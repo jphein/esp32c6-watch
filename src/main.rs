@@ -324,6 +324,39 @@ async fn main(_spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
+    // === OTA foundation: report partition layout + boot slot ===
+    let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
+    let mut config_offset: Option<u32> = None;
+    {
+        use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionType};
+        let mut pt_mem = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
+        match partitions::read_partition_table(&mut flash, &mut pt_mem) {
+            Ok(pt) => {
+                println!("[OTA] partition table: {} entries", pt.len());
+                if let Ok(Some(cp)) =
+                    pt.find_partition(PartitionType::Data(DataPartitionSubType::Spiffs))
+                {
+                    config_offset = Some(cp.offset());
+                }
+                match pt.find_partition(PartitionType::Data(DataPartitionSubType::Ota)) {
+                    Ok(Some(od)) => {
+                        let region = od.as_embedded_storage(&mut flash);
+                        match esp_bootloader_esp_idf::ota::Ota::new(region, 2) {
+                            Ok(mut ota) => println!(
+                                "[OTA] boot slot {:?}, state {:?}",
+                                ota.current_app_partition(),
+                                ota.current_ota_state()
+                            ),
+                            Err(e) => println!("[OTA] otadata: {e:?}"),
+                        }
+                    }
+                    _ => println!("[OTA] no otadata partition (factory layout)"),
+                }
+            }
+            Err(e) => println!("[OTA] partition table read failed: {e:?}"),
+        }
+    }
+
     // === Radio: WiFi STA + BLE, both OFF at boot (see the S3 power notes) ===
     // In esp-radio 0.18 `set_config` is what starts the controller, so we
     // build the station config here but only apply it on the first toggle.
@@ -334,16 +367,27 @@ async fn main(_spawner: Spawner) -> ! {
     println!("[RADIO] stack ready (WiFi OFF, BLE advertising OFF)");
 
     use esp_radio::wifi::sta::StationConfig;
-    let wifi_ssid = option_env!("WIFI_SSID").unwrap_or("");
-    let wifi_pass = option_env!("WIFI_PASS").unwrap_or("");
-    let wifi_has_creds = !wifi_ssid.is_empty();
-    if !wifi_has_creds {
-        println!("[WIFI] No WIFI_SSID at build time - WiFi toggle will no-op");
+    // Credentials: flash config wins; compile-time env is the fallback seed.
+    let mut watch_cfg = config_offset
+        .and_then(|off| peripherals::config::load(&mut flash, off))
+        .unwrap_or_default();
+    if watch_cfg.ssid.is_empty() {
+        let _ = watch_cfg.ssid.push_str(option_env!("WIFI_SSID").unwrap_or(""));
+        let _ = watch_cfg.pass.push_str(option_env!("WIFI_PASS").unwrap_or(""));
     }
-    let station_config = esp_radio::wifi::Config::Station(
+    println!(
+        "[CFG] node id{:03}, ssid={:?}",
+        watch_cfg.node_id,
+        watch_cfg.ssid.as_str()
+    );
+    let mut wifi_has_creds = !watch_cfg.ssid.is_empty();
+    if !wifi_has_creds {
+        println!("[WIFI] no credentials - set them in Settings");
+    }
+    let mut station_config = esp_radio::wifi::Config::Station(
         StationConfig::default()
-            .with_ssid(esp_radio::wifi::Ssid::from(wifi_ssid))
-            .with_password(wifi_pass.into()),
+            .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
+            .with_password(watch_cfg.pass.as_str().into()),
     );
 
     // ESP-NOW rides the same radio; usable whenever WiFi is started.
@@ -365,6 +409,8 @@ async fn main(_spawner: Spawner) -> ! {
     let mut watchface = WatchFace::new();
     watchface.wifi_connected = false;
     watchface.cpu_mhz = 160;
+    watchface.brightness = watch_cfg.brightness;
+    display.set_brightness(watch_cfg.brightness);
     let mut current_page = Page::Clock;
     let mut power_stats = PowerStats::new();
     power_stats.cpu_mhz = 160;
@@ -427,8 +473,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut ble_on = false;
     let mut ble_toggle_request = false;
     let mut ble_seen: alloc::vec::Vec<[u8; 6]> = alloc::vec::Vec::new();
-    // SMOLv1 mesh: the watch is fleet node id 042.
-    let mut mesh = SmolMesh::new(42);
+    let mut settings_connect_pending = false;
+    // SMOLv1 mesh: node id comes from flash config (default 042).
+    let mut mesh = SmolMesh::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
     let mut mesh_channel_pinned = false;
 
@@ -634,6 +681,11 @@ async fn main(_spawner: Spawner) -> ! {
                         watchface.wifi_connected = true;
                         watchface.force_redraw();
                         page_dirty = true;
+                        if settings_connect_pending {
+                            settings_app.wifi_state =
+                                crate::peripherals::wifi::WifiState::Connected;
+                            settings_connect_pending = false;
+                        }
                         // NTP happens from the main loop once DHCP lands.
                     }
                     Ok(Err(e)) => {
@@ -642,6 +694,10 @@ async fn main(_spawner: Spawner) -> ! {
                         watchface.wifi_connected = false;
                         watchface.force_redraw();
                         page_dirty = true;
+                        if settings_connect_pending {
+                            settings_app.wifi_state = crate::peripherals::wifi::WifiState::Error;
+                            settings_connect_pending = false;
+                        }
                     }
                     _ => {
                         println!("[WIFI] connect timeout (15s)");
@@ -1135,6 +1191,42 @@ async fn main(_spawner: Spawner) -> ! {
             }
 
             AppState::Settings => {
+                // CONNECT pressed in Settings: persist creds to flash and
+                // (re)start WiFi with them.
+                use crate::peripherals::wifi::WifiState;
+                if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending {
+                    let ssid = settings_app.wifi_config.ssid_str();
+                    if ssid.is_empty() {
+                        settings_app.wifi_state = WifiState::Error;
+                    } else {
+                        watch_cfg.ssid.clear();
+                        let _ = watch_cfg.ssid.push_str(ssid);
+                        watch_cfg.pass.clear();
+                        let pw = core::str::from_utf8(
+                            &settings_app.wifi_config.password
+                                [..settings_app.wifi_config.pass_len],
+                        )
+                        .unwrap_or("");
+                        let _ = watch_cfg.pass.push_str(pw);
+                        match config_offset
+                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                        {
+                            Some(Ok(())) => println!("[CFG] credentials saved to flash"),
+                            _ => println!("[CFG] save failed"),
+                        }
+                        station_config = esp_radio::wifi::Config::Station(
+                            StationConfig::default()
+                                .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
+                                .with_password(watch_cfg.pass.as_str().into()),
+                        );
+                        wifi_has_creds = true;
+                        wifi_started = false;
+                        wifi_connected = false;
+                        ntp_synced = false;
+                        wifi_on_request = true;
+                        settings_connect_pending = true;
+                    }
+                }
                 settings_app.update(dt_ms.max(1));
                 if tap_event {
                     settings_app.handle_tap(last_touch_x, last_touch_y);

@@ -1,4 +1,5 @@
 pub mod ble;
+pub mod config;
 pub mod cpu_clock;
 pub mod imu;
 pub mod power;
