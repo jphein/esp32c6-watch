@@ -1,0 +1,189 @@
+// FT3168 Touch Controller driver
+// Reference: Arduino_FT3x68.h - I2C address 0x38
+
+use embedded_hal::i2c::I2c;
+
+const FT3168_ADDR: u8 = 0x38;
+
+// Registers
+const REG_FINGER_NUM: u8 = 0x02;
+const REG_X1_H: u8 = 0x03;
+const REG_X1_L: u8 = 0x04;
+const REG_Y1_H: u8 = 0x05;
+const REG_Y1_L: u8 = 0x06;
+const REG_POWER_MODE: u8 = 0xA5;
+const REG_GESTURE_ID: u8 = 0xD3;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TouchPoint {
+    pub x: u16,
+    pub y: u16,
+    pub fingers: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Gesture {
+    None,
+    SwipeUp,
+    SwipeDown,
+    SwipeLeft,
+    SwipeRight,
+    SingleTap,
+    DoubleTap,
+    LongPress,
+    Unknown(u8),
+}
+
+/// Detected swipe gesture with start/end coordinates
+#[derive(Debug, Clone, Copy)]
+pub struct SwipeEvent {
+    pub direction: SwipeDirection,
+    pub start_x: u16,
+    pub start_y: u16,
+    pub end_x: u16,
+    pub end_y: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SwipeDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+    Tap,
+}
+
+pub struct Ft3168Touch<I> {
+    i2c: I,
+    // Swipe tracking state
+    tracking: bool,
+    start_x: u16,
+    start_y: u16,
+    last_x: u16,
+    last_y: u16,
+}
+
+impl<I: I2c> Ft3168Touch<I> {
+    pub fn new(i2c: I) -> Self {
+        Self {
+            i2c,
+            tracking: false,
+            start_x: 0,
+            start_y: 0,
+            last_x: 0,
+            last_y: 0,
+        }
+    }
+
+    fn read_reg(&mut self, reg: u8) -> Result<u8, I::Error> {
+        let mut buf = [0u8];
+        self.i2c.write_read(FT3168_ADDR, &[reg], &mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), I::Error> {
+        self.i2c.write(FT3168_ADDR, &[reg, val])
+    }
+
+    /// Initialize touch controller in monitor power mode.
+    pub fn init(&mut self) -> Result<(), I::Error> {
+        // Set power mode to monitor (triggers on touch)
+        self.write_reg(REG_POWER_MODE, 0x01)?;
+        Ok(())
+    }
+
+    /// Read current touch state. Returns None if no touch.
+    pub fn read(&mut self) -> Result<Option<TouchPoint>, I::Error> {
+        let fingers = self.read_reg(REG_FINGER_NUM)?;
+        if fingers == 0 {
+            return Ok(None);
+        }
+
+        let x_h = self.read_reg(REG_X1_H)? as u16;
+        let x_l = self.read_reg(REG_X1_L)? as u16;
+        let y_h = self.read_reg(REG_Y1_H)? as u16;
+        let y_l = self.read_reg(REG_Y1_L)? as u16;
+
+        let x = ((x_h & 0x0F) << 8) | x_l;
+        let y = ((y_h & 0x0F) << 8) | y_l;
+
+        Ok(Some(TouchPoint {
+            x,
+            y,
+            fingers,
+        }))
+    }
+
+    /// Poll touch and detect swipe gestures.
+    /// Returns Some(SwipeEvent) when a finger is lifted after movement.
+    /// Returns current touch position for live tracking.
+    pub fn poll(&mut self) -> Result<(Option<TouchPoint>, Option<SwipeEvent>), I::Error> {
+        let point = self.read()?;
+
+        match point {
+            Some(tp) => {
+                if !self.tracking {
+                    // New touch started
+                    self.tracking = true;
+                    self.start_x = tp.x;
+                    self.start_y = tp.y;
+                }
+                self.last_x = tp.x;
+                self.last_y = tp.y;
+                Ok((Some(tp), None))
+            }
+            None => {
+                if self.tracking {
+                    // Finger lifted - determine swipe
+                    self.tracking = false;
+                    let dx = self.last_x as i32 - self.start_x as i32;
+                    let dy = self.last_y as i32 - self.start_y as i32;
+                    let abs_dx = dx.unsigned_abs();
+                    let abs_dy = dy.unsigned_abs();
+
+                    // Require dominant axis to be at least 1.5x the other
+                    // to prevent diagonal swipes from triggering left/right
+                    let direction = if abs_dx < 30 && abs_dy < 30 {
+                        SwipeDirection::Tap
+                    } else if abs_dx > abs_dy * 3 / 2 {
+                        // Clearly horizontal
+                        if dx > 0 { SwipeDirection::Right } else { SwipeDirection::Left }
+                    } else if abs_dy > abs_dx * 3 / 2 {
+                        // Clearly vertical
+                        if dy > 0 { SwipeDirection::Down } else { SwipeDirection::Up }
+                    } else {
+                        // Diagonal - treat as tap (ignore)
+                        SwipeDirection::Tap
+                    };
+
+                    let event = SwipeEvent {
+                        direction,
+                        start_x: self.start_x,
+                        start_y: self.start_y,
+                        end_x: self.last_x,
+                        end_y: self.last_y,
+                    };
+                    Ok((None, Some(event)))
+                } else {
+                    Ok((None, None))
+                }
+            }
+        }
+    }
+
+    /// Read gesture ID.
+    pub fn read_gesture(&mut self) -> Result<Gesture, I::Error> {
+        let id = self.read_reg(REG_GESTURE_ID)?;
+        Ok(match id {
+            0x00 => Gesture::None,
+            0x01 => Gesture::SwipeUp,
+            0x02 => Gesture::SwipeDown,
+            0x03 => Gesture::SwipeLeft,
+            0x04 => Gesture::SwipeRight,
+            0x05 => Gesture::SingleTap,
+            0x0B => Gesture::DoubleTap,
+            0x0C => Gesture::LongPress,
+            other => Gesture::Unknown(other),
+        })
+    }
+}
