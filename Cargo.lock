@@ -2112,6 +2112,7 @@ dependencies = [
  "ieee802154",
  "log",
  "rssi",
+ "scan-model",
  "slint",
  "slint-build",
  "static_cell",

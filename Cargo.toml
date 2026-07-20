@@ -109,6 +109,9 @@ docsplay = { version = "0.1", default-features = false }
 esp32c6 = { version = "0.23", features = ["critical-section"] }
 ieee802154 = "0.6.1"
 byte = "0.2.7"
+# RS4: pure-logic 802.15.4 scan aggregator (host-tested; parses MAC headers,
+# folds per-channel/PAN/device stats for the RadioScan screen).
+scan-model = { path = "crates/scan-model" }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

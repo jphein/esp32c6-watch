@@ -682,6 +682,10 @@ async fn main(_spawner: Spawner) -> ! {
     let mut radio_mode = RadioMode::Wifi;
     let mut ieee: Option<vendor::ieee802154::Ieee802154<'static>> = None;
     let mut radio_scan_request = false;
+    // RS4: aggregate parsed 802.15.4 frames (per-channel/PAN/device) for RS5's
+    // RadioScan screen. `#[allow(unused)]` until RS5 reads it for display.
+    #[allow(unused)]
+    let mut scan_state = scan_model::ScanState::new();
     // Default 802.15.4 channel (Zigbee/Thread commonly 11..=26); RS5 makes it
     // selectable. 15 is a common Thread channel.
     const SCAN_CHANNEL: u8 = 15;
@@ -1184,7 +1188,10 @@ async fn main(_spawner: Spawner) -> ! {
                     let mut n = 0u32;
                     while let Some(raw) = dev.raw_received() {
                         n += 1;
-                        let _ = raw; // RS4: scan_model.ingest(&raw.data, raw.channel)
+                        // RS4: fold into the scan aggregator. Per-frame RSSI isn't
+                        // in RawReceived (it's in the PHY footer) — extracting it is
+                        // an RS6/glass refinement; 0 is a benign placeholder for now.
+                        scan_state.fold_frame(raw.channel, &raw.data, 0);
                     }
                     if n > 0 {
                         println!("[SCAN] +{n} frame(s) ch{SCAN_CHANNEL}");
