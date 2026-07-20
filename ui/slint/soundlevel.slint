@@ -1,0 +1,127 @@
+import { Theme, PageTitle } from "theme.slint";
+
+// MC4 — standalone "Sound Level" dBFS meter screen. Overlay-style: MC5 shows it
+// via `if root.mic-open: SoundLevel {}` (same pattern as launcher/AOD) and
+// forwards the two input properties. This component is pure presentation — Rust
+// (MC3) pushes the values, this only renders. NOT wired into WatchShell yet.
+//
+// Interface (named to match the mic-capture plan so MC5 is a clean drop-in):
+//   in property <float> mic-dbfs : current level, dBFS, expected [-60, 0]
+//   in property <float> mic-peak : peak-hold value, dBFS, expected [-60, 0]
+// -60 dBFS = silence floor (empty bar), 0 dBFS = full scale (bar railed).
+export component SoundLevel {
+    in property <float> mic-dbfs: -60;
+    in property <float> mic-peak: -60;
+
+    // dBFS [-60,0] -> fill fraction [0,1]. clamp() guards out-of-range pushes.
+    property <float> fill: clamp((root.mic-dbfs + 60) / 60, 0.0, 1.0);
+    property <float> peak-fill: clamp((root.mic-peak + 60) / 60, 0.0, 1.0);
+    // Zone colour, mirrors the bar: teal quiet -> gold mid -> red near full scale.
+    property <color> level-color: root.mic-dbfs >= -6 ? Theme.warn
+        : (root.mic-dbfs >= -20 ? Theme.warm : Theme.accent);
+
+    // Meter track geometry (shared by fill, ticks, peak marker, scale labels).
+    property <length> bar-x: (root.width - 340px) / 2;     // 35px side inset
+    property <length> bar-w: 340px;
+    property <length> bar-y: 284px;
+
+    // Opaque AMOLED backdrop — this screen fully replaces the watchface.
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
+    PageTitle { title: "SOUND LEVEL"; }
+
+    // Hero numeric readout, coloured by zone. "-inf" at the silence floor.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 140px;
+        text: root.mic-dbfs <= -59.5 ? "-\u{221e}" : "\{round(root.mic-dbfs)}";
+        color: root.level-color;
+        font-size: 84px;
+        font-weight: 700;
+    }
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 240px;
+        text: "dBFS";
+        color: Theme.dim;
+        font-size: 20px;
+        letter-spacing: 4px;
+    }
+
+    // Meter track.
+    track := Rectangle {
+        x: root.bar-x;
+        y: root.bar-y;
+        width: root.bar-w;
+        height: 26px;
+        border-radius: 13px;
+        background: Theme.track;
+
+        // Fill: reveal only the left `fill` fraction of a FULL-width zone
+        // gradient (clip:true), so the tip colour reflects the real level
+        // instead of a gradient squeezed into the fill width.
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width * root.fill;
+            height: 100%;
+            border-radius: 13px;
+            clip: true;
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: track.width;
+                height: 100%;
+                border-radius: 13px;
+                background: @linear-gradient(90deg,
+                    Theme.accent 0%, Theme.warm 62%, Theme.warn 100%);
+            }
+        }
+
+        // Faint interior scale ticks at -40 / -20 (the two mid gridlines).
+        Rectangle {
+            x: parent.width * 0.333 - 0.5px; y: 4px;
+            width: 1px; height: parent.height - 8px; background: Theme.line;
+        }
+        Rectangle {
+            x: parent.width * 0.667 - 0.5px; y: 4px;
+            width: 1px; height: parent.height - 8px; background: Theme.line;
+        }
+
+        // Peak-hold tick — clamped to stay inside the track.
+        Rectangle {
+            x: clamp(parent.width * root.peak-fill - 1.5px, 0px, parent.width - 3px);
+            y: -4px;
+            width: 3px;
+            height: parent.height + 8px;
+            border-radius: 1.5px;
+            background: Theme.ink;
+        }
+    }
+
+    // Scale labels under the bar (-60 / -40 / -20 / 0), centred on each tick.
+    Text { x: root.bar-x - self.width / 2;                    y: root.bar-y + 40px; text: "-60"; color: Theme.dim; font-size: 13px; }
+    Text { x: root.bar-x + root.bar-w * 0.333 - self.width / 2; y: root.bar-y + 40px; text: "-40"; color: Theme.dim; font-size: 13px; }
+    Text { x: root.bar-x + root.bar-w * 0.667 - self.width / 2; y: root.bar-y + 40px; text: "-20"; color: Theme.dim; font-size: 13px; }
+    Text { x: root.bar-x + root.bar-w - self.width / 2;        y: root.bar-y + 40px; text: "0";   color: Theme.dim; font-size: 13px; }
+
+    // Peak-hold numeric readout.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: root.bar-y + 74px;
+        text: root.mic-peak <= -59.5 ? "peak  -\u{221e}" : "peak  \{round(root.mic-peak)} dBFS";
+        color: Theme.soft;
+        font-size: 15px;
+        letter-spacing: 1px;
+    }
+
+    // Honesty caption — relative dBFS, not calibrated SPL (per the plan/spec).
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 432px;
+        text: "relative dBFS \u{00b7} not calibrated dB SPL";
+        color: Theme.faint;
+        font-size: 14px;
+        letter-spacing: 1px;
+    }
+}
