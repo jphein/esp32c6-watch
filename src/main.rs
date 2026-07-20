@@ -694,7 +694,8 @@ async fn main(_spawner: Spawner) -> ! {
                 AppState::Watchface
                 | AppState::Launcher
                 | AppState::Wled
-                | AppState::Hunt => {
+                | AppState::Hunt
+                | AppState::Energy => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -1355,7 +1356,8 @@ async fn main(_spawner: Spawner) -> ! {
             AppState::Watchface
             | AppState::Launcher
             | AppState::Wled
-            | AppState::Hunt => {
+            | AppState::Hunt
+            | AppState::Energy => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1365,6 +1367,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Launcher
                         | AppState::Wled
                         | AppState::Hunt
+                        | AppState::Energy
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1406,6 +1409,7 @@ async fn main(_spawner: Spawner) -> ! {
                 shell.set_launcher_open(app_state == AppState::Launcher);
                 shell.set_wled_open(app_state == AppState::Wled);
                 shell.set_hunt_open(app_state == AppState::Hunt);
+                shell.set_energy_open(app_state == AppState::Energy);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
                 app_state = if shell.launcher_open() {
                     AppState::Launcher
@@ -1413,6 +1417,8 @@ async fn main(_spawner: Spawner) -> ! {
                     AppState::Wled
                 } else if shell.hunt_open() {
                     AppState::Hunt
+                } else if shell.energy_open() {
+                    AppState::Energy
                 } else {
                     AppState::Watchface
                 };
@@ -1472,6 +1478,12 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_hunt(&view);
                 } else {
                     let _ = shell.req.hunt_next.take(); // drop a late "next" tap
+                }
+
+                // Energy overlay is display-only; back-chevron / Right-swipe closes.
+                if shell.req.energy_close.take() {
+                    shell.set_energy_open(false);
+                    app_state = AppState::Watchface;
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1619,6 +1631,13 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         shell.set_hunt_open(true);
                         app_state = AppState::Hunt;
+                    } else if target == AppState::Energy {
+                        // Home energy: display-only Slint overlay. Placeholder data
+                        // (a plausible sunny-afternoon snapshot) until the HA/ESP-NOW
+                        // energy feed lands — a deferred net task. grid_w<0 = export.
+                        shell.set_energy(72, 3400, -1200, true);
+                        shell.set_energy_open(true);
+                        app_state = AppState::Energy;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -1707,6 +1726,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Launcher
                         | AppState::Wled
                         | AppState::Hunt
+                        | AppState::Energy
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);

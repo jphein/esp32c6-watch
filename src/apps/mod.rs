@@ -56,4 +56,7 @@ pub enum AppState {
     /// RSSI treasure-hunt (warmer/colder) — a Slint overlay driven live from the
     /// mesh roster's smoothed RSSI. Also scene-resident (no framebuffer).
     Hunt,
+    /// Home energy screen (house battery/solar/grid) — a display-only Slint
+    /// overlay. Placeholder data until the HA/ESP-NOW energy feed lands.
+    Energy,
 }

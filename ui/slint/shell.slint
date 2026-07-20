@@ -7,6 +7,7 @@ import { MeshPage } from "mesh.slint";
 import { LauncherOverlay } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
+import { EnergyPage } from "energy.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -94,6 +95,12 @@ export component WatchShell inherits Window {
     in property <bool> hunt-found: false;
     in property <bool> hunt-warmer: false;
     in property <bool> hunt-colder: false;
+    // Home energy overlay (display-only; placeholder data for now).
+    in-out property <bool> energy-open: false;
+    in property <int> energy-batt: 0;
+    in property <int> energy-solar-w: 0;
+    in property <int> energy-grid-w: 0;
+    in property <bool> energy-charging: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -110,6 +117,7 @@ export component WatchShell inherits Window {
     callback wled-close();
     callback hunt-next();     // cycle to the next roster target
     callback hunt-close();
+    callback energy-close();
 
     in-out property <float> brightness: 0.8;
 
@@ -327,6 +335,16 @@ export component WatchShell inherits Window {
         colder: root.hunt-colder;
         next-target => { root.hunt-next(); }
         close => { root.hunt-close(); }
+    }
+
+    // ==================== Energy overlay ====================
+    if root.energy-open: EnergyPage {
+        width: 100%; height: 100%;
+        battery-pct: root.energy-batt;
+        solar-w: root.energy-solar-w;
+        grid-w: root.energy-grid-w;
+        charging: root.energy-charging;
+        close => { root.energy-close(); }
     }
 
     // ==================== AOD overlay ====================

@@ -98,6 +98,13 @@ component AppIcon {
         Rectangle { x: 11px; y: 11px; width: 24px; height: 24px; border-radius: 12px; border-width: 2px; border-color: root.tint.with-alpha(0.6); }
         Rectangle { x: 19px; y: 19px; width: 8px;  height: 8px;  border-radius: 4px; background: root.tint; }
     }
+    // 11 — Energy: a battery cell (outline + terminal) with a charge bolt.
+    if root.id == 11: Rectangle {
+        Rectangle { x: 5px;  y: 11px; width: 30px; height: 24px; border-radius: 4px; border-width: 3px; border-color: root.tint; }
+        Rectangle { x: 35px; y: 18px; width: 5px;  height: 10px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 20px; y: 13px; width: 6px;  height: 12px; border-radius: 1px; background: Theme.warm; }
+        Rectangle { x: 15px; y: 21px; width: 6px;  height: 12px; border-radius: 1px; background: Theme.warm; }
+    }
 }
 
 // One big app tile: icon over label. Carries its launch idx.
@@ -158,8 +165,8 @@ export component LauncherOverlay {
         x: 22px; y: 58px;
         width: parent.width - 44px;
         height: parent.height - 74px;
-        // Content = GAMES header + 4 tile rows + SYSTEM header + 1 tile row + gaps.
-        viewport-height: 712px;
+        // Content = GAMES header + 4 tile rows + SYSTEM header + 2 tile rows + gaps.
+        viewport-height: 840px;
         VerticalLayout {
             spacing: 12px;
             SectionHeader { title: "GAMES"; }
@@ -188,6 +195,11 @@ export component LauncherOverlay {
                 spacing: 12px;
                 AppTile { name: "Settings";    accent: #c0ffc0; icon-id: 6; idx: 6; launch(i) => { root.launch-app(i); } }
                 AppTile { name: "WLED";        accent: #ffd060; icon-id: 9; idx: 7; launch(i) => { root.launch-app(i); } }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9; launch(i) => { root.launch-app(i); } }
+                Rectangle { }  // spacer keeps the lone tile half-width
             }
         }
     }

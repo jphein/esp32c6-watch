@@ -49,7 +49,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 9] = [
+pub const LAUNCHER_APPS: [AppState; 10] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -57,8 +57,9 @@ pub const LAUNCHER_APPS: [AppState; 9] = [
     AppState::Flappy,
     AppState::Maze,
     AppState::Settings,
-    AppState::Wled, // idx 7 — SYSTEM-section WLED tile (icon-id 9)
-    AppState::Hunt, // idx 8 — GAMES-section HUNT tile (icon-id 10)
+    AppState::Wled,   // idx 7 — SYSTEM-section WLED tile (icon-id 9)
+    AppState::Hunt,   // idx 8 — GAMES-section HUNT tile (icon-id 10)
+    AppState::Energy, // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
 ];
 
 #[derive(Default)]
@@ -78,6 +79,8 @@ pub struct ShellRequests {
     /// Hunt: "next target" tap cycles the roster; `hunt_close` is back/Right-swipe.
     pub hunt_next: Cell<bool>,
     pub hunt_close: Cell<bool>,
+    /// Energy overlay back/Right-swipe.
+    pub energy_close: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -236,6 +239,13 @@ impl ShellUi {
             if ui.get_hunt_open() {
                 if direction == SwipeDirection::Right {
                     ui.set_hunt_open(false);
+                }
+                return;
+            }
+            // Energy overlay: same contract — swallow nav swipes, Right closes.
+            if ui.get_energy_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_energy_open(false);
                 }
                 return;
             }
@@ -527,6 +537,24 @@ impl ShellUi {
         ui.set_hunt_colder(v.trend == hunt::Trend::Colder);
     }
 
+    pub fn set_energy_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_energy_open(open);
+    }
+
+    pub fn energy_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_energy_open())
+    }
+
+    /// Home energy figures (grid_w is SIGNED: >0 importing, <0 exporting).
+    pub fn set_energy(&self, batt_pct: i32, solar_w: i32, grid_w: i32, charging: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_energy_batt(batt_pct);
+        ui.set_energy_solar_w(solar_w);
+        ui.set_energy_grid_w(grid_w);
+        ui.set_energy_charging(charging);
+    }
+
     pub fn page(&self) -> i32 {
         // While suspended, report the page we'll restore on resume.
         self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
@@ -673,6 +701,9 @@ fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> W
 
         let r = req.clone();
         ui.on_hunt_close(move || r.hunt_close.set(true));
+
+        let r = req.clone();
+        ui.on_energy_close(move || r.energy_close.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     // Firmware version is a compile-time constant; set it once so the system
