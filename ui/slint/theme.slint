@@ -40,18 +40,21 @@ export component RadioDot {
     in property <string> label;
     in property <bool> active;
     callback tapped();
-    width: 54px;
-    height: 30px;
+    // Finger-friendly hit target (66x44). The visual dot+label stay in the top
+    // 30px band so the row still lines up with the battery pill; the TouchArea
+    // fills the full 44px height, so the whole chip is tappable.
+    width: 66px;
+    height: 44px;
 
     Rectangle {
         x: 0;
-        y: (parent.height - self.height) / 2;
-        width: 8px; height: 8px; border-radius: 4px;
+        y: (30px - self.height) / 2;
+        width: 12px; height: 12px; border-radius: 6px;
         background: root.active ? Theme.accent : Theme.off-dot;
     }
     Text {
-        x: 14px;
-        y: (parent.height - self.height) / 2;
+        x: 18px;
+        y: (30px - self.height) / 2;
         text: root.label;
         color: root.active ? Theme.soft : Theme.faint;
         font-size: 13px;

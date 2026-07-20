@@ -590,6 +590,10 @@ async fn main(_spawner: Spawner) -> ! {
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
+    // Mesh enable flag (MESH chrome dot toggles it). Off = pause the ESP-NOW
+    // tick/rx/familiar processing (a tick-level pause, not a radio teardown);
+    // the peer stays registered so re-enabling resumes instantly.
+    let mut mesh_enabled = true;
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
@@ -638,7 +642,7 @@ async fn main(_spawner: Spawner) -> ! {
         // Mesh Familiar cadence override: a holder must beat every ~1.5 s and
         // a non-holder must notice a dead holder within FAM_LOST_MS (~12 s),
         // so the idle 10/30 s sleeps are capped while the mesh is up.
-        let tick = if esp_now_peer_added {
+        let tick = if esp_now_peer_added && mesh_enabled {
             if familiar.needs_fast_tick() {
                 tick.min(Duration::from_millis(400))
             } else {
@@ -965,7 +969,7 @@ async fn main(_spawner: Spawner) -> ! {
                     Err(e) => println!("[MESH] add_peer failed: {e:?}"),
                 }
             }
-            if esp_now_peer_added {
+            if esp_now_peer_added && mesh_enabled {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
                 mesh.tick(&mut esp_now, now_ms, uptime_secs);
@@ -1283,6 +1287,15 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if shell.req.ble_toggle.take() {
                     ble_toggle_request = true;
+                }
+                if shell.req.mesh_toggle.take() {
+                    mesh_enabled = !mesh_enabled;
+                    if !mesh_enabled {
+                        // Reflect "off" in the MESH chrome dot immediately; peers
+                        // repopulate from HELLOs once re-enabled.
+                        last_mesh_peers = 0;
+                    }
+                    println!("[MESH] toggled -> {}", if mesh_enabled { "ON" } else { "OFF" });
                 }
                 if shell.req.cpu_cycle.take() {
                     // Mirror the old WatchFace::cycle_cpu ladder: 80 -> 160 -> 240.

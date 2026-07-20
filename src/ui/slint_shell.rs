@@ -65,6 +65,7 @@ pub struct ShellRequests {
     pub launch: Cell<Option<AppState>>,
     pub wifi_toggle: Cell<bool>,
     pub ble_toggle: Cell<bool>,
+    pub mesh_toggle: Cell<bool>,
     pub cpu_cycle: Cell<bool>,
     pub gyro_toggle: Cell<bool>,
     pub reboot: Cell<bool>,
@@ -102,6 +103,10 @@ impl ShellUi {
         {
             let r = req.clone();
             ui.on_ble_tap(move || r.ble_toggle.set(true));
+        }
+        {
+            let r = req.clone();
+            ui.on_mesh_tap(move || r.mesh_toggle.set(true));
         }
         {
             let r = req.clone();

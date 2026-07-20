@@ -81,6 +81,7 @@ export component WatchShell inherits Window {
     callback brightness-changed(float);
     callback wifi-tap();
     callback ble-tap();
+    callback mesh-tap();
     callback cpu-tap();
     callback gyro-tap();
     callback reboot-tap();
@@ -176,12 +177,13 @@ export component WatchShell inherits Window {
     // battery pill clear the panel's rounded corners (were y12-14, clipped).
     RadioDot { x: 22px;  y: Theme.safe-top; label: "WIFI"; active: root.wifi-on;
                tapped => { root.wifi-tap(); } }
-    RadioDot { x: 84px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
+    RadioDot { x: 94px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
                tapped => { root.ble-tap(); } }
     RadioDot {
-        x: 138px; y: Theme.safe-top;
+        x: 166px; y: Theme.safe-top;
         label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
         active: root.mesh-peers > 0;
+        tapped => { root.mesh-tap(); }
     }
 
     // Battery pill (top-right) — dropped to safe-top and pulled in by
