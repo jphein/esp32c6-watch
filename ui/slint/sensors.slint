@@ -1,0 +1,28 @@
+import { Theme, StatRow, PageTitle } from "theme.slint";
+
+export component SensorsPage {
+    in property <string> accel-text;  // "+0.02  -0.98  +0.03 g"
+    in property <string> gyro-text;   // "+1.2  -0.4  +0.0 dps"
+    in property <string> imu-temp-text; // "27.5 C"
+
+    PageTitle { title: "SENSORS"; }
+
+    VerticalLayout {
+        x: (parent.width - 330px) / 2;
+        y: 130px;
+        width: 330px;
+        spacing: 8px;
+        StatRow { label: "ACCEL"; value: root.accel-text; value-color: Theme.accent; }
+        StatRow { label: "GYRO"; value: root.gyro-text; }
+        StatRow { label: "IMU TEMP"; value: root.imu-temp-text; value-color: Theme.warm; }
+    }
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 420px;
+        text: "QMI8658 \u{00b7} 100ms";
+        color: Theme.dim;
+        font-size: 15px;
+        letter-spacing: 2px;
+    }
+}

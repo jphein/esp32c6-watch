@@ -1,0 +1,25 @@
+import { Theme, StatRow, PageTitle } from "theme.slint";
+
+export component SystemPage {
+    in property <string> chip-text: "ESP32-C6 \u{00b7} RISC-V";
+    in property <string> display-text: "410x502 AMOLED";
+    in property <string> fw-text;      // "v0.1.0" (set once from Cargo)
+    in property <string> heap-text;    // "123k free"
+    in property <string> uptime-text;
+    in property <string> battery-text; // "83% · 4012 mV"
+
+    PageTitle { title: "SYSTEM"; }
+
+    VerticalLayout {
+        x: (parent.width - 330px) / 2;
+        y: 120px;
+        width: 330px;
+        spacing: 6px;
+        StatRow { label: "CHIP"; value: root.chip-text; }
+        StatRow { label: "DISPLAY"; value: root.display-text; }
+        StatRow { label: "FIRMWARE"; value: root.fw-text; }
+        StatRow { label: "HEAP"; value: root.heap-text; value-color: Theme.accent; }
+        StatRow { label: "UPTIME"; value: root.uptime-text; }
+        StatRow { label: "BATTERY"; value: root.battery-text; }
+    }
+}

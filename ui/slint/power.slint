@@ -1,0 +1,174 @@
+import { Theme, StatRow, PageTitle } from "theme.slint";
+
+// One subsystem read-out cell: dim name over "STATE · NNmA". Compact 38px so
+// the six-cell grid leaves room for the LP CORE row above TOTAL (see below).
+component PowerCell {
+    in property <string> name;
+    in property <string> value;
+    height: 38px;
+    Text {
+        x: 0; y: 2px;
+        text: root.name;
+        color: Theme.dim; font-size: 12px; letter-spacing: 2px;
+    }
+    Text {
+        x: 0; y: 16px;
+        text: root.value;
+        color: Theme.ink; font-size: 16px; font-weight: 600;
+    }
+}
+
+export component PowerPage {
+    // Six live-draw cells, formatted by Rust set_power (single source of
+    // truth: PowerStats), e.g. "160MHz · 38mA", "PS · 20mA". SDCARD is
+    // omitted: the C6 board has no SD slot and main.rs never sets sd_on.
+    in property <string> cpu-cell: "--";
+    in property <string> display-cell: "--";
+    in property <string> wifi-cell: "--";
+    in property <string> ble-cell: "--";
+    in property <string> imu-cell: "--";
+    in property <string> audio-cell: "--";
+    in property <int> total-ma: -1;      // <0 renders "--"
+    in property <string> runtime-text: "--"; // "100%: 4h · left: ~3h"
+    in property <int> left-hours: 999;   // colors the runtime row
+    in property <string> lp-core-text: "--"; // LP core, e.g. "idle · 20 MHz"
+    in-out property <float> brightness;
+    callback brightness-changed(float);
+    callback reboot-tap();
+
+    PageTitle { title: "POWER"; }
+
+    // 2-column subsystem grid (per-subsystem state + estimated mA), the
+    // Slint successor of the old "POWER MONITOR" terminal read-out.
+    GridLayout {
+        x: (parent.width - 340px) / 2;
+        y: 100px;
+        width: 340px;
+        spacing: 6px;
+        Row {
+            PowerCell { name: "CPU"; value: root.cpu-cell; }
+            PowerCell { name: "DISPLAY"; value: root.display-cell; }
+        }
+        Row {
+            PowerCell { name: "WIFI"; value: root.wifi-cell; }
+            PowerCell { name: "BLE"; value: root.ble-cell; }
+        }
+        Row {
+            PowerCell { name: "IMU"; value: root.imu-cell; }
+            PowerCell { name: "AUDIO"; value: root.audio-cell; }
+        }
+    }
+
+    // LP core (low-power RISC-V) status. Not a live workload — offload got a
+    // RED verdict (task #24), so this is an availability indicator: the core
+    // sits idle/available at its ~20MHz clock (the HP core runs 160MHz). Value
+    // is pushed once from main.rs. Colour is muted (soft) since it's idle, not
+    // an active/alerting reading like TOTAL/RUNTIME. Slots into the space freed
+    // by the compact 38px grid cells; TOTAL/RUNTIME/slider/reboot are unmoved.
+    StatRow {
+        x: (parent.width - 340px) / 2;
+        y: 228px;
+        width: 340px; height: 28px;
+        label: "LP CORE";
+        value: root.lp-core-text;
+        value-color: Theme.soft;
+    }
+
+    // Total draw, color-coded with the old page's thresholds
+    // (<50mA good, <120mA mid, else high).
+    StatRow {
+        x: (parent.width - 340px) / 2;
+        y: 258px;
+        width: 340px; height: 34px;
+        label: "TOTAL";
+        value: root.total-ma < 0 ? "--" : "\{root.total-ma}mA";
+        value-color: root.total-ma < 50 ? Theme.accent
+            : (root.total-ma < 120 ? Theme.warm : Theme.warn);
+    }
+
+    // Runtime estimate: theoretical 100%→0% plus remaining at the current
+    // battery level, colored by the LEFT thresholds (<2h/<6h). The value
+    // ("100%: 4h · left: ~3h", worst case "100%: 12h · left: ~10h") is far too
+    // long to sit beside a label at StatRow's right-anchored 22px value — it ran
+    // left across the "RUNTIME" label. So it gets its own stacked cell (dim
+    // label above, full-width value below), matching the PowerCell idiom of the
+    // grid: the string now owns the whole 340px line with no label to collide
+    // with. Sits between TOTAL (ends ~289) and the BRIGHTNESS label (y336).
+    Rectangle {
+        x: (parent.width - 340px) / 2;
+        y: 294px;
+        width: 340px; height: 40px;
+        Text {
+            x: 0; y: 0;
+            text: "RUNTIME";
+            color: Theme.dim; font-size: 13px; letter-spacing: 2px;
+        }
+        Text {
+            x: 0; y: 17px;
+            text: root.runtime-text;
+            color: root.left-hours < 2 ? Theme.warn
+                : (root.left-hours < 6 ? Theme.warm : Theme.accent);
+            font-size: 17px; font-weight: 600;
+        }
+    }
+
+    // Brightness slider — custom control (Slint has no built-in Slider in this
+    // no_std build). Rust swipe handling ignores horizontal swipes starting in
+    // y 330..430 while this page is showing (SLIDER_BAND in slint_shell.rs).
+    Text {
+        x: (parent.width - 340px) / 2;
+        y: 336px;
+        text: "BRIGHTNESS";
+        color: Theme.dim; font-size: 16px; letter-spacing: 2px;
+    }
+    slider := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 366px;
+        width: 330px; height: 40px;
+        Rectangle {
+            x: 0; y: (parent.height - self.height) / 2;
+            width: parent.width; height: 10px; border-radius: 5px;
+            background: Theme.track;
+            Rectangle {
+                x: 0; y: 0;
+                width: max(10px, parent.width * root.brightness);
+                height: parent.height; border-radius: 5px;
+                background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
+            }
+        }
+        Rectangle {
+            x: clamp(slider.width * root.brightness - self.width / 2,
+                     0px, slider.width - self.width);
+            y: (parent.height - self.height) / 2;
+            width: 26px; height: 26px; border-radius: 13px;
+            background: Theme.ink;
+        }
+        TouchArea {
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down
+                    || (ev.kind == PointerEventKind.move && self.pressed)) {
+                    root.brightness = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                    root.brightness-changed(root.brightness);
+                }
+            }
+        }
+    }
+
+    // Reboot button (kicks OTA check first when WiFi is up, then resets).
+    // Placed at y 410 / height 36 (ends y 446) so it clears the raised page-dots
+    // TouchArea at y 448 with a 2px gap, and still sits below the brightness
+    // slider (ends y 406, outside the Rust SLIDER_BAND 330..430 swipe guard).
+    reboot := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 410px;
+        width: 180px; height: 36px; border-radius: 18px;
+        border-width: 1px; border-color: Theme.warn;
+        background: #200a10; // one-off dark-red pair for Theme.warn
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: "REBOOT"; color: Theme.warn; font-size: 16px; letter-spacing: 3px;
+        }
+        TouchArea { clicked => { root.reboot-tap(); } }
+    }
+}

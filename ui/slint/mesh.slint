@@ -1,0 +1,85 @@
+import { Theme, PageTitle, PeerRow } from "theme.slint";
+
+// Marauder's Watch mesh roster. Mirrors the legacy eg draw_mesh_page:
+//   - self banner (id + realm name; Task 3 formats it "#042 Adjective Noun")
+//   - one line per heard peer: realm name (id folded in), RSSI, age
+//   - empty state carries the "listening ch6" channel hint
+// The old page encoded age as row dimming and RSSI as a near/far bar; the
+// Slint page shows both as explicit text (no information lost).
+export component MeshPage {
+    in property <string> self-text;   // "#042 Adjective Noun"
+    in property <[PeerRow]> rows;
+
+    PageTitle { title: "MESH"; }
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 100px;
+        text: root.self-text;
+        color: Theme.accent;
+        font-size: 20px;
+        font-weight: 600;
+    }
+
+    // 7 rows x 38px + 6 x 3px spacing = 284px; from y150 ends y434, clearing
+    // the page dots (touch area at y456).
+    VerticalLayout {
+        x: 30px;
+        y: 150px;
+        width: 350px;
+        spacing: 3px;
+        for peer in root.rows: Rectangle {
+            height: 38px;
+            border-radius: 8px;
+            background: Theme.panel;
+            // Columns (row width 350): name bounded 14..194 and elided (long
+            // "#NNN Adjective Noun" strings otherwise overrun); RSSI right-
+            // aligned to 281 (worst case "-100 dBm" ~73px at 15px font ->
+            // spans ~208..281, 14px gutter after the name); age right-aligned
+            // to 336 ("999s" ~30px -> spans ~306..336, 25px gutter).
+            Text {
+                x: 14px; y: (parent.height - self.height) / 2;
+                width: 180px;
+                overflow: elide;
+                text: peer.name; color: Theme.ink; font-size: 16px;
+            }
+            Text {
+                x: parent.width - self.width - 69px;
+                y: (parent.height - self.height) / 2;
+                text: peer.rssi; color: Theme.soft; font-size: 15px;
+            }
+            Text {
+                x: parent.width - self.width - 14px;
+                y: (parent.height - self.height) / 2;
+                text: peer.age; color: Theme.dim; font-size: 15px;
+            }
+        }
+    }
+
+    // Empty state, centred in the roster void (below the self-line, above the
+    // page dots). Needs an explicit height + alignment:center — a width:100%
+    // VerticalLayout with no height defaults to alignment:stretch, which
+    // distributes the free space between the two lines and splays them apart.
+    if root.rows.length == 0: VerticalLayout {
+        x: 0;
+        y: 150px;
+        width: 100%;
+        height: 280px;
+        alignment: center;
+        spacing: 11px;
+        Text {
+            horizontal-alignment: center;
+            text: "NO FLEET HEARD";
+            color: Theme.faint;
+            font-size: 18px;
+            letter-spacing: 3px;
+        }
+        Text {
+            horizontal-alignment: center;
+            text: "listening ch6";
+            color: Theme.dim;
+            font-size: 15px;
+            letter-spacing: 2px;
+        }
+    }
+}

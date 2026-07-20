@@ -1,0 +1,106 @@
+// Shared palette + small components for the watch shell.
+
+// One mesh roster line. Lives here (not shell.slint) so both shell.slint and
+// mesh.slint can import it without a recursive shell<->mesh import cycle.
+export struct PeerRow {
+    name: string,
+    rssi: string,
+    age: string,
+}
+
+export global Theme {
+    // --- safe area (410x502 AMOLED with physically ROUNDED corners) ---
+    // Centered content is corner-safe automatically; only elements that sit in
+    // a corner get clipped by the arc. `safe-top`/`safe-bottom`/`safe-side` are
+    // straight-edge insets; `safe-corner` is the extra side-inset for elements
+    // that live IN a top corner (the status chrome), so they drop below and pull
+    // in clear of the arc. Conservative values — good to a corner radius of
+    // ~100px; revisit if the measured radius comes back larger.
+    out property <length> safe-top: 30px;
+    out property <length> safe-bottom: 24px;
+    out property <length> safe-side: 22px;
+    out property <length> safe-corner: 30px;
+
+    out property <color> ink: #f2f5ff;
+    out property <color> soft: #9fb4d8;
+    out property <color> dim: #55617a;
+    out property <color> faint: #3c4761;
+    out property <color> accent: #35e0b0;
+    out property <color> accent2: #3a7bd5;
+    out property <color> panel: #101728;
+    out property <color> line: #2a3550;
+    out property <color> track: #16202f;
+    out property <color> warn: #ff5566;
+    out property <color> warm: #ffd166;
+    out property <color> off-dot: #223048;
+}
+
+// One radio indicator: dot + label, tappable.
+export component RadioDot {
+    in property <string> label;
+    in property <bool> active;
+    callback tapped();
+    // Finger-friendly hit target (66x44). The visual dot+label stay in the top
+    // 30px band so the row still lines up with the battery pill; the TouchArea
+    // fills the full 44px height, so the whole chip is tappable.
+    width: 66px;
+    height: 44px;
+
+    Rectangle {
+        x: 0;
+        y: (30px - self.height) / 2;
+        width: 12px; height: 12px; border-radius: 6px;
+        background: root.active ? Theme.accent : Theme.off-dot;
+    }
+    Text {
+        x: 18px;
+        y: (30px - self.height) / 2;
+        text: root.label;
+        color: root.active ? Theme.soft : Theme.faint;
+        font-size: 13px;
+        letter-spacing: 1px;
+    }
+    TouchArea { clicked => { root.tapped(); } }
+}
+
+// One label/value line for stats-style pages.
+export component StatRow {
+    in property <string> label;
+    in property <string> value;
+    in property <color> value-color: Theme.ink;
+    width: 330px;
+    height: 48px;
+
+    Text {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: Theme.dim;
+        font-size: 16px;
+        letter-spacing: 2px;
+    }
+    Text {
+        x: parent.width - self.width;
+        y: (parent.height - self.height) / 2;
+        text: root.value;
+        color: root.value-color;
+        font-size: 22px;
+        font-weight: 600;
+    }
+}
+
+// Page title, centered at the top.
+export component PageTitle {
+    in property <string> title;
+    x: 0; y: 0;
+    width: 100%; height: 100%;
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 56px;
+        text: root.title;
+        color: Theme.soft;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: 5px;
+    }
+}

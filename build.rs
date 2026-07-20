@@ -7,8 +7,8 @@ fn main() {
     // resources (fonts/images) pre-rendered for the no_std software renderer.
     let slint_config = slint_build::CompilerConfiguration::new()
         .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer);
-    slint_build::compile_with_config("src/bin/watchface.slint", slint_config)
-        .expect("failed to compile src/bin/watchface.slint");
+    slint_build::compile_with_config("ui/slint/shell.slint", slint_config)
+        .expect("failed to compile ui/slint/shell.slint");
 }
 
 fn linker_be_nice() {

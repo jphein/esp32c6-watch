@@ -1,0 +1,300 @@
+import { Theme, RadioDot, PeerRow } from "theme.slint";
+import { ClockPage } from "clock.slint";
+import { SensorsPage } from "sensors.slint";
+import { SystemPage } from "system.slint";
+import { PowerPage } from "power.slint";
+import { MeshPage } from "mesh.slint";
+import { LauncherOverlay } from "launcher.slint";
+
+// Re-export so the generated Rust module keeps exposing `PeerRow`
+// (slint_shell.rs constructs it) now that the struct lives in theme.slint.
+export { PeerRow }
+
+export component WatchShell inherits Window {
+    width: 410px;
+    height: 502px;
+    background: #000000;
+
+    // --- clock ---
+    in property <string> time-text: "--:--";
+    in property <string> seconds-text: "--";
+    in property <string> date-text: "SYNCING RTC";
+    in property <float> minute-progress: 0.0;
+    in property <int> steps: 0;
+    in property <string> weather-text: "";
+    in property <string> cpu-text: "160 MHz";
+    in property <bool> gyro-on: false;
+    in property <length> par-x: 0px;
+    in property <length> par-y: 0px;
+    // Mesh Familiar (clock nook); fed by ShellUi::set_fam.
+    in property <bool> fam-known: false;
+    in property <bool> fam-holding: false;
+    in property <int> fam-mood: 0;
+    in property <int> fam-hunger: 0;
+    in property <int> fam-stage: 0;
+
+    // sensors page (live at 100ms while showing)
+    in property <string> accel-text: "--";
+    in property <string> gyro-text: "--";
+    in property <string> imu-temp-text: "--";
+
+    // system page (live at 2s while showing); chip/display are constants and
+    // keep their SystemPage component defaults. fw-text is set once from Cargo.
+    in property <string> fw-text: "--";
+    in property <string> heap-text: "--";
+    in property <string> uptime-text: "--";
+    in property <string> battery-text: "--";
+
+    // power page (live at 1s while showing): six subsystem cells + total +
+    // runtime, all formatted by Rust set_power from PowerStats. cpu-cell
+    // carries its own MHz+mA string, so the clock chip's cpu-text stays
+    // independent. No battery row here: pct+charging live in the chrome
+    // pill, pct·mV on the system page.
+    in property <string> cpu-cell: "--";
+    in property <string> display-cell: "--";
+    in property <string> wifi-cell: "--";
+    in property <string> ble-cell: "--";
+    in property <string> imu-cell: "--";
+    in property <string> audio-cell: "--";
+    in property <int> total-ma: -1;
+    in property <string> runtime-text: "--";
+    in property <int> left-hours: 999;
+    in property <string> lp-core-text: "--"; // LP core status (set once at boot)
+
+    // --- battery / radios (chrome) ---
+    in property <int> battery-percent: -1;
+    in property <bool> charging: false;
+    in property <bool> wifi-on: false;
+    in property <bool> ble-on: false;
+    in property <int> mesh-peers: 0;
+
+    // mesh page data (rendered from plan task 7)
+    in property <string> mesh-self-text: "";
+    in property <[PeerRow]> mesh-rows: [];
+
+    // --- paging / modes ---
+    in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
+    in-out property <bool> launcher-open: false;
+    in property <bool> aod: false;
+    in property <string> toast-text: "";
+
+    // --- callbacks (drained by the Rust loop via request cells) ---
+    callback brightness-changed(float);
+    callback wifi-tap();
+    callback ble-tap();
+    callback mesh-tap();
+    callback cpu-tap();
+    callback gyro-tap();
+    callback reboot-tap();
+    callback launch-app(int); // launcher item index
+
+    in-out property <float> brightness: 0.8;
+
+    // True-black AMOLED background. A dark diagonal gradient across near-blacks
+    // bands badly on this panel's software renderer (RGB565, no dithering), so
+    // the field is solid #000000 — crisp, self-emissive-black, battery-optimal.
+    // The teal brand accent lives in the content, not the backdrop.
+    Rectangle {
+        width: 100%; height: 100%;
+        background: #000000;
+    }
+
+    pages := Rectangle {
+        width: 100%; height: 100%;
+        clip: true;
+
+        ClockPage {
+            x: (0 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            time-text: root.time-text;
+            seconds-text: root.seconds-text;
+            date-text: root.date-text;
+            minute-progress: root.minute-progress;
+            steps: root.steps;
+            weather-text: root.weather-text;
+            cpu-text: root.cpu-text;
+            gyro-on: root.gyro-on;
+            par-x: root.par-x;
+            par-y: root.par-y;
+            fam-known: root.fam-known;
+            fam-holding: root.fam-holding;
+            fam-mood: root.fam-mood;
+            fam-hunger: root.fam-hunger;
+            fam-stage: root.fam-stage;
+            cpu-tap => { root.cpu-tap(); }
+            gyro-tap => { root.gyro-tap(); }
+            apps-tap => { root.launcher-open = true; }
+        }
+
+        SensorsPage {
+            x: (1 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            accel-text: root.accel-text;
+            gyro-text: root.gyro-text;
+            imu-temp-text: root.imu-temp-text;
+        }
+
+        SystemPage {
+            x: (2 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            fw-text: root.fw-text;
+            heap-text: root.heap-text;
+            uptime-text: root.uptime-text;
+            battery-text: root.battery-text;
+        }
+
+        PowerPage {
+            x: (3 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            cpu-cell: root.cpu-cell;
+            display-cell: root.display-cell;
+            wifi-cell: root.wifi-cell;
+            ble-cell: root.ble-cell;
+            imu-cell: root.imu-cell;
+            audio-cell: root.audio-cell;
+            total-ma: root.total-ma;
+            runtime-text: root.runtime-text;
+            left-hours: root.left-hours;
+            lp-core-text: root.lp-core-text;
+            brightness <=> root.brightness;
+            brightness-changed(f) => { root.brightness-changed(f); }
+            reboot-tap => { root.reboot-tap(); }
+        }
+
+        MeshPage {
+            x: (4 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            self-text: root.mesh-self-text;
+            rows: root.mesh-rows;
+        }
+    }
+
+    // ==================== persistent chrome ====================
+    // Top status row dropped to Theme.safe-top so the corner radio dots and the
+    // battery pill clear the panel's rounded corners (were y12-14, clipped).
+    RadioDot { x: 22px;  y: Theme.safe-top; label: "WIFI"; active: root.wifi-on;
+               tapped => { root.wifi-tap(); } }
+    RadioDot { x: 94px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
+               tapped => { root.ble-tap(); } }
+    RadioDot {
+        x: 166px; y: Theme.safe-top;
+        label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
+        active: root.mesh-peers > 0;
+        tapped => { root.mesh-tap(); }
+    }
+
+    // Battery pill (top-right) — dropped to safe-top and pulled in by
+    // safe-corner so its top-right corner sits inside the arc.
+    batt-pill := Rectangle {
+        x: parent.width - self.width - Theme.safe-corner;
+        y: Theme.safe-top;
+        width: batt-text.width + 62px;
+        height: 30px;
+        border-radius: 15px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: Theme.panel;
+        batt-body := Rectangle {
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 26px; height: 13px; border-radius: 3px;
+            border-width: 1px;
+            border-color: root.charging ? Theme.accent : Theme.soft;
+            Rectangle {
+                x: 2px; y: 2px;
+                width: (batt-body.width - 4px)
+                    * (clamp(root.battery-percent, 0, 100) / 100.0);
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: root.charging ? Theme.accent
+                    : (root.battery-percent >= 0 && root.battery-percent < 20
+                        ? Theme.warn : Theme.soft);
+            }
+        }
+        Rectangle {
+            x: 38px;
+            y: (parent.height - self.height) / 2;
+            width: 3px; height: 7px;
+            background: root.charging ? Theme.accent : Theme.soft;
+        }
+        batt-text := Text {
+            x: 48px;
+            y: (parent.height - self.height) / 2;
+            text: (root.charging ? "+" : "")
+                + (root.battery-percent < 0 ? "--" : "\{root.battery-percent}%");
+            color: root.charging ? Theme.accent : Theme.soft;
+            font-size: 15px;
+        }
+    }
+
+    // Page dots: 5 pages, tap advances. Raised off the bottom edge (was y456);
+    // stays centred, so it was already clear of the bottom corners, this just
+    // adds straight-edge margin. Clears the power page's reboot button (ends
+    // y446) with a 2px gap.
+    dots := TouchArea {
+        x: (parent.width - self.width) / 2;
+        y: 448px;
+        width: 160px;
+        height: 40px;
+        clicked => { root.current-page = mod(root.current-page + 1, 5); }
+        HorizontalLayout {
+            x: (parent.width - 5 * 10px - 4 * 12px) / 2;
+            y: (parent.height - 10px) / 2;
+            spacing: 12px;
+            for i in 5: Rectangle {
+                width: 10px; height: 10px; border-radius: 5px;
+                background: root.current-page == i ? Theme.accent : Theme.line;
+            }
+        }
+    }
+
+    // Toast (RAM-busy etc.): visible while toast-text != ""
+    if root.toast-text != "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 420px;
+        width: min(360px, toast-label.width + 40px);
+        height: 44px;
+        border-radius: 22px;
+        background: #1a2233ee;
+        border-width: 1px; border-color: Theme.line;
+        toast-label := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.toast-text; color: Theme.ink; font-size: 16px;
+        }
+    }
+
+    // ==================== launcher overlay ====================
+    // Rendered below the AOD overlay so AOD still wins when both are visible.
+    if root.launcher-open: LauncherOverlay {
+        width: 100%; height: 100%;
+        launch-app(idx) => { root.launch-app(idx); }
+    }
+
+    // ==================== AOD overlay ====================
+    if root.aod: Rectangle {
+        width: 100%; height: 100%;
+        background: #000000;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 180px;
+            text: root.time-text;
+            color: #6b7690;
+            font-size: 84px;
+            font-weight: 300;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 300px;
+            text: root.date-text;
+            color: Theme.faint;
+            font-size: 17px;
+            letter-spacing: 2px;
+        }
+    }
+}
