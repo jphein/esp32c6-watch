@@ -152,6 +152,21 @@ fn set_rtc_from_unix(
     (hours, minutes, seconds)
 }
 
+/// Watchface page from a persisted / CFG-relayed index (clamped to Clock).
+fn page_from_index(idx: u8) -> Page {
+    match idx {
+        1 => Page::Sensors,
+        2 => Page::System,
+        3 => Page::Power,
+        _ => Page::Clock,
+    }
+}
+
+/// CFG key `R` boot debounce (reference main.rs REBOOT_DEBOUNCE_MS): within
+/// this window a retained/re-armed reboot command is consumed but ignored,
+/// so a stale `R` can never reboot-loop the watch.
+const REBOOT_DEBOUNCE_MS: u64 = 10_000;
+
 /// One-shot SNTP query; sets the RTC and returns the Unix time.
 async fn ntp_sync(
     stack: embassy_net::Stack<'static>,
@@ -468,7 +483,8 @@ async fn main(_spawner: Spawner) -> ! {
     watchface.cpu_mhz = 160;
     watchface.brightness = watch_cfg.brightness;
     display.set_brightness(watch_cfg.brightness);
-    let mut current_page = Page::Clock;
+    // Boot default page: CFG key `S` persists it (SMOLv1 config channel).
+    let mut current_page = page_from_index(watch_cfg.default_page);
     let mut power_stats = PowerStats::new();
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
@@ -908,24 +924,96 @@ async fn main(_spawner: Spawner) -> ! {
                     mesh.broadcast_diag(&mut esp_now, rec.as_bytes());
                     next_diag = now + Duration::from_secs(60);
                 }
+                // RELAY leaf uplink: a fresh DIAG-style stat message every
+                // ~15s while a peer is alive, then bounded retransmit of
+                // whatever fragments the gateway's RELAYACK still misses.
+                if mesh.relay_emit_due(now_ms) {
+                    let mut tele: heapless::String<192> = heapless::String::new();
+                    use core::fmt::Write as _;
+                    let _ = write!(
+                        tele,
+                        "WATCH|up={}|heap={}|batt={}|mv={}|chg={}|peers={}|scr={}:{}",
+                        uptime_secs,
+                        esp_alloc::HEAP.free(),
+                        batt_pct,
+                        batt_mv,
+                        u8::from(charging),
+                        last_mesh_peers,
+                        current_page.name(),
+                        current_page as u8,
+                    );
+                    mesh.relay_emit(&mut esp_now, tele.as_bytes(), now_ms);
+                }
+                mesh.relay_retransmit(&mut esp_now, now_ms);
                 while let Some(rx) = esp_now.receive() {
-                    if let Some(MeshEvent::TimeAdopted { unix, from_id }) = mesh.handle_rx(
+                    let event = mesh.handle_rx(
                         &mut esp_now,
                         rx.info.src_address,
                         rx.data(),
                         now_ms,
                         uptime_secs,
-                    ) {
-                        let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
-                        sync_src = "mesh";
-                        last_sync = now;
-                        println!(
-                            "[MESH] RTC set from mesh (id{from_id}): {h:02}:{m:02}:{s:02}"
-                        );
-                        if let Ok(dt) = rtc.get_time() {
-                            watchface.update_time(dt.hours, dt.minutes, dt.seconds);
-                            watchface.update_date(dt.day, dt.month, dt.year);
+                    );
+                    match event {
+                        Some(MeshEvent::TimeAdopted { unix, from_id }) => {
+                            let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
+                            sync_src = "mesh";
+                            last_sync = now;
+                            println!(
+                                "[MESH] RTC set from mesh (id{from_id}): {h:02}:{m:02}:{s:02}"
+                            );
+                            if let Ok(dt) = rtc.get_time() {
+                                watchface.update_time(dt.hours, dt.minutes, dt.seconds);
+                                watchface.update_date(dt.day, dt.month, dt.year);
+                            }
                         }
+                        // CFG `S`: apply live + persist. EDGE-TRIGGERED save —
+                        // the gateway re-broadcasts cached configs every ~10s,
+                        // so a same-value re-arm must never wear flash.
+                        Some(MeshEvent::CfgScreen { page }) => {
+                            if app_state == AppState::Watchface && current_page as u8 != page {
+                                current_page = page_from_index(page);
+                                watchface.force_redraw();
+                                page_dirty = true;
+                            }
+                            if watch_cfg.default_page != page {
+                                watch_cfg.default_page = page;
+                                match config_offset.map(|off| {
+                                    peripherals::config::save(&mut flash, off, &watch_cfg)
+                                }) {
+                                    Some(Ok(())) => {
+                                        println!("[CFG] default page {page} saved")
+                                    }
+                                    _ => println!("[CFG] save failed"),
+                                }
+                            }
+                        }
+                        // CFG `U`: store + persist (edge-triggered, as above).
+                        Some(MeshEvent::CfgUnits { temp_f, clk_24h }) => {
+                            if watch_cfg.units_temp_f != temp_f
+                                || watch_cfg.units_clk_24h != clk_24h
+                            {
+                                watch_cfg.units_temp_f = temp_f;
+                                watch_cfg.units_clk_24h = clk_24h;
+                                match config_offset.map(|off| {
+                                    peripherals::config::save(&mut flash, off, &watch_cfg)
+                                }) {
+                                    Some(Ok(())) => println!("[CFG] units saved"),
+                                    _ => println!("[CFG] save failed"),
+                                }
+                            }
+                        }
+                        // CFG `R`: transient, never persisted. Boot-debounced
+                        // (a retained/re-armed `R` within 10s of boot is
+                        // consumed but ignored — never a reboot-loop).
+                        Some(MeshEvent::CfgReboot) => {
+                            if now_ms >= REBOOT_DEBOUNCE_MS {
+                                println!("[CFG] remote reboot - software_reset()");
+                                esp_hal::system::software_reset();
+                            } else {
+                                println!("[CFG] reboot ignored (boot debounce)");
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
