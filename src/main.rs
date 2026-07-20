@@ -537,6 +537,10 @@ async fn main(_spawner: Spawner) -> ! {
     // clock; apply default_page so the watch boots where the user left it. Until
     // now this value was written to flash but never read back at boot.
     shell.set_page(watch_cfg.default_page as i32);
+    // LP (low-power RISC-V) core status on the power page. No offload yet
+    // (task #24 got a RED verdict), so this is a static availability indicator:
+    // the LP core is idle at its ~20MHz clock (HP core runs 160MHz). One-shot.
+    shell.set_lp_core("idle", 20);
     let mut power_stats = PowerStats::new();
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
