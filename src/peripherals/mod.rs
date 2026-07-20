@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod ble;
 pub mod config;
 pub mod cpu_clock;

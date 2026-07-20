@@ -12,7 +12,7 @@
 // no TE pin wired in the BSP, different GPIO map (see board.rs).
 // Radio: WiFi STA + NTP and BLE advertising, both OFF at boot, toggled from
 // the watchface buttons. Set WIFI_SSID / WIFI_PASS env vars at build time.
-// Not yet ported: audio (ES8311 + I2S), mp3player/smarthome apps, DVFS.
+// Not yet ported: mp3player/smarthome apps, DVFS.
 
 mod board;
 mod drivers;
@@ -33,10 +33,11 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    dma::{DmaRxBuf, DmaTxBuf},
+    dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf},
     dma_buffers,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
+    i2s::master::{Config as I2sConfig, DataFormat, I2s},
     spi::{
         master::{Config as SpiConfig, Spi},
         Mode as SpiMode,
@@ -59,6 +60,7 @@ use crate::drivers::co5300::Co5300Display;
 use crate::net::smol_mesh::{MeshEvent, SmolMesh};
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
+use crate::peripherals::audio::{fill_beep_buffer, Es8311};
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::power::Axp2101Power;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
@@ -249,8 +251,10 @@ async fn main(_spawner: Spawner) -> ! {
     println!("=== smol watch v2 (C6 AMOLED, Embassy) ===");
     let delay = Delay::new();
 
-    // Speaker amp stays off until audio is ported.
-    let _amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    // Speaker amp enable (GPIO6). CRITICAL: keep LOW before the ES8311 is
+    // initialized and muted below — a floating I2S line through an enabled
+    // amp produces loud white noise. Raised only for the duration of a beep.
+    let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
 
     // === I2C bus (AXP2101 + FT3168 + PCF85063 + QMI8658) ===
     let i2c = I2c::new(
@@ -317,6 +321,52 @@ async fn main(_spawner: Spawner) -> ! {
     let mut imu = Qmi8658Imu::new(RefCellDevice::new(&i2c_ref));
     let _ = imu.init();
     println!("[IMU] OK");
+
+    // === Audio (ES8311 codec + I2S) ===
+    // CRITICAL ORDER (mirrors the S3 reference):
+    // 1. Keep speaker amp DISABLED (GPIO6 LOW, done above) - prevents white
+    //    noise from a floating I2S line
+    // 2. Init codec (codec init leaves DAC powered but no input yet)
+    // 3. Immediately shut the codec down again
+    // 4. Init I2S bus
+    // Only when we actually beep: unmute codec -> raise amp -> write DMA ->
+    // lower amp -> mute
+    println!("[AUDIO] Init codec...");
+    let mut audio_codec = Es8311::new(RefCellDevice::new(&i2c_ref));
+    match audio_codec.init() {
+        Ok(()) => println!("[AUDIO] Codec OK"),
+        Err(_) => println!("[AUDIO] Codec FAILED"),
+    }
+    // Full power-down of the analog blocks (not just mute). The PGA, DAC
+    // and HP driver are explicitly cut — saves ~20 mA versus mute() which
+    // only zeroes the volume register. `unmute()` brings them back on
+    // demand at playback time.
+    let _ = audio_codec.shutdown();
+
+    // === I2S TX for beep playback (16kHz stereo 16-bit) ===
+    // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DAC data=GPIO21.
+    // DMA_CH1 — the display QSPI owns DMA_CH0.
+    println!("[AUDIO] Init I2S...");
+    let i2s_config = I2sConfig::default()
+        .with_sample_rate(Rate::from_hz(16000))
+        .with_data_format(DataFormat::Data16Channel16);
+    let i2s_periph = I2s::new(peripherals.I2S0, peripherals.DMA_CH1, i2s_config)
+        .expect("I2S failed")
+        .with_mclk(peripherals.GPIO19);
+    static I2S_TX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
+    let mut i2s_tx = i2s_periph
+        .i2s_tx
+        .with_bclk(peripherals.GPIO20)
+        .with_ws(peripherals.GPIO22)
+        .with_dout(peripherals.GPIO21)
+        .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
+
+    // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
+    static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
+    let beep_storage = BEEP_BUF.init([0u8; 4000]);
+    let beep_len = fill_beep_buffer(beep_storage, 800, 16000, 50);
+    let beep_buf: &'static [u8] = &beep_storage[..beep_len];
+    println!("[AUDIO] I2S OK ({} bytes beep)", beep_len);
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
     let mut boot_button = Input::new(
@@ -1075,6 +1125,7 @@ async fn main(_spawner: Spawner) -> ! {
             }
 
             AppState::Snake => {
+                let prev_score = snake_game.score();
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -1087,6 +1138,19 @@ async fn main(_spawner: Spawner) -> ! {
                         if snake_game.stepped() {
                             snake_game.render(&mut fb);
                             fb.flush(&mut display);
+                            // Beep when food eaten via I2S DMA
+                            if snake_game.score() > prev_score {
+                                // Unmute codec, then raise the amp, then play
+                                let _ = audio_codec.unmute();
+                                delay.delay_millis(2); // let codec stabilize before enabling amp
+                                amp_en.set_high();
+                                if let Ok(transfer) = i2s_tx.write_dma(&beep_buf) {
+                                    let _ = transfer.wait();
+                                }
+                                // Lower amp FIRST, then mute codec to avoid pop
+                                amp_en.set_low();
+                                let _ = audio_codec.mute();
+                            }
                         }
                     }
                     AppResult::Exit => {
