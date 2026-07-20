@@ -82,10 +82,13 @@ export component WatchShell inherits Window {
 
     in-out property <float> brightness: 0.8;
 
-    // Ambient AMOLED-friendly gradient (mostly true black)
+    // True-black AMOLED background. A dark diagonal gradient across near-blacks
+    // bands badly on this panel's software renderer (RGB565, no dithering), so
+    // the field is solid #000000 — crisp, self-emissive-black, battery-optimal.
+    // The teal brand accent lives in the content, not the backdrop.
     Rectangle {
         width: 100%; height: 100%;
-        background: @linear-gradient(155deg, #140b2e 0%, #000000 40%, #000000 72%, #002733 100%);
+        background: #000000;
     }
 
     pages := Rectangle {
@@ -158,20 +161,23 @@ export component WatchShell inherits Window {
     }
 
     // ==================== persistent chrome ====================
-    RadioDot { x: 22px;  y: 14px; label: "WIFI"; active: root.wifi-on;
+    // Top status row dropped to Theme.safe-top so the corner radio dots and the
+    // battery pill clear the panel's rounded corners (were y12-14, clipped).
+    RadioDot { x: 22px;  y: Theme.safe-top; label: "WIFI"; active: root.wifi-on;
                tapped => { root.wifi-tap(); } }
-    RadioDot { x: 84px;  y: 14px; label: "BLE";  active: root.ble-on;
+    RadioDot { x: 84px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
                tapped => { root.ble-tap(); } }
     RadioDot {
-        x: 138px; y: 14px;
+        x: 138px; y: Theme.safe-top;
         label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
         active: root.mesh-peers > 0;
     }
 
-    // Battery pill (top-right)
+    // Battery pill (top-right) — dropped to safe-top and pulled in by
+    // safe-corner so its top-right corner sits inside the arc.
     batt-pill := Rectangle {
-        x: parent.width - self.width - 20px;
-        y: 12px;
+        x: parent.width - self.width - Theme.safe-corner;
+        y: Theme.safe-top;
         width: batt-text.width + 62px;
         height: 30px;
         border-radius: 15px;
@@ -211,10 +217,13 @@ export component WatchShell inherits Window {
         }
     }
 
-    // Page dots: 5 pages, tap advances.
+    // Page dots: 5 pages, tap advances. Raised off the bottom edge (was y456);
+    // stays centred, so it was already clear of the bottom corners, this just
+    // adds straight-edge margin. Clears the power page's reboot button (ends
+    // y446) with a 2px gap.
     dots := TouchArea {
         x: (parent.width - self.width) / 2;
-        y: 456px;
+        y: 448px;
         width: 160px;
         height: 40px;
         clicked => { root.current-page = mod(root.current-page + 1, 5); }

@@ -14,15 +14,15 @@ export component LauncherOverlay {
 
     Text {
         x: (parent.width - self.width) / 2;
-        y: 20px;
+        y: 26px;                                       // clear of the top edge/arc
         text: "APPS";
         color: Theme.ink; font-size: 24px; font-weight: 600; letter-spacing: 4px;
     }
 
     Flickable {
-        x: 20px; y: 55px;
-        width: parent.width - 40px;
-        height: parent.height - 75px;                 // 502 - 75 = 427px visible
+        x: 24px; y: 60px;                              // side inset clears corner arc
+        width: parent.width - 48px;
+        height: parent.height - 84px;                 // 502 - 84 = 418px visible
         viewport-height: 7 * 65px + 6 * 6px;          // exact content height = 491px (455 + 36)
         VerticalLayout {
             spacing: 6px;
