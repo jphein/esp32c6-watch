@@ -1,0 +1,174 @@
+import { Theme, PageTitle } from "theme.slint";
+
+// Voice-to-text screen (push-to-talk → stream mic → transcript back). Standalone
+// overlay-style component, like SoundLevel (MC4) / RadioScanOverlay (RS5). Pure
+// presentation + PTT input events; the mic stream + STT bridge live in the loop.
+// NOT wired into WatchShell/main.rs yet — that's the MC5-style wiring, a clean
+// drop-in once main.rs frees up.
+//
+// Interface (for the wiring layer):
+//   in property <int>    voice-state : 0 idle · 1 listening · 2 sending · 3 result · 4 error
+//   in property <float>  level       : input level 0..1 (drives the listening pulse)
+//   in property <string> transcript  : recognised text (shown in state 3)
+//   in property <string> error-text  : message shown in state 4
+//   callback ptt-pressed()  : finger down on the button  → start capture
+//   callback ptt-released() : finger up / cancel          → stop + send
+export component VoicePage {
+    in property <int> voice-state: 0;
+    in property <float> level: 0.0;
+    in property <string> transcript;
+    in property <string> error-text;
+    callback ptt-pressed();
+    callback ptt-released();
+
+    // Push-to-talk button geometry (shared by the circle, pulse, icon, hit area).
+    property <length> btn: 148px;
+    property <length> cx: root.width / 2;
+    property <length> cy: 366px;
+
+    // Opaque AMOLED backdrop.
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
+    PageTitle { title: "VOICE"; }
+
+    // ---------------- state content (above the button) ----------------
+    // idle
+    if root.voice-state == 0: Text {
+        x: (parent.width - self.width) / 2;
+        y: 200px;
+        text: "Hold to talk";
+        color: Theme.soft;
+        font-size: 22px;
+        letter-spacing: 1px;
+    }
+
+    // listening — label + a live input-level bar
+    if root.voice-state == 1: Text {
+        x: (parent.width - self.width) / 2;
+        y: 150px;
+        text: "LISTENING";
+        color: Theme.accent;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 3px;
+    }
+    if root.voice-state == 1: Rectangle {
+        x: (parent.width - 300px) / 2;
+        y: 200px;
+        width: 300px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.track;
+        Rectangle {
+            x: 0; y: 0; height: 100%;
+            width: max(6px, parent.width * clamp(root.level, 0.0, 1.0));
+            border-radius: 6px;
+            background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
+        }
+    }
+
+    // sending
+    if root.voice-state == 2: Text {
+        x: (parent.width - self.width) / 2;
+        y: 200px;
+        text: "TRANSCRIBING...";
+        color: Theme.dim;
+        font-size: 20px;
+        letter-spacing: 2px;
+    }
+
+    // result — the transcript is the hero
+    if root.voice-state == 3: Text {
+        x: 30px;
+        y: 120px;
+        width: parent.width - 60px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+        text: root.transcript;
+        color: Theme.ink;
+        font-size: 24px;
+        font-weight: 600;
+    }
+
+    // error
+    if root.voice-state == 4: Text {
+        x: 30px;
+        y: 190px;
+        width: parent.width - 60px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+        text: root.error-text == "" ? "No speech heard" : root.error-text;
+        color: Theme.warn;
+        font-size: 20px;
+        font-weight: 600;
+    }
+
+    // ---------------- push-to-talk button ----------------
+    // Pulse ring — only while listening, grows with input level.
+    if root.voice-state == 1: Rectangle {
+        width: root.btn + root.level * 84px;
+        height: self.width;
+        x: root.cx - self.width / 2;
+        y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: #35e0b024; // faint accent glow (one-off)
+    }
+
+    button := Rectangle {
+        width: root.btn;
+        height: root.btn;
+        x: root.cx - self.width / 2;
+        y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        background: root.voice-state == 1 ? Theme.accent
+            : (root.voice-state == 2 ? Theme.track : Theme.panel);
+        border-color: root.voice-state == 4 ? Theme.warn
+            : (root.voice-state == 2 ? Theme.dim : Theme.accent);
+
+        // Minimal mic glyph (head capsule + stand + base), coloured per state.
+        mic-head := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: parent.height / 2 - 34px;
+            width: 26px;
+            height: 44px;
+            border-radius: 13px;
+            background: root.voice-state == 1 ? #05100a
+                : (root.voice-state == 4 ? Theme.warn
+                : (root.voice-state == 2 ? Theme.dim : Theme.accent));
+        }
+        Rectangle { // stand
+            x: (parent.width - self.width) / 2;
+            y: mic-head.y + mic-head.height + 4px;
+            width: 4px; height: 12px;
+            background: mic-head.background;
+        }
+        Rectangle { // base
+            x: (parent.width - self.width) / 2;
+            y: mic-head.y + mic-head.height + 16px;
+            width: 30px; height: 4px; border-radius: 2px;
+            background: mic-head.background;
+        }
+
+        TouchArea {
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) { root.ptt-pressed(); }
+                if (ev.kind == PointerEventKind.up) { root.ptt-released(); }
+                if (ev.kind == PointerEventKind.cancel) { root.ptt-released(); }
+            }
+        }
+    }
+
+    // Action hint under the button.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 452px;
+        text: root.voice-state == 1 ? "release to send"
+            : (root.voice-state == 2 ? ""
+            : (root.voice-state == 3 ? "hold to talk again"
+            : (root.voice-state == 4 ? "hold to retry" : "press \u{0026} hold")));
+        color: Theme.dim;
+        font-size: 14px;
+        letter-spacing: 1px;
+    }
+}
