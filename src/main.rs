@@ -67,6 +67,7 @@ use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::{fill_beep_buffer, Es8311};
+use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::power::Axp2101Power;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
@@ -382,6 +383,9 @@ async fn main(_spawner: Spawner) -> ! {
     // AOD (#29). The wall clock stays on the external PCF85063 above, which is
     // unaffected by light sleep; this only powers the sleep/wake handshake.
     let mut rtc_lp = Rtc::new(peripherals.LPWR);
+
+    // C6 on-die temperature sensor (#54) — read on the sensors page.
+    let die_temp = DieTemp::new(peripherals.TSENS);
 
     // === IMU ===
     let mut imu = Qmi8658Imu::new(RefCellDevice::new(&i2c_ref));
@@ -1384,7 +1388,10 @@ async fn main(_spawner: Spawner) -> ! {
                     next_flush = now;
                 }
                 match page {
-                    slint_shell::PAGE_SENSORS => shell.set_sensors(accel, gyro_data, imu_temp),
+                    slint_shell::PAGE_SENSORS => {
+                        shell.set_sensors(accel, gyro_data, imu_temp);
+                        shell.set_die_temp(die_temp.decidegrees());
+                    }
                     slint_shell::PAGE_SYSTEM => {
                         if now >= next_flush {
                             shell.set_system(esp_alloc::HEAP.free(), batt_pct, batt_mv);

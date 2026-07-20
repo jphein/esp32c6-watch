@@ -316,6 +316,15 @@ impl ShellUi {
         ui.set_imu_temp_text(slint::format!("{:.1} C", temp_dc as f32 / 10.0));
     }
 
+    /// C6 on-die temperature (deci-degrees C) → sensors page (#54).
+    pub fn set_die_temp(&self, dc: i16) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        if ui.get_current_page() != PAGE_SENSORS {
+            return;
+        }
+        ui.set_die_temp_text(slint::format!("{:.1} C", dc as f32 / 10.0));
+    }
+
     pub fn set_system(&self, heap_free: usize, batt_pct: u8, batt_mv: u16) {
         // System page refreshes at 2s; skip the SharedString allocs when the
         // page isn't showing rather than relying on caller discipline.

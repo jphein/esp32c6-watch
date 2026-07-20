@@ -4,6 +4,7 @@ export component SensorsPage {
     in property <string> accel-text;  // "+0.02  -0.98  +0.03 g"
     in property <string> gyro-text;   // "+1.2  -0.4  +0.0 dps"
     in property <string> imu-temp-text; // "27.5 C"
+    in property <string> die-temp-text; // C6 die temp, "42.0 C"
     in property <int> steps;          // pedometer count (from set_steps)
 
     PageTitle { title: "SENSORS"; }
@@ -16,6 +17,7 @@ export component SensorsPage {
         StatRow { label: "ACCEL"; value: root.accel-text; value-color: Theme.accent; }
         StatRow { label: "GYRO"; value: root.gyro-text; }
         StatRow { label: "IMU TEMP"; value: root.imu-temp-text; value-color: Theme.warm; }
+        StatRow { label: "DIE TEMP"; value: root.die-temp-text; value-color: Theme.warm; }
         // Steps derive from the same QMI8658 IMU (already tracked via set_steps).
         StatRow { label: "STEPS"; value: "\{root.steps}"; }
     }

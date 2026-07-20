@@ -37,6 +37,7 @@ export component WatchShell inherits Window {
     in property <string> accel-text: "--";
     in property <string> gyro-text: "--";
     in property <string> imu-temp-text: "--";
+    in property <string> die-temp-text: "--";
 
     // system page (live at 2s while showing); chip/display are constants and
     // keep their SystemPage component defaults. fw-text is set once from Cargo.
@@ -134,6 +135,7 @@ export component WatchShell inherits Window {
             accel-text: root.accel-text;
             gyro-text: root.gyro-text;
             imu-temp-text: root.imu-temp-text;
+            die-temp-text: root.die-temp-text;
             steps: root.steps;
         }
 
