@@ -6,6 +6,7 @@ use embedded_graphics::prelude::DrawTarget;
 use crate::peripherals::touch::{SwipeDirection, TouchPoint};
 
 pub mod snake;
+pub mod world_snake;
 pub mod game2048;
 pub mod tetris;
 pub mod flappy;
@@ -41,6 +42,7 @@ pub enum AppState {
     Watchface,
     Launcher,
     Snake,
+    WorldSnake,
     Game2048,
     Tetris,
     Flappy,
