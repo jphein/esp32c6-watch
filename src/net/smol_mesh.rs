@@ -283,14 +283,16 @@ fn frag_mask(count: u8) -> u8 {
 /// CFG `S` value → watchface page. Fleet wire is `<AppKind>:<page>` (page =
 /// one digit, out-of-range clamps; empty = clear → 0). The watch has no
 /// AppKind tiers, so it takes the digit after the last ':' (or a bare
-/// leading digit) as its own page index, clamped to 0..=3.
+/// leading digit) as its own page index, clamped to the 5-page Slint shell
+/// range 0..=4 (clock/sensors/system/power/mesh). Was 0..=3 in the 4-page
+/// era — that stranded remote CFG-`S` one page short of the mesh page.
 fn parse_screen_page(value: &[u8]) -> u8 {
     let digit = match value.iter().rposition(|&b| b == b':') {
         Some(i) => value.get(i + 1).copied(),
         None => value.first().copied(),
     };
     match digit {
-        Some(d) if d.is_ascii_digit() => (d - b'0').min(3),
+        Some(d) if d.is_ascii_digit() => (d - b'0').min(4),
         _ => 0,
     }
 }
