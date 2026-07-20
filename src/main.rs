@@ -65,12 +65,10 @@ use crate::peripherals::audio::{fill_beep_buffer, Es8311};
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::power::Axp2101Power;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
-use crate::peripherals::rtc::Pcf85063aRtc;
+use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
 use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
-use crate::ui::launcher::Launcher;
-use crate::ui::pages::{self, Page};
-use crate::ui::power_page;
-use crate::ui::watchface::WatchFace;
+use crate::ui::pages;
+use crate::ui::slint_shell::{self, ShellUi};
 
 extern crate alloc;
 
@@ -153,13 +151,15 @@ fn set_rtc_from_unix(
     (hours, minutes, seconds)
 }
 
-/// Watchface page from a persisted / CFG-relayed index (clamped to Clock).
-fn page_from_index(idx: u8) -> Page {
-    match idx {
-        1 => Page::Sensors,
-        2 => Page::System,
-        3 => Page::Power,
-        _ => Page::Clock,
+/// Page label for the WATCH telemetry `scr` field, keyed by the Slint shell's
+/// current-page index (shares the page order with ui/slint/shell.slint).
+fn page_scr_name(page: i32) -> &'static str {
+    match page {
+        1 => "SENSORS",
+        2 => "SYSTEM",
+        3 => "POWER",
+        4 => "MESH",
+        _ => "CLOCK",
     }
 }
 
@@ -308,6 +308,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut display = Co5300Display::new(QspiBus::new(spi, cs), reset);
     display.init();
     println!("[DISPLAY] OK");
+
+    // Slint shell owns the whole watchface + launcher UI now. Construct it once
+    // (registers the Slint platform + shows the window). brightness is synced to
+    // the real boot value once watch_cfg is loaded (below).
+    let mut shell = ShellUi::new();
+    println!("[SLINT] shell up");
 
     let mut fb = Framebuffer::new();
     fb.clear_color(Rgb565::BLACK);
@@ -481,16 +487,21 @@ async fn main(_spawner: Spawner) -> ! {
     println!("=== All systems GO! ===");
 
     // === State ===
-    let mut watchface = WatchFace::new();
-    watchface.wifi_connected = false;
-    watchface.cpu_mhz = 160;
-    watchface.brightness = watch_cfg.brightness;
-    display.set_brightness(watch_cfg.brightness);
-    // Boot default page: CFG key `S` persists it (SMOLv1 config channel).
-    let mut current_page = page_from_index(watch_cfg.default_page);
+    // Watchface live-state that used to hang off WatchFace. The Slint shell owns
+    // its own scene state (page, launcher, dirty tracking), so these are plain
+    // loop locals pushed into the shell via setters.
+    let mut brightness: u8 = watch_cfg.brightness;
+    let mut gyro_enabled = false;
+    let mut cpu_mhz: u16 = 160;
+    let mut last_dt: Option<DateTime> = None;
+    display.set_brightness(brightness);
+    // Sync the power-page slider knob to the real boot brightness (else it shows
+    // the Slint default while the panel is at watch_cfg.brightness).
+    shell.set_brightness_from_raw(brightness);
     let mut power_stats = PowerStats::new();
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
+    let mut prev_app_state = app_state;
     let mut snake_game = SnakeGame::new();
     // World Snake shares the SMOLv1 node id so its SNK frames name us.
     let mut world_snake = WorldSnakeApp::new(watch_cfg.node_id);
@@ -498,7 +509,6 @@ async fn main(_spawner: Spawner) -> ! {
     let mut tetris_game = TetrisGame::new();
     let mut flappy_game = FlappyGame::new();
     let mut maze_game = MazeGame::new();
-    let mut launcher = Launcher::new();
     let mut settings_app = SettingsApp::new();
     let mut last_touch_y: u16 = 0;
     let mut last_touch_x: u16 = 0;
@@ -508,28 +518,28 @@ async fn main(_spawner: Spawner) -> ! {
     let mut batt_pct: u8 = 0;
     let mut batt_mv: u16 = 0;
     let mut charging = false;
-    let mut page_dirty = true;
     let mut last_interaction = Instant::now();
     // 3=bright 2=dim 1=AOD 0=off (see the S3 firmware for the rationale)
     let mut screen_state: u8 = 3;
-    let mut aod_last_minute: u8 = 99;
+    // Shell push-guards: only re-push radio chrome / re-pace page data on change.
+    let mut prev_radios: (bool, bool, u8) = (false, false, 0);
+    let mut prev_page: i32 = -1;
 
-    // Initial render
+    // Initial shell paint so the panel shows a live clock immediately instead of
+    // waiting up to a full tick for the first loop render.
     if let Ok(pct) = power.get_battery_percent() {
         batt_pct = pct;
         batt_mv = power.get_battery_voltage().unwrap_or(0);
         charging = power.is_charging().unwrap_or(false);
-        watchface.update_battery(batt_pct, batt_mv, charging);
+        shell.set_battery(batt_pct, batt_mv, charging);
         crate::peripherals::ble::BATTERY_PERCENT
             .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
     }
     if let Ok(dt) = rtc.get_time() {
-        watchface.update_time(dt.hours, dt.minutes, dt.seconds);
-        watchface.update_date(dt.day, dt.month, dt.year);
+        let _ = shell.set_time(&dt);
+        last_dt = Some(dt);
     }
-    watchface.force_redraw();
-    let _ = watchface.render(&mut fb);
-    fb.flush(&mut display);
+    shell.render(&mut display);
 
     let mut next_rtc = Instant::now();
     let mut next_battery = Instant::now();
@@ -582,20 +592,28 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(10)
         } else {
             match app_state {
-                AppState::Watchface => match current_page {
-                    Page::Clock => {
-                        if watchface.gyro_enabled {
-                            Duration::from_millis(33)
-                        } else {
-                            Duration::from_secs(1)
+                AppState::Watchface | AppState::Launcher => {
+                    // Slint animations (launcher slide, flings) need frame pacing;
+                    // otherwise pace by the visible page's live-data cadence.
+                    if shell.has_active_animations() {
+                        Duration::from_millis(33)
+                    } else {
+                        match shell.page() {
+                            1 => Duration::from_millis(100), // sensors live
+                            2 => Duration::from_secs(2),     // system
+                            3 | 4 => Duration::from_secs(1), // power / mesh refresh
+                            _ => {
+                                // Clock: 33ms while the gyro toy is live, else 1Hz.
+                                if gyro_enabled {
+                                    Duration::from_millis(33)
+                                } else {
+                                    Duration::from_secs(1)
+                                }
+                            }
                         }
                     }
-                    Page::Sensors => Duration::from_millis(100),
-                    Page::System => Duration::from_secs(2),
-                    Page::Power => Duration::from_secs(1),
-                    Page::Mesh => Duration::from_secs(1),
-                },
-                AppState::Launcher | AppState::Settings => Duration::from_millis(100),
+                }
+                AppState::Settings => Duration::from_millis(100),
                 _ => Duration::from_millis(33),
             }
         };
@@ -625,11 +643,12 @@ async fn main(_spawner: Spawner) -> ! {
 
         // === IMU gating ===
         let need_imu = screen_state >= 2
-            && (watchface.gyro_enabled
+            && (gyro_enabled
                 || app_state == AppState::Maze
                 || app_state == AppState::Tetris
                 || app_state == AppState::Flappy
-                || (app_state == AppState::Watchface && current_page == Page::Sensors));
+                || (app_state == AppState::Watchface
+                    && shell.page() == slint_shell::PAGE_SENSORS));
         if need_imu && !imu_powered {
             let _ = imu.power_up();
             imu_powered = true;
@@ -640,7 +659,6 @@ async fn main(_spawner: Spawner) -> ! {
         if need_imu {
             if let Ok(a) = imu.read_accel() {
                 accel = (a.x, a.y, a.z);
-                watchface.update_accel(a.x, a.y, a.z);
             }
             if let Ok(g) = imu.read_gyro() {
                 gyro_data = ((g.x * 10.0) as i16, (g.y * 10.0) as i16, (g.z * 10.0) as i16);
@@ -651,10 +669,11 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         // === RTC 1Hz ===
+        // Stash the reading; the shell arm pushes it via shell.set_time (which
+        // no-ops until the second actually ticks).
         if screen_state >= 2 && now >= next_rtc {
             if let Ok(dt) = rtc.get_time() {
-                watchface.update_time(dt.hours, dt.minutes, dt.seconds);
-                watchface.update_date(dt.day, dt.month, dt.year);
+                last_dt = Some(dt);
             }
             next_rtc = now + Duration::from_secs(1);
         }
@@ -663,8 +682,8 @@ async fn main(_spawner: Spawner) -> ! {
         // The hardware step counter runs even while the IMU is "powered
         // down" (gyro off, accel on). One cheap 3-byte I2C read per minute.
         if now >= next_step_poll {
-            if let Ok(steps) = imu.read_step_count() {
-                watchface.steps = steps;
+            if let Ok(s) = imu.read_step_count() {
+                shell.set_steps(s);
             }
             next_step_poll = now + Duration::from_secs(60);
         }
@@ -675,7 +694,7 @@ async fn main(_spawner: Spawner) -> ! {
                 batt_pct = pct;
                 batt_mv = power.get_battery_voltage().unwrap_or(0);
                 charging = power.is_charging().unwrap_or(false);
-                watchface.update_battery(batt_pct, batt_mv, charging);
+                shell.set_battery(batt_pct, batt_mv, charging);
                 // Feed the BLE Battery Service (read + notify).
                 crate::peripherals::ble::BATTERY_PERCENT
                     .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
@@ -692,18 +711,22 @@ async fn main(_spawner: Spawner) -> ! {
         // snapshots it needs (2x412KB) don't exist without PSRAM. Swipes
         // switch pages directly instead.
         let mut swipe_event = None;
+        let mut swipe_start_y: u16 = 0;
         let mut tap_event = false;
+        let mut touch_point: Option<crate::peripherals::touch::TouchPoint> = None;
         let int_low = touch_int.is_low();
         let touch_active = screen_state >= 2 && (int_low || was_touching);
         was_touching = int_low;
         if touch_active {
             if let Ok((point, event)) = touch.poll() {
+                touch_point = point;
                 if let Some(tp) = point {
                     last_touch_x = tp.x;
                     last_touch_y = tp.y;
                 }
                 if let Some(swipe) = event {
                     swipe_event = Some(swipe.direction);
+                    swipe_start_y = swipe.start_y;
                     tap_event = swipe.direction == SwipeDirection::Tap;
                 }
             }
@@ -718,13 +741,14 @@ async fn main(_spawner: Spawner) -> ! {
                     display.display_on();
                     Timer::after(Duration::from_millis(20)).await;
                 }
-                display.set_brightness(watchface.brightness);
+                display.set_brightness(brightness);
                 screen_state = 3;
                 next_flush = now;
-                if app_state == AppState::Watchface {
-                    watchface.force_redraw();
-                    page_dirty = true;
-                }
+                // Real AOD is task 11; for now just make sure the AOD flag never
+                // sticks, and force one full repaint so we don't wake onto a
+                // stale (or app-clobbered) frame.
+                shell.set_aod(false);
+                shell.request_redraw();
             }
         }
         let idle_secs = (now - last_interaction).as_secs();
@@ -733,10 +757,9 @@ async fn main(_spawner: Spawner) -> ! {
             display.display_off();
             screen_state = 0;
         } else if idle_secs >= 15 && screen_state > 1 {
-            if app_state == AppState::Watchface && current_page == Page::Clock {
+            if app_state == AppState::Watchface && shell.page() == slint_shell::PAGE_CLOCK {
                 display.set_brightness(0x18);
                 screen_state = 1;
-                aod_last_minute = 99;
             } else {
                 display.set_brightness(0x00);
                 display.display_off();
@@ -796,9 +819,6 @@ async fn main(_spawner: Spawner) -> ! {
                         println!("[WIFI] connected");
                         wifi_connect_attempts = 0;
                         wifi_connected = true;
-                        watchface.wifi_connected = true;
-                        watchface.force_redraw();
-                        page_dirty = true;
                         if settings_connect_pending {
                             settings_app.wifi_state =
                                 crate::peripherals::wifi::WifiState::Connected;
@@ -821,9 +841,6 @@ async fn main(_spawner: Spawner) -> ! {
                         if wifi_connect_attempts >= 3 {
                             wifi_connect_attempts = 0;
                             wifi_on_request = false;
-                            watchface.wifi_connected = false;
-                            watchface.force_redraw();
-                            page_dirty = true;
                             if settings_connect_pending {
                                 settings_app.wifi_state =
                                     crate::peripherals::wifi::WifiState::Error;
@@ -842,9 +859,6 @@ async fn main(_spawner: Spawner) -> ! {
             let _ = wifi_controller.disconnect_async().await;
             println!("[WIFI] disconnected");
             wifi_connected = false;
-            watchface.wifi_connected = false;
-            watchface.force_redraw();
-            page_dirty = true;
             last_wifi_idle_check = now;
         }
         // Safety net: radio left on + 5 min idle -> auto-off.
@@ -858,9 +872,6 @@ async fn main(_spawner: Spawner) -> ! {
         if wifi_connected && !wifi_controller.is_connected() {
             println!("[WIFI] link lost - will reconnect");
             wifi_connected = false;
-            watchface.wifi_connected = false;
-            watchface.force_redraw();
-            page_dirty = true;
         }
 
         // NTP once DHCP is up; retry with a 10s backoff until it works.
@@ -882,10 +893,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // Weather fetch in the same WiFi window (fire-and-forget,
                     // bounded at 8s; logs [WX] failed and moves on).
                     if let Some(wx) = crate::net::weather::fetch(stack).await {
-                        watchface.weather_temp_f = Some(wx.temp_f);
-                        watchface.weather_code = wx.code;
-                        watchface.force_redraw();
-                        page_dirty = true;
+                        shell.set_weather(Some(wx.temp_f), wx.code);
                     }
                     wifi_on_request = false; // WiFi burst complete
                 } else {
@@ -941,8 +949,6 @@ async fn main(_spawner: Spawner) -> ! {
                 let peers = mesh.peer_count(now_ms) as u8;
                 if peers != last_mesh_peers {
                     last_mesh_peers = peers;
-                    watchface.mesh_peers = peers;
-                    watchface.force_redraw();
                 }
                 // DIAG record every 60s: full field set in spec order (the HA
                 // dashboard parses positionally), zeros where the watch has
@@ -997,8 +1003,8 @@ async fn main(_spawner: Spawner) -> ! {
                         batt_mv,
                         u8::from(charging),
                         last_mesh_peers,
-                        current_page.name(),
-                        current_page as u8,
+                        page_scr_name(shell.page()),
+                        shell.page() as u8,
                     );
                     mesh.relay_emit(&mut esp_now, tele.as_bytes(), now_ms);
                 }
@@ -1031,19 +1037,17 @@ async fn main(_spawner: Spawner) -> ! {
                                 "[MESH] RTC set from mesh (id{from_id}): {h:02}:{m:02}:{s:02}"
                             );
                             if let Ok(dt) = rtc.get_time() {
-                                watchface.update_time(dt.hours, dt.minutes, dt.seconds);
-                                watchface.update_date(dt.day, dt.month, dt.year);
+                                last_dt = Some(dt);
                             }
                         }
                         // CFG `S`: apply live + persist. EDGE-TRIGGERED save —
                         // the gateway re-broadcasts cached configs every ~10s,
                         // so a same-value re-arm must never wear flash.
                         Some(MeshEvent::CfgScreen { page }) => {
-                            if app_state == AppState::Watchface && current_page as u8 != page {
-                                current_page = page_from_index(page);
-                                watchface.force_redraw();
-                                page_dirty = true;
-                            }
+                            // Live remote page-switch is deferred: the Slint shell
+                            // owns its current page and exposes no setter yet, so a
+                            // CFG `S` downlink only persists the new default for now
+                            // (a follow-up adds ShellUi::set_page). See task-9 notes.
                             if watch_cfg.default_page != page {
                                 watch_cfg.default_page = page;
                                 match config_offset.map(|off| {
@@ -1100,15 +1104,8 @@ async fn main(_spawner: Spawner) -> ! {
                     if let Some(frame) = familiar.tick(&ids[..n], now_ms, unix_now) {
                         mesh.broadcast_fam(&mut esp_now, &frame);
                     }
-                    // Snapshot for the watchface (dirty-rendered like mesh_peers).
-                    let fam_ui = crate::ui::watchface::FamUi {
-                        known: familiar.known(),
-                        holding: familiar.is_holder(),
-                        mood: familiar.mood(),
-                        hunger: familiar.creature().hunger_level(unix_now),
-                        stage: familiar.creature().stage_level(unix_now),
-                    };
-                    watchface.fam = fam_ui;
+                    // The creature UI snapshot returns in task 12 (Familiar on the
+                    // Slint watchface); the mesh arbitration/beat above stays live.
                 }
             }
         }
@@ -1131,177 +1128,124 @@ async fn main(_spawner: Spawner) -> ! {
             } else {
                 println!("[BLE] host can't be stopped at runtime - reboot to disable");
             }
-            watchface.ble_on = ble_on;
             power_stats.ble_on = ble_on;
-            watchface.force_redraw();
-            page_dirty = true;
         }
 
-        // === AOD ===
-        if screen_state == 1 {
-            if let Ok(dt) = rtc.get_time() {
-                if dt.minutes != aod_last_minute {
-                    aod_last_minute = dt.minutes;
-                    watchface.update_time(dt.hours, dt.minutes, dt.seconds);
-                    if let Ok(pct) = power.get_battery_percent() {
-                        watchface.update_battery(pct, batt_mv, charging);
-                        crate::peripherals::ble::BATTERY_PERCENT
-                            .store(pct, core::sync::atomic::Ordering::Relaxed);
-                    }
-                    let _ = watchface.render_aod(&mut fb);
-                    fb.flush(&mut display);
-                }
-            }
-            continue;
+        // Push radio chrome (wifi/ble/mesh-peers) only when it actually changed —
+        // set_radios itself is cheap, but this avoids touching the scene every
+        // iteration and keeps Slint's dirty tracking meaningful.
+        let radios = (wifi_connected, ble_on, last_mesh_peers);
+        if radios != prev_radios {
+            shell.set_radios(radios.0, radios.1, radios.2);
+            prev_radios = radios;
         }
+
+        // === AOD (real always-on display lands in task 11) ===
+        // For now screen_state 1 just stays dim showing the last frame; skip the
+        // render/interaction work until the panel is off entirely.
         if screen_state == 0 {
             continue;
         }
 
         // === App state machine ===
         match app_state {
-            AppState::Watchface => {
-                // Swipe left/right switches pages (no slide animation on C6).
-                match swipe_event {
-                    Some(SwipeDirection::Left) => {
-                        current_page = current_page.next();
-                        page_dirty = true;
+            AppState::Watchface | AppState::Launcher => {
+                // Just came back from an app that painted straight to the panel
+                // (bypassing Slint) — force one full repaint so we don't sit on a
+                // stale game frame that Slint thinks is still valid.
+                if !matches!(prev_app_state, AppState::Watchface | AppState::Launcher) {
+                    shell.request_redraw();
+                }
+
+                // Mirror launcher open-state into the scene, then feed touch. The
+                // shell owns page/launcher navigation via swipes internally.
+                shell.set_launcher_open(app_state == AppState::Launcher);
+                shell.handle_touch(touch_point, swipe_event, swipe_start_y);
+                // Reconcile app_state with swipe-driven launcher open/close.
+                if shell.launcher_open() != (app_state == AppState::Launcher) {
+                    app_state = if shell.launcher_open() {
+                        AppState::Launcher
+                    } else {
+                        AppState::Watchface
+                    };
+                }
+
+                // Refresh per-page data immediately on a page switch, then pace it.
+                let page = shell.page();
+                if page != prev_page {
+                    prev_page = page;
+                    next_flush = now;
+                }
+                match page {
+                    slint_shell::PAGE_SENSORS => shell.set_sensors(accel, gyro_data, imu_temp),
+                    slint_shell::PAGE_SYSTEM => {
+                        if now >= next_flush {
+                            shell.set_system(esp_alloc::HEAP.free(), batt_pct, batt_mv);
+                            next_flush = now + Duration::from_secs(2);
+                        }
                     }
-                    Some(SwipeDirection::Right) => {
-                        current_page = current_page.prev();
-                        page_dirty = true;
+                    slint_shell::PAGE_POWER => {
+                        if now >= next_flush {
+                            update_power_stats(
+                                &mut power_stats,
+                                screen_state,
+                                imu_powered,
+                                wifi_connected,
+                                wifi_on_request,
+                                brightness,
+                                batt_mv,
+                                batt_pct,
+                                charging,
+                            );
+                            shell.set_power(&power_stats);
+                            next_flush = now + Duration::from_secs(1);
+                        }
+                    }
+                    slint_shell::PAGE_MESH => {
+                        if now >= next_flush {
+                            let mut rows = [PeerView::default(); pages::MESH_MAX_ROWS];
+                            let n = mesh.peers(now.as_millis(), &mut rows);
+                            shell.set_mesh_rows(watch_cfg.node_id, &rows[..n]);
+                            next_flush = now + Duration::from_secs(1);
+                        }
                     }
                     _ => {}
                 }
 
-                let mut need_flush = false;
-                if page_dirty {
-                    fb.clear_color(current_page.color());
-                    match current_page {
-                        Page::Clock => {
-                            watchface.force_redraw();
-                        }
-                        Page::System => {
-                            let _ = pages::draw_system_page(&mut fb, batt_mv, batt_pct, charging);
-                        }
-                        Page::Power => {
-                            update_power_stats(
-                                &mut power_stats,
-                                screen_state,
-                                imu_powered,
-                                wifi_connected,
-                                wifi_on_request,
-                                watchface.brightness,
-                                batt_mv,
-                                batt_pct,
-                                charging,
-                            );
-                            let _ = power_page::draw_power_page(&mut fb, &power_stats);
-                        }
-                        Page::Mesh => {
-                            let mut rows = [PeerView::default(); pages::MESH_MAX_ROWS];
-                            let n = mesh.peers(now.as_millis(), &mut rows);
-                            let _ =
-                                pages::draw_mesh_page(&mut fb, watch_cfg.node_id, &rows[..n]);
-                        }
-                        _ => {}
-                    }
-                    page_dirty = false;
-                    need_flush = true;
-                }
-                match current_page {
-                    Page::Clock => {
-                        if watchface.needs_render() {
-                            let _ = watchface.render(&mut fb);
-                            need_flush = true;
-                        }
-                    }
-                    Page::Sensors => {
-                        let ax = (accel.0 * 100.0) as i16;
-                        let ay = (accel.1 * 100.0) as i16;
-                        let az = (accel.2 * 100.0) as i16;
-                        fb.clear_color(current_page.color());
-                        let _ = pages::draw_sensors_page(
-                            &mut fb, ax, ay, az, gyro_data.0, gyro_data.1, gyro_data.2, imu_temp,
-                        );
-                        need_flush = true;
-                    }
-                    Page::Power => {
-                        if now >= next_flush {
-                            update_power_stats(
-                                &mut power_stats,
-                                screen_state,
-                                imu_powered,
-                                wifi_connected,
-                                wifi_on_request,
-                                watchface.brightness,
-                                batt_mv,
-                                batt_pct,
-                                charging,
-                            );
-                            let _ = power_page::draw_power_page(&mut fb, &power_stats);
-                            need_flush = true;
-                            next_flush = now + Duration::from_secs(1);
-                        }
-                    }
-                    Page::Mesh => {
-                        // ~1Hz roster refresh (ages + EWMA move between frames).
-                        if now >= next_flush {
-                            fb.clear_color(current_page.color());
-                            let mut rows = [PeerView::default(); pages::MESH_MAX_ROWS];
-                            let n = mesh.peers(now.as_millis(), &mut rows);
-                            let _ =
-                                pages::draw_mesh_page(&mut fb, watch_cfg.node_id, &rows[..n]);
-                            need_flush = true;
-                            next_flush = now + Duration::from_secs(1);
-                        }
-                    }
-                    Page::System => {}
-                }
-                if need_flush {
-                    fb.flush(&mut display);
-                    next_flush = now;
+                // 1Hz clock push (no-ops until the second actually ticks).
+                if let Some(dt) = last_dt.as_ref() {
+                    let _ = shell.set_time(dt);
                 }
 
-                // Tap dispatch on the Clock page.
-                if current_page == Page::Clock {
-                    if let Some(bri) = WatchFace::brightness_from_tap(last_touch_x, last_touch_y) {
-                        if (touch_int.is_low() || tap_event) && bri != watchface.brightness {
-                            watchface.brightness = bri;
-                            display.set_brightness(bri);
-                            watchface.force_redraw();
-                            page_dirty = true;
-                        }
-                    } else if tap_event {
-                        if WatchFace::is_ble_zone(last_touch_x, last_touch_y) {
-                            ble_toggle_request = true;
-                            watchface.force_redraw();
-                            page_dirty = true;
-                        } else if WatchFace::is_wifi_zone(last_touch_x, last_touch_y) {
-                            wifi_toggle_request = true;
-                            watchface.force_redraw();
-                            page_dirty = true;
-                        } else if WatchFace::is_cpu_zone(last_touch_x, last_touch_y) {
-                            watchface.cycle_cpu();
-                            let actual =
-                                crate::peripherals::cpu_clock::set_cpu_mhz(watchface.cpu_mhz);
-                            watchface.cpu_mhz = actual;
-                            power_stats.cpu_mhz = actual;
-                            watchface.force_redraw();
-                            page_dirty = true;
-                        } else if WatchFace::is_apps_zone(last_touch_x, last_touch_y) {
-                            app_state = AppState::Launcher;
-                        } else if WatchFace::is_gyro_zone(last_touch_y) {
-                            let enabled = watchface.toggle_gyro();
-                            println!("Gyro: {}", if enabled { "ON" } else { "OFF" });
-                        }
-                    }
+                // Drain UI requests raised by the Slint callbacks.
+                if let Some(raw) = shell.req.brightness.take() {
+                    brightness = raw;
+                    display.set_brightness(raw);
                 }
-
-                if current_page == Page::Power
-                    && tap_event
-                    && power_page::is_reboot_zone(last_touch_x, last_touch_y)
-                {
+                if shell.req.wifi_toggle.take() {
+                    wifi_toggle_request = true;
+                }
+                if shell.req.ble_toggle.take() {
+                    ble_toggle_request = true;
+                }
+                if shell.req.cpu_cycle.take() {
+                    // Mirror the old WatchFace::cycle_cpu ladder: 80 -> 160 -> 240.
+                    cpu_mhz = match cpu_mhz {
+                        80 => 160,
+                        160 => 240,
+                        _ => 80,
+                    };
+                    let actual = crate::peripherals::cpu_clock::set_cpu_mhz(cpu_mhz);
+                    cpu_mhz = actual;
+                    power_stats.cpu_mhz = actual;
+                    shell.set_cpu_mhz(actual);
+                }
+                if shell.req.gyro_toggle.take() {
+                    gyro_enabled = !gyro_enabled;
+                    shell.set_gyro(gyro_enabled);
+                    println!("Gyro: {}", if gyro_enabled { "ON" } else { "OFF" });
+                }
+                if shell.req.reboot.take() {
                     println!("REBOOT requested");
                     // If WiFi is up and an OTA_URL was baked in at build time,
                     // try to stage an OTA update first; reboot either way.
@@ -1312,15 +1256,46 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     esp_hal::system::software_reset();
                 }
-
-                if let Some(SwipeDirection::Up) = swipe_event {
-                    if current_page == Page::Clock {
-                        app_state = AppState::Launcher;
+                if let Some(target) = shell.req.launch.take() {
+                    // Close the launcher, then run the SAME per-app setup the old
+                    // launcher arm did (without setup the games boot into garbage).
+                    shell.set_launcher_open(false);
+                    match target {
+                        AppState::Snake => snake_game.setup(),
+                        AppState::WorldSnake => world_snake.setup(),
+                        AppState::Game2048 => {
+                            game_2048.setup();
+                            game_2048.render(&mut fb);
+                            fb.flush(&mut display);
+                        }
+                        AppState::Tetris => tetris_game.setup(),
+                        AppState::Flappy => flappy_game.setup(),
+                        AppState::Maze => maze_game.setup(),
+                        AppState::Settings => {}
+                        _ => {}
                     }
+                    app_state = target;
                 }
+
+                // BOOT button toggles the launcher overlay.
                 if boot_button.is_low() {
-                    app_state = AppState::Launcher;
+                    let opening = app_state == AppState::Watchface;
+                    shell.set_launcher_open(opening);
+                    app_state = if opening {
+                        AppState::Launcher
+                    } else {
+                        AppState::Watchface
+                    };
                     Timer::after(Duration::from_millis(200)).await;
+                }
+
+                // Repaint if the scene is dirty (full-frame, line-streamed).
+                // Skip when a launch just switched us into an app this iteration:
+                // that app already painted its first frame (e.g. Game2048) and the
+                // trailing shell repaint would clobber it.
+                if screen_state >= 2 && matches!(app_state, AppState::Watchface | AppState::Launcher)
+                {
+                    shell.render(&mut display);
                 }
             }
 
@@ -1355,14 +1330,10 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     AppResult::Exit => {
                         app_state = AppState::Watchface;
-                        watchface.force_redraw();
-                        page_dirty = true;
                     }
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Watchface;
-                    watchface.force_redraw();
-                    page_dirty = true;
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
@@ -1385,44 +1356,6 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Launcher => {
-                if let Ok((point, _)) = touch.poll() {
-                    if let Some(tp) = point {
-                        last_touch_y = tp.y;
-                    }
-                }
-                if let Some(new_state) = launcher.update(swipe_event, tap_event, last_touch_y) {
-                    app_state = new_state;
-                    match app_state {
-                        AppState::Snake => snake_game.setup(),
-                        AppState::WorldSnake => world_snake.setup(),
-                        AppState::Game2048 => {
-                            game_2048.setup();
-                            game_2048.render(&mut fb);
-                            fb.flush(&mut display);
-                        }
-                        AppState::Tetris => tetris_game.setup(),
-                        AppState::Flappy => flappy_game.setup(),
-                        AppState::Maze => maze_game.setup(),
-                        AppState::Settings => {}
-                        AppState::Watchface => {
-                            watchface.force_redraw();
-                            page_dirty = true;
-                        }
-                        _ => {}
-                    }
-                } else {
-                    launcher.render(&mut fb);
-                    fb.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Watchface;
-                    watchface.force_redraw();
-                    page_dirty = true;
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
@@ -1491,7 +1424,6 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
-                    page_dirty = true;
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
@@ -1576,5 +1508,9 @@ async fn main(_spawner: Spawner) -> ! {
                 app_state = AppState::Watchface;
             }
         }
+
+        // Track the arm we ran so the shell arm can detect a return from an app
+        // that painted straight to the panel and force a repaint.
+        prev_app_state = app_state;
     }
 }

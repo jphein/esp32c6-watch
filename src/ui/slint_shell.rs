@@ -445,6 +445,14 @@ impl ShellUi {
         self.window.has_active_animations()
     }
 
+    /// Force a full repaint on the next [`render`]. Needed when something painted
+    /// straight to the panel (a game's framebuffer flush, or a wake from a dim
+    /// screen) and clobbered the frame Slint still believes is on-screen — its
+    /// dirty tracking can't see writes that bypassed the scene.
+    pub fn request_redraw(&self) {
+        self.window.window().request_redraw();
+    }
+
     /// Run timers/animations and repaint if the scene is dirty.
     pub fn render(&mut self, display: &mut Co5300Display) {
         slint::platform::update_timers_and_animations();
