@@ -41,6 +41,7 @@ esp-radio = { version = "0.18.0", features = [
 embassy-net = { version = "0.9.1", features = [
     "tcp",
     "udp",
+    "dns",
     "dhcpv4",
     "medium-ethernet",
     "log",

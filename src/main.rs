@@ -451,7 +451,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut esp_now = wifi_interfaces.esp_now;
 
     let net_config = embassy_net::Config::dhcpv4(Default::default());
-    static RESOURCES: StaticCell<embassy_net::StackResources<3>> = StaticCell::new();
+    // 4 sockets: DHCP + the always-on DNS socket + one transient TCP/UDP
+    // (NTP, MQTT, weather, OTA — never concurrent) + one spare.
+    static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         wifi_interfaces.station,
         net_config,
@@ -829,6 +831,14 @@ async fn main(_spawner: Spawner) -> ! {
                     // still open. Fire-and-forget: logs and moves on after at
                     // most ~5s; never blocks the boot/NTP/mesh flow.
                     crate::net::mqtt_ha::publish_burst(stack, batt_pct).await;
+                    // Weather fetch in the same WiFi window (fire-and-forget,
+                    // bounded at 8s; logs [WX] failed and moves on).
+                    if let Some(wx) = crate::net::weather::fetch(stack).await {
+                        watchface.weather_temp_f = Some(wx.temp_f);
+                        watchface.weather_code = wx.code;
+                        watchface.force_redraw();
+                        page_dirty = true;
+                    }
                     wifi_on_request = false; // WiFi burst complete
                 } else {
                     println!("[NTP] failed, retrying in 10s");

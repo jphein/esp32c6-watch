@@ -45,6 +45,12 @@ const BATTERY_REGION_H: i32 = 52;
 // Mesh status indicator (top-right, mirrors the wifi/ble icons top-left)
 const MESH_X: i32 = 300;
 const MESH_Y: i32 = 10;
+
+// Weather readout (left of the date line; the centered date starts ~x137)
+const WX_X: i32 = 12;
+const WX_Y: i32 = 162; // FONT_10X20 baseline, vertically centered on the date
+const WX_REGION_W: i32 = 126;
+const WX_REGION_H: i32 = 26;
 const GYRO_CX: i32 = 205;
 const GYRO_CY: i32 = 370;
 const GYRO_R: i32 = 50;
@@ -116,6 +122,7 @@ pub struct RenderOutcome {
     pub battery_region: Option<FlushRegion>,
     pub gyro_region: Option<FlushRegion>,
     pub mesh_region: Option<FlushRegion>,
+    pub weather_region: Option<FlushRegion>,
 }
 
 pub struct WatchFace {
@@ -137,6 +144,13 @@ pub struct WatchFace {
     pub mesh_peers: u8,
     /// Last peer count actually drawn, for dirty tracking.
     mesh_drawn: u8,
+    /// Current outside temperature in Fahrenheit (Open-Meteo). None until the
+    /// first successful fetch of a WiFi window; nothing is drawn while None.
+    pub weather_temp_f: Option<i16>,
+    /// WMO weather interpretation code matching `weather_temp_f`.
+    pub weather_code: u8,
+    /// Last (temp, code) actually drawn, for dirty tracking.
+    weather_drawn: (Option<i16>, u8),
 }
 
 impl WatchFace {
@@ -155,6 +169,9 @@ impl WatchFace {
             cpu_mhz: 160,
             mesh_peers: 0,
             mesh_drawn: 0,
+            weather_temp_f: None,
+            weather_code: 0,
+            weather_drawn: (None, 0),
         }
     }
 
@@ -515,6 +532,7 @@ impl WatchFace {
             || self.battery_changed
             || self.gyro_changed
             || self.mesh_peers != self.mesh_drawn
+            || (self.weather_temp_f, self.weather_code) != self.weather_drawn
     }
 
     /// Draw the big HH:MM (logisoso92) with small seconds (logisoso24)
@@ -589,6 +607,25 @@ impl WatchFace {
 
     pub fn mesh_region() -> FlushRegion {
         FlushRegion::new(MESH_X - 4, MESH_Y - 8, 70, 30)
+    }
+
+    /// Weather readout: "72F Rain" left of the date. Draws nothing until the
+    /// first successful fetch (temp is None).
+    fn draw_weather<D: DrawTarget<Color = Rgb565>>(
+        d: &mut D,
+        temp_f: Option<i16>,
+        code: u8,
+    ) -> Result<(), D::Error> {
+        let Some(t) = temp_f else { return Ok(()) };
+        let mut buf = [0u8; 16];
+        let s = fmt_weather(&mut buf, t, code);
+        let st = MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_GRAY);
+        Text::new(s, Point::new(WX_X, WX_Y), st).draw(d)?;
+        Ok(())
+    }
+
+    pub fn weather_region() -> FlushRegion {
+        FlushRegion::new(WX_X - 2, WX_Y - 18, WX_REGION_W, WX_REGION_H)
     }
 
     /// Always-On-Display renderer.
@@ -717,6 +754,10 @@ impl WatchFace {
                 )
                 .map_err(font_err)?;
 
+            // Weather (left of the date; empty until the first fetch)
+            Self::draw_weather(d, self.weather_temp_f, self.weather_code)?;
+            self.weather_drawn = (self.weather_temp_f, self.weather_code);
+
             // Battery bar + percentage (more space below date)
             self.draw_battery(d, cx, BATTERY_Y)?;
 
@@ -785,6 +826,18 @@ impl WatchFace {
             Self::draw_mesh_indicator(d, self.mesh_peers)?;
             self.mesh_drawn = self.mesh_peers;
             outcome.mesh_region = Some(Self::mesh_region());
+        }
+
+        if (self.weather_temp_f, self.weather_code) != self.weather_drawn {
+            Rectangle::new(
+                Point::new(Self::weather_region().x as i32, Self::weather_region().y as i32),
+                Size::new(Self::weather_region().w as u32, Self::weather_region().h as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(d)?;
+            Self::draw_weather(d, self.weather_temp_f, self.weather_code)?;
+            self.weather_drawn = (self.weather_temp_f, self.weather_code);
+            outcome.weather_region = Some(Self::weather_region());
         }
 
         Ok(outcome)
@@ -943,6 +996,48 @@ fn fmt_batt<'a>(buf: &'a mut [u8; 16], pct: u8, chg: bool) -> &'a str {
     buf[p]=b'%'; p+=1;
     if chg { for &c in b" CHG" { buf[p]=c; p+=1; } }
     core::str::from_utf8(&buf[..p]).unwrap_or("?%")
+}
+
+/// Short condition word for a WMO weather interpretation code.
+fn wmo_condition(code: u8) -> &'static str {
+    match code {
+        0..=1 => "Clear",
+        2..=3 => "Cloudy",
+        45..=48 => "Fog",
+        51..=67 => "Rain",
+        71..=77 => "Snow",
+        80..=82 => "Rain",
+        85..=86 => "Snow",
+        95.. => "Storm",
+        _ => "",
+    }
+}
+
+/// Format "72F Rain" / "-5F Snow". Temp is clamped to +/-999.
+fn fmt_weather<'a>(buf: &'a mut [u8; 16], temp_f: i16, code: u8) -> &'a str {
+    let mut p = 0;
+    let mut t = (temp_f as i32).clamp(-999, 999);
+    if t < 0 {
+        buf[p] = b'-';
+        p += 1;
+        t = -t;
+    }
+    if t >= 100 { buf[p] = b'0' + (t / 100) as u8; p += 1; }
+    if t >= 10 { buf[p] = b'0' + ((t / 10) % 10) as u8; p += 1; }
+    buf[p] = b'0' + (t % 10) as u8;
+    p += 1;
+    buf[p] = b'F';
+    p += 1;
+    let word = wmo_condition(code);
+    if !word.is_empty() {
+        buf[p] = b' ';
+        p += 1;
+        for &c in word.as_bytes() {
+            buf[p] = c;
+            p += 1;
+        }
+    }
+    core::str::from_utf8(&buf[..p]).unwrap_or("?F")
 }
 
 fn fmt_bat_short<'a>(buf: &'a mut [u8; 4], pct: u8) -> &'a str {
