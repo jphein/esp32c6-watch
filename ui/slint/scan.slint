@@ -1,0 +1,236 @@
+import { Theme, PageTitle, ScanRow, ScanChannel } from "theme.slint";
+
+// RS5 — standalone Radio Scan screen (passive 802.15.4 / Zigbee-Thread monitor).
+// Overlay-style: RS6 shows it via `if root.scan-open: RadioScanOverlay {}` (same
+// pattern as launcher/AOD) and forwards the properties + callbacks. Pure
+// presentation — the scan engine (RS4) + scan-model (RS2) produce the data,
+// this only renders. NOT wired into WatchShell yet (that's RS6, post-merge).
+//
+// scan-phase drives the view:
+//   0 Warn      — pre-scan consent gate (WiFi/BLE go off)
+//   1 Scanning  — live channel strip + discovered PANs
+//   2 Restoring — radios coming back after exit
+//   3 Error     — restore failed, offer reboot
+// Data (RS6 setters, gated on scan-open):
+//   scan-channels : [ScanChannel; 16]  (ch 11..26, level+peak already 0..1)
+//   scan-pans     : [ScanRow]          (pre-formatted, mesh-row style)
+export component RadioScanOverlay {
+    in property <int> scan-phase: 0;
+    in property <[ScanChannel]> scan-channels;
+    in property <[ScanRow]> scan-pans;
+    in property <int> scan-frames: 0;   // total frames heard (footer)
+    in property <int> scan-sweep: 0;    // elapsed sweep seconds (footer)
+    callback scan-confirm();  // Warn: START SCAN
+    callback scan-exit();     // Warn: CANCEL (Scanning-exit is a swipe, wired in RS6)
+    callback scan-reboot();   // Error: REBOOT
+
+    // Opaque AMOLED backdrop — fully covers the watchface + chrome.
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
+    PageTitle { title: "RADIO SCAN"; }
+
+    // ==================== Phase 0 — Warn (consent) ====================
+    if root.scan-phase == 0: Rectangle {
+        // Warning card — this is JP's directive: 802.15.4 needs the radio alone.
+        Rectangle {
+            x: (parent.width - 340px) / 2;
+            y: 120px;
+            width: 340px;
+            height: 156px;
+            border-radius: 18px;
+            border-width: 2px;
+            border-color: Theme.warn;
+            background: #1a0a0e; // one-off dark-red pair for Theme.warn
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                alignment: center;
+                Text {
+                    horizontal-alignment: center;
+                    text: "\u{26a0}  WiFi + BLE GO OFF";
+                    color: Theme.warn;
+                    font-size: 22px;
+                    font-weight: 700;
+                    letter-spacing: 1px;
+                }
+                Text {
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    text: "802.15.4 monitoring needs the 2.4 GHz radio exclusively.";
+                    color: Theme.soft;
+                    font-size: 15px;
+                }
+                Text {
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    text: "Mesh + BLE disconnect now, restore on exit.";
+                    color: Theme.dim;
+                    font-size: 14px;
+                }
+            }
+        }
+        // START SCAN
+        Rectangle {
+            x: (parent.width - 220px) / 2;
+            y: 296px;
+            width: 220px;
+            height: 48px;
+            border-radius: 24px;
+            border-width: 1px;
+            border-color: Theme.accent;
+            background: #08201a; // one-off dark-teal pair for Theme.accent
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "START SCAN";
+                color: Theme.accent;
+                font-size: 18px;
+                font-weight: 600;
+                letter-spacing: 2px;
+            }
+            TouchArea { clicked => { root.scan-confirm(); } }
+        }
+        // CANCEL
+        Rectangle {
+            x: (parent.width - 220px) / 2;
+            y: 356px;
+            width: 220px;
+            height: 40px;
+            border-radius: 20px;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "CANCEL";
+                color: Theme.dim;
+                font-size: 16px;
+                letter-spacing: 2px;
+            }
+            TouchArea { clicked => { root.scan-exit(); } }
+        }
+    }
+
+    // ==================== Phase 1 — Scanning (live) ====================
+    if root.scan-phase == 1: Rectangle {
+        // Channel energy strip: 16 bottom-anchored bars for ch 11..26.
+        HorizontalLayout {
+            x: 35px;
+            y: 100px;
+            width: 340px;
+            height: 76px;
+            spacing: 3px;
+            for ch in root.scan-channels: Rectangle {
+                background: Theme.track;
+                border-radius: 2px;
+                // activity bar (grows from the bottom), colour by intensity
+                Rectangle {
+                    x: 0;
+                    width: parent.width;
+                    height: parent.height * ch.level;
+                    y: parent.height - self.height;
+                    border-radius: 2px;
+                    background: ch.level > 0.66 ? Theme.warn
+                        : (ch.level > 0.33 ? Theme.warm : Theme.accent);
+                }
+                // peak-hold marker
+                Rectangle {
+                    x: 0;
+                    width: parent.width;
+                    height: 2px;
+                    y: parent.height - parent.height * ch.peak - 1px;
+                    background: Theme.ink;
+                }
+            }
+        }
+        // Strip scale labels.
+        Text { x: 35px;               y: 182px; text: "CH 11";    color: Theme.faint; font-size: 12px; }
+        Text { x: (parent.width - self.width) / 2; y: 182px; text: "802.15.4"; color: Theme.dim;   font-size: 12px; letter-spacing: 2px; }
+        Text { x: 375px - self.width; y: 182px; text: "26";       color: Theme.faint; font-size: 12px; }
+
+        // Discovered PANs — mesh-row pattern: PANID · ch · RSSI · N dev.
+        Flickable {
+            x: 30px;
+            y: 210px;
+            width: 350px;
+            height: 190px;
+            viewport-height: root.scan-pans.length * 37px;
+            VerticalLayout {
+                spacing: 3px;
+                for pan in root.scan-pans: Rectangle {
+                    height: 34px;
+                    border-radius: 8px;
+                    background: Theme.panel;
+                    Text {
+                        x: 12px; y: (parent.height - self.height) / 2;
+                        width: 96px; overflow: elide;
+                        text: pan.pan; color: Theme.ink; font-size: 15px; font-weight: 600;
+                    }
+                    Text {
+                        x: parent.width - self.width - 172px; y: (parent.height - self.height) / 2;
+                        text: pan.channel; color: Theme.soft; font-size: 14px;
+                    }
+                    Text {
+                        x: parent.width - self.width - 74px; y: (parent.height - self.height) / 2;
+                        text: pan.rssi; color: Theme.soft; font-size: 14px;
+                    }
+                    Text {
+                        x: parent.width - self.width - 12px; y: (parent.height - self.height) / 2;
+                        text: pan.devices; color: Theme.dim; font-size: 14px;
+                    }
+                }
+            }
+        }
+        // Empty state (no PANs yet).
+        if root.scan-pans.length == 0: VerticalLayout {
+            x: 0; y: 250px; width: 100%; height: 60px;
+            alignment: center; spacing: 8px;
+            Text { horizontal-alignment: center; text: "NO PANS HEARD"; color: Theme.faint; font-size: 17px; letter-spacing: 2px; }
+            Text { horizontal-alignment: center; text: "sweeping 11-26..."; color: Theme.dim; font-size: 14px; }
+        }
+
+        // Footer: mesh paused + live counters, then the honesty caption.
+        Text {
+            x: (parent.width - self.width) / 2; y: 410px;
+            text: "Mesh paused \u{00b7} \{root.scan-frames} fr \u{00b7} \{root.scan-sweep}s";
+            color: Theme.soft; font-size: 14px; letter-spacing: 1px;
+        }
+        Text {
+            x: (parent.width - self.width) / 2; y: 432px;
+            text: "passive \u{00b7} headers only \u{00b7} payloads encrypted";
+            color: Theme.faint; font-size: 13px;
+        }
+    }
+
+    // ==================== Phase 2 — Restoring ====================
+    if root.scan-phase == 2: VerticalLayout {
+        x: 0; y: 0; width: 100%; height: 100%;
+        alignment: center; spacing: 14px;
+        Text { horizontal-alignment: center; text: "RESTORING RADIOS"; color: Theme.soft; font-size: 24px; font-weight: 600; letter-spacing: 3px; }
+        Text { horizontal-alignment: center; text: "reconnecting mesh + BLE..."; color: Theme.dim; font-size: 16px; }
+    }
+
+    // ==================== Phase 3 — Error ====================
+    if root.scan-phase == 3: Rectangle {
+        VerticalLayout {
+            x: 0; y: 156px; width: 100%; height: 140px;
+            alignment: start; spacing: 14px;
+            Text { horizontal-alignment: center; text: "SCAN ERROR"; color: Theme.warn; font-size: 26px; font-weight: 700; letter-spacing: 3px; }
+            Text { horizontal-alignment: center; wrap: word-wrap; text: "The radios could not be restored."; color: Theme.soft; font-size: 16px; }
+        }
+        Rectangle {
+            x: (parent.width - 200px) / 2;
+            y: 336px;
+            width: 200px;
+            height: 48px;
+            border-radius: 24px;
+            border-width: 1px;
+            border-color: Theme.warn;
+            background: #200a10;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "REBOOT"; color: Theme.warn; font-size: 18px; letter-spacing: 3px;
+            }
+            TouchArea { clicked => { root.scan-reboot(); } }
+        }
+    }
+}

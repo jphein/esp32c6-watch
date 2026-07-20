@@ -8,6 +8,24 @@ export struct PeerRow {
     age: string,
 }
 
+// One discovered 802.15.4 PAN row for the Radio Scan screen (RS5). Mirrors
+// PeerRow: every field pre-formatted by Rust (RS6 set_scan_pans) so the Slint
+// side is pure layout.
+export struct ScanRow {
+    pan: string,       // "0x1234"
+    channel: string,   // "ch 15"
+    rssi: string,      // "-55 dBm" (last · ewma-smoothed feel)
+    devices: string,   // "3 dev"
+}
+
+// One channel cell for the Radio Scan energy strip (16 channels, 11..26).
+// `level`/`peak` are 0..1 bar fractions; Rust (RS6) normalises the raw frame
+// count + peak RSSI from scan-model's ChannelStat into these.
+export struct ScanChannel {
+    level: float,      // activity bar height, 0..1
+    peak: float,       // peak-hold marker height, 0..1
+}
+
 export global Theme {
     // --- safe area (410x502 AMOLED with physically ROUNDED corners) ---
     // Centered content is corner-safe automatically; only elements that sit in
