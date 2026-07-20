@@ -1,6 +1,7 @@
 import { Theme, RadioDot, PageTitle } from "theme.slint";
 import { ClockPage } from "clock.slint";
 import { SensorsPage } from "sensors.slint";
+import { SystemPage } from "system.slint";
 
 export struct PeerRow {
     name: string,
@@ -29,6 +30,13 @@ export component WatchShell inherits Window {
     in property <string> accel-text: "--";
     in property <string> gyro-text: "--";
     in property <string> imu-temp-text: "--";
+
+    // system page (live at 2s while showing); chip/display are constants and
+    // keep their SystemPage component defaults. fw-text is set once from Cargo.
+    in property <string> fw-text: "--";
+    in property <string> heap-text: "--";
+    in property <string> uptime-text: "--";
+    in property <string> battery-text: "--";
 
     // --- battery / radios (chrome) ---
     in property <int> battery-percent: -1;
@@ -96,9 +104,19 @@ export component WatchShell inherits Window {
             imu-temp-text: root.imu-temp-text;
         }
 
-        // Placeholder pages 2-4, replaced by later tasks.
-        for title[idx] in ["SYSTEM", "POWER", "MESH"]: Rectangle {
-            x: (idx + 2 - root.current-page) * pages.width;
+        SystemPage {
+            x: (2 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            fw-text: root.fw-text;
+            heap-text: root.heap-text;
+            uptime-text: root.uptime-text;
+            battery-text: root.battery-text;
+        }
+
+        // Placeholder pages 3-4, replaced by later tasks.
+        for title[idx] in ["POWER", "MESH"]: Rectangle {
+            x: (idx + 3 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
             animate x { duration: 260ms; easing: ease-out; }
             PageTitle { title: title; }

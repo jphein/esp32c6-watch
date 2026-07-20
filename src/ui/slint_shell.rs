@@ -119,6 +119,11 @@ impl ShellUi {
         let mesh_model: Rc<VecModel<PeerRow>> = Rc::new(VecModel::default());
         ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
 
+        // Firmware version is a compile-time constant; set it once so the
+        // system page shows the real Cargo version (single source of truth)
+        // instead of a hardcoded string that drifts.
+        ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
+
         ui.show().expect("show failed");
 
         Self {
@@ -281,6 +286,20 @@ impl ShellUi {
             gyro.2 as f32 / 10.0
         ));
         self.ui.set_imu_temp_text(slint::format!("{:.1} C", temp_dc as f32 / 10.0));
+    }
+
+    pub fn set_system(&self, heap_free: usize, batt_pct: u8, batt_mv: u16) {
+        // System page refreshes at 2s; skip the SharedString allocs when the
+        // page isn't showing rather than relying on caller discipline.
+        if self.ui.get_current_page() != 2 {
+            return;
+        }
+        self.ui.set_heap_text(slint::format!("{}k free", heap_free / 1024));
+        let s = embassy_time::Instant::now().as_secs();
+        self.ui.set_uptime_text(slint::format!(
+            "{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60
+        ));
+        self.ui.set_battery_text(slint::format!("{}% \u{00b7} {} mV", batt_pct, batt_mv));
     }
 
     pub fn set_weather(&self, temp_f: Option<i16>, code: u8) {
