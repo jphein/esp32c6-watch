@@ -1416,12 +1416,14 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
-                    // Apps paint through the ~201KB RGB332 framebuffer, which
-                    // cannot fit in the C6's SRAM alongside the resident Slint
-                    // scene. Close the launcher and DROP the scene first (frees
-                    // ~30-40KB), THEN allocate the fb — that's what makes the
-                    // launch succeed. On the (now near-impossible) failure path,
-                    // recreate the scene and stay put with a toast.
+                    // Apps paint through the framebuffer, now HALF-RES (~51KB, see
+                    // framebuffer.rs). It fits alongside the resident Slint scene
+                    // at the 240KB heap with ~80KB to spare, so a launch no longer
+                    // *needs* the scene gone. We still close the launcher and drop
+                    // the scene here (kept as heap headroom; a post-ship task, #37,
+                    // may remove it as unnecessary), then allocate the fb fallibly.
+                    // The failure path (now practically impossible) recreates the
+                    // scene and stays put with a toast.
                     shell.set_launcher_open(false);
                     if toast_active {
                         shell.set_toast("");

@@ -4,6 +4,51 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-07-20
+
+Migration tail + hardening on top of the Slint shell: always-on display, the
+Mesh Familiar on the clock, LP-core power reporting, and — the headline fix —
+games and Settings that launch in **any** radio state, after the framebuffer
+was reworked to half-resolution.
+
+### Added
+- **AOD (always-on display)** rendered by the Slint shell — at the dim idle
+  state the clock repaints only on the minute flip (a black `aod` overlay);
+  the full shell returns on touch.
+- **Mesh Familiar** status cluster on the clock page (known / holding / mood /
+  hunger / growth-stage), fed from `FamState`, plus **gyro parallax** that
+  nudges the clock face from the accelerometer.
+- **LP-core status row** on the Power page.
+- **Boot & remote page control** — the watch boots to the persisted default
+  page (CFG `S`), and the live remote page-switch is honored again.
+- **Finger-friendly radio toggles** — larger WIFI / BLE / MESH tap targets, and
+  **MESH is now a real on/off toggle**.
+
+### Changed
+- **Half-resolution framebuffer** — the game/Settings framebuffer is now
+  205×251 RGB332 (~51 KB, nearest-neighbor upscaled 2× on flush) instead of the
+  full-res ~201 KB. Apps still draw at full 410×502 (unchanged); only the
+  backing store shrank. This is what lets games launch with WiFi and/or mesh on
+  — the full-res buffer could not share the C6's single SRAM region with the
+  resident Slint scene + radio stacks.
+- **Mesh radio decoupled from WiFi credentials** — ESP-NOW needs only the STA
+  radio (PHY) up, not an AP association, so the radio is started when MESH is
+  toggled on. Mesh now works with no WiFi credentials.
+- The Slint scene is dropped while a game runs and recreated (with all live
+  state re-pushed) on return.
+
+### Fixed
+- **Games / Settings would not launch** ("RAM busy") — once the Slint scene was
+  resident the on-demand full-res framebuffer had no contiguous room. The
+  half-res buffer resolves it in every radio state. (Bumping the heap region was
+  a dead end: the framebuffer's SRAM competes with the scene-build stack, and
+  264–288 KB heaps boot-looped building the Slint scene.)
+- **MESH toggle did nothing** — mesh was gated behind the credential-locked WiFi
+  path and never ran without creds.
+- One-shot shell properties (LP-core row, radios, Familiar, brightness, …) no
+  longer blank out after returning from a game — the recreated scene re-pushes
+  them.
+
 ## [0.2.0] — 2026-07-20
 
 The **Slint UI migration**: the watchface shell is rebuilt on the
