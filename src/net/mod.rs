@@ -9,4 +9,8 @@ pub mod mqtt_ha;
 pub mod names;
 pub mod ota_http;
 pub mod smol_mesh;
+// Voice-to-text upload (STT bridge). Unwired until MC5 spawns it from main.rs;
+// silence dead-code until then rather than churn per-item attributes.
+#[allow(dead_code)]
+pub mod voice_stt;
 pub mod weather;
