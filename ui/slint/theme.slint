@@ -40,21 +40,26 @@ export component RadioDot {
     in property <string> label;
     in property <bool> active;
     callback tapped();
-    // Finger-friendly hit target (66x44). The visual dot+label stay in the top
-    // 30px band so the row still lines up with the battery pill; the TouchArea
-    // fills the full 44px height, so the whole chip is tappable.
-    width: 66px;
-    height: 44px;
+    // BIG finger target (78x64): the whole component is the TouchArea. The
+    // visual dot+label sit ~30px down so, placed at shell y=8, they align at
+    // ~y38-52 with the battery-pill row; the hit area then spans the top strip
+    // (y8..72) — panel-top edge down to the title band — where a finger lands
+    // reaching for a top-row toggle. Width fills the strip left of the battery
+    // pill (see shell.slint placement: x 22/102/182). +72% area over the old
+    // 66x44 (JP asked twice for bigger), extending UP to the corner-safe top
+    // edge and keeping the same bottom (y72≈old y74) so no new title overlap.
+    width: 78px;
+    height: 64px;
 
     Rectangle {
-        x: 0;
-        y: (30px - self.height) / 2;
-        width: 12px; height: 12px; border-radius: 6px;
+        x: 2px;
+        y: 30px;
+        width: 14px; height: 14px; border-radius: 7px;
         background: root.active ? Theme.accent : Theme.off-dot;
     }
     Text {
-        x: 18px;
-        y: (30px - self.height) / 2;
+        x: 22px;
+        y: 28px;
         text: root.label;
         color: root.active ? Theme.soft : Theme.faint;
         font-size: 13px;

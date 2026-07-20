@@ -134,6 +134,7 @@ export component WatchShell inherits Window {
             accel-text: root.accel-text;
             gyro-text: root.gyro-text;
             imu-temp-text: root.imu-temp-text;
+            steps: root.steps;
         }
 
         SystemPage {
@@ -175,14 +176,17 @@ export component WatchShell inherits Window {
     }
 
     // ==================== persistent chrome ====================
-    // Top status row dropped to Theme.safe-top so the corner radio dots and the
-    // battery pill clear the panel's rounded corners (were y12-14, clipped).
-    RadioDot { x: 22px;  y: Theme.safe-top; label: "WIFI"; active: root.wifi-on;
+    // Top status row. RadioDots are BIG 78x64 tap targets placed at y8 (their
+    // visible dot+label sit ~30px in, aligning at ~y38-52 with the battery
+    // pill); x 22/102/182 fills the strip left of the pill with 2px gaps. The
+    // hit areas clear the corner arcs (top-left on-panel at x22,y8) and the pill
+    // (MESH ends x260, pill starts ~268).
+    RadioDot { x: 22px;  y: 8px; label: "WIFI"; active: root.wifi-on;
                tapped => { root.wifi-tap(); } }
-    RadioDot { x: 94px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
+    RadioDot { x: 102px; y: 8px; label: "BLE";  active: root.ble-on;
                tapped => { root.ble-tap(); } }
     RadioDot {
-        x: 166px; y: Theme.safe-top;
+        x: 182px; y: 8px;
         label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
         active: root.mesh-peers > 0;
         tapped => { root.mesh-tap(); }
