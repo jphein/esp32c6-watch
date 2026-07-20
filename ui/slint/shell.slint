@@ -1,5 +1,6 @@
 import { Theme, RadioDot, PageTitle } from "theme.slint";
 import { ClockPage } from "clock.slint";
+import { SensorsPage } from "sensors.slint";
 
 export struct PeerRow {
     name: string,
@@ -23,6 +24,11 @@ export component WatchShell inherits Window {
     in property <bool> gyro-on: false;
     in property <length> par-x: 0px;
     in property <length> par-y: 0px;
+
+    // sensors page (live at 100ms while showing)
+    in property <string> accel-text: "--";
+    in property <string> gyro-text: "--";
+    in property <string> imu-temp-text: "--";
 
     // --- battery / radios (chrome) ---
     in property <int> battery-percent: -1;
@@ -81,9 +87,18 @@ export component WatchShell inherits Window {
             apps-tap => { root.launcher-open = true; }
         }
 
-        // Placeholder pages 1-4, replaced by later tasks.
-        for title[idx] in ["SENSORS", "SYSTEM", "POWER", "MESH"]: Rectangle {
-            x: (idx + 1 - root.current-page) * pages.width;
+        SensorsPage {
+            x: (1 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            accel-text: root.accel-text;
+            gyro-text: root.gyro-text;
+            imu-temp-text: root.imu-temp-text;
+        }
+
+        // Placeholder pages 2-4, replaced by later tasks.
+        for title[idx] in ["SYSTEM", "POWER", "MESH"]: Rectangle {
+            x: (idx + 2 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
             animate x { duration: 260ms; easing: ease-out; }
             PageTitle { title: title; }

@@ -269,6 +269,20 @@ impl ShellUi {
         self.ui.set_gyro_on(on);
     }
 
+    pub fn set_sensors(&self, accel: (f32, f32, f32), gyro: (i16, i16, i16), temp_dc: i16) {
+        // Sensors update at 100ms; skip the 3 SharedString allocs when the page
+        // isn't showing rather than relying on caller discipline.
+        if self.ui.get_current_page() != 1 { return; }
+        self.ui.set_accel_text(slint::format!(
+            "{:+.2} {:+.2} {:+.2} g", accel.0, accel.1, accel.2
+        ));
+        self.ui.set_gyro_text(slint::format!(
+            "{:+.1} {:+.1} {:+.1} dps", gyro.0 as f32 / 10.0, gyro.1 as f32 / 10.0,
+            gyro.2 as f32 / 10.0
+        ));
+        self.ui.set_imu_temp_text(slint::format!("{:.1} C", temp_dc as f32 / 10.0));
+    }
+
     pub fn set_weather(&self, temp_f: Option<i16>, code: u8) {
         match temp_f {
             Some(t) => self
