@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Mirror rust-toolchain.toml: stable + rust-src + the riscv32imac bare-metal
       # target (its precompiled core/alloc are what the build uses; build-std in
@@ -63,30 +63,42 @@ jobs:
       - name: Stage ELF
         run: cp target/riscv32imac-unknown-none-elf/release/esp32c6-watch esp32c6-watch.elf
 
-      # Flashable image is best-effort: espflash pulls libudev; if the install or
-      # save-image trips in CI, the ELF is still published and the job succeeds.
-      - name: Build flashable .bin (best-effort)
+      # Flashable images are best-effort: espflash pulls libudev; if the install
+      # or save-image trips in CI, the ELF is still published and the job
+      # succeeds. Two images:
+      #   * esp32c6-watch-app.bin  — application-partition image only; flash at
+      #     the ota_0 offset (0x10000) or via `espflash flash` / OTA.
+      #   * esp32c6-watch-full.bin — merged flash-at-0x0 image (bootloader +
+      #     partition table + app), foolproof for `esptool write_flash 0x0`.
+      #     Uses the project's A/B OTA partitions.csv and 16MB flash so the
+      #     ota_1/config slots fit and the on-device partition reader matches.
+      - name: Build flashable .bin images (best-effort)
         id: bin
         continue-on-error: true
         run: |
           sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev
           cargo install espflash --version 4.5.0 --locked
-          espflash save-image --chip esp32c6 esp32c6-watch.elf esp32c6-watch.bin
+          espflash save-image --chip esp32c6 esp32c6-watch.elf esp32c6-watch-app.bin
+          espflash save-image --merge --chip esp32c6 \
+            --partition-table partitions.csv --flash-size 16mb \
+            esp32c6-watch.elf esp32c6-watch-full.bin
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: esp32c6-watch-firmware
           path: |
             esp32c6-watch.elf
-            esp32c6-watch.bin
+            esp32c6-watch-app.bin
+            esp32c6-watch-full.bin
           if-no-files-found: warn
 
       - name: Attach to the tag's Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             esp32c6-watch.elf
-            esp32c6-watch.bin
+            esp32c6-watch-app.bin
+            esp32c6-watch-full.bin
           fail_on_unmatched_files: false
