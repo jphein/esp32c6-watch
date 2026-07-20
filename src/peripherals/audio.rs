@@ -125,6 +125,41 @@ impl<I: I2c> Es8311<I> {
         Ok(())
     }
 
+    /// Enable the ADC (mic) capture path for I2S RX. Reverses `shutdown()`'s
+    /// ADC-side power-down and configures the analog mic input + level.
+    ///
+    /// `pga_gain` is the reg-0x14 analog-PGA gain code (bits[3:0], 0..=0x0F ≈
+    /// 0–30 dB per the ES8311 datasheet; higher = more sensitive). Register
+    /// *semantics* are datasheet-confirmed; the exact gain/volume codes are the
+    /// on-glass tuning surface — MC6 picks the mic L/R slot + final gain so a
+    /// normal room sits mid-scale without railing.
+    pub fn enable_adc(&mut self, pga_gain: u8) -> Result<(), I::Error> {
+        // Re-power the analog bias + PGA/modulator that shutdown() turns off
+        // (same writes as unmute()'s analog re-enable).
+        self.write_reg(0x0D, 0x01)?; // Power up analog bias
+        self.write_reg(0x0E, 0x02)?; // Enable analog PGA + ADC modulator (PDN_PGA=0)
+        // Analog mic input: bit6=0 selects the analog mic (not DMIC);
+        // bits[3:0] = PGA gain. (0x10 keeps the datasheet default high bits.)
+        self.write_reg(0x14, 0x10 | (pga_gain & 0x0F))?;
+        // ADC serial port = 16-bit I2S and EQ-bypass/DC-cancel: init() already
+        // sets these, re-asserted here so enable_adc() is self-contained.
+        self.write_reg(0x0A, 0x0C)?; // ADC SDP 16-bit
+        self.write_reg(0x15, 0x00)?; // ADC ramp default; ADC un-muted
+        self.write_reg(0x1C, 0x6A)?; // ADC EQ bypass + DC-offset cancel
+        self.write_reg(0x17, 0xBF)?; // ADC digital volume ~0 dB (confirm code in MC6)
+        Ok(())
+    }
+
+    /// Power the ADC (mic) path back down. Mirrors `shutdown()`'s analog-off
+    /// writes so the codec draws ~0 mA when the sound-level meter isn't open.
+    /// (v1 never captures + plays simultaneously, so this shares the analog
+    /// power regs with the DAC path; revisit if full-duplex audio is added.)
+    pub fn disable_adc(&mut self) -> Result<(), I::Error> {
+        self.write_reg(0x0E, 0xFF)?; // PDN_PGA | PDN_MOD — analog capture off
+        self.write_reg(0x0D, 0xFC)?; // analog bias off
+        Ok(())
+    }
+
     pub fn is_initialized(&self) -> bool { self.initialized }
 }
 
