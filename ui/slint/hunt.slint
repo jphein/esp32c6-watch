@@ -36,21 +36,27 @@ export component HuntPage {
         letter-spacing: 1px;
     }
 
-    // Hero: the big warmer/colder word + trend arrow.
+    // Hero: the big warmer/colder word + trend arrow, centred as a group.
+    // (A HorizontalLayout fills its parent's width and left-packs, so the old
+    // `x: (parent.width - self.width)/2` left everything at x0 and clipped the
+    // wide words off the left edge — luna render-check. Fill + alignment:center
+    // is how you centre a layout's content.)
     HorizontalLayout {
-        x: (parent.width - self.width) / 2;
+        x: 0;
         y: 168px;
+        width: 100%;
+        alignment: center;
         spacing: 12px;
         Text {
             text: root.hero-text;
             color: root.hero-color;
-            font-size: 56px;
+            font-size: 50px;
             font-weight: 700;
         }
         Text {
             text: root.arrow;
             color: root.hero-color;
-            font-size: 56px;
+            font-size: 50px;
             font-weight: 700;
         }
     }
