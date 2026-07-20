@@ -1,0 +1,17 @@
+# WLED WiZmote linked-remote frame encoder (ported from smol
+# rust/clock/src/net/wled.rs). Standalone STANDALONE crate — like scan-model /
+# mic-dsp: the firmware package's esp-hal/slint deps don't build for the host,
+# so keeping the pure encoder here makes it `cargo test`-able on the host and
+# no_std for the on-target build. The firmware pulls it in later via
+# `wled-wizmote = { path = "crates/wled-wizmote" }` (main.rs wiring, deferred).
+[package]
+name = "wled-wizmote"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[lib]
+name = "wled_wizmote"
+path = "src/lib.rs"
+
+[dependencies]

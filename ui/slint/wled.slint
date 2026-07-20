@@ -1,0 +1,95 @@
+import { Theme, PageTitle } from "theme.slint";
+
+// WLED WiZmote remote page (smol #25 port, UI half). Standalone overlay-style
+// component, like SoundLevel / VoicePage. Big finger tiles; tapping one fires
+// `emit(action-id)` — the main.rs wiring maps the id to a WledButton, calls
+// wled_wizmote::encode_wizmote(btn, seq, bat), and broadcasts it over ESP-NOW.
+// NOT wired yet (queued behind light-sleep + voice wiring).
+//
+// action-id → WledButton (the wiring contract):
+//   0 On · 1 Off · 2 Preset1 · 3 Preset2 · 4 Preset3 · 5 Preset4
+//   6 BrightUp (DIM+) · 7 BrightDown (DIM-) · 8 Night
+
+// A big finger-tile button.
+component WledTile {
+    in property <string> label;
+    in property <color> accent;
+    in property <int> act;
+    callback fire(int);
+    Rectangle {
+        border-radius: 14px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.line;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.label;
+            color: root.accent;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+        TouchArea { clicked => { root.fire(root.act); } }
+    }
+}
+
+export component WledRemote {
+    callback emit(int);
+    in property <string> status;   // main.rs sets e.g. "-> On" after a send; "" = idle
+
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
+    PageTitle { title: "WLED"; }
+
+    VerticalLayout {
+        x: 22px;
+        y: 96px;
+        width: parent.width - 44px;
+        spacing: 10px;
+
+        // On / Off
+        HorizontalLayout {
+            height: 82px;
+            spacing: 12px;
+            WledTile { label: "ON";  accent: Theme.accent; act: 0; fire(a) => { root.emit(a); } }
+            WledTile { label: "OFF"; accent: Theme.soft;   act: 1; fire(a) => { root.emit(a); } }
+        }
+
+        // Presets 1-4
+        Text {
+            height: 26px;
+            text: "PRESETS";
+            color: Theme.dim; font-size: 13px; letter-spacing: 3px;
+        }
+        HorizontalLayout {
+            height: 74px;
+            spacing: 8px;
+            WledTile { label: "1"; accent: Theme.accent2; act: 2; fire(a) => { root.emit(a); } }
+            WledTile { label: "2"; accent: Theme.accent2; act: 3; fire(a) => { root.emit(a); } }
+            WledTile { label: "3"; accent: Theme.accent2; act: 4; fire(a) => { root.emit(a); } }
+            WledTile { label: "4"; accent: Theme.accent2; act: 5; fire(a) => { root.emit(a); } }
+        }
+
+        // Dim - / Dim +
+        HorizontalLayout {
+            height: 74px;
+            spacing: 12px;
+            WledTile { label: "DIM \u{2212}"; accent: Theme.warm; act: 7; fire(a) => { root.emit(a); } }
+            WledTile { label: "DIM +";        accent: Theme.warm; act: 6; fire(a) => { root.emit(a); } }
+        }
+
+        // Night (full width)
+        WledTile { label: "NIGHT"; accent: Theme.soft; act: 8; height: 58px; fire(a) => { root.emit(a); } }
+    }
+
+    // Feedback / hint line.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 466px;
+        text: root.status == "" ? "WiZmote \u{00b7} linked remote" : root.status;
+        color: root.status == "" ? Theme.faint : Theme.accent;
+        font-size: 14px;
+        letter-spacing: 1px;
+    }
+}
