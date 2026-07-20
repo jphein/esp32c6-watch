@@ -8,6 +8,10 @@ rust-version = "1.88"
 name = "esp32c6-watch"
 path = "./src/main.rs"
 
+[[bin]]
+name = "slint-demo"
+path = "./src/bin/slint_demo.rs"
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [
     "esp32c6",
@@ -75,6 +79,18 @@ embedded-graphics-core = "0.4"
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3.0"
 heapless = "0.9"
+
+# Slint UI toolkit (no_std MCU backend, software renderer) — used by the
+# `slint-demo` binary only.
+slint = { version = "1.17.1", default-features = false, features = [
+    "compat-1-2",
+    "unsafe-single-threaded",
+    "libm",
+    "renderer-software",
+] }
+
+[build-dependencies]
+slint-build = "1.17.1"
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
