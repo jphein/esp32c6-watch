@@ -1,63 +1,174 @@
 import { Theme } from "theme.slint";
 
-// App launcher overlay: full-screen scrim + a vertically scrolling list.
-// Tap an item to launch it; the Rust side closes the overlay on a Right swipe.
+// PROTOTYPE (direction check) — categorised launcher with drawn vector icons +
+// big finger tiles. Icons are lightweight Slint shapes (no bitmaps) so they cost
+// no RAM/flash and render crisp on the RGB565 sw renderer.
+//
+// launch-app(idx) keeps the existing contract: idx indexes LAUNCHER_APPS in
+// slint_shell.rs. Each tile carries its own idx, so category grouping is free.
+
+// A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS order.
+component AppIcon {
+    in property <int> id;
+    in property <color> tint;
+    width: 46px;
+    height: 46px;
+
+    // 0 Snake — three body segments turning up, plus a head with an eye.
+    if root.id == 0: Rectangle {
+        Rectangle { x: 4px;  y: 26px; width: 12px; height: 12px; border-radius: 3px; background: root.tint; }
+        Rectangle { x: 17px; y: 26px; width: 12px; height: 12px; border-radius: 3px; background: root.tint; }
+        Rectangle { x: 30px; y: 26px; width: 12px; height: 12px; border-radius: 3px; background: root.tint; }
+        Rectangle { x: 30px; y: 13px; width: 12px; height: 12px; border-radius: 3px; background: root.tint; }
+        Rectangle { x: 30px; y: 2px;  width: 13px; height: 13px; border-radius: 4px; background: root.tint;
+            Rectangle { x: 8px; y: 3px; width: 3px; height: 3px; border-radius: 1.5px; background: #05100a; } }
+    }
+    // 2 — 2048: a 2x2 tile grid.
+    if root.id == 2: Rectangle {
+        Rectangle { x: 4px;  y: 4px;  width: 17px; height: 17px; border-radius: 4px; background: root.tint; }
+        Rectangle { x: 25px; y: 4px;  width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.55); }
+        Rectangle { x: 4px;  y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.55); }
+        Rectangle { x: 25px; y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint; }
+    }
+    // 3 — Tetris: an L-tetromino (4 blocks).
+    if root.id == 3: Rectangle {
+        Rectangle { x: 8px;  y: 3px;  width: 13px; height: 13px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 8px;  y: 16px; width: 13px; height: 13px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 8px;  y: 29px; width: 13px; height: 13px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 21px; y: 29px; width: 13px; height: 13px; border-radius: 2px; background: root.tint; }
+    }
+    // 6 — Settings: three slider rows with knobs at different positions.
+    if root.id == 6: Rectangle {
+        Rectangle { x: 4px;  y: 8px;  width: 38px; height: 3px; border-radius: 1.5px; background: root.tint.with-alpha(0.4);
+            Rectangle { x: 24px; y: -4px; width: 10px; height: 10px; border-radius: 5px; background: root.tint; } }
+        Rectangle { x: 4px;  y: 21px; width: 38px; height: 3px; border-radius: 1.5px; background: root.tint.with-alpha(0.4);
+            Rectangle { x: 6px;  y: -4px; width: 10px; height: 10px; border-radius: 5px; background: root.tint; } }
+        Rectangle { x: 4px;  y: 34px; width: 38px; height: 3px; border-radius: 1.5px; background: root.tint.with-alpha(0.4);
+            Rectangle { x: 18px; y: -4px; width: 10px; height: 10px; border-radius: 5px; background: root.tint; } }
+    }
+    // 1 — World Snake: a globe (circle + equator + meridian capsule).
+    if root.id == 1: Rectangle {
+        Rectangle { x: 3px; y: 3px; width: 40px; height: 40px; border-radius: 20px; border-width: 3px; border-color: root.tint; }
+        Rectangle { x: 5px; y: 21px; width: 36px; height: 3px; background: root.tint; }
+        Rectangle { x: 15px; y: 3px; width: 16px; height: 40px; border-radius: 8px; border-width: 2px; border-color: root.tint; }
+    }
+    // 4 — Flappy Bird: round body + wing + eye + a little beak.
+    if root.id == 4: Rectangle {
+        Rectangle { x: 7px; y: 10px; width: 28px; height: 28px; border-radius: 14px; background: root.tint;
+            Rectangle { x: 4px; y: 12px; width: 12px; height: 9px; border-radius: 4px; background: root.tint.with-alpha(0.45); } // wing
+            Rectangle { x: 19px; y: 7px; width: 4px; height: 4px; border-radius: 2px; background: #05100a; } // eye
+        }
+        Rectangle { x: 34px; y: 21px; width: 7px; height: 5px; border-radius: 1px; background: Theme.warm; } // beak
+    }
+    // 5 — Maze (Tilt): outer wall + inner path segments + the ball.
+    if root.id == 5: Rectangle {
+        Rectangle { x: 3px; y: 3px; width: 40px; height: 40px; border-radius: 6px; border-width: 3px; border-color: root.tint; }
+        Rectangle { x: 3px;  y: 17px; width: 22px; height: 3px; background: root.tint; }
+        Rectangle { x: 22px; y: 17px; width: 3px;  height: 15px; background: root.tint; }
+        Rectangle { x: 22px; y: 29px; width: 18px; height: 3px; background: root.tint; }
+        Rectangle { x: 32px; y: 8px;  width: 6px;  height: 6px; border-radius: 3px; background: root.tint; } // ball
+    }
+    // 7 — Voice: a mic (head capsule + stand + base). Drawn, ready for its tile
+    // once the voice feature lands in LAUNCHER_APPS (no live tile yet).
+    if root.id == 7: Rectangle {
+        Rectangle { x: 15px; y: 4px; width: 16px; height: 26px; border-radius: 8px; background: root.tint; }
+        Rectangle { x: 21px; y: 31px; width: 4px; height: 8px; background: root.tint; }
+        Rectangle { x: 12px; y: 40px; width: 22px; height: 3px; border-radius: 1.5px; background: root.tint; }
+    }
+    // 8 — Radio scan: a spectrum of bars (matches the RS5 energy strip). Drawn,
+    // ready for its tile once radio-scan lands (no live tile yet).
+    if root.id == 8: Rectangle {
+        Rectangle { x: 4px;  y: 26px; width: 6px; height: 14px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 13px; y: 16px; width: 6px; height: 24px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 22px; y: 8px;  width: 6px; height: 32px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 31px; y: 19px; width: 6px; height: 21px; border-radius: 2px; background: root.tint; }
+        Rectangle { x: 40px; y: 30px; width: 6px; height: 10px; border-radius: 2px; background: root.tint; }
+    }
+}
+
+// One big app tile: icon over label. Carries its launch idx.
+component AppTile {
+    in property <string> name;
+    in property <color> accent;
+    in property <int> icon-id;
+    in property <int> idx;
+    callback launch(int);
+    height: 116px;
+    Rectangle {
+        border-radius: 16px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.line;
+        AppIcon {
+            x: (parent.width - self.width) / 2;
+            y: 18px;
+            id: root.icon-id;
+            tint: root.accent;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 78px;
+            text: root.name;
+            color: Theme.soft;
+            font-size: 17px;
+            font-weight: 600;
+        }
+        TouchArea { clicked => { root.launch(root.idx); } }
+    }
+}
+
+component SectionHeader {
+    in property <string> title;
+    height: 30px;
+    Text {
+        x: 0; y: 6px;
+        text: root.title;
+        color: Theme.dim;
+        font-size: 14px;
+        letter-spacing: 3px;
+    }
+}
+
 export component LauncherOverlay {
     callback launch-app(int);
 
-    Rectangle {
-        width: 100%; height: 100%;
-        // Deliberate translucent one-off scrim (near-black at 95% alpha) so the
-        // watchface stays faintly visible behind the launcher.
-        background: #05080aF2;
-    }
+    // Scrim (watchface faintly behind).
+    Rectangle { width: 100%; height: 100%; background: #05080aF2; }
 
     Text {
-        x: (parent.width - self.width) / 2;
-        y: 26px;                                       // clear of the top edge/arc
-        text: "APPS";
-        color: Theme.ink; font-size: 24px; font-weight: 600; letter-spacing: 4px;
+        x: (parent.width - self.width) / 2; y: 22px;
+        text: "APPS"; color: Theme.ink; font-size: 22px; font-weight: 600; letter-spacing: 4px;
     }
 
     Flickable {
-        x: 24px; y: 60px;                              // side inset clears corner arc
-        width: parent.width - 48px;
-        height: parent.height - 84px;                 // 502 - 84 = 418px visible
-        viewport-height: 7 * 65px + 6 * 6px;          // exact content height = 491px (455 + 36)
+        x: 22px; y: 58px;
+        width: parent.width - 44px;
+        height: parent.height - 74px;
+        // Content = GAMES header + 3 tile rows + SYSTEM header + 1 tile row + gaps.
+        viewport-height: 584px;
         VerticalLayout {
-            spacing: 6px;
-            // Item order MUST match LAUNCHER_APPS in src/ui/slint_shell.rs
-            // (Snake, World Snake, 2048, Tetris, Flappy Bird, Maze (Tilt), Settings).
-            // Per-item accents are deliberate one-offs mirroring the old eg
-            // launcher's identity colors (src/ui/launcher.rs MENU_ITEMS),
-            // translated from Rgb565 (5/6/5) to 8-bit hex. The accent tracks
-            // each item's text_color where that carried the hue (Snake green,
-            // World Snake teal-green, 2048 yellow, Tetris cyan, Flappy white);
-            // Maze and Settings had white text, so their accent takes the
-            // bg_color hue (Maze blue-ish, Settings pale green), lightened.
-            for item[idx] in [
-                { name: "Snake",       accent: #00e000 },  // GREEN  #00ff00 -> softened
-                { name: "World Snake", accent: #00ff80 },  // teal-green (bg teal + green text)
-                { name: "2048",        accent: #f0d000 },  // YELLOW #ffff00 -> gold
-                { name: "Tetris",      accent: #00d0f0 },  // CYAN   #00ffff
-                { name: "Flappy Bird", accent: #ffffff },  // WHITE
-                { name: "Maze (Tilt)", accent: #8090ff },  // bg blue #10107b -> lightened
-                { name: "Settings",   accent: #c0ffc0 },   // bg pale-green #313031 -> lightened
-            ]: Rectangle {
-                height: 65px;
-                border-radius: 12px;
-                background: Theme.panel;
-                Rectangle {
-                    x: 0; y: 8px; width: 4px; height: parent.height - 16px;
-                    background: item.accent;
-                }
-                Text {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    text: item.name; color: item.accent;
-                    font-size: 20px; font-weight: 600;
-                }
-                TouchArea { clicked => { root.launch-app(idx); } }
+            spacing: 12px;
+            SectionHeader { title: "GAMES"; }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Snake";       accent: #35e0b0; icon-id: 0; idx: 0; launch(i) => { root.launch-app(i); } }
+                AppTile { name: "World Snake"; accent: #00ff80; icon-id: 1; idx: 1; launch(i) => { root.launch-app(i); } }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "2048";        accent: #f0d000; icon-id: 2; idx: 2; launch(i) => { root.launch-app(i); } }
+                AppTile { name: "Tetris";      accent: #00d0f0; icon-id: 3; idx: 3; launch(i) => { root.launch-app(i); } }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Flappy Bird"; accent: #ffffff; icon-id: 4; idx: 4; launch(i) => { root.launch-app(i); } }
+                AppTile { name: "Maze (Tilt)"; accent: #8090ff; icon-id: 5; idx: 5; launch(i) => { root.launch-app(i); } }
+            }
+            SectionHeader { title: "SYSTEM"; }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Settings";    accent: #c0ffc0; icon-id: 6; idx: 6; launch(i) => { root.launch-app(i); } }
+                Rectangle { }  // spacer keeps the lone tile half-width
             }
         }
     }
