@@ -1,157 +1,199 @@
-//! BLE advertising control via raw HCI commands.
+//! BLE GATT server via trouble-host.
 //!
-//! esp-radio's `BleConnector` is a low-level HCI transport — it doesn't
-//! provide a GATT server or high-level advertising API. For the smartwatch
-//! we only need the device to be discoverable (advertising its name), so
-//! we send 3 HCI commands directly:
+//! Replaces the old raw-HCI advertising/scanning code. esp-radio's
+//! `BleConnector` implements bt-hci 0.8's `Transport`, which trouble-host
+//! 0.6 wraps with `ExternalController` to run a full host stack.
 //!
-//!   1. LE Set Advertising Parameters (slow interval = power-friendly)
-//!   2. LE Set Advertising Data (Flags + Complete Local Name)
-//!   3. LE Set Advertising Enable (on / off)
+//! The server exposes the standard Battery Service (0x180F) with a
+//! Battery Level characteristic (0x2A19, read + notify). The level is
+//! read from [`BATTERY_PERCENT`], which main.rs updates from its AXP2101
+//! polling loop.
 //!
-//! The VHCI interface in ESP-IDF expects H4 transport framing, so every
-//! command is prefixed with 0x01 (HCI Command Packet).
+//! Lifecycle: [`ble_host_task`] is spawned at boot but parks until the
+//! watchface BLE button sets [`BLE_START_REQUEST`]. From then on the
+//! trouble host owns the controller and loops forever:
+//! advertise -> accept connection -> serve GATT + battery notifications
+//! -> disconnect -> advertise again. There is no clean way to tear the
+//! host down once its runner is started, so "BLE off" requires a reboot
+//! (main.rs logs this on subsequent toggles).
+//!
+//! Scanning: the old device-discovery logging was dropped. trouble's
+//! scanner drives the central role of the same host, which conflicts with
+//! the single-connection peripheral setup here (and would need extra
+//! connection slots + a second command path). Peripheral-only for now.
 
-use embedded_io::Write;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-/// Start BLE advertising as "Rust Watch".
-/// Sends HCI commands synchronously via the BleConnector's Write impl.
-pub fn start_advertising<W: Write>(hci: &mut W) -> Result<(), W::Error> {
-    // 1) LE Set Advertising Parameters
-    //    Opcode 0x2006, 15 bytes of params
-    //    Interval: 0x0800 (1.28s) — slow to save power
-    //    Type: ADV_IND (connectable, undirected)
-    //    Channels: all 3 (37, 38, 39)
-    hci.write_all(&[
-        0x01,                   // H4: HCI command
-        0x06, 0x20,             // opcode: LE Set Advertising Parameters
-        15,                     // param length
-        0x00, 0x08,             // interval min: 0x0800 (1280 * 0.625ms = 800ms)
-        0x00, 0x08,             // interval max: 0x0800
-        0x00,                   // type: ADV_IND
-        0x00,                   // own addr type: public
-        0x00,                   // peer addr type
-        0, 0, 0, 0, 0, 0,      // peer addr (unused)
-        0x07,                   // channel map: all
-        0x00,                   // filter policy: any
-    ])?;
+use embassy_futures::join::join;
+use embassy_futures::select::select;
+use embassy_time::{Duration, Timer};
+use esp_println::println;
+use esp_radio::ble::controller::BleConnector;
+use trouble_host::prelude::*;
 
-    // 2) LE Set Advertising Data
-    //    Opcode 0x2008, always 32 bytes of param (1 len + 31 data)
-    let name = b"Rust Watch";
-    let flags_len: u8 = 3;      // AD: [len=2, type=0x01 Flags, val=0x06]
-    let name_ad_len: u8 = 1 + name.len() as u8; // [type + name bytes]
-    let sig_octets = flags_len + 1 + name_ad_len; // total significant
+/// Battery level in percent, written by main.rs (AXP2101 polling),
+/// read by the GATT server for the 0x2A19 characteristic.
+pub static BATTERY_PERCENT: AtomicU8 = AtomicU8::new(0);
 
-    let mut cmd = [0u8; 36]; // 1 (H4) + 2 (opcode) + 1 (plen) + 32 (data) = 36
-    cmd[0] = 0x01;                          // H4
-    cmd[1] = 0x08; cmd[2] = 0x20;          // opcode: LE Set Advertising Data
-    cmd[3] = 32;                            // param length (always 32)
-    cmd[4] = sig_octets;                    // significant octets count
-    // Flags AD structure
-    cmd[5] = 2;                             // length of this AD
-    cmd[6] = 0x01;                          // AD type: Flags
-    cmd[7] = 0x06;                          // General Discoverable + BR/EDR Not Supported
-    // Complete Local Name AD structure
-    cmd[8] = name_ad_len;
-    cmd[9] = 0x09;                          // AD type: Complete Local Name
-    cmd[10..10 + name.len()].copy_from_slice(name);
-    // Remaining bytes are zero (padding)
-    hci.write_all(&cmd)?;
+/// Set to true by the watchface BLE button. The parked host task starts
+/// advertising once it sees this. Never cleared: stopping the trouble
+/// host requires a reboot.
+pub static BLE_START_REQUEST: AtomicBool = AtomicBool::new(false);
 
-    // 3) LE Set Advertising Enable
-    //    Opcode 0x200A, 1 byte param = 0x01 (enable)
-    hci.write_all(&[
-        0x01,           // H4
-        0x0A, 0x20,     // opcode: LE Set Advertising Enable
-        1,              // param length
-        0x01,           // enable
-    ])?;
+const DEVICE_NAME: &str = "Rust Watch";
 
-    Ok(())
+/// Max number of concurrent connections.
+const CONNECTIONS_MAX: usize = 1;
+/// Max number of L2CAP channels (signal + ATT).
+const L2CAP_CHANNELS_MAX: usize = 2;
+
+/// Concrete controller type: trouble's HCI wrapper around esp-radio's
+/// connector, with 20 command slots (matches trouble's esp32 examples).
+pub type WatchController = ExternalController<BleConnector<'static>, 20>;
+
+// GATT server definition (expanded by trouble-host's derive macros).
+#[gatt_server]
+struct Server {
+    battery_service: BatteryService,
 }
 
-/// Stop BLE advertising.
-pub fn stop_advertising<W: Write>(hci: &mut W) -> Result<(), W::Error> {
-    hci.write_all(&[
-        0x01,           // H4
-        0x0A, 0x20,     // opcode: LE Set Advertising Enable
-        1,              // param length
-        0x00,           // disable
-    ])?;
-    Ok(())
+/// Standard Battery Service (0x180F).
+#[gatt_service(uuid = service::BATTERY)]
+struct BatteryService {
+    /// Battery Level (0x2A19), percent.
+    #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify)]
+    level: u8,
 }
 
-/// Start an active BLE scan (observer role). Advertising reports arrive as
-/// HCI LE Meta events, parsed with [`parse_adv_report`].
-pub fn start_scan<W: Write>(hci: &mut W) -> Result<(), W::Error> {
-    // LE Set Scan Parameters (0x200B): active scan (so peers send scan
-    // responses carrying their names), interval 96*0.625ms, window 48*0.625ms,
-    // public own-address, accept-all filter policy.
-    hci.write_all(&[
-        0x01,       // H4
-        0x0B, 0x20, // opcode
-        7,          // param length
-        0x01,       // active scan
-        0x60, 0x00, // interval
-        0x30, 0x00, // window
-        0x00,       // own address type: public
-        0x00,       // filter policy: accept all
-    ])?;
-    // LE Set Scan Enable (0x200C): enable, controller filters duplicates.
-    hci.write_all(&[0x01, 0x0C, 0x20, 2, 0x01, 0x01])?;
-    Ok(())
-}
-
-/// Stop the BLE scan.
-pub fn stop_scan<W: Write>(hci: &mut W) -> Result<(), W::Error> {
-    hci.write_all(&[0x01, 0x0C, 0x20, 2, 0x00, 0x01])?;
-    Ok(())
-}
-
-/// A device heard during scanning.
-pub struct AdvReport {
-    pub addr: [u8; 6],
-    pub rssi: i8,
-    /// Complete or shortened local name from the AD payload, if present.
-    pub name: heapless::String<32>,
-}
-
-/// Parse one HCI packet as an LE Advertising Report event (0x3E / subevent
-/// 0x02). Accepts packets with or without the leading H4 0x04 byte. Returns
-/// the first report in the packet.
-pub fn parse_adv_report(pkt: &[u8]) -> Option<AdvReport> {
-    // Skip the H4 HCI-event prefix if present.
-    let evt = if pkt.first() == Some(&0x04) { &pkt[1..] } else { pkt };
-    // evt: [0x3E, plen, subevt=0x02, num, evt_type, addr_type, addr[6], dlen, data..., rssi]
-    if evt.len() < 12 || evt[0] != 0x3E || evt[2] != 0x02 {
-        return None;
+/// The trouble host task. Spawned at boot; parks until the watchface
+/// requests BLE, then runs the host + GATT server forever.
+#[embassy_executor::task]
+pub async fn ble_host_task(controller: WatchController) {
+    // Park cheaply until the user asks for BLE.
+    while !BLE_START_REQUEST.load(Ordering::Relaxed) {
+        Timer::after(Duration::from_millis(250)).await;
     }
-    let mut addr = [0u8; 6];
-    addr.copy_from_slice(&evt[6..12]);
-    addr.reverse(); // HCI is little-endian; display MSB-first
-    let data_len = *evt.get(12)? as usize;
-    let data = evt.get(13..13 + data_len)?;
-    let rssi = *evt.get(13 + data_len)? as i8;
 
-    // Walk the AD structures for a local name (0x09 complete / 0x08 short).
-    let mut name = heapless::String::new();
-    let mut i = 0;
-    while i + 1 < data.len() {
-        let len = data[i] as usize;
-        if len == 0 || i + 1 + len > data.len() {
-            break;
+    // Static random address (top two bits of the MSB must be 1).
+    let address = Address::random([0x42, 0x5a, 0xe3, 0x1e, 0x83, 0xc6]);
+    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
+        HostResources::new();
+    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+    let Host {
+        mut peripheral,
+        mut runner,
+        ..
+    } = stack.build();
+
+    let server = match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name: DEVICE_NAME,
+        appearance: &appearance::watch::SMARTWATCH,
+    })) {
+        Ok(server) => server,
+        Err(e) => {
+            println!("[BLE] GATT server init failed: {e:?}");
+            return;
         }
-        let ad_type = data[i + 1];
-        if ad_type == 0x09 || ad_type == 0x08 {
-            for &b in &data[i + 2..i + 1 + len] {
-                if name.push(b as char).is_err() {
-                    break;
+    };
+    println!("[BLE] host up, advertising as '{DEVICE_NAME}'");
+
+    // The host runner must run alongside everything else, forever.
+    let host_fut = async {
+        loop {
+            if let Err(e) = runner.run().await {
+                println!("[BLE] host runner error: {e:?}");
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    };
+
+    let gatt_fut = async {
+        loop {
+            // Keep the readable attribute fresh even while unconnected.
+            let pct = BATTERY_PERCENT.load(Ordering::Relaxed);
+            let _ = server.set(&server.battery_service.level, &pct);
+
+            match advertise(&mut peripheral, &server).await {
+                Ok(conn) => {
+                    // Serve GATT events and push battery notifications until
+                    // the central disconnects, then go back to advertising.
+                    select(gatt_events(&conn), notify_battery(&server, &conn)).await;
+                }
+                Err(e) => {
+                    println!("[BLE] advertise error: {e:?}");
+                    Timer::after(Duration::from_secs(3)).await;
                 }
             }
-            break;
         }
-        i += 1 + len;
+    };
+
+    join(host_fut, gatt_fut).await;
+}
+
+/// Advertise as connectable "Rust Watch" and wait for a central.
+async fn advertise<'values, 'server, C: Controller>(
+    peripheral: &mut Peripheral<'values, C, DefaultPacketPool>,
+    server: &'server Server<'values>,
+) -> Result<GattConnection<'values, 'server, DefaultPacketPool>, BleHostError<C::Error>> {
+    let mut adv_data = [0; 31];
+    let len = AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::ServiceUuids16(&[[0x0f, 0x18]]), // Battery Service
+            AdStructure::CompleteLocalName(DEVICE_NAME.as_bytes()),
+        ],
+        &mut adv_data[..],
+    )?;
+    let advertiser = peripheral
+        .advertise(
+            &Default::default(),
+            Advertisement::ConnectableScannableUndirected {
+                adv_data: &adv_data[..len],
+                scan_data: &[],
+            },
+        )
+        .await?;
+    println!("[BLE] advertising as '{DEVICE_NAME}'");
+    let conn = advertiser.accept().await?.with_attribute_server(server)?;
+    println!("[BLE] central connected");
+    Ok(conn)
+}
+
+/// Answer GATT requests until the connection closes.
+async fn gatt_events<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
+    loop {
+        match conn.next().await {
+            GattConnectionEvent::Disconnected { reason } => {
+                println!("[BLE] disconnected: {reason:?}");
+                break;
+            }
+            GattConnectionEvent::Gatt { event } => {
+                // Attribute reads/writes are served from the server table;
+                // we only need to accept so the reply is sent.
+                match event.accept() {
+                    Ok(reply) => reply.send().await,
+                    Err(e) => println!("[BLE] gatt reply error: {e:?}"),
+                }
+            }
+            _ => {}
+        }
     }
-    Some(AdvReport { addr, rssi, name })
+}
+
+/// Push battery-level notifications to the connected central whenever the
+/// value changes (checked every 10s); ends when the connection drops.
+async fn notify_battery<P: PacketPool>(server: &Server<'_>, conn: &GattConnection<'_, '_, P>) {
+    let level = server.battery_service.level;
+    let mut last = 0xFFu8; // force one initial notification
+    loop {
+        let pct = BATTERY_PERCENT.load(Ordering::Relaxed);
+        if pct != last {
+            last = pct;
+            if level.notify(conn, &pct).await.is_err() {
+                println!("[BLE] notify failed (connection closed?)");
+                break;
+            }
+        }
+        Timer::after(Duration::from_secs(10)).await;
+    }
 }

@@ -73,6 +73,14 @@ embassy-time = { version = "0.5.0", features = ["log"] }
 static_cell = "2.1.1"
 critical-section = "1.2.0"
 
+# BLE host stack (GATT server). 0.6.x is the newest release compatible with
+# esp-radio 0.18, whose BleConnector implements bt-hci 0.8's Transport trait
+# (trouble-host 0.7 moved to bt-hci 0.9).
+trouble-host = { version = "0.6.0", features = ["log"] }
+# The #[gatt_server] macro expands to code referencing `embassy_sync`, so it
+# must be a direct dependency; pin to the 0.7 line trouble-host 0.6 uses.
+embassy-sync = "0.7"
+
 embassy-futures = "0.1"
 embedded-graphics = "0.8.2"
 embedded-graphics-core = "0.4"

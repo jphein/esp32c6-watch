@@ -412,8 +412,15 @@ async fn main(_spawner: Spawner) -> ! {
     // build the station config here but only apply it on the first toggle.
     let (mut wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("WiFi init failed");
-    let mut ble_connector =
+    let ble_connector =
         BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
+    // trouble-host GATT server: wrap the HCI transport and hand it to the
+    // host task. The task parks until the watchface BLE button fires.
+    let ble_controller: peripherals::ble::WatchController =
+        trouble_host::prelude::ExternalController::new(ble_connector);
+    _spawner.spawn(
+        peripherals::ble::ble_host_task(ble_controller).expect("ble_host_task token"),
+    );
     println!("[RADIO] stack ready (WiFi OFF, BLE advertising OFF)");
 
     use esp_radio::wifi::sta::StationConfig;
@@ -492,6 +499,8 @@ async fn main(_spawner: Spawner) -> ! {
         batt_mv = power.get_battery_voltage().unwrap_or(0);
         charging = power.is_charging().unwrap_or(false);
         watchface.update_battery(batt_pct, batt_mv, charging);
+        crate::peripherals::ble::BATTERY_PERCENT
+            .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
     }
     if let Ok(dt) = rtc.get_time() {
         watchface.update_time(dt.hours, dt.minutes, dt.seconds);
@@ -522,7 +531,6 @@ async fn main(_spawner: Spawner) -> ! {
     let mut last_wifi_idle_check = Instant::now();
     let mut ble_on = false;
     let mut ble_toggle_request = false;
-    let mut ble_seen: alloc::vec::Vec<[u8; 6]> = alloc::vec::Vec::new();
     let mut settings_connect_pending = false;
     let mut wifi_connect_attempts: u8 = 0;
     // SMOLv1 mesh: node id comes from flash config (default 042).
@@ -618,6 +626,9 @@ async fn main(_spawner: Spawner) -> ! {
                 batt_mv = power.get_battery_voltage().unwrap_or(0);
                 charging = power.is_charging().unwrap_or(false);
                 watchface.update_battery(batt_pct, batt_mv, charging);
+                // Feed the BLE Battery Service (read + notify).
+                crate::peripherals::ble::BATTERY_PERCENT
+                    .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
             }
             next_battery = if screen_state == 0 {
                 now + Duration::from_secs(600)
@@ -920,59 +931,28 @@ async fn main(_spawner: Spawner) -> ! {
             }
         }
 
-        // === BLE state machine ===
+        // === BLE toggle ===
+        // First press wakes the parked trouble-host task, which advertises
+        // as "Rust Watch" and serves the Battery GATT service. The trouble
+        // host owns the controller from then on and cannot be torn down at
+        // runtime, so "off" requires a reboot; later presses just log that.
+        // (The old raw-HCI scan/device-discovery logging was dropped: the
+        // scanner would drive the central role against the same
+        // single-connection peripheral host.)
         if ble_toggle_request {
             ble_toggle_request = false;
-            ble_on = !ble_on;
-            if ble_on {
-                match crate::peripherals::ble::start_advertising(&mut ble_connector) {
-                    Ok(()) => {
-                        println!("[BLE] advertising as 'Rust Watch'");
-                        ble_seen.clear();
-                        match crate::peripherals::ble::start_scan(&mut ble_connector) {
-                            Ok(()) => println!("[BLE] scanning for devices..."),
-                            Err(_) => println!("[BLE] scan start failed"),
-                        }
-                    }
-                    Err(_) => {
-                        println!("[BLE] failed to start advertising");
-                        ble_on = false;
-                    }
-                }
+            if !ble_on {
+                ble_on = true;
+                crate::peripherals::ble::BLE_START_REQUEST
+                    .store(true, core::sync::atomic::Ordering::Relaxed);
+                println!("[BLE] GATT server start requested ('Rust Watch')");
             } else {
-                let _ = crate::peripherals::ble::stop_scan(&mut ble_connector);
-                let _ = crate::peripherals::ble::stop_advertising(&mut ble_connector);
-                println!("[BLE] advertising + scan stopped");
+                println!("[BLE] host can't be stopped at runtime - reboot to disable");
             }
             watchface.ble_on = ble_on;
             power_stats.ble_on = ble_on;
             watchface.force_redraw();
             page_dirty = true;
-        }
-
-        // Drain BLE scan reports; log each device the first time it's heard.
-        if ble_on {
-            let mut pkt = [0u8; 255];
-            for _ in 0..16 {
-                let n = match ble_connector.next(&mut pkt) {
-                    Ok(n) if n > 0 => n,
-                    _ => break,
-                };
-                if let Some(rep) = crate::peripherals::ble::parse_adv_report(&pkt[..n]) {
-                    if !ble_seen.contains(&rep.addr) {
-                        if ble_seen.len() < 64 {
-                            ble_seen.push(rep.addr);
-                        }
-                        println!(
-                            "[BLE] found {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rssi={} {}",
-                            rep.addr[0], rep.addr[1], rep.addr[2],
-                            rep.addr[3], rep.addr[4], rep.addr[5],
-                            rep.rssi,
-                            if rep.name.is_empty() { "<no name>" } else { rep.name.as_str() },
-                        );
-                    }
-                }
-            }
         }
 
         // === AOD ===
@@ -983,6 +963,8 @@ async fn main(_spawner: Spawner) -> ! {
                     watchface.update_time(dt.hours, dt.minutes, dt.seconds);
                     if let Ok(pct) = power.get_battery_percent() {
                         watchface.update_battery(pct, batt_mv, charging);
+                        crate::peripherals::ble::BATTERY_PERCENT
+                            .store(pct, core::sync::atomic::Ordering::Relaxed);
                     }
                     let _ = watchface.render_aod(&mut fb);
                     fb.flush(&mut display);
