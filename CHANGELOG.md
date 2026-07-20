@@ -4,6 +4,34 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-07-20
+
+The feature-integration wave: light-sleep power lands as the default, and four
+smol-port features come online as launcher apps + a new sensors readout, all
+riding the on-demand framebuffer + Slint-overlay architecture (no scene-suspend
+for the button/display apps).
+
+### Added
+- **Light-sleep AOD** — the idle/ambient state now enters HP light-sleep between
+  wakes (timer + touch/GPIO wake sources), with the CO5300's self-refresh GRAM
+  holding the dim clock. Wakes force an external-RTC (`PCF85063`) time read so the
+  minute flip never looks stuck despite embassy-time freezing during sleep.
+- **WLED WiZmote remote** (launcher → SYSTEM) — a Slint overlay whose tiles
+  (On/Off, presets 1-4, dim ±, night) broadcast ESP-NOW WiZmote frames via the
+  new `wled-wizmote` crate, reusing the mesh broadcast peer.
+- **RSSI treasure-hunt** (launcher → GAMES) — a warmer/colder hunt driven live
+  from the mesh roster's smoothed RSSI (`hunt` + `rssi` crates), with trend
+  arrows, proximity buckets, and hold-to-confirm FOUND.
+- **Home energy screen** (launcher → SYSTEM) — house battery / solar / grid
+  overlay (placeholder data until the HA/ESP-NOW feed lands).
+- **C6 die temperature** on the Sensors page (`esp_hal` TSENS).
+- Workspace reorganised: pure-logic `no_std` crates (`rssi`, `hunt`,
+  `wled-wizmote`, `ota-proto`, `scan-model`) under `crates/*`, host-unit-tested.
+
+### Deferred
+- **Voice-to-text (MC5)** — mic-capture + STT modules merged but not wired
+  (clean TODO at the i2s_rx site); awaiting the full capture-task snippet.
+
 ## [0.3.1] — 2026-07-20
 
 On-glass fixes on top of v0.3.0: WiFi actually works, the radio toggles are
