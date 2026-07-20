@@ -529,6 +529,7 @@ async fn main(_spawner: Spawner) -> ! {
     let mut mesh = SmolMesh::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
     let mut mesh_channel_pinned = false;
+    let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
     // Time-sync provenance for the DIAG record (tsrc/tage fields).
     let mut sync_src: &str = "none";
@@ -864,6 +865,12 @@ async fn main(_spawner: Spawner) -> ! {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
                 mesh.tick(&mut esp_now, now_ms, uptime_secs);
+                let peers = mesh.peer_count(now_ms) as u8;
+                if peers != last_mesh_peers {
+                    last_mesh_peers = peers;
+                    watchface.mesh_peers = peers;
+                    watchface.force_redraw();
+                }
                 // DIAG record every 60s: full field set in spec order (the HA
                 // dashboard parses positionally), zeros where the watch has
                 // no equivalent counter yet.
