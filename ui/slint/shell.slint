@@ -31,6 +31,10 @@ export component WatchShell inherits Window {
     in property <bool> ble-on: false;
     in property <int> mesh-peers: 0;
 
+    // mesh page data (rendered from plan task 7)
+    in property <string> mesh-self-text: "";
+    in property <[PeerRow]> mesh-rows: [];
+
     // --- paging / modes ---
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
