@@ -430,6 +430,16 @@ async fn main(_spawner: Spawner) -> ! {
         .with_ws(peripherals.GPIO22)
         .with_dout(peripherals.GPIO21)
         .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
+    // TODO(#42 voice MC5, wiring-wave C2 — DEFERRED): `i2s_periph.i2s_rx` is
+    // still available here (partial move; tx took i2s_tx). Wire it per nebula's
+    // MC5 snippet: `i2s_periph.i2s_rx.with_din(GPIO23).build(I2S_RX_DESC…)`
+    // (BLOCKING mode), MIC_RING/MIC_CH StaticCells, `spawner.spawn(
+    // mic_capture_task(i2s_rx, MIC_RING.init(…), mic_ch.sender()))`, PTT via
+    // join(stream_utterance, watch_release) + enable_adc(MIC_PGA_GAIN) gating,
+    // and an AppState::Voice launcher tile → voice.slint (already merged, inert).
+    // Deferred: needs nebula's exact snippet (offline until ~16:20) — not safe to
+    // author solo unverified. mic_capture.rs / voice_stt.rs / voice.slint are on
+    // main, inert, ready to wire.
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
