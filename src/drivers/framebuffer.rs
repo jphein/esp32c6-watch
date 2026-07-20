@@ -15,7 +15,6 @@ use embedded_graphics_core::primitives::Rectangle;
 use crate::board;
 use crate::drivers::co5300::{Co5300Display, DisplayError};
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 const WIDTH: usize = board::LCD_WIDTH as usize;
@@ -54,13 +53,6 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
-    pub fn new() -> Self {
-        Self {
-            buf: vec![0u8; PIXEL_COUNT],
-            row: vec![0u16; WIDTH],
-        }
-    }
-
     /// Allocate without aborting on OOM: games grab ~201KB on entry and the
     /// shell reclaims it on exit. `None` = the heap can't fit a frame right now
     /// (e.g. a WiFi window is holding the RAM), so the caller stays in the shell.
@@ -72,17 +64,6 @@ impl Framebuffer {
         row.try_reserve_exact(WIDTH).ok()?;
         row.resize(WIDTH, 0);
         Some(Self { buf, row })
-    }
-
-    pub fn clear_color(&mut self, color: Rgb565) {
-        self.buf.fill(rgb565_to_332(RawU16::from(color).into_inner()));
-    }
-
-    #[inline(always)]
-    pub fn set_pixel(&mut self, x: usize, y: usize, color: u16) {
-        if x < WIDTH && y < HEIGHT {
-            self.buf[y * WIDTH + x] = rgb565_to_332(color);
-        }
     }
 
     /// Flush the whole frame to the display, expanding RGB332 -> RGB565 row by row.
