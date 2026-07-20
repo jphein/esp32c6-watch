@@ -32,13 +32,15 @@ mod drivers {
 #[path = "../peripherals"]
 #[allow(dead_code)]
 mod peripherals {
+    pub mod power;
     pub mod rtc;
+    pub mod touch;
 }
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
@@ -48,7 +50,7 @@ use esp_hal::{
     clock::CpuClock,
     dma::{DmaRxBuf, DmaTxBuf},
     dma_buffers,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     spi::{
         master::{Config as SpiConfig, Spi},
@@ -62,11 +64,13 @@ use esp_println::println;
 use slint::platform::software_renderer::{
     LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
 };
-use slint::platform::{Platform, WindowAdapter};
+use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
 
 use crate::drivers::co5300::Co5300Display;
 use crate::drivers::qspi_bus::QspiBus;
+use crate::peripherals::power::Axp2101Power;
 use crate::peripherals::rtc::Pcf85063aRtc;
+use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
 
 // Pulls in the `WatchFace` component compiled by slint-build from
 // src/bin/watchface.slint (see build.rs).
@@ -180,6 +184,23 @@ fn date_string(dt: &crate::peripherals::rtc::DateTime) -> slint::SharedString {
     slint::format!("{} {:02} {} 20{:02}", weekday, dt.day, month, dt.year)
 }
 
+fn uptime_string() -> slint::SharedString {
+    let s = embassy_time::Instant::now().as_secs();
+    slint::format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Map the UI slider fraction (0.0..1.0) onto the CO5300 brightness range,
+/// keeping a floor so the slider can never black the panel out completely.
+const BRIGHTNESS_MIN: u8 = 0x10;
+fn brightness_raw(frac: f32) -> u8 {
+    let frac = frac.clamp(0.0, 1.0);
+    BRIGHTNESS_MIN + (frac * (0xFF - BRIGHTNESS_MIN) as f32) as u8
+}
+
+/// y-band of the brightness slider on the stats page (see watchface.slint):
+/// horizontal swipes starting here are slider drags, not page switches.
+const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
+
 // === Entry point ===================================================
 
 #[esp_rtos::main]
@@ -215,6 +236,11 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = rtc.init();
     println!("[RTC] OK");
 
+    // === Power (AXP2101 at 0x34, same bus; read-mostly: rails untouched) ===
+    let mut power = Axp2101Power::new(RefCellDevice::new(&i2c_ref));
+    let _ = power.enable_adc();
+    println!("[POWER] OK");
+
     // === Display: CO5300 over QSPI DMA at 80MHz ===
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(80))
@@ -237,6 +263,20 @@ async fn main(_spawner: Spawner) -> ! {
     display.init();
     println!("[DISPLAY] OK");
 
+    // === Touch (FT3168 at 0x38, same bus; INT=GPIO15, RST=GPIO10) ===
+    let mut touch_rst = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
+    let touch_int = Input::new(
+        peripherals.GPIO15,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    touch_rst.set_low();
+    Timer::after(Duration::from_millis(10)).await;
+    touch_rst.set_high();
+    Timer::after(Duration::from_millis(50)).await;
+    let mut touch = Ft3168Touch::new(RefCellDevice::new(&i2c_ref));
+    let _ = touch.init();
+    println!("[TOUCH] OK");
+
     // === Slint platform ===
     // NewBuffer: our 2-line strip never holds the previous frame, so ask the
     // renderer to repaint everything each time it draws.
@@ -248,6 +288,21 @@ async fn main(_spawner: Spawner) -> ! {
     .expect("set_platform failed");
 
     let ui = WatchFace::new().expect("failed to create WatchFace");
+
+    // Radio glyphs: static for now, the demo carries no radio stack.
+    ui.set_wifi_on(false);
+    ui.set_ble_on(false);
+    ui.set_mesh_peers(0);
+    ui.set_steps(0); // placeholder: no pedometer in the demo
+
+    // Brightness requests flow out of the Slint callback through this cell
+    // and are applied in the loop, where `display` is mutably borrowable.
+    let brightness_req: Rc<Cell<Option<u8>>> = Rc::new(Cell::new(None));
+    {
+        let req = brightness_req.clone();
+        ui.on_brightness_changed(move |frac| req.set(Some(brightness_raw(frac))));
+    }
+
     ui.show().expect("show failed");
     println!("[SLINT] UI up, entering render loop");
 
@@ -256,8 +311,57 @@ async fn main(_spawner: Spawner) -> ! {
     let mut scratch: Vec<u16> = alloc::vec![0u16; WIDTH * 2];
 
     let mut last_second: u8 = 0xFF;
+    let mut batt_countdown: u8 = 0; // battery poll every 5 second-ticks
+    let mut touch_down = false;
+    let mut last_pos = slint::LogicalPosition::new(0.0, 0.0);
 
     loop {
+        // === Touch -> Slint pointer events + page swipes ===
+        // The FT3168 INT line is low while a finger is down; keep polling
+        // one extra round after it releases so the up-edge is delivered.
+        if touch_int.is_low() || touch_down {
+            if let Ok((point, swipe)) = touch.poll() {
+                if let Some(tp) = point {
+                    let pos = slint::LogicalPosition::new(tp.x as f32, tp.y as f32);
+                    let event = if touch_down {
+                        WindowEvent::PointerMoved { position: pos }
+                    } else {
+                        WindowEvent::PointerPressed {
+                            position: pos,
+                            button: PointerEventButton::Left,
+                        }
+                    };
+                    touch_down = true;
+                    last_pos = pos;
+                    let _ = window.window().try_dispatch_event(event);
+                } else if touch_down {
+                    touch_down = false;
+                    let _ = window.window().try_dispatch_event(WindowEvent::PointerReleased {
+                        position: last_pos,
+                        button: PointerEventButton::Left,
+                    });
+                }
+                if let Some(sw) = swipe {
+                    // A horizontal drag that started on the brightness slider
+                    // is a slider adjustment, not a page switch.
+                    let on_slider =
+                        ui.get_current_page() == 1 && SLIDER_BAND.contains(&sw.start_y);
+                    if !on_slider {
+                        match sw.direction {
+                            SwipeDirection::Left => ui.set_current_page(1),
+                            SwipeDirection::Right => ui.set_current_page(0),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply any brightness change requested by the UI callback.
+        if let Some(raw) = brightness_req.take() {
+            display.set_brightness(raw);
+        }
+
         slint::platform::update_timers_and_animations();
 
         // Poll the RTC; push new values into the UI when the second ticks.
@@ -268,6 +372,18 @@ async fn main(_spawner: Spawner) -> ! {
                 ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
                 ui.set_date_text(date_string(&dt));
                 ui.set_minute_progress(dt.seconds as f32 / 59.0);
+                ui.set_uptime_text(uptime_string());
+
+                // Battery telemetry is slow-moving: poll every 5 ticks.
+                if batt_countdown == 0 {
+                    batt_countdown = 5;
+                    if let Ok(pct) = power.get_battery_percent() {
+                        ui.set_battery_percent(pct.min(100) as i32);
+                    }
+                    ui.set_battery_mv(power.get_battery_voltage().unwrap_or(0) as i32);
+                    ui.set_charging(power.is_charging().unwrap_or(false));
+                }
+                batt_countdown -= 1;
             }
         }
 
@@ -282,7 +398,10 @@ async fn main(_spawner: Spawner) -> ! {
             flusher.flush_pending();
         });
 
-        if window.has_active_animations() {
+        if touch_down || touch_int.is_low() {
+            // Tight poll while a finger is down so drags feel live.
+            Timer::after(Duration::from_millis(20)).await;
+        } else if window.has_active_animations() {
             Timer::after(Duration::from_millis(33)).await;
         } else {
             Timer::after(Duration::from_millis(100)).await;

@@ -1,16 +1,93 @@
 // Slint watchface for the Waveshare ESP32-C6-Touch-AMOLED-2.06 (410x502).
 // Rendered by the Slint software renderer line-by-line to the CO5300 panel.
+//
+// Two horizontally-swipeable pages:
+//   page 0: clock face (time / date / seconds / minute bar)
+//   page 1: stats (steps placeholder, battery mV, uptime) + brightness slider
+// Persistent chrome: radio status dots (top-left), battery pill (top-right),
+// page dots (bottom, tappable to switch page).
+
+// One radio indicator: a dot that lights up + label.
+component RadioDot {
+    in property <string> label;
+    in property <bool> active;
+    width: 54px;
+    height: 30px;
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: root.active ? #35e0b0 : #223048;
+    }
+    Text {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: root.active ? #9fb4d8 : #3c4761;
+        font-size: 13px;
+        letter-spacing: 1px;
+    }
+}
+
+// One label/value line on the stats page.
+component StatRow {
+    in property <string> label;
+    in property <string> value;
+    width: 330px;
+    height: 56px;
+
+    Text {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: #55617a;
+        font-size: 16px;
+        letter-spacing: 2px;
+    }
+    Text {
+        x: parent.width - self.width;
+        y: (parent.height - self.height) / 2;
+        text: root.value;
+        color: #f2f5ff;
+        font-size: 24px;
+        font-weight: 600;
+    }
+}
 
 export component WatchFace inherits Window {
     width: 410px;
     height: 502px;
     background: #000000;
 
+    // --- clock ---
     in property <string> time-text: "--:--";
     in property <string> seconds-text: "--";
     in property <string> date-text: "SYNCING RTC";
     // 0.0 .. 1.0, how far into the current minute we are
     in property <float> minute-progress: 0.0;
+
+    // --- battery / stats ---
+    in property <int> battery-percent: -1; // -1 = unknown
+    in property <bool> charging: false;
+    in property <int> battery-mv: 0;
+    in property <int> steps: 0; // placeholder: no pedometer in the demo
+    in property <string> uptime-text: "0:00:00";
+
+    // --- radio status (static in the demo: no radio stack) ---
+    in property <bool> wifi-on: false;
+    in property <bool> ble-on: false;
+    in property <int> mesh-peers: 0;
+
+    // --- paging + brightness ---
+    // 0 = clock face, 1 = stats. Set from Rust on swipes, or by tapping
+    // the page-dot area below.
+    in-out property <int> current-page: 0;
+    // 0.0 .. 1.0 slider position; the loop maps it to CO5300 0x10..0xFF.
+    in-out property <float> brightness: 0.8;
+    callback brightness-changed(float);
 
     // Ambient AMOLED-friendly gradient (mostly true black)
     Rectangle {
@@ -19,74 +96,272 @@ export component WatchFace inherits Window {
         background: @linear-gradient(155deg, #140b2e 0%, #000000 40%, #000000 72%, #002733 100%);
     }
 
-    // Top date pill
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: 56px;
-        width: date.width + 44px;
-        height: 42px;
-        border-radius: 21px;
+    // ==================== paged content ====================
+    pages := Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        clip: true;
+
+        // --- page 0: clock face ---
+        clock-page := Rectangle {
+            x: -root.current-page * pages.width;
+            y: 0;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+
+            // Top date pill
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 56px;
+                width: date.width + 44px;
+                height: 42px;
+                border-radius: 21px;
+                border-width: 1px;
+                border-color: #2a3550;
+                background: #101728;
+
+                date := Text {
+                    x: 22px;
+                    y: (parent.height - self.height) / 2;
+                    text: root.date-text;
+                    color: #9fb4d8;
+                    font-size: 19px;
+                    letter-spacing: 2px;
+                }
+            }
+
+            // Big clock digits
+            time := Text {
+                x: (parent.width - self.width) / 2;
+                y: 148px;
+                text: root.time-text;
+                color: #f2f5ff;
+                font-size: 108px;
+                font-weight: 700;
+            }
+
+            // Seconds, accent colored
+            secs := Text {
+                x: (parent.width - self.width) / 2;
+                y: 292px;
+                text: root.seconds-text;
+                color: #35e0b0;
+                font-size: 40px;
+                font-weight: 600;
+            }
+
+            // Minute progress track + fill
+            track := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 372px;
+                width: 300px;
+                height: 10px;
+                border-radius: 5px;
+                background: #16202f;
+
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: max(10px, track.width * root.minute-progress);
+                    height: parent.height;
+                    border-radius: 5px;
+                    background: @linear-gradient(90deg, #3a7bd5 0%, #35e0b0 100%);
+                    animate width { duration: 350ms; easing: ease-out; }
+                }
+            }
+
+            // Footer caption
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: 414px;
+                text: "SLINT \u{00b7} ESP32-C6";
+                color: #55617a;
+                font-size: 17px;
+                letter-spacing: 3px;
+            }
+        }
+
+        // --- page 1: stats ---
+        stats-page := Rectangle {
+            x: pages.width - root.current-page * pages.width;
+            y: 0;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: 56px;
+                text: "STATS";
+                color: #9fb4d8;
+                font-size: 26px;
+                font-weight: 600;
+                letter-spacing: 5px;
+            }
+
+            StatRow {
+                x: (parent.width - self.width) / 2;
+                y: 118px;
+                label: "STEPS";
+                value: "\{root.steps}";
+            }
+            StatRow {
+                x: (parent.width - self.width) / 2;
+                y: 182px;
+                label: "BATTERY";
+                value: root.battery-percent < 0
+                    ? "\{root.battery-mv} mV"
+                    : "\{root.battery-percent}% \u{00b7} \{root.battery-mv} mV";
+            }
+            StatRow {
+                x: (parent.width - self.width) / 2;
+                y: 246px;
+                label: "UPTIME";
+                value: root.uptime-text;
+            }
+
+            // Brightness slider (custom: no std-widgets in this build).
+            // NOTE: the Rust swipe handler ignores horizontal swipes that
+            // start in the y 330..430 band so slider drags don't flip pages.
+            Text {
+                x: (parent.width - 330px) / 2;
+                y: 336px;
+                text: "BRIGHTNESS";
+                color: #55617a;
+                font-size: 16px;
+                letter-spacing: 2px;
+            }
+            slider := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 366px;
+                width: 330px;
+                height: 40px;
+
+                Rectangle {
+                    x: 0;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: #16202f;
+
+                    Rectangle {
+                        x: 0; y: 0;
+                        width: max(10px, parent.width * root.brightness);
+                        height: parent.height;
+                        border-radius: 5px;
+                        background: @linear-gradient(90deg, #3a7bd5 0%, #35e0b0 100%);
+                    }
+                }
+                Rectangle {
+                    x: clamp(slider.width * root.brightness - self.width / 2,
+                             0px, slider.width - self.width);
+                    y: (parent.height - self.height) / 2;
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 13px;
+                    background: #f2f5ff;
+                }
+                slider-ta := TouchArea {
+                    x: 0; y: 0;
+                    width: parent.width; height: parent.height;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down
+                            || (ev.kind == PointerEventKind.move && self.pressed)) {
+                            root.brightness = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                            root.brightness-changed(root.brightness);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================== persistent chrome ====================
+
+    // Radio status glyph row (top-left)
+    RadioDot { x: 22px;  y: 14px; label: "WIFI"; active: root.wifi-on; }
+    RadioDot { x: 84px;  y: 14px; label: "BLE";  active: root.ble-on; }
+    RadioDot {
+        x: 138px; y: 14px;
+        label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
+        active: root.mesh-peers > 0;
+    }
+
+    // Battery pill (top-right): glyph + percent, accent when charging
+    batt-pill := Rectangle {
+        x: parent.width - self.width - 20px;
+        y: 12px;
+        width: batt-text.width + 62px;
+        height: 30px;
+        border-radius: 15px;
         border-width: 1px;
         border-color: #2a3550;
         background: #101728;
 
-        date := Text {
-            x: 22px;
+        // battery body
+        batt-body := Rectangle {
+            x: 12px;
             y: (parent.height - self.height) / 2;
-            text: root.date-text;
-            color: #9fb4d8;
-            font-size: 19px;
-            letter-spacing: 2px;
+            width: 26px;
+            height: 13px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.charging ? #35e0b0 : #9fb4d8;
+
+            Rectangle {
+                x: 2px; y: 2px;
+                width: (batt-body.width - 4px)
+                    * (clamp(root.battery-percent, 0, 100) / 100.0);
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: root.charging ? #35e0b0
+                    : (root.battery-percent >= 0 && root.battery-percent < 20
+                        ? #ff5566 : #9fb4d8);
+            }
+        }
+        // battery tip
+        Rectangle {
+            x: 38px;
+            y: (parent.height - self.height) / 2;
+            width: 3px;
+            height: 7px;
+            background: root.charging ? #35e0b0 : #9fb4d8;
+        }
+        batt-text := Text {
+            x: 48px;
+            y: (parent.height - self.height) / 2;
+            text: (root.charging ? "+" : "")
+                + (root.battery-percent < 0 ? "--" : "\{root.battery-percent}%");
+            color: root.charging ? #35e0b0 : #9fb4d8;
+            font-size: 15px;
         }
     }
 
-    // Big clock digits
-    time := Text {
+    // Page dots: tap to toggle between clock and stats
+    dots := TouchArea {
         x: (parent.width - self.width) / 2;
-        y: 148px;
-        text: root.time-text;
-        color: #f2f5ff;
-        font-size: 108px;
-        font-weight: 700;
-    }
-
-    // Seconds, accent colored
-    secs := Text {
-        x: (parent.width - self.width) / 2;
-        y: 292px;
-        text: root.seconds-text;
-        color: #35e0b0;
-        font-size: 40px;
-        font-weight: 600;
-    }
-
-    // Minute progress track + fill
-    track := Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: 372px;
-        width: 300px;
-        height: 10px;
-        border-radius: 5px;
-        background: #16202f;
+        y: 450px;
+        width: 140px;
+        height: 44px;
+        clicked => {
+            root.current-page = 1 - root.current-page;
+        }
 
         Rectangle {
-            x: 0px;
-            y: 0px;
-            width: max(10px, track.width * root.minute-progress);
-            height: parent.height;
+            x: parent.width / 2 - 16px;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
             border-radius: 5px;
-            background: @linear-gradient(90deg, #3a7bd5 0%, #35e0b0 100%);
-            animate width { duration: 350ms; easing: ease-out; }
+            background: root.current-page == 0 ? #35e0b0 : #2a3550;
         }
-    }
-
-    // Footer caption
-    Text {
-        x: (parent.width - self.width) / 2;
-        y: 432px;
-        text: "SLINT \u{00b7} ESP32-C6";
-        color: #55617a;
-        font-size: 17px;
-        letter-spacing: 3px;
+        Rectangle {
+            x: parent.width / 2 + 6px;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: root.current-page == 1 ? #35e0b0 : #2a3550;
+        }
     }
 }
