@@ -1,14 +1,13 @@
-import { Theme, RadioDot, PageTitle } from "theme.slint";
+import { Theme, RadioDot, PeerRow } from "theme.slint";
 import { ClockPage } from "clock.slint";
 import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
 import { PowerPage } from "power.slint";
+import { MeshPage } from "mesh.slint";
 
-export struct PeerRow {
-    name: string,
-    rssi: string,
-    age: string,
-}
+// Re-export so the generated Rust module keeps exposing `PeerRow`
+// (slint_shell.rs constructs it) now that the struct lives in theme.slint.
+export { PeerRow }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -148,12 +147,12 @@ export component WatchShell inherits Window {
             reboot-tap => { root.reboot-tap(); }
         }
 
-        // Placeholder page 4, replaced by task 7 (mesh).
-        for title[idx] in ["MESH"]: Rectangle {
-            x: (idx + 4 - root.current-page) * pages.width;
+        MeshPage {
+            x: (4 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
             animate x { duration: 260ms; easing: ease-out; }
-            PageTitle { title: title; }
+            self-text: root.mesh-self-text;
+            rows: root.mesh-rows;
         }
     }
 

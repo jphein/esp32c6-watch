@@ -1,4 +1,13 @@
 // Shared palette + small components for the watch shell.
+
+// One mesh roster line. Lives here (not shell.slint) so both shell.slint and
+// mesh.slint can import it without a recursive shell<->mesh import cycle.
+export struct PeerRow {
+    name: string,
+    rssi: string,
+    age: string,
+}
+
 export global Theme {
     out property <color> ink: #f2f5ff;
     out property <color> soft: #9fb4d8;

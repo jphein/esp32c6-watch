@@ -392,9 +392,19 @@ impl ShellUi {
     /// (ms since we last heard the peer — see `SmolMesh::peers`), so it is
     /// divided directly; no wall-clock parameter is needed.
     pub fn set_mesh_rows(&self, our_id: u8, rows: &[PeerView]) {
-        let (adj, noun) = names::name_for_id(our_id);
-        self.ui
-            .set_mesh_self_text(slint::format!("#{:03} {} {}", our_id, adj, noun));
+        // Mesh page refreshes at 1s; skip the row-string allocs when the
+        // page isn't showing rather than relying on caller discipline.
+        if self.ui.get_current_page() != PAGE_MESH {
+            return;
+        }
+        // The self banner is static per boot (node id never changes); the
+        // property defaults to "", so format it on the first on-page push
+        // only instead of re-allocating it every 1s refresh.
+        if self.ui.get_mesh_self_text().is_empty() {
+            let (adj, noun) = names::name_for_id(our_id);
+            self.ui
+                .set_mesh_self_text(slint::format!("#{:03} {} {}", our_id, adj, noun));
+        }
         let model: Vec<PeerRow> = rows
             .iter()
             .take(crate::ui::pages::MESH_MAX_ROWS)
