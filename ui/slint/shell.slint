@@ -4,6 +4,7 @@ import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
 import { PowerPage } from "power.slint";
 import { MeshPage } from "mesh.slint";
+import { LauncherOverlay } from "launcher.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -242,6 +243,13 @@ export component WatchShell inherits Window {
             y: (parent.height - self.height) / 2;
             text: root.toast-text; color: Theme.ink; font-size: 16px;
         }
+    }
+
+    // ==================== launcher overlay ====================
+    // Rendered below the AOD overlay so AOD still wins when both are visible.
+    if root.launcher-open: LauncherOverlay {
+        width: 100%; height: 100%;
+        launch-app(idx) => { root.launch-app(idx); }
     }
 
     // ==================== AOD overlay ====================

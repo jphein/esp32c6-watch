@@ -186,8 +186,16 @@ impl ShellUi {
             let slider_drag = !self.ui.get_launcher_open()
                 && self.ui.get_current_page() == PAGE_POWER
                 && SLIDER_BAND.contains(&swipe_start_y);
-            let directional =
-                matches!(swipe, Some(d) if d != SwipeDirection::Tap) && !slider_drag;
+            // Vertical swipes while the launcher is open belong to the Flickable's
+            // own scroll/fling; releasing off-screen would kill its momentum. Keep
+            // the natural release — Flickable's drag-capture suppresses stray item
+            // clicks on a real scroll. (slider_drag already excludes launcher-open,
+            // so the two are mutually exclusive.)
+            let launcher_scroll = self.ui.get_launcher_open()
+                && matches!(swipe, Some(SwipeDirection::Up) | Some(SwipeDirection::Down));
+            let directional = matches!(swipe, Some(d) if d != SwipeDirection::Tap)
+                && !slider_drag
+                && !launcher_scroll;
             let release_pos = if directional {
                 let off = slint::LogicalPosition::new(-1.0, -1.0);
                 let _ = self

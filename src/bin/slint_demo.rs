@@ -255,9 +255,8 @@ async fn main(_spawner: Spawner) -> ! {
                                     ui.set_current_page((ui.get_current_page() + 4).rem_euclid(5))
                                 }
                             }
-                            // NOTE: launcher overlay renders from plan task 8; until then
-                            // this sets an invisible flag and the next right-swipe closes
-                            // it instead of paging back.
+                            // Up-swipe on the clock opens the launcher overlay;
+                            // the next right-swipe (above) closes it.
                             SwipeDirection::Up => ui.set_launcher_open(true),
                             _ => {}
                         }

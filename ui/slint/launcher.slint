@@ -1,0 +1,64 @@
+import { Theme } from "theme.slint";
+
+// App launcher overlay: full-screen scrim + a vertically scrolling list.
+// Tap an item to launch it; the Rust side closes the overlay on a Right swipe.
+export component LauncherOverlay {
+    callback launch-app(int);
+
+    Rectangle {
+        width: 100%; height: 100%;
+        // Deliberate translucent one-off scrim (near-black at 95% alpha) so the
+        // watchface stays faintly visible behind the launcher.
+        background: #05080aF2;
+    }
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 20px;
+        text: "APPS";
+        color: Theme.ink; font-size: 24px; font-weight: 600; letter-spacing: 4px;
+    }
+
+    Flickable {
+        x: 20px; y: 55px;
+        width: parent.width - 40px;
+        height: parent.height - 75px;                 // 502 - 75 = 427px visible
+        viewport-height: 7 * 65px + 6 * 6px;          // exact content height = 491px (455 + 36)
+        VerticalLayout {
+            spacing: 6px;
+            // Item order MUST match LAUNCHER_APPS in src/ui/slint_shell.rs
+            // (Snake, World Snake, 2048, Tetris, Flappy Bird, Maze (Tilt), Settings).
+            // Per-item accents are deliberate one-offs mirroring the old eg
+            // launcher's identity colors (src/ui/launcher.rs MENU_ITEMS),
+            // translated from Rgb565 (5/6/5) to 8-bit hex. The accent tracks
+            // each item's text_color where that carried the hue (Snake green,
+            // World Snake teal-green, 2048 yellow, Tetris cyan, Flappy white);
+            // Maze and Settings had white text, so their accent takes the
+            // bg_color hue (Maze blue-ish, Settings pale green), lightened.
+            for item[idx] in [
+                { name: "Snake",       accent: #00e000 },  // GREEN  #00ff00 -> softened
+                { name: "World Snake", accent: #00ff80 },  // teal-green (bg teal + green text)
+                { name: "2048",        accent: #f0d000 },  // YELLOW #ffff00 -> gold
+                { name: "Tetris",      accent: #00d0f0 },  // CYAN   #00ffff
+                { name: "Flappy Bird", accent: #ffffff },  // WHITE
+                { name: "Maze (Tilt)", accent: #8090ff },  // bg blue #10107b -> lightened
+                { name: "Settings",   accent: #c0ffc0 },   // bg pale-green #313031 -> lightened
+            ]: Rectangle {
+                height: 65px;
+                border-radius: 12px;
+                background: Theme.panel;
+                Rectangle {
+                    x: 0; y: 8px; width: 4px; height: parent.height - 16px;
+                    background: item.accent;
+                }
+                Text {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    text: item.name; color: item.accent;
+                    font-size: 20px; font-weight: 600;
+                }
+                TouchArea { clicked => { root.launch-app(idx); } }
+            }
+        }
+    }
+}
