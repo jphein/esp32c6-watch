@@ -214,6 +214,22 @@ impl SmolMesh {
         }
     }
 
+    /// Broadcast a DIAG record ("SMOLv1 DIAG NNN" + verbatim key=val record).
+    /// The fleet gateway caches it and republishes retained to smol/<id>/diag,
+    /// which is how the watch shows up in Home Assistant without MQTT.
+    pub fn broadcast_diag(&mut self, esp_now: &mut EspNow<'_>, record: &[u8]) {
+        const DIAG_PREFIX: &[u8] = b"SMOLv1 DIAG ";
+        let mut msg = [0u8; 250];
+        msg[..DIAG_PREFIX.len()].copy_from_slice(DIAG_PREFIX);
+        write_id(self.id, &mut msg[DIAG_PREFIX.len()..]);
+        let base = DIAG_PREFIX.len() + 3;
+        let n = record.len().min(250 - base);
+        msg[base..base + n].copy_from_slice(&record[..n]);
+        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &msg[..base + n]) {
+            let _ = w.wait();
+        }
+    }
+
     /// Handle one received ESP-NOW payload.
     pub fn handle_rx(
         &mut self,

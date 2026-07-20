@@ -474,10 +474,15 @@ async fn main(_spawner: Spawner) -> ! {
     let mut ble_toggle_request = false;
     let mut ble_seen: alloc::vec::Vec<[u8; 6]> = alloc::vec::Vec::new();
     let mut settings_connect_pending = false;
+    let mut wifi_connect_attempts: u8 = 0;
     // SMOLv1 mesh: node id comes from flash config (default 042).
     let mut mesh = SmolMesh::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
     let mut mesh_channel_pinned = false;
+    let mut next_diag = Instant::now() + Duration::from_secs(30);
+    // Time-sync provenance for the DIAG record (tsrc/tage fields).
+    let mut sync_src: &str = "none";
+    let mut last_sync = Instant::now();
 
     loop {
         let touch_held = touch_int.is_low();
@@ -677,6 +682,7 @@ async fn main(_spawner: Spawner) -> ! {
                 {
                     Ok(Ok(_)) => {
                         println!("[WIFI] connected");
+                        wifi_connect_attempts = 0;
                         wifi_connected = true;
                         watchface.wifi_connected = true;
                         watchface.force_redraw();
@@ -688,23 +694,30 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         // NTP happens from the main loop once DHCP lands.
                     }
-                    Ok(Err(e)) => {
-                        println!("[WIFI] connect error: {e:?}");
-                        wifi_on_request = false;
-                        watchface.wifi_connected = false;
-                        watchface.force_redraw();
-                        page_dirty = true;
-                        if settings_connect_pending {
-                            settings_app.wifi_state = crate::peripherals::wifi::WifiState::Error;
-                            settings_connect_pending = false;
+                    other => {
+                        // Transient hotspot errors (AuthenticationExpired etc.)
+                        // are common - retry a few times before giving up.
+                        wifi_connect_attempts += 1;
+                        match other {
+                            Ok(Err(e)) => println!(
+                                "[WIFI] connect error (attempt {wifi_connect_attempts}/3): {e:?}"
+                            ),
+                            _ => println!(
+                                "[WIFI] connect timeout (attempt {wifi_connect_attempts}/3)"
+                            ),
                         }
-                    }
-                    _ => {
-                        println!("[WIFI] connect timeout (15s)");
-                        wifi_on_request = false;
-                        watchface.wifi_connected = false;
-                        watchface.force_redraw();
-                        page_dirty = true;
+                        if wifi_connect_attempts >= 3 {
+                            wifi_connect_attempts = 0;
+                            wifi_on_request = false;
+                            watchface.wifi_connected = false;
+                            watchface.force_redraw();
+                            page_dirty = true;
+                            if settings_connect_pending {
+                                settings_app.wifi_state =
+                                    crate::peripherals::wifi::WifiState::Error;
+                                settings_connect_pending = false;
+                            }
+                        }
                     }
                 }
             }
@@ -746,6 +759,8 @@ async fn main(_spawner: Spawner) -> ! {
             if stack.config_v4().is_some() {
                 if let Ok(unix) = ntp_sync(stack, &mut rtc).await {
                     ntp_synced = true;
+                    sync_src = "ntp";
+                    last_sync = now;
                     mesh.set_time_authoritative(unix, now.as_secs());
                     println!("[NTP] synced - RTC set, mesh authority claimed");
                     wifi_on_request = false; // WiFi burst complete
@@ -799,6 +814,28 @@ async fn main(_spawner: Spawner) -> ! {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
                 mesh.tick(&mut esp_now, now_ms, uptime_secs);
+                // DIAG record every 60s: full field set in spec order (the HA
+                // dashboard parses positionally), zeros where the watch has
+                // no equivalent counter yet.
+                if now >= next_diag {
+                    let mut rec: heapless::String<240> = heapless::String::new();
+                    use core::fmt::Write as _;
+                    let tage = if sync_src == "none" { 0 } else { (now - last_sync).as_secs() };
+                    let _ = write!(
+                        rec,
+                        "DIAG|slot=ota_0|rst=unknown|boot=0|ota=none|up={}|heap={}|hmin=0\
+                         |btn=0|btnl=0|fok=0|ffl=0|vok=0|vfl=0|loss=0|rtt=0|rx={}|tx=0\
+                         |led=off:off|tage={}|tsrc={}|net=0:ok|brk=baked|otah=slot\
+                         |fwd=0|dedup=0|ttl=0|hop=1|dlseq=0|dfwd=0",
+                        uptime_secs,
+                        esp_alloc::HEAP.free(),
+                        mesh.other_frames_heard,
+                        tage,
+                        sync_src,
+                    );
+                    mesh.broadcast_diag(&mut esp_now, rec.as_bytes());
+                    next_diag = now + Duration::from_secs(60);
+                }
                 while let Some(rx) = esp_now.receive() {
                     if let Some(MeshEvent::TimeAdopted { unix, from_id }) = mesh.handle_rx(
                         &mut esp_now,
@@ -808,6 +845,8 @@ async fn main(_spawner: Spawner) -> ! {
                         uptime_secs,
                     ) {
                         let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
+                        sync_src = "mesh";
+                        last_sync = now;
                         println!(
                             "[MESH] RTC set from mesh (id{from_id}): {h:02}:{m:02}:{s:02}"
                         );
