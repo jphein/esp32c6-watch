@@ -1,0 +1,9 @@
+[package]
+name = "rssi"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std RSSI smoothing (EWMA) + proximity mapping for roster/hunt/finder screens. Host-unit-testable; no esp-hal deps. Ported from smol clock/src/rssi.rs."
+license = "MIT OR Apache-2.0"
+
+# Pure logic — no dependencies (core only).
+[dependencies]
