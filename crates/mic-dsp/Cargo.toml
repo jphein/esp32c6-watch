@@ -1,0 +1,11 @@
+[package]
+name = "mic-dsp"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std DSP for the watch mic sound-level meter (RMS -> dBFS). Host-unit-testable; no esp-hal deps."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# no_std sqrt/log10 that also builds on the host — keeps the module identical
+# on the riscv target and under `cargo test`.
+libm = "0.2"
