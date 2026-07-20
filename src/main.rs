@@ -589,6 +589,10 @@ async fn main(_spawner: Spawner) -> ! {
     // AOD repaints only when the minute changes; 99 is a sentinel that forces
     // the first paint on AOD entry (any real minute 0..=59 differs).
     let mut aod_last_minute: u8 = 99;
+    // Wall-clock (PCF85063) seconds-of-day captured at AOD entry. The AOD->off
+    // timeout is driven from this, NOT embassy-time, because embassy-time freezes
+    // during light sleep (#29 DS1).
+    let mut aod_entry_sod: u32 = 0;
     // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
     let mut prev_fam = FamUi::default();
     // Last pushed step count, cached so the shell can be re-populated after a
@@ -732,6 +736,12 @@ async fn main(_spawner: Spawner) -> ! {
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+            // embassy-time froze during sleep, so the loop's next_rtc gate won't
+            // refresh last_dt — force a read now so the AOD minute repaint and the
+            // wall-clock AOD->off (below) both see the real time (#29 DS1).
+            if let Ok(dt) = rtc.get_time() {
+                last_dt = Some(dt);
+            }
             println!(
                 "[AOD-SLEEP] woke cause={:?} embassy_lag_ms={}",
                 cause,
@@ -863,6 +873,24 @@ async fn main(_spawner: Spawner) -> ! {
             }
         }
         let idle_secs = (now - last_interaction).as_secs();
+        // AOD (light sleep) freezes embassy-time, so idle_secs stalls at ~15 and
+        // the 180s->off below can never fire from it. Drive the AOD->off from the
+        // external PCF85063 wall clock: 165 s in AOD == 180 s total idle (AOD is
+        // entered at the 15 s mark). sod wrap is handled mod 86_400 (#29 DS1).
+        if screen_state == 1 {
+            if let Some(dt) = last_dt.as_ref() {
+                let sod_now =
+                    dt.hours as u32 * 3600 + dt.minutes as u32 * 60 + dt.seconds as u32;
+                let aod_real = (sod_now + 86_400 - aod_entry_sod) % 86_400;
+                if aod_real >= 165 {
+                    display.set_brightness(0x00);
+                    display.display_off();
+                    screen_state = 0;
+                    shell.set_aod(false);
+                    println!("[AOD-SLEEP] {}s real in AOD -> screen off", aod_real);
+                }
+            }
+        }
         if idle_secs >= 180 && screen_state > 0 {
             display.set_brightness(0x00);
             display.display_off();
@@ -875,6 +903,11 @@ async fn main(_spawner: Spawner) -> ! {
                 // Force the first AOD repaint next iteration (99 != any minute)
                 // so the dim overlay appears immediately, not at the next flip.
                 aod_last_minute = 99;
+                // Stamp the wall-clock AOD-entry time for the sleep-safe timeout.
+                if let Some(dt) = last_dt.as_ref() {
+                    aod_entry_sod =
+                        dt.hours as u32 * 3600 + dt.minutes as u32 * 60 + dt.seconds as u32;
+                }
             } else {
                 display.set_brightness(0x00);
                 display.display_off();
