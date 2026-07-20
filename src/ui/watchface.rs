@@ -45,6 +45,13 @@ const BATTERY_REGION_H: i32 = 52;
 // Mesh status indicator (top-right, mirrors the wifi/ble icons top-left)
 const MESH_X: i32 = 300;
 const MESH_Y: i32 = 10;
+
+// Mesh Familiar (fleet #57) — creature nook, right of the gyro circle.
+const FAM_CX: i32 = 330;
+const FAM_CY: i32 = 372;
+const FAM_BODY_R: i32 = 26;
+const FAM_BAR_W: i32 = 44;
+const FAM_BAR_H: i32 = 8;
 const GYRO_CX: i32 = 205;
 const GYRO_CY: i32 = 370;
 const GYRO_R: i32 = 50;
@@ -116,6 +123,23 @@ pub struct RenderOutcome {
     pub battery_region: Option<FlushRegion>,
     pub gyro_region: Option<FlushRegion>,
     pub mesh_region: Option<FlushRegion>,
+    pub fam_region: Option<FlushRegion>,
+}
+
+/// Render snapshot of the Mesh Familiar (fleet #57) for the watchface.
+/// `mood` uses the wire tokens (0 idle, 1 happy, 2 hungry, 3 sleeping);
+/// `hunger` is 0 full / 1 peckish / 2 hungry. Compared whole for dirty
+/// tracking, mirroring the `mesh_peers`/`mesh_drawn` pattern.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct FamUi {
+    /// A familiar exists somewhere on the mesh (heard or hosted).
+    pub known: bool,
+    /// This watch is the current holder — draw the live creature.
+    pub holding: bool,
+    pub mood: u8,
+    pub hunger: u8,
+    /// Growth stage 0..=3 (egg/hatchling/juvenile/adult) — scales the body.
+    pub stage: u8,
 }
 
 pub struct WatchFace {
@@ -137,6 +161,10 @@ pub struct WatchFace {
     pub mesh_peers: u8,
     /// Last peer count actually drawn, for dirty tracking.
     mesh_drawn: u8,
+    /// Mesh Familiar snapshot (fleet #57). Holder → creature, else pointer dot.
+    pub fam: FamUi,
+    /// Last familiar state actually drawn, for dirty tracking.
+    fam_drawn: FamUi,
 }
 
 impl WatchFace {
@@ -155,6 +183,8 @@ impl WatchFace {
             cpu_mhz: 160,
             mesh_peers: 0,
             mesh_drawn: 0,
+            fam: FamUi::default(),
+            fam_drawn: FamUi::default(),
         }
     }
 
@@ -515,6 +545,7 @@ impl WatchFace {
             || self.battery_changed
             || self.gyro_changed
             || self.mesh_peers != self.mesh_drawn
+            || self.fam != self.fam_drawn
     }
 
     /// Draw the big HH:MM (logisoso92) with small seconds (logisoso24)
@@ -589,6 +620,89 @@ impl WatchFace {
 
     pub fn mesh_region() -> FlushRegion {
         FlushRegion::new(MESH_X - 4, MESH_Y - 8, 70, 30)
+    }
+
+    /// Draw the Mesh Familiar nook.
+    ///
+    /// Holding: the live creature — a filled body circle (color keyed by
+    /// mood), two eyes (open squares; closed lines when sleeping, drooped
+    /// when hungry) and a hunger bar underneath. Not holding but known: a
+    /// small "away" pointer dot (the Weasley-clock hand, minimal form).
+    /// Unknown: nothing.
+    fn draw_familiar<D: DrawTarget<Color = Rgb565>>(d: &mut D, f: FamUi) -> Result<(), D::Error> {
+        if !f.known {
+            return Ok(());
+        }
+
+        if !f.holding {
+            // Away: a small dim dot inside a thin ring — "it lives elsewhere".
+            Circle::new(Point::new(FAM_CX - 8, FAM_CY - 8), 16)
+                .into_styled(PrimitiveStyle::with_stroke(Rgb565::new(8, 16, 8), 1))
+                .draw(d)?;
+            Circle::new(Point::new(FAM_CX - 3, FAM_CY - 3), 6)
+                .into_styled(PrimitiveStyle::with_fill(Rgb565::new(12, 24, 12)))
+                .draw(d)?;
+            return Ok(());
+        }
+
+        // Body color by mood (wire tokens: 0 idle, 1 happy, 2 hungry, 3 sleep).
+        let body = match f.mood {
+            1 => Rgb565::new(31, 52, 8),  // happy — warm gold
+            2 => Rgb565::new(28, 32, 4),  // hungry — orange
+            3 => Rgb565::new(6, 14, 18),  // sleeping — dim blue
+            _ => Rgb565::new(10, 42, 14), // idle — soft green
+        };
+        // Body radius grows with stage (egg → adult), like the reference.
+        let br = match f.stage {
+            0 => 12,
+            1 => 17,
+            2 => 22,
+            _ => FAM_BODY_R,
+        };
+        Circle::new(Point::new(FAM_CX - br, FAM_CY - br), (br * 2) as u32)
+            .into_styled(PrimitiveStyle::with_fill(body))
+            .draw(d)?;
+
+        // Eyes: dark holes in the body. Sleeping → closed lines; hungry →
+        // drooped a few px (the reference creature's droopy-eye idiom).
+        let eye_y = FAM_CY - br / 3 + if f.mood == 2 { 3 } else { 0 };
+        for &ex in &[FAM_CX - br / 2, FAM_CX + br / 2] {
+            if f.mood == 3 {
+                Rectangle::new(Point::new(ex - 4, eye_y + 2), Size::new(8, 2))
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+                    .draw(d)?;
+            } else {
+                Rectangle::new(Point::new(ex - 3, eye_y), Size::new(6, 6))
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+                    .draw(d)?;
+            }
+        }
+
+        // Hunger bar under the body: full/2-3/1-3 fill, green→yellow→red.
+        let bar_x = FAM_CX - FAM_BAR_W / 2;
+        let bar_y = FAM_CY + FAM_BODY_R + 8;
+        Rectangle::new(
+            Point::new(bar_x, bar_y),
+            Size::new(FAM_BAR_W as u32, FAM_BAR_H as u32),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::CSS_GRAY, 1))
+        .draw(d)?;
+        let (fill_w, fill_c) = match f.hunger {
+            0 => (FAM_BAR_W - 4, Rgb565::GREEN),
+            1 => ((FAM_BAR_W - 4) * 2 / 3, Rgb565::YELLOW),
+            _ => ((FAM_BAR_W - 4) / 3, Rgb565::RED),
+        };
+        Rectangle::new(
+            Point::new(bar_x + 2, bar_y + 2),
+            Size::new(fill_w as u32, (FAM_BAR_H - 4) as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(fill_c))
+        .draw(d)?;
+        Ok(())
+    }
+
+    pub fn fam_region() -> FlushRegion {
+        FlushRegion::new(FAM_CX - FAM_BODY_R - 4, FAM_CY - FAM_BODY_R - 4, 60, 76)
     }
 
     /// Always-On-Display renderer.
@@ -684,6 +798,10 @@ impl WatchFace {
             // Mesh indicator (top-right): always drawn, greyed out when 0 peers
             Self::draw_mesh_indicator(d, self.mesh_peers)?;
             self.mesh_drawn = self.mesh_peers;
+
+            // Mesh Familiar nook (creature when holding, pointer dot when away)
+            Self::draw_familiar(d, self.fam)?;
+            self.fam_drawn = self.fam;
 
             // === BLE toggle (above WiFi) ===
             Self::draw_ble_toggle(d, self.ble_on)?;
@@ -785,6 +903,18 @@ impl WatchFace {
             Self::draw_mesh_indicator(d, self.mesh_peers)?;
             self.mesh_drawn = self.mesh_peers;
             outcome.mesh_region = Some(Self::mesh_region());
+        }
+
+        if self.fam != self.fam_drawn {
+            Rectangle::new(
+                Point::new(Self::fam_region().x as i32, Self::fam_region().y as i32),
+                Size::new(Self::fam_region().w as u32, Self::fam_region().h as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(d)?;
+            Self::draw_familiar(d, self.fam)?;
+            self.fam_drawn = self.fam;
+            outcome.fam_region = Some(Self::fam_region());
         }
 
         Ok(outcome)
