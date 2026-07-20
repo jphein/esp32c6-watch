@@ -813,6 +813,10 @@ async fn main(_spawner: Spawner) -> ! {
                     last_sync = now;
                     mesh.set_time_authoritative(unix, now.as_secs());
                     println!("[NTP] synced - RTC set, mesh authority claimed");
+                    // MQTT burst to Home Assistant while the WiFi window is
+                    // still open. Fire-and-forget: logs and moves on after at
+                    // most ~5s; never blocks the boot/NTP/mesh flow.
+                    crate::net::mqtt_ha::publish_burst(stack, batt_pct).await;
                     wifi_on_request = false; // WiFi burst complete
                 } else {
                     println!("[NTP] failed, retrying in 10s");
