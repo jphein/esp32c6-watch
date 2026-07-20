@@ -1,0 +1,92 @@
+// Slint watchface for the Waveshare ESP32-C6-Touch-AMOLED-2.06 (410x502).
+// Rendered by the Slint software renderer line-by-line to the CO5300 panel.
+
+export component WatchFace inherits Window {
+    width: 410px;
+    height: 502px;
+    background: #000000;
+
+    in property <string> time-text: "--:--";
+    in property <string> seconds-text: "--";
+    in property <string> date-text: "SYNCING RTC";
+    // 0.0 .. 1.0, how far into the current minute we are
+    in property <float> minute-progress: 0.0;
+
+    // Ambient AMOLED-friendly gradient (mostly true black)
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        background: @linear-gradient(155deg, #140b2e 0%, #000000 40%, #000000 72%, #002733 100%);
+    }
+
+    // Top date pill
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 56px;
+        width: date.width + 44px;
+        height: 42px;
+        border-radius: 21px;
+        border-width: 1px;
+        border-color: #2a3550;
+        background: #101728;
+
+        date := Text {
+            x: 22px;
+            y: (parent.height - self.height) / 2;
+            text: root.date-text;
+            color: #9fb4d8;
+            font-size: 19px;
+            letter-spacing: 2px;
+        }
+    }
+
+    // Big clock digits
+    time := Text {
+        x: (parent.width - self.width) / 2;
+        y: 148px;
+        text: root.time-text;
+        color: #f2f5ff;
+        font-size: 108px;
+        font-weight: 700;
+    }
+
+    // Seconds, accent colored
+    secs := Text {
+        x: (parent.width - self.width) / 2;
+        y: 292px;
+        text: root.seconds-text;
+        color: #35e0b0;
+        font-size: 40px;
+        font-weight: 600;
+    }
+
+    // Minute progress track + fill
+    track := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 372px;
+        width: 300px;
+        height: 10px;
+        border-radius: 5px;
+        background: #16202f;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: max(10px, track.width * root.minute-progress);
+            height: parent.height;
+            border-radius: 5px;
+            background: @linear-gradient(90deg, #3a7bd5 0%, #35e0b0 100%);
+            animate width { duration: 350ms; easing: ease-out; }
+        }
+    }
+
+    // Footer caption
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 432px;
+        text: "SLINT \u{00b7} ESP32-C6";
+        color: #55617a;
+        font-size: 17px;
+        letter-spacing: 3px;
+    }
+}

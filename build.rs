@@ -2,6 +2,13 @@ fn main() {
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+
+    // Slint UI for the `slint-demo` binary: compile the .slint file with
+    // resources (fonts/images) pre-rendered for the no_std software renderer.
+    let slint_config = slint_build::CompilerConfiguration::new()
+        .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer);
+    slint_build::compile_with_config("src/bin/watchface.slint", slint_config)
+        .expect("failed to compile src/bin/watchface.slint");
 }
 
 fn linker_be_nice() {
