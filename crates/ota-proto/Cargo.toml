@@ -1,0 +1,15 @@
+[package]
+name = "ota-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std mesh-OTA protocol core: OTAM/OTAD/OTAN frame parse/encode, ed25519 signed-manifest verify, anti-rollback freshness gate, windowed-NAK masks. Adversarial (parses untrusted mesh frames). Host-testable. Ported from smol clock/src/{ota,ota_mesh}.rs."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+ed25519-compact = { version = "2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+# Host tests: full ed25519-compact (Seed/KeyPair) to sign a message deterministically
+# and verify it through our key-overridable verify path — no private key needed.
+[dev-dependencies]
+ed25519-compact = { version = "2" }
