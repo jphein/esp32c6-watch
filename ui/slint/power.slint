@@ -69,16 +69,30 @@ export component PowerPage {
             : (root.total-ma < 120 ? Theme.warm : Theme.warn);
     }
 
-    // Runtime estimates: theoretical 100%→0% plus remaining at the current
-    // battery level, colored by the old page's LEFT thresholds (<2h/<6h).
-    StatRow {
+    // Runtime estimate: theoretical 100%→0% plus remaining at the current
+    // battery level, colored by the LEFT thresholds (<2h/<6h). The value
+    // ("100%: 4h · left: ~3h", worst case "100%: 12h · left: ~10h") is far too
+    // long to sit beside a label at StatRow's right-anchored 22px value — it ran
+    // left across the "RUNTIME" label. So it gets its own stacked cell (dim
+    // label above, full-width value below), matching the PowerCell idiom of the
+    // grid: the string now owns the whole 340px line with no label to collide
+    // with. Sits between TOTAL (ends ~289) and the BRIGHTNESS label (y336).
+    Rectangle {
         x: (parent.width - 340px) / 2;
         y: 294px;
-        width: 340px; height: 30px;
-        label: "RUNTIME";
-        value: root.runtime-text;
-        value-color: root.left-hours < 2 ? Theme.warn
-            : (root.left-hours < 6 ? Theme.warm : Theme.accent);
+        width: 340px; height: 40px;
+        Text {
+            x: 0; y: 0;
+            text: "RUNTIME";
+            color: Theme.dim; font-size: 13px; letter-spacing: 2px;
+        }
+        Text {
+            x: 0; y: 17px;
+            text: root.runtime-text;
+            color: root.left-hours < 2 ? Theme.warn
+                : (root.left-hours < 6 ? Theme.warm : Theme.accent);
+            font-size: 17px; font-weight: 600;
+        }
     }
 
     // Brightness slider — custom control (Slint has no built-in Slider in this
