@@ -4,24 +4,47 @@ use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Circle, PrimitiveStyle, Rectangle, RoundedRectangle};
+use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle};
 use embedded_graphics::text::{Alignment, Text};
+use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use u8g2_fonts::{fonts, FontRenderer};
 
 use crate::board;
-use crate::ui::segments;
+
+/// Big clock digits: Logisoso 92px, numeric-only ("HH:MM" is 257x92 px).
+const TIME_FONT: FontRenderer = FontRenderer::new::<fonts::u8g2_font_logisoso92_tn>();
+/// Medium numeric font: seconds + date line (Logisoso 24px, has ':' and '/').
+const MED_FONT: FontRenderer = FontRenderer::new::<fonts::u8g2_font_logisoso24_tn>();
+/// Bold text font for battery percentage etc. (Helvetica Bold 18px, full charset).
+const TEXT_FONT: FontRenderer = FontRenderer::new::<fonts::u8g2_font_helvB18_tf>();
+
+/// Unwrap a u8g2 render error into the underlying display error.
+/// We only render with `FontColor::Transparent` and ASCII the fonts contain,
+/// so the only reachable variant is `DisplayError`.
+fn font_err<E>(e: u8g2_fonts::Error<E>) -> E {
+    match e {
+        u8g2_fonts::Error::DisplayError(e) => e,
+        _ => unreachable!(),
+    }
+}
 
 const SCREEN_CX: i32 = board::LCD_WIDTH as i32 / 2;
-const TIME_Y: i32 = 60;
-const TIME_DW: i32 = 36;
-const TIME_DH: i32 = 64;
-const TIME_GAP: i32 = 6;
-const TIME_CW: i32 = 14;
-const TIME_TOTAL_W: i32 = 6 * TIME_DW + 2 * TIME_CW + 7 * TIME_GAP;
+const TIME_Y: i32 = 44; // top of the big digits
+const TIME_H: i32 = 92; // logisoso92 glyph height
+const SECONDS_H: i32 = 24; // logisoso24 glyph height
+// Region covers the widest "HH:MM" (257px centered) plus the small seconds
+// hanging off the right edge (10px gap + 27px digits).
+const TIME_REGION_X: i32 = SCREEN_CX - 134;
+const TIME_REGION_W: i32 = 134 + 134 + 10 + 27 + 5;
 const TIME_PAD: i32 = 4;
 const BATTERY_Y: i32 = 175;
 const BATTERY_PAD_Y: i32 = 4;
 const BATTERY_REGION_W: i32 = 240;
-const BATTERY_REGION_H: i32 = 92;
+const BATTERY_REGION_H: i32 = 52;
+
+// Mesh status indicator (top-right, mirrors the wifi/ble icons top-left)
+const MESH_X: i32 = 300;
+const MESH_Y: i32 = 10;
 const GYRO_CX: i32 = 205;
 const GYRO_CY: i32 = 370;
 const GYRO_R: i32 = 50;
@@ -92,6 +115,7 @@ pub struct RenderOutcome {
     pub time_region: Option<FlushRegion>,
     pub battery_region: Option<FlushRegion>,
     pub gyro_region: Option<FlushRegion>,
+    pub mesh_region: Option<FlushRegion>,
 }
 
 pub struct WatchFace {
@@ -109,6 +133,10 @@ pub struct WatchFace {
     /// CPU frequency in MHz. Cycles through 80/160/240 on tap.
     /// Only takes effect on next reboot (esp-hal doesn't expose runtime DVFS).
     pub cpu_mhz: u16,
+    /// Number of SMOLv1 mesh peers currently heard. 0 = greyed-out indicator.
+    pub mesh_peers: u8,
+    /// Last peer count actually drawn, for dirty tracking.
+    mesh_drawn: u8,
 }
 
 impl WatchFace {
@@ -125,6 +153,8 @@ impl WatchFace {
             gyro_enabled: false, // off by default to save battery
             brightness: 0xA0,   // default ~63%
             cpu_mhz: 160,
+            mesh_peers: 0,
+            mesh_drawn: 0,
         }
     }
 
@@ -480,7 +510,85 @@ impl WatchFace {
     }
 
     pub fn needs_render(&self) -> bool {
-        self.full_redraw || self.time_changed || self.battery_changed || self.gyro_changed
+        self.full_redraw
+            || self.time_changed
+            || self.battery_changed
+            || self.gyro_changed
+            || self.mesh_peers != self.mesh_drawn
+    }
+
+    /// Draw the big HH:MM (logisoso92) with small seconds (logisoso24)
+    /// bottom-aligned to the right of the digits.
+    fn draw_time_block<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) -> Result<(), D::Error> {
+        let mut buf = [0u8; 5];
+        let hhmm = fmt_hhmm(&mut buf, self.hours, self.minutes);
+        let bb = TIME_FONT
+            .render_aligned(
+                hhmm,
+                Point::new(SCREEN_CX, TIME_Y),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::WHITE),
+                d,
+            )
+            .map_err(font_err)?;
+        // Seconds tucked against the right edge of the big digits.
+        let right = bb
+            .map(|r| r.top_left.x + r.size.width as i32)
+            .unwrap_or(SCREEN_CX + 129);
+        let mut sbuf = [0u8; 2];
+        let ss = fmt_ss(&mut sbuf, self.seconds);
+        MED_FONT
+            .render_aligned(
+                ss,
+                Point::new(right + 10, TIME_Y + TIME_H - SECONDS_H),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Rgb565::CSS_GRAY),
+                d,
+            )
+            .map_err(font_err)?;
+        Ok(())
+    }
+
+    /// Small mesh network glyph (3 linked nodes) + peer count, top-right.
+    /// Greyed out when no peers, green when the mesh is alive.
+    fn draw_mesh_indicator<D: DrawTarget<Color = Rgb565>>(
+        d: &mut D,
+        peers: u8,
+    ) -> Result<(), D::Error> {
+        let color = if peers > 0 {
+            Rgb565::GREEN
+        } else {
+            Rgb565::new(8, 16, 8) // flat mid-grey, RGB332-safe
+        };
+        let x = MESH_X;
+        let y = MESH_Y;
+        let node = |dx: i32, dy: i32| {
+            Rectangle::new(Point::new(x + dx, y + dy), Size::new(4, 4))
+                .into_styled(PrimitiveStyle::with_fill(color))
+        };
+        let link = |x0: i32, y0: i32, x1: i32, y1: i32| {
+            Line::new(Point::new(x + x0, y + y0), Point::new(x + x1, y + y1))
+                .into_styled(PrimitiveStyle::with_stroke(color, 1))
+        };
+        // Links between node centers first, nodes drawn on top.
+        link(8, 2, 2, 13).draw(d)?;
+        link(8, 2, 14, 13).draw(d)?;
+        link(2, 13, 14, 13).draw(d)?;
+        node(6, 0).draw(d)?;
+        node(0, 11).draw(d)?;
+        node(12, 11).draw(d)?;
+        // Peer count
+        let mut buf = [0u8; 3];
+        let s = fmt_u8(&mut buf, peers);
+        let st = MonoTextStyle::new(&FONT_10X20, color);
+        Text::new(s, Point::new(x + 22, y + 14), st).draw(d)?;
+        Ok(())
+    }
+
+    pub fn mesh_region() -> FlushRegion {
+        FlushRegion::new(MESH_X - 4, MESH_Y - 8, 70, 30)
     }
 
     /// Always-On-Display renderer.
@@ -504,22 +612,39 @@ impl WatchFace {
         let shift_y = ((self.minutes as i32 / 9) % 9) - 4;
 
         let cx = SCREEN_CX + shift_x;
-        let cy = h / 2 - 32 + shift_y;
+        let cy = h / 2 - TIME_H / 2 + shift_y;
 
         // HH:MM only (no seconds, no extra widgets).
-        // We use a slightly dimmed white (CSS_LIGHT_GRAY = ~0.8 brightness) to further reduce power
+        // We use a slightly dimmed white (~50% gray) to further reduce power
         // because each AMOLED sub-pixel scales current with luminance.
-        let dim_white = Rgb565::new(20, 40, 20); // ~50% gray, looks white-ish on AMOLED but uses ~half the current
+        let dim_white = Rgb565::new(20, 40, 20);
 
-        // Draw HH:MM using the segment renderer. Pass 99 for seconds to indicate "skip seconds".
-        // The segments::draw_time function draws all 8 chars; we'll use a custom call.
-        segments::draw_hhmm(d, cx, cy, self.hours, self.minutes, dim_white, Rgb565::BLACK)?;
+        let mut buf = [0u8; 5];
+        let hhmm = fmt_hhmm(&mut buf, self.hours, self.minutes);
+        TIME_FONT
+            .render_aligned(
+                hhmm,
+                Point::new(cx, cy),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(dim_white),
+                d,
+            )
+            .map_err(font_err)?;
 
-        // Tiny battery indicator at the bottom (3 chars max: "99%")
-        let mut buf = [0u8; 4];
-        let s = fmt_bat_short(&mut buf, self.battery_percent);
-        let style = MonoTextStyle::new(&FONT_10X20, Rgb565::new(8, 16, 8));
-        Text::with_alignment(s, Point::new(cx, cy + 110), style, Alignment::Center).draw(d)?;
+        // Tiny battery indicator at the bottom (4 chars max: "100%")
+        let mut bbuf = [0u8; 4];
+        let s = fmt_bat_short(&mut bbuf, self.battery_percent);
+        TEXT_FONT
+            .render_aligned(
+                s,
+                Point::new(cx, cy + TIME_H + 18),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::new(8, 16, 8)),
+                d,
+            )
+            .map_err(font_err)?;
 
         // Reset dirty flags so the normal renderer does a full redraw on wake.
         self.full_redraw = true;
@@ -530,7 +655,7 @@ impl WatchFace {
     }
 
     pub fn render<D: DrawTarget<Color = Rgb565>>(&mut self, d: &mut D) -> Result<RenderOutcome, D::Error> {
-        if !self.full_redraw && !self.time_changed && !self.battery_changed && !self.gyro_changed {
+        if !self.needs_render() {
             return Ok(RenderOutcome::default());
         }
 
@@ -556,6 +681,9 @@ impl WatchFace {
             if self.ble_on {
                 Self::draw_ble_icon(d, 96, 10, Rgb565::new(0, 16, 31))?;
             }
+            // Mesh indicator (top-right): always drawn, greyed out when 0 peers
+            Self::draw_mesh_indicator(d, self.mesh_peers)?;
+            self.mesh_drawn = self.mesh_peers;
 
             // === BLE toggle (above WiFi) ===
             Self::draw_ble_toggle(d, self.ble_on)?;
@@ -572,17 +700,25 @@ impl WatchFace {
             // Title
             Text::with_alignment("RUST WATCH", Point::new(cx, 38), cyan, Alignment::Center).draw(d)?;
 
-            // Time (y=60, 64px tall, ends at y=124)
-            segments::draw_time(d, cx, TIME_Y, self.hours, self.minutes, self.seconds,
-                Rgb565::WHITE, Rgb565::BLACK)?;
+            // Time: big HH:MM (y=44..136) + small seconds bottom-right
+            self.draw_time_block(d)?;
 
-            // Date FR under time
+            // Date under time (logisoso24, digits + '/')
             let mut date_buf = [0u8; 12];
             let ds = fmt_date_fr(&mut date_buf, self.day, self.month, self.year);
-            Text::with_alignment(ds, Point::new(cx, 150), dim, Alignment::Center).draw(d)?;
+            MED_FONT
+                .render_aligned(
+                    ds,
+                    Point::new(cx, 144),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Rgb565::CSS_GRAY),
+                    d,
+                )
+                .map_err(font_err)?;
 
             // Battery bar + percentage (more space below date)
-            self.draw_battery(d, cx, 175)?;
+            self.draw_battery(d, cx, BATTERY_Y)?;
 
             // Gyro section (only when enabled)
             if self.gyro_enabled {
@@ -617,8 +753,7 @@ impl WatchFace {
             )
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(d)?;
-            segments::draw_time(d, cx, TIME_Y, self.hours, self.minutes, self.seconds,
-                Rgb565::WHITE, Rgb565::BLACK)?;
+            self.draw_time_block(d)?;
             self.time_changed = false;
             outcome.time_region = Some(Self::time_region());
         }
@@ -638,6 +773,18 @@ impl WatchFace {
         if self.gyro_changed && self.gyro_enabled {
             outcome.gyro_region = self.draw_gyro_ball(d)?;
             self.gyro_changed = false;
+        }
+
+        if self.mesh_peers != self.mesh_drawn {
+            Rectangle::new(
+                Point::new(Self::mesh_region().x as i32, Self::mesh_region().y as i32),
+                Size::new(Self::mesh_region().w as u32, Self::mesh_region().h as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(d)?;
+            Self::draw_mesh_indicator(d, self.mesh_peers)?;
+            self.mesh_drawn = self.mesh_peers;
+            outcome.mesh_region = Some(Self::mesh_region());
         }
 
         Ok(outcome)
@@ -689,21 +836,26 @@ impl WatchFace {
 
         let mut buf = [0u8; 16];
         let s = fmt_batt(&mut buf, self.battery_percent, self.is_charging);
-        let st = if self.is_charging {
-            MonoTextStyle::new(&FONT_10X20, Rgb565::GREEN)
-        } else {
-            MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE)
-        };
-        Text::with_alignment(s, Point::new(cx, y + bh + 25), st, Alignment::Center).draw(d)?;
+        let color = if self.is_charging { Rgb565::GREEN } else { Rgb565::WHITE };
+        TEXT_FONT
+            .render_aligned(
+                s,
+                Point::new(cx, y + bh + 8),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(color),
+                d,
+            )
+            .map_err(font_err)?;
         Ok(())
     }
 
     pub fn time_region() -> FlushRegion {
         FlushRegion::new(
-            SCREEN_CX - TIME_TOTAL_W / 2 - TIME_PAD,
+            TIME_REGION_X - TIME_PAD,
             TIME_Y - TIME_PAD,
-            TIME_TOTAL_W + TIME_PAD * 2,
-            TIME_DH + TIME_PAD * 2,
+            TIME_REGION_W + TIME_PAD * 2,
+            TIME_H + TIME_PAD * 2,
         )
     }
 
@@ -731,6 +883,29 @@ impl WatchFace {
         let by = ((accel_x as i32) * max_off / 100).clamp(-max_off, max_off);
         (GYRO_CX + bx, GYRO_CY + by)
     }
+}
+
+fn fmt_hhmm<'a>(buf: &'a mut [u8; 5], h: u8, m: u8) -> &'a str {
+    buf[0] = b'0' + h / 10;
+    buf[1] = b'0' + h % 10;
+    buf[2] = b':';
+    buf[3] = b'0' + m / 10;
+    buf[4] = b'0' + m % 10;
+    core::str::from_utf8(buf).unwrap_or("??:??")
+}
+
+fn fmt_ss<'a>(buf: &'a mut [u8; 2], s: u8) -> &'a str {
+    buf[0] = b'0' + s / 10;
+    buf[1] = b'0' + s % 10;
+    core::str::from_utf8(buf).unwrap_or("??")
+}
+
+fn fmt_u8<'a>(buf: &'a mut [u8; 3], v: u8) -> &'a str {
+    let mut p = 0;
+    if v >= 100 { buf[p] = b'0' + v / 100; p += 1; }
+    if v >= 10 { buf[p] = b'0' + (v / 10) % 10; p += 1; }
+    buf[p] = b'0' + v % 10; p += 1;
+    core::str::from_utf8(&buf[..p]).unwrap_or("?")
 }
 
 fn fmt_mhz_short<'a>(buf: &'a mut [u8; 5], mhz: u16) -> &'a str {
@@ -779,12 +954,3 @@ fn fmt_bat_short<'a>(buf: &'a mut [u8; 4], pct: u8) -> &'a str {
     core::str::from_utf8(&buf[..p]).unwrap_or("?%")
 }
 
-fn fmt_mv<'a>(buf: &'a mut [u8; 12], mv: u16) -> &'a str {
-    let mut p = 0;
-    if mv >= 1000 { buf[p]=b'0'+(mv/1000) as u8; p+=1; }
-    buf[p]=b'0'+((mv/100)%10) as u8; p+=1;
-    buf[p]=b'0'+((mv/10)%10) as u8; p+=1;
-    buf[p]=b'0'+(mv%10) as u8; p+=1;
-    for &c in b"mV" { buf[p]=c; p+=1; }
-    core::str::from_utf8(&buf[..p]).unwrap_or("????mV")
-}

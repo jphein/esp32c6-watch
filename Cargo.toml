@@ -75,6 +75,7 @@ embedded-graphics-core = "0.4"
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3.0"
 heapless = "0.9"
+u8g2-fonts = "0.8.0"
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
