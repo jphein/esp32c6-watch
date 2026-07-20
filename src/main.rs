@@ -163,6 +163,29 @@ fn page_scr_name(page: i32) -> &'static str {
     }
 }
 
+/// Log per-region free heap at boot / app-enter. The framebuffer must come from
+/// ONE region, so total-free (HEAP.free()) can read fine while the main region
+/// alone is short. region_stats[0] = main (240KB pool), [1] = reclaimed (56KB).
+/// `need` is the half-res fb footprint (205*251) so a launch log shows the
+/// margin at a glance.
+fn log_heap(tag: &str) {
+    let stats = esp_alloc::HEAP.stats();
+    let region_free = |i: usize| {
+        stats.region_stats[i]
+            .as_ref()
+            .map(|r| r.free)
+            .unwrap_or(0)
+    };
+    println!(
+        "[HEAP] {}: main_free={} recl_free={} total_free={} need={}",
+        tag,
+        region_free(0),
+        region_free(1),
+        esp_alloc::HEAP.free(),
+        (410usize / 2) * (502usize / 2),
+    );
+}
+
 /// CFG key `R` boot debounce (reference main.rs REBOOT_DEBOUNCE_MS): within
 /// this window a retained/re-armed reboot command is consumed but ignored,
 /// so a stale `R` can never reboot-loop the watch.
@@ -256,6 +279,14 @@ async fn main(_spawner: Spawner) -> ! {
     // RGB332 framebuffer (~201KB) + app allocations live here. The main heap
     // sits in regular DRAM; the small ROM-reclaimed region (~64KB) is added
     // as a second pool so nothing goes to waste.
+    // Main DRAM region, back at the original 240KB. The framebuffer is now
+    // HALF-RES (~51KB, see framebuffer.rs) instead of ~201KB, so it fits here
+    // alongside the Slint scene + WiFi + BLE + mesh with ~80KB to spare — no
+    // heap bump needed, and the full ~47KB stack is preserved (a bigger heap
+    // eats the stack, since esp-hal's `.stack` is the leftover gap under RAM
+    // top; 280KB boot-looped on the scene build). This is the durable fix for
+    // the game-launch OOM in EVERY radio state (#35), replacing the 264KB
+    // interim.
     esp_alloc::heap_allocator!(size: 240 * 1024);
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 56 * 1024);
 
@@ -322,7 +353,7 @@ async fn main(_spawner: Spawner) -> ! {
     // the Co5300 (no framebuffer) so the first shell.render lands on black.
     let mut fb: Option<Framebuffer> = None;
     display.fill_screen(Rgb565::BLACK);
-    println!("[HEAP] boot free: {}", esp_alloc::HEAP.free());
+    log_heap("boot");
 
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
     let mut touch_rst = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
@@ -579,7 +610,11 @@ async fn main(_spawner: Spawner) -> ! {
     // DEBUG: auto-enable WiFi at boot while we diagnose the connect issue,
     // so no watchface tap is needed. Revert to `false` once stable.
     let mut wifi_on_request = wifi_has_creds;
-    let mut wifi_started = false;
+    // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
+    // from WiFi credentials/association (that's `wifi_connected`). Set by either
+    // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
+    // this, so mesh no longer requires WiFi creds to run.
+    let mut radio_started = false;
     let mut wifi_scanned = false;
     let mut wifi_connected = false;
     let mut ntp_synced = false;
@@ -596,10 +631,11 @@ async fn main(_spawner: Spawner) -> ! {
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
-    // Mesh enable flag (MESH chrome dot toggles it). Off = pause the ESP-NOW
-    // tick/rx/familiar processing (a tick-level pause, not a radio teardown);
-    // the peer stays registered so re-enabling resumes instantly.
-    let mut mesh_enabled = true;
+    // Mesh enable flag (MESH chrome dot toggles it). Default OFF (power: the STA
+    // radio only comes up when mesh is turned on). Toggling ON starts the radio
+    // (below) then the ESP-NOW tick/rx/familiar run; OFF pauses the tick (peer
+    // stays registered, radio stays up — a tick-level pause, not a teardown).
+    let mut mesh_enabled = false;
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
@@ -815,14 +851,14 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         if wifi_on_request && !wifi_connected {
-            if !wifi_started && wifi_controller.set_config(&station_config).is_ok() {
+            if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
                 // Minimum PS until DHCP+NTP are done; Maximum breaks DHCP
                 // under BLE coex. Switched to Maximum after first NTP sync.
                 let _ = wifi_controller
                     .set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
-                wifi_started = true;
+                radio_started = true;
             }
-            if wifi_started {
+            if radio_started {
                 // One-time diagnostic scan: is the AP visible, on what
                 // channel, with what auth?
                 if !wifi_scanned {
@@ -940,7 +976,7 @@ async fn main(_spawner: Spawner) -> ! {
 
         // TIME-SHARE steady state: whenever WiFi is down but the radio is up,
         // pin ESP-NOW to the fleet's fixed channel. Re-pin after any WiFi use.
-        if wifi_started && !wifi_connected && !mesh_channel_pinned {
+        if radio_started && !wifi_connected && !mesh_channel_pinned {
             match esp_now.set_channel(crate::net::smol_mesh::MESH_CHANNEL) {
                 Ok(()) => {
                     mesh_channel_pinned = true;
@@ -957,7 +993,7 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         // === SMOLv1 mesh (ESP-NOW) ===
-        if wifi_started {
+        if radio_started {
             if !esp_now_peer_added {
                 let peer = esp_radio::esp_now::PeerInfo {
                     interface: esp_radio::esp_now::EspNowWifiInterface::Station,
@@ -1323,9 +1359,22 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if shell.req.mesh_toggle.take() {
                     mesh_enabled = !mesh_enabled;
-                    if !mesh_enabled {
+                    if mesh_enabled {
+                        // Bring up the STA radio for ESP-NOW if it isn't already
+                        // (creds NOT required — set_config starts the PHY without
+                        // connecting). The mesh block gates on radio_started, so
+                        // this is what actually lets the mesh come up. The channel
+                        // pin (set_channel(MESH_CHANNEL)) rides the existing path.
+                        if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
+                            let _ = wifi_controller
+                                .set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
+                            radio_started = true;
+                            println!("[MESH] STA radio started for ESP-NOW");
+                        }
+                    } else {
                         // Reflect "off" in the MESH chrome dot immediately; peers
-                        // repopulate from HELLOs once re-enabled.
+                        // repopulate from HELLOs once re-enabled. Radio stays up
+                        // (tick-level pause, not a teardown).
                         last_mesh_peers = 0;
                     }
                     println!("[MESH] toggled -> {}", if mesh_enabled { "ON" } else { "OFF" });
@@ -1370,12 +1419,13 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_toast("");
                         toast_active = false;
                     }
+                    log_heap("pre-fb pre-drop");
                     shell.suspend_scene();
-                    println!("[HEAP] scene dropped, free: {}", esp_alloc::HEAP.free());
+                    log_heap("pre-fb post-drop");
                     match Framebuffer::try_new() {
                         Some(f) => {
                             fb = Some(f);
-                            println!("[HEAP] app enter free: {}", esp_alloc::HEAP.free());
+                            log_heap("app enter");
                             // Run the SAME per-app setup the old launcher arm did
                             // (without setup the games boot into garbage).
                             match target {
@@ -1674,7 +1724,7 @@ async fn main(_spawner: Spawner) -> ! {
                                 .with_password(watch_cfg.pass.as_str().into()),
                         );
                         wifi_has_creds = true;
-                        wifi_started = false;
+                        radio_started = false;
                         wifi_connected = false;
                         ntp_synced = false;
                         wifi_on_request = true;
