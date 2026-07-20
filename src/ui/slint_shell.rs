@@ -22,6 +22,14 @@ use crate::ui::slint_platform::{init_platform, TwoLineFlusher, WIDTH};
 
 slint::include_modules!(); // WatchShell, PeerRow
 
+/// Carousel page indices — MUST match the page order in ui/slint/shell.slint.
+pub const PAGE_CLOCK: i32 = 0;
+pub const PAGE_SENSORS: i32 = 1;
+pub const PAGE_SYSTEM: i32 = 2;
+pub const PAGE_POWER: i32 = 3;
+pub const PAGE_MESH: i32 = 4;
+pub const PAGE_COUNT: i32 = PAGE_MESH + 1;
+
 const WEEKDAYS: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -176,7 +184,7 @@ impl ShellUi {
             // drags keep the normal release at last_pos. The task-9 hardware
             // gate verifies this gesture behavior.
             let slider_drag = !self.ui.get_launcher_open()
-                && self.ui.get_current_page() == 3
+                && self.ui.get_current_page() == PAGE_POWER
                 && SLIDER_BAND.contains(&swipe_start_y);
             let directional =
                 matches!(swipe, Some(d) if d != SwipeDirection::Tap) && !slider_drag;
@@ -208,18 +216,20 @@ impl ShellUi {
             // Horizontal swipes starting on the power page's brightness
             // slider are slider drags, not page switches.
             let on_slider =
-                self.ui.get_current_page() == 3 && SLIDER_BAND.contains(&swipe_start_y);
+                self.ui.get_current_page() == PAGE_POWER && SLIDER_BAND.contains(&swipe_start_y);
             if on_slider {
                 return;
             }
             match direction {
                 SwipeDirection::Left => {
-                    self.ui.set_current_page((self.ui.get_current_page() + 1).rem_euclid(5))
+                    self.ui.set_current_page((self.ui.get_current_page() + 1).rem_euclid(PAGE_COUNT))
                 }
                 SwipeDirection::Right => {
-                    self.ui.set_current_page((self.ui.get_current_page() + 4).rem_euclid(5))
+                    self.ui.set_current_page(
+                        (self.ui.get_current_page() + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT),
+                    )
                 }
-                SwipeDirection::Up if self.ui.get_current_page() == 0 => {
+                SwipeDirection::Up if self.ui.get_current_page() == PAGE_CLOCK => {
                     self.ui.set_launcher_open(true)
                 }
                 _ => {}
@@ -277,7 +287,7 @@ impl ShellUi {
     pub fn set_sensors(&self, accel: (f32, f32, f32), gyro: (i16, i16, i16), temp_dc: i16) {
         // Sensors update at 100ms; skip the 3 SharedString allocs when the page
         // isn't showing rather than relying on caller discipline.
-        if self.ui.get_current_page() != 1 { return; }
+        if self.ui.get_current_page() != PAGE_SENSORS { return; }
         self.ui.set_accel_text(slint::format!(
             "{:+.2} {:+.2} {:+.2} g", accel.0, accel.1, accel.2
         ));
@@ -291,7 +301,7 @@ impl ShellUi {
     pub fn set_system(&self, heap_free: usize, batt_pct: u8, batt_mv: u16) {
         // System page refreshes at 2s; skip the SharedString allocs when the
         // page isn't showing rather than relying on caller discipline.
-        if self.ui.get_current_page() != 2 {
+        if self.ui.get_current_page() != PAGE_SYSTEM {
             return;
         }
         self.ui.set_heap_text(slint::format!("{}k free", heap_free / 1024));
@@ -300,6 +310,47 @@ impl ShellUi {
             "{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60
         ));
         self.ui.set_battery_text(slint::format!("{}% \u{00b7} {} mV", batt_pct, batt_mv));
+    }
+
+    pub fn set_power(&self, stats: &crate::peripherals::power_stats::PowerStats) {
+        // Power page refreshes at 1s; skip the alloc churn when not showing.
+        if self.ui.get_current_page() != PAGE_POWER {
+            return;
+        }
+        use crate::peripherals::power_stats::{on_off, BATTERY_CAPACITY_MAH};
+        // Per-subsystem cells mirror the old "POWER MONITOR" read-out; all
+        // labels and mA come from PowerStats (single source of truth, shared
+        // with the legacy eg renderer until task 13 deletes it). SDCARD is
+        // omitted: the C6 board has no SD slot and main.rs never sets sd_on.
+        // cpu-text (clock chip) is untouched — the CPU cell has its own MHz.
+        self.ui.set_cpu_cell(slint::format!(
+            "{}MHz \u{00b7} {}mA", stats.cpu_mhz, stats.base_ma()
+        ));
+        self.ui.set_display_cell(slint::format!(
+            "{} \u{00b7} {}mA", stats.display_label(), stats.display_ma()
+        ));
+        self.ui.set_wifi_cell(slint::format!(
+            "{} \u{00b7} {}mA", stats.wifi_label(), stats.wifi_ma()
+        ));
+        self.ui.set_ble_cell(slint::format!(
+            "{} \u{00b7} {}mA", on_off(stats.ble_on), stats.ble_ma()
+        ));
+        self.ui.set_imu_cell(slint::format!(
+            "{} \u{00b7} {}mA", on_off(stats.imu_on), stats.imu_ma()
+        ));
+        self.ui.set_audio_cell(slint::format!(
+            "{} \u{00b7} {}mA", on_off(stats.audio_on), stats.audio_ma()
+        ));
+        self.ui.set_total_ma(stats.total_ma() as i32);
+        let full = stats.full_runtime_hours(BATTERY_CAPACITY_MAH);
+        let left = stats.estimated_hours(BATTERY_CAPACITY_MAH);
+        self.ui.set_left_hours(left as i32);
+        let full_s: SharedString =
+            if full >= 999 { "--".into() } else { slint::format!("{}h", full) };
+        let left_s: SharedString =
+            if left >= 999 { "--".into() } else { slint::format!("~{}h", left) };
+        self.ui
+            .set_runtime_text(slint::format!("100%: {} \u{00b7} left: {}", full_s, left_s));
     }
 
     pub fn set_weather(&self, temp_f: Option<i16>, code: u8) {

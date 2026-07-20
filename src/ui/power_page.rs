@@ -22,7 +22,9 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle, RoundedRectangle}
 use embedded_graphics::text::{Alignment, Text};
 
 use crate::board;
-use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
+use crate::peripherals::power_stats::{
+    on_off, DisplayState, PowerStats, WifiMode, BATTERY_CAPACITY_MAH,
+};
 
 const W: i32 = board::LCD_WIDTH as i32;
 const H: i32 = board::LCD_HEIGHT as i32;
@@ -62,64 +64,56 @@ pub fn draw_power_page<D: DrawTarget<Color = Rgb565>>(
     y += row_h;
 
     // --- Display ---
+    // State labels + mA come from PowerStats (single source of truth shared
+    // with the Slint power page); this module only renders them.
     Text::new("LCD:", Point::new(left_x, y), label).draw(d)?;
-    let disp_text = match stats.display {
-        None | Some(DisplayState::Off) => "OFF    0mA",
-        Some(DisplayState::Aod)        => "AOD    8mA",
-        Some(DisplayState::Dim)        => "DIM   25mA",
-        Some(DisplayState::Bright)     => "ON    70mA",
-    };
+    let mut disp_buf = [0u8; 16];
+    let disp_text = fmt_state_ma(&mut disp_buf, stats.display_label(), stats.display_ma());
     let disp_style = if matches!(stats.display, Some(DisplayState::Bright)) { yellow_inline() } else { value };
     Text::with_alignment(disp_text, Point::new(right_x, y), disp_style, Alignment::Right).draw(d)?;
     y += row_h;
 
     // --- WiFi ---
     Text::new("WIFI:", Point::new(left_x, y), label).draw(d)?;
-    let (wifi_text, wifi_style) = match stats.wifi {
-        None | Some(WifiMode::Off)        => ("OFF    0mA", green),
-        Some(WifiMode::PowerSave)         => ("PS    20mA", value),
-        Some(WifiMode::Active)            => ("ACT   90mA", red),
+    let mut wifi_buf = [0u8; 16];
+    let wifi_text = fmt_state_ma(&mut wifi_buf, stats.wifi_label(), stats.wifi_ma());
+    let wifi_style = match stats.wifi {
+        None | Some(WifiMode::Off) => green,
+        Some(WifiMode::PowerSave)  => value,
+        Some(WifiMode::Active)     => red,
     };
     Text::with_alignment(wifi_text, Point::new(right_x, y), wifi_style, Alignment::Right).draw(d)?;
     y += row_h;
 
     // --- BLE ---
     Text::new("BLE:", Point::new(left_x, y), label).draw(d)?;
-    let (ble_text, ble_style) = if stats.ble_on {
-        ("ON    15mA", value)
-    } else {
-        ("OFF    0mA", green)
-    };
+    let mut ble_buf = [0u8; 16];
+    let ble_text = fmt_state_ma(&mut ble_buf, on_off(stats.ble_on), stats.ble_ma());
+    let ble_style = if stats.ble_on { value } else { green };
     Text::with_alignment(ble_text, Point::new(right_x, y), ble_style, Alignment::Right).draw(d)?;
     y += row_h;
 
     // --- IMU ---
     Text::new("IMU:", Point::new(left_x, y), label).draw(d)?;
-    let (imu_text, imu_style) = if stats.imu_on {
-        ("ON     2mA", value)
-    } else {
-        ("OFF    0mA", green)
-    };
+    let mut imu_buf = [0u8; 16];
+    let imu_text = fmt_state_ma(&mut imu_buf, on_off(stats.imu_on), stats.imu_ma());
+    let imu_style = if stats.imu_on { value } else { green };
     Text::with_alignment(imu_text, Point::new(right_x, y), imu_style, Alignment::Right).draw(d)?;
     y += row_h;
 
     // --- Audio ---
     Text::new("AUDIO:", Point::new(left_x, y), label).draw(d)?;
-    let (au_text, au_style) = if stats.audio_on {
-        ("ON    25mA", value)
-    } else {
-        ("OFF    0mA", green)
-    };
+    let mut au_buf = [0u8; 16];
+    let au_text = fmt_state_ma(&mut au_buf, on_off(stats.audio_on), stats.audio_ma());
+    let au_style = if stats.audio_on { value } else { green };
     Text::with_alignment(au_text, Point::new(right_x, y), au_style, Alignment::Right).draw(d)?;
     y += row_h;
 
     // --- SD ---
     Text::new("SDCARD:", Point::new(left_x, y), label).draw(d)?;
-    let (sd_text, sd_style) = if stats.sd_on {
-        ("ON    30mA", value)
-    } else {
-        ("OFF    0mA", green)
-    };
+    let mut sd_buf = [0u8; 16];
+    let sd_text = fmt_state_ma(&mut sd_buf, on_off(stats.sd_on), stats.sd_ma());
+    let sd_style = if stats.sd_on { value } else { green };
     Text::with_alignment(sd_text, Point::new(right_x, y), sd_style, Alignment::Right).draw(d)?;
     y += row_h + 8;
 
@@ -144,7 +138,7 @@ pub fn draw_power_page<D: DrawTarget<Color = Rgb565>>(
     y += row_h + 6;
 
     // --- Full-charge runtime (theoretical 100%→0%) ---
-    let full_hours = stats.full_runtime_hours(300);
+    let full_hours = stats.full_runtime_hours(BATTERY_CAPACITY_MAH);
     let mut fh_buf = [0u8; 20];
     let fh_s = fmt_runtime_full(&mut fh_buf, full_hours);
     Text::new("100%:", Point::new(left_x, y), label).draw(d)?;
@@ -152,7 +146,7 @@ pub fn draw_power_page<D: DrawTarget<Color = Rgb565>>(
     y += row_h;
 
     // --- Remaining autonomy based on actual battery % ---
-    let remain_hours = stats.estimated_hours(300);
+    let remain_hours = stats.estimated_hours(BATTERY_CAPACITY_MAH);
     let mut rh_buf = [0u8; 20];
     let rh_s = fmt_remaining(&mut rh_buf, remain_hours, stats.battery_pct);
     Text::new("LEFT:", Point::new(left_x, y), label).draw(d)?;
@@ -236,6 +230,28 @@ fn fmt_u16(buf: &mut [u8], pos: &mut usize, mut v: u16) {
         buf[*pos] = digits[n];
         *pos += 1;
     }
+}
+
+/// Format "LABEL   NNmA" into the old page's fixed 10-char field (label
+/// left-flush, "NNmA" right-flush; FONT_8X13 is monospace so the columns
+/// line up exactly like the previous hardcoded strings, e.g. "PS    20mA").
+fn fmt_state_ma<'a>(buf: &'a mut [u8; 16], state: &'static str, ma: u16) -> &'a str {
+    let ma_len: usize = if ma >= 100 { 3 } else if ma >= 10 { 2 } else { 1 };
+    let mut p = 0;
+    for &c in state.as_bytes() {
+        buf[p] = c;
+        p += 1;
+    }
+    for _ in 0..10usize.saturating_sub(state.len() + ma_len + 2) {
+        buf[p] = b' ';
+        p += 1;
+    }
+    fmt_u16(buf, &mut p, ma);
+    for &c in b"mA" {
+        buf[p] = c;
+        p += 1;
+    }
+    core::str::from_utf8(&buf[..p]).unwrap_or("?")
 }
 
 fn fmt_mhz<'a>(buf: &'a mut [u8; 16], mhz: u16, ma: u16) -> &'a str {

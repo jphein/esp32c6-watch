@@ -15,6 +15,14 @@
 //! They are *estimates* displayed for diagnosis, not precise telemetry.
 //! For real numbers, use a USB power meter or tap the battery lead.
 
+/// Nominal battery capacity used for the runtime estimates.
+pub const BATTERY_CAPACITY_MAH: u16 = 300;
+
+/// "ON"/"OFF" label for the boolean subsystems (BLE / IMU / audio / SD).
+pub const fn on_off(on: bool) -> &'static str {
+    if on { "ON" } else { "OFF" }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayState {
     Off,      //   0 mA  (AMOLED fully off + MCU in sleep/idle)
@@ -72,6 +80,25 @@ impl PowerStats {
             80 => 22,
             40 => 14,
             _ => 38,
+        }
+    }
+
+    /// Short display-state label for the power read-out ("OFF"/"AOD"/"DIM"/"ON").
+    pub fn display_label(&self) -> &'static str {
+        match self.display {
+            None | Some(DisplayState::Off) => "OFF",
+            Some(DisplayState::Aod) => "AOD",
+            Some(DisplayState::Dim) => "DIM",
+            Some(DisplayState::Bright) => "ON",
+        }
+    }
+
+    /// Short WiFi-state label for the power read-out ("OFF"/"PS"/"ACT").
+    pub fn wifi_label(&self) -> &'static str {
+        match self.wifi {
+            None | Some(WifiMode::Off) => "OFF",
+            Some(WifiMode::PowerSave) => "PS",
+            Some(WifiMode::Active) => "ACT",
         }
     }
 

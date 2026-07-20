@@ -2,6 +2,7 @@ import { Theme, RadioDot, PageTitle } from "theme.slint";
 import { ClockPage } from "clock.slint";
 import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
+import { PowerPage } from "power.slint";
 
 export struct PeerRow {
     name: string,
@@ -37,6 +38,21 @@ export component WatchShell inherits Window {
     in property <string> heap-text: "--";
     in property <string> uptime-text: "--";
     in property <string> battery-text: "--";
+
+    // power page (live at 1s while showing): six subsystem cells + total +
+    // runtime, all formatted by Rust set_power from PowerStats. cpu-cell
+    // carries its own MHz+mA string, so the clock chip's cpu-text stays
+    // independent. No battery row here: pct+charging live in the chrome
+    // pill, pct·mV on the system page.
+    in property <string> cpu-cell: "--";
+    in property <string> display-cell: "--";
+    in property <string> wifi-cell: "--";
+    in property <string> ble-cell: "--";
+    in property <string> imu-cell: "--";
+    in property <string> audio-cell: "--";
+    in property <int> total-ma: -1;
+    in property <string> runtime-text: "--";
+    in property <int> left-hours: 999;
 
     // --- battery / radios (chrome) ---
     in property <int> battery-percent: -1;
@@ -114,9 +130,27 @@ export component WatchShell inherits Window {
             battery-text: root.battery-text;
         }
 
-        // Placeholder pages 3-4, replaced by later tasks.
-        for title[idx] in ["POWER", "MESH"]: Rectangle {
-            x: (idx + 3 - root.current-page) * pages.width;
+        PowerPage {
+            x: (3 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            cpu-cell: root.cpu-cell;
+            display-cell: root.display-cell;
+            wifi-cell: root.wifi-cell;
+            ble-cell: root.ble-cell;
+            imu-cell: root.imu-cell;
+            audio-cell: root.audio-cell;
+            total-ma: root.total-ma;
+            runtime-text: root.runtime-text;
+            left-hours: root.left-hours;
+            brightness <=> root.brightness;
+            brightness-changed(f) => { root.brightness-changed(f); }
+            reboot-tap => { root.reboot-tap(); }
+        }
+
+        // Placeholder page 4, replaced by task 7 (mesh).
+        for title[idx] in ["MESH"]: Rectangle {
+            x: (idx + 4 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
             animate x { duration: 260ms; easing: ease-out; }
             PageTitle { title: title; }
