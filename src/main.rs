@@ -58,7 +58,7 @@ use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState};
 use crate::drivers::co5300::Co5300Display;
-use crate::net::smol_mesh::{MeshEvent, SmolMesh};
+use crate::net::smol_mesh::{MeshEvent, PeerView, SmolMesh};
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::{fill_beep_buffer, Es8311};
@@ -574,6 +574,7 @@ async fn main(_spawner: Spawner) -> ! {
                     Page::Sensors => Duration::from_millis(100),
                     Page::System => Duration::from_secs(2),
                     Page::Power => Duration::from_secs(1),
+                    Page::Mesh => Duration::from_secs(1),
                 },
                 AppState::Launcher | AppState::Settings => Duration::from_millis(100),
                 _ => Duration::from_millis(33),
@@ -959,10 +960,14 @@ async fn main(_spawner: Spawner) -> ! {
                     {
                         world_snake.handle_rx(rx.data());
                     }
+                    // Per-frame receive RSSI (dBm) from the radio's rx control
+                    // info — feeds the Marauder's Watch near/far EWMA.
+                    let rssi = rx.info.rx_control.rssi.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
                     if let Some(MeshEvent::TimeAdopted { unix, from_id }) = mesh.handle_rx(
                         &mut esp_now,
                         rx.info.src_address,
                         rx.data(),
+                        Some(rssi),
                         now_ms,
                         uptime_secs,
                     ) {
@@ -1066,6 +1071,12 @@ async fn main(_spawner: Spawner) -> ! {
                             );
                             let _ = power_page::draw_power_page(&mut fb, &power_stats);
                         }
+                        Page::Mesh => {
+                            let mut rows = [PeerView::default(); pages::MESH_MAX_ROWS];
+                            let n = mesh.peers(now.as_millis(), &mut rows);
+                            let _ =
+                                pages::draw_mesh_page(&mut fb, watch_cfg.node_id, &rows[..n]);
+                        }
                         _ => {}
                     }
                     page_dirty = false;
@@ -1102,6 +1113,18 @@ async fn main(_spawner: Spawner) -> ! {
                                 charging,
                             );
                             let _ = power_page::draw_power_page(&mut fb, &power_stats);
+                            need_flush = true;
+                            next_flush = now + Duration::from_secs(1);
+                        }
+                    }
+                    Page::Mesh => {
+                        // ~1Hz roster refresh (ages + EWMA move between frames).
+                        if now >= next_flush {
+                            fb.clear_color(current_page.color());
+                            let mut rows = [PeerView::default(); pages::MESH_MAX_ROWS];
+                            let n = mesh.peers(now.as_millis(), &mut rows);
+                            let _ =
+                                pages::draw_mesh_page(&mut fb, watch_cfg.node_id, &rows[..n]);
                             need_flush = true;
                             next_flush = now + Duration::from_secs(1);
                         }
