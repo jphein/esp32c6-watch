@@ -56,9 +56,16 @@ export component MeshPage {
         }
     }
 
+    // Empty state, centred in the roster void (below the self-line, above the
+    // page dots). Needs an explicit height + alignment:center — a width:100%
+    // VerticalLayout with no height defaults to alignment:stretch, which
+    // distributes the free space between the two lines and splays them apart.
     if root.rows.length == 0: VerticalLayout {
-        y: 240px;
+        x: 0;
+        y: 150px;
         width: 100%;
+        height: 280px;
+        alignment: center;
         spacing: 11px;
         Text {
             horizontal-alignment: center;
