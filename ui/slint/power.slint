@@ -124,12 +124,12 @@ export component PowerPage {
     }
 
     // Reboot button (kicks OTA check first when WiFi is up, then resets).
-    // Placed at y 414 / height 36 (ends y 450) so it clears the page-dots
-    // TouchArea at y 456 — the plan's y 430 / height 40 ended at 470 and
-    // overlapped the dots band, risking tap ambiguity in the shared centre.
+    // Placed at y 410 / height 36 (ends y 446) so it clears the raised page-dots
+    // TouchArea at y 448 with a 2px gap, and still sits below the brightness
+    // slider (ends y 406, outside the Rust SLIDER_BAND 330..430 swipe guard).
     reboot := Rectangle {
         x: (parent.width - self.width) / 2;
-        y: 414px;
+        y: 410px;
         width: 180px; height: 36px; border-radius: 18px;
         border-width: 1px; border-color: Theme.warn;
         background: #200a10; // one-off dark-red pair for Theme.warn

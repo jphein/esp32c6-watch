@@ -9,6 +9,18 @@ export struct PeerRow {
 }
 
 export global Theme {
+    // --- safe area (410x502 AMOLED with physically ROUNDED corners) ---
+    // Centered content is corner-safe automatically; only elements that sit in
+    // a corner get clipped by the arc. `safe-top`/`safe-bottom`/`safe-side` are
+    // straight-edge insets; `safe-corner` is the extra side-inset for elements
+    // that live IN a top corner (the status chrome), so they drop below and pull
+    // in clear of the arc. Conservative values — good to a corner radius of
+    // ~100px; revisit if the measured radius comes back larger.
+    out property <length> safe-top: 30px;
+    out property <length> safe-bottom: 24px;
+    out property <length> safe-side: 22px;
+    out property <length> safe-corner: 30px;
+
     out property <color> ink: #f2f5ff;
     out property <color> soft: #9fb4d8;
     out property <color> dim: #55617a;
