@@ -1,5 +1,11 @@
 fn main() {
     linker_be_nice();
+    // defmt-rtt (behind the `defmt` cargo feature) needs its linker script, and
+    // it must come before linkall.x. Gated on the feature so the default serial
+    // build doesn't require defmt.x to be present.
+    if std::env::var_os("CARGO_FEATURE_DEFMT").is_some() {
+        println!("cargo:rustc-link-arg=-Tdefmt.x");
+    }
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 

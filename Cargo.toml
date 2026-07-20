@@ -12,6 +12,15 @@ path = "./src/main.rs"
 name = "slint-demo"
 path = "./src/bin/slint_demo.rs"
 
+[features]
+# `defmt`: route structured logs through a defmt-rtt channel read by probe-rs
+# (deeper than the default esp-println / espflash serial path). OFF by default
+# so the working serial logger is untouched. Build + view:
+#   DEFMT_LOG=info cargo build --release --features defmt --bin esp32c6-watch
+#   probe-rs run    --chip esp32c6 <elf>   # flash + attach the RTT channel
+#   probe-rs attach --chip esp32c6 <elf>   # attach RTT to an already-running target
+defmt = ["dep:defmt", "dep:defmt-rtt"]
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [
     "esp32c6",
@@ -65,6 +74,14 @@ esp-backtrace = { version = "0.19.0", features = [
     "panic-handler",
     "println",
 ] }
+
+# Structured logging over RTT (probe-rs), gated behind the `defmt` feature
+# above. defmt 1.x matches the version already resolved in the dependency tree.
+# The RTT global logger is linked by `use defmt_rtt as _;` in main.rs, and
+# build.rs adds the `defmt.x` linker script when the feature is on.
+defmt = { version = "1", optional = true }
+defmt-rtt = { version = "1", optional = true }
+
 esp-alloc = "0.10.0"
 embassy-executor = { version = "0.10.0", features = [
     "log",

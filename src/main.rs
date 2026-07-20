@@ -46,6 +46,12 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_println::println;
+// defmt-rtt global logger (probe-rs RTT), behind the `defmt` feature. The
+// `as _` import is what links the RTT logger; default builds omit it and keep
+// the esp-println serial path. Kept here in the logger region, isolated from
+// the shell event loop, so it merge-cascades cleanly behind main.rs work.
+#[cfg(feature = "defmt")]
+use defmt_rtt as _;
 use esp_radio::ble::controller::BleConnector;
 use static_cell::StaticCell;
 
@@ -248,6 +254,9 @@ fn update_power_stats(
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
+    // First line on the RTT channel — proves probe-rs is receiving defmt frames.
+    #[cfg(feature = "defmt")]
+    defmt::info!("defmt-rtt up - structured logs via probe-rs RTT");
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
