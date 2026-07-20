@@ -58,6 +58,7 @@ use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState};
 use crate::drivers::co5300::Co5300Display;
+use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
@@ -501,6 +502,10 @@ async fn main(_spawner: Spawner) -> ! {
     // Sync the power-page slider knob to the real boot brightness (else it shows
     // the Slint default while the panel is at watch_cfg.brightness).
     shell.set_brightness_from_raw(brightness);
+    // Honor the persisted boot page (CFG `S` default). The shell starts on the
+    // clock; apply default_page so the watch boots where the user left it. Until
+    // now this value was written to flash but never read back at boot.
+    shell.set_page(watch_cfg.default_page as i32);
     let mut power_stats = PowerStats::new();
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
@@ -531,6 +536,17 @@ async fn main(_spawner: Spawner) -> ! {
     // auto-cleared once its window elapses (toast_active gates the single clear).
     let mut toast_until = Instant::now();
     let mut toast_active = false;
+    // AOD repaints only when the minute changes; 99 is a sentinel that forces
+    // the first paint on AOD entry (any real minute 0..=59 differs).
+    let mut aod_last_minute: u8 = 99;
+    // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
+    let mut prev_fam = FamUi::default();
+    // Last pushed step count, cached so the shell can be re-populated after a
+    // scene recreate (the pedometer only polls once a minute).
+    let mut last_steps: u32 = 0;
+    // Last weather (temp_f, code), cached for re-push after a scene recreate:
+    // it's fetched only during a WiFi/NTP window, which may be a long way off.
+    let mut last_weather: Option<(i16, u8)> = None;
 
     // Initial shell paint so the panel shows a live clock immediately instead of
     // waiting up to a full tick for the first loop render.
@@ -580,6 +596,10 @@ async fn main(_spawner: Spawner) -> ! {
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
+    // Mesh enable flag (MESH chrome dot toggles it). Off = pause the ESP-NOW
+    // tick/rx/familiar processing (a tick-level pause, not a radio teardown);
+    // the peer stays registered so re-enabling resumes instantly.
+    let mut mesh_enabled = true;
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
@@ -596,7 +616,8 @@ async fn main(_spawner: Spawner) -> ! {
         } else if screen_state == 0 {
             Duration::from_secs(30)
         } else if screen_state == 1 {
-            Duration::from_secs(10)
+            // AOD: wake often enough that the minute flip never looks stuck.
+            Duration::from_secs(5)
         } else {
             match app_state {
                 AppState::Watchface | AppState::Launcher => {
@@ -627,7 +648,7 @@ async fn main(_spawner: Spawner) -> ! {
         // Mesh Familiar cadence override: a holder must beat every ~1.5 s and
         // a non-holder must notice a dead holder within FAM_LOST_MS (~12 s),
         // so the idle 10/30 s sleeps are capped while the mesh is up.
-        let tick = if esp_now_peer_added {
+        let tick = if esp_now_peer_added && mesh_enabled {
             if familiar.needs_fast_tick() {
                 tick.min(Duration::from_millis(400))
             } else {
@@ -677,8 +698,9 @@ async fn main(_spawner: Spawner) -> ! {
 
         // === RTC 1Hz ===
         // Stash the reading; the shell arm pushes it via shell.set_time (which
-        // no-ops until the second actually ticks).
-        if screen_state >= 2 && now >= next_rtc {
+        // no-ops until the second actually ticks). Read at state >= 1 too so the
+        // AOD minute-gated repaint has a fresh `last_dt` to compare against.
+        if screen_state >= 1 && now >= next_rtc {
             if let Ok(dt) = rtc.get_time() {
                 last_dt = Some(dt);
             }
@@ -690,6 +712,7 @@ async fn main(_spawner: Spawner) -> ! {
         // down" (gyro off, accel on). One cheap 3-byte I2C read per minute.
         if now >= next_step_poll {
             if let Ok(s) = imu.read_step_count() {
+                last_steps = s;
                 shell.set_steps(s);
             }
             next_step_poll = now + Duration::from_secs(60);
@@ -767,6 +790,10 @@ async fn main(_spawner: Spawner) -> ! {
             if app_state == AppState::Watchface && shell.page() == slint_shell::PAGE_CLOCK {
                 display.set_brightness(0x18);
                 screen_state = 1;
+                shell.set_aod(true);
+                // Force the first AOD repaint next iteration (99 != any minute)
+                // so the dim overlay appears immediately, not at the next flip.
+                aod_last_minute = 99;
             } else {
                 display.set_brightness(0x00);
                 display.display_off();
@@ -900,6 +927,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // Weather fetch in the same WiFi window (fire-and-forget,
                     // bounded at 8s; logs [WX] failed and moves on).
                     if let Some(wx) = crate::net::weather::fetch(stack).await {
+                        last_weather = Some((wx.temp_f, wx.code));
                         shell.set_weather(Some(wx.temp_f), wx.code);
                     }
                     wifi_on_request = false; // WiFi burst complete
@@ -949,7 +977,7 @@ async fn main(_spawner: Spawner) -> ! {
                     Err(e) => println!("[MESH] add_peer failed: {e:?}"),
                 }
             }
-            if esp_now_peer_added {
+            if esp_now_peer_added && mesh_enabled {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
                 mesh.tick(&mut esp_now, now_ms, uptime_secs);
@@ -1051,10 +1079,11 @@ async fn main(_spawner: Spawner) -> ! {
                         // the gateway re-broadcasts cached configs every ~10s,
                         // so a same-value re-arm must never wear flash.
                         Some(MeshEvent::CfgScreen { page }) => {
-                            // Live remote page-switch is deferred: the Slint shell
-                            // owns its current page and exposes no setter yet, so a
-                            // CFG `S` downlink only persists the new default for now
-                            // (a follow-up adds ShellUi::set_page). See task-9 notes.
+                            // Switch the visible page live (ShellUi::set_page
+                            // clamps out-of-range). Takes effect immediately on
+                            // the watchface; if we're in an app it sets the page
+                            // the shell returns to. The save stays edge-triggered.
+                            shell.set_page(page as i32);
                             if watch_cfg.default_page != page {
                                 watch_cfg.default_page = page;
                                 match config_offset.map(|off| {
@@ -1111,8 +1140,21 @@ async fn main(_spawner: Spawner) -> ! {
                     if let Some(frame) = familiar.tick(&ids[..n], now_ms, unix_now) {
                         mesh.broadcast_fam(&mut esp_now, &frame);
                     }
-                    // The creature UI snapshot returns in task 12 (Familiar on the
-                    // Slint watchface); the mesh arbitration/beat above stays live.
+                    // Push the creature UI snapshot to the Slint clock nook
+                    // (task 12), gated on change so we don't churn properties.
+                    // stage/hunger are age-derived on the Creature, not FamState.
+                    let creature = familiar.creature();
+                    let fam = FamUi {
+                        known: familiar.known(),
+                        holding: familiar.is_holder(),
+                        mood: familiar.mood(),
+                        hunger: creature.hunger_level(unix_now),
+                        stage: creature.stage_level(unix_now),
+                    };
+                    if fam != prev_fam {
+                        shell.set_fam(&fam);
+                        prev_fam = fam;
+                    }
                 }
             }
         }
@@ -1147,9 +1189,9 @@ async fn main(_spawner: Spawner) -> ! {
             prev_radios = radios;
         }
 
-        // === AOD (real always-on display lands in task 11) ===
-        // For now screen_state 1 just stays dim showing the last frame; skip the
-        // render/interaction work until the panel is off entirely.
+        // === screen off ===
+        // State 0 = panel fully off: skip all render/interaction work. State 1
+        // (AOD) falls through — the shell arm renders it minute-gated below.
         if screen_state == 0 {
             continue;
         }
@@ -1168,6 +1210,31 @@ async fn main(_spawner: Spawner) -> ! {
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
                 if !matches!(prev_app_state, AppState::Watchface | AppState::Launcher) {
+                    // Returning from a game: the Slint scene was dropped on launch
+                    // to free heap for the framebuffer. Recreate it, then re-push
+                    // the state the per-tick on-change guards won't refresh on
+                    // their own (a fresh scene is all defaults). Runs before the
+                    // page-data match below, so prev_page = -1 re-pushes page data
+                    // this same iteration.
+                    shell.resume_scene();
+                    prev_page = -1;
+                    shell.set_radios(wifi_connected, ble_on, last_mesh_peers);
+                    prev_radios = (wifi_connected, ble_on, last_mesh_peers);
+                    shell.set_fam(&prev_fam);
+                    shell.set_battery(batt_pct, batt_mv, charging);
+                    shell.set_brightness_from_raw(brightness);
+                    shell.set_gyro(gyro_enabled);
+                    shell.set_cpu_mhz(cpu_mhz);
+                    shell.set_steps(last_steps);
+                    if let Some((t, c)) = last_weather {
+                        shell.set_weather(Some(t), c);
+                    }
+                    // We only return from a game while awake, so AOD is off; make
+                    // it explicit against the fresh scene's default.
+                    shell.set_aod(false);
+                    if let Some(dt) = last_dt.as_ref() {
+                        let _ = shell.set_time(dt);
+                    }
                     shell.request_redraw();
                 }
 
@@ -1231,6 +1298,18 @@ async fn main(_spawner: Spawner) -> ! {
                     let _ = shell.set_time(dt);
                 }
 
+                // Gyro parallax: nudge the clock face by scaled accel while the
+                // gyro toy is on (page-0 arm already paces at 33ms for this). Off
+                // the clock or with gyro off, the offsets stay at their last value
+                // — reset to neutral once so the face doesn't freeze askew.
+                if shell.page() == slint_shell::PAGE_CLOCK {
+                    if gyro_enabled {
+                        shell.set_parallax(accel.0, accel.1);
+                    } else {
+                        shell.set_parallax(0.0, 0.0);
+                    }
+                }
+
                 // Drain UI requests raised by the Slint callbacks.
                 if let Some(raw) = shell.req.brightness.take() {
                     brightness = raw;
@@ -1241,6 +1320,15 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if shell.req.ble_toggle.take() {
                     ble_toggle_request = true;
+                }
+                if shell.req.mesh_toggle.take() {
+                    mesh_enabled = !mesh_enabled;
+                    if !mesh_enabled {
+                        // Reflect "off" in the MESH chrome dot immediately; peers
+                        // repopulate from HELLOs once re-enabled.
+                        last_mesh_peers = 0;
+                    }
+                    println!("[MESH] toggled -> {}", if mesh_enabled { "ON" } else { "OFF" });
                 }
                 if shell.req.cpu_cycle.take() {
                     // Mirror the old WatchFace::cycle_cpu ladder: 80 -> 160 -> 240.
@@ -1271,21 +1359,25 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
-                    // Apps paint through the framebuffer; allocate it fallibly on
-                    // entry (~201KB). If the heap can't fit it right now, stay in
-                    // the shell and toast instead of aborting.
+                    // Apps paint through the ~201KB RGB332 framebuffer, which
+                    // cannot fit in the C6's SRAM alongside the resident Slint
+                    // scene. Close the launcher and DROP the scene first (frees
+                    // ~30-40KB), THEN allocate the fb — that's what makes the
+                    // launch succeed. On the (now near-impossible) failure path,
+                    // recreate the scene and stay put with a toast.
+                    shell.set_launcher_open(false);
+                    if toast_active {
+                        shell.set_toast("");
+                        toast_active = false;
+                    }
+                    shell.suspend_scene();
+                    println!("[HEAP] scene dropped, free: {}", esp_alloc::HEAP.free());
                     match Framebuffer::try_new() {
                         Some(f) => {
                             fb = Some(f);
                             println!("[HEAP] app enter free: {}", esp_alloc::HEAP.free());
-                            // Close the launcher, then run the SAME per-app setup
-                            // the old launcher arm did (without setup the games
-                            // boot into garbage).
-                            shell.set_launcher_open(false);
-                            if toast_active {
-                                shell.set_toast("");
-                                toast_active = false;
-                            }
+                            // Run the SAME per-app setup the old launcher arm did
+                            // (without setup the games boot into garbage).
                             match target {
                                 AppState::Snake => snake_game.setup(),
                                 AppState::WorldSnake => world_snake.setup(),
@@ -1304,7 +1396,16 @@ async fn main(_spawner: Spawner) -> ! {
                             app_state = target;
                         }
                         None => {
-                            // Heap can't fit a frame — keep app_state in the shell.
+                            // Even with the scene freed the fb won't fit — recreate
+                            // the scene, stay in the shell, and toast. The reset
+                            // guards force a repopulate over the next ticks.
+                            shell.resume_scene();
+                            prev_page = -1;
+                            prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
+                            shell.set_battery(batt_pct, batt_mv, charging);
+                            if let Some(dt) = last_dt.as_ref() {
+                                let _ = shell.set_time(dt);
+                            }
                             shell.set_toast("RAM busy \u{2014} try again");
                             toast_active = true;
                             toast_until = now + Duration::from_secs(3);
@@ -1335,9 +1436,20 @@ async fn main(_spawner: Spawner) -> ! {
                 // Skip when a launch just switched us into an app this iteration:
                 // that app already painted its first frame (e.g. Game2048) and the
                 // trailing shell repaint would clobber it.
-                if screen_state >= 2 && matches!(app_state, AppState::Watchface | AppState::Launcher)
-                {
-                    shell.render(&mut display);
+                if matches!(app_state, AppState::Watchface | AppState::Launcher) {
+                    if screen_state >= 2 {
+                        shell.render(&mut display);
+                    } else if screen_state == 1 {
+                        // AOD: repaint only when the minute changes so the dim
+                        // scene isn't driven every wake. last_dt is refreshed at
+                        // state >= 1 above; set_time (shell arm) dirtied the scene.
+                        if let Some(dt) = last_dt.as_ref() {
+                            if dt.minutes != aod_last_minute {
+                                aod_last_minute = dt.minutes;
+                                shell.render(&mut display);
+                            }
+                        }
+                    }
                 }
             }
 

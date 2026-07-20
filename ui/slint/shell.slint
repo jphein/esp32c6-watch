@@ -26,6 +26,12 @@ export component WatchShell inherits Window {
     in property <bool> gyro-on: false;
     in property <length> par-x: 0px;
     in property <length> par-y: 0px;
+    // Mesh Familiar (clock nook); fed by ShellUi::set_fam.
+    in property <bool> fam-known: false;
+    in property <bool> fam-holding: false;
+    in property <int> fam-mood: 0;
+    in property <int> fam-hunger: 0;
+    in property <int> fam-stage: 0;
 
     // sensors page (live at 100ms while showing)
     in property <string> accel-text: "--";
@@ -75,6 +81,7 @@ export component WatchShell inherits Window {
     callback brightness-changed(float);
     callback wifi-tap();
     callback ble-tap();
+    callback mesh-tap();
     callback cpu-tap();
     callback gyro-tap();
     callback reboot-tap();
@@ -109,6 +116,11 @@ export component WatchShell inherits Window {
             gyro-on: root.gyro-on;
             par-x: root.par-x;
             par-y: root.par-y;
+            fam-known: root.fam-known;
+            fam-holding: root.fam-holding;
+            fam-mood: root.fam-mood;
+            fam-hunger: root.fam-hunger;
+            fam-stage: root.fam-stage;
             cpu-tap => { root.cpu-tap(); }
             gyro-tap => { root.gyro-tap(); }
             apps-tap => { root.launcher-open = true; }
@@ -165,12 +177,13 @@ export component WatchShell inherits Window {
     // battery pill clear the panel's rounded corners (were y12-14, clipped).
     RadioDot { x: 22px;  y: Theme.safe-top; label: "WIFI"; active: root.wifi-on;
                tapped => { root.wifi-tap(); } }
-    RadioDot { x: 84px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
+    RadioDot { x: 94px;  y: Theme.safe-top; label: "BLE";  active: root.ble-on;
                tapped => { root.ble-tap(); } }
     RadioDot {
-        x: 138px; y: Theme.safe-top;
+        x: 166px; y: Theme.safe-top;
         label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
         active: root.mesh-peers > 0;
+        tapped => { root.mesh-tap(); }
     }
 
     // Battery pill (top-right) — dropped to safe-top and pulled in by
