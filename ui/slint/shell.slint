@@ -1,0 +1,198 @@
+import { Theme, RadioDot, PageTitle } from "theme.slint";
+import { ClockPage } from "clock.slint";
+
+export struct PeerRow {
+    name: string,
+    rssi: string,
+    age: string,
+}
+
+export component WatchShell inherits Window {
+    width: 410px;
+    height: 502px;
+    background: #000000;
+
+    // --- clock ---
+    in property <string> time-text: "--:--";
+    in property <string> seconds-text: "--";
+    in property <string> date-text: "SYNCING RTC";
+    in property <float> minute-progress: 0.0;
+    in property <int> steps: 0;
+    in property <string> weather-text: "";
+    in property <string> cpu-text: "160 MHz";
+    in property <bool> gyro-on: false;
+    in property <length> par-x: 0px;
+    in property <length> par-y: 0px;
+
+    // --- battery / radios (chrome) ---
+    in property <int> battery-percent: -1;
+    in property <bool> charging: false;
+    in property <bool> wifi-on: false;
+    in property <bool> ble-on: false;
+    in property <int> mesh-peers: 0;
+
+    // --- paging / modes ---
+    in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
+    in-out property <bool> launcher-open: false;
+    in property <bool> aod: false;
+    in property <string> toast-text: "";
+
+    // --- callbacks (drained by the Rust loop via request cells) ---
+    callback brightness-changed(float);
+    callback wifi-tap();
+    callback ble-tap();
+    callback cpu-tap();
+    callback gyro-tap();
+    callback reboot-tap();
+    callback launch-app(int); // launcher item index
+
+    in-out property <float> brightness: 0.8;
+
+    // Ambient AMOLED-friendly gradient (mostly true black)
+    Rectangle {
+        width: 100%; height: 100%;
+        background: @linear-gradient(155deg, #140b2e 0%, #000000 40%, #000000 72%, #002733 100%);
+    }
+
+    pages := Rectangle {
+        width: 100%; height: 100%;
+        clip: true;
+
+        ClockPage {
+            x: (0 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            time-text: root.time-text;
+            seconds-text: root.seconds-text;
+            date-text: root.date-text;
+            minute-progress: root.minute-progress;
+            steps: root.steps;
+            weather-text: root.weather-text;
+            cpu-text: root.cpu-text;
+            gyro-on: root.gyro-on;
+            par-x: root.par-x;
+            par-y: root.par-y;
+            cpu-tap => { root.cpu-tap(); }
+            gyro-tap => { root.gyro-tap(); }
+            apps-tap => { root.launcher-open = true; }
+        }
+
+        // Placeholder pages 1-4, replaced by later tasks.
+        for title[idx] in ["SENSORS", "SYSTEM", "POWER", "MESH"]: Rectangle {
+            x: (idx + 1 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            animate x { duration: 260ms; easing: ease-out; }
+            PageTitle { title: title; }
+        }
+    }
+
+    // ==================== persistent chrome ====================
+    RadioDot { x: 22px;  y: 14px; label: "WIFI"; active: root.wifi-on;
+               tapped => { root.wifi-tap(); } }
+    RadioDot { x: 84px;  y: 14px; label: "BLE";  active: root.ble-on;
+               tapped => { root.ble-tap(); } }
+    RadioDot {
+        x: 138px; y: 14px;
+        label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
+        active: root.mesh-peers > 0;
+    }
+
+    // Battery pill (top-right)
+    batt-pill := Rectangle {
+        x: parent.width - self.width - 20px;
+        y: 12px;
+        width: batt-text.width + 62px;
+        height: 30px;
+        border-radius: 15px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: Theme.panel;
+        batt-body := Rectangle {
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 26px; height: 13px; border-radius: 3px;
+            border-width: 1px;
+            border-color: root.charging ? Theme.accent : Theme.soft;
+            Rectangle {
+                x: 2px; y: 2px;
+                width: (batt-body.width - 4px)
+                    * (clamp(root.battery-percent, 0, 100) / 100.0);
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: root.charging ? Theme.accent
+                    : (root.battery-percent >= 0 && root.battery-percent < 20
+                        ? Theme.warn : Theme.soft);
+            }
+        }
+        Rectangle {
+            x: 38px;
+            y: (parent.height - self.height) / 2;
+            width: 3px; height: 7px;
+            background: root.charging ? Theme.accent : Theme.soft;
+        }
+        batt-text := Text {
+            x: 48px;
+            y: (parent.height - self.height) / 2;
+            text: (root.charging ? "+" : "")
+                + (root.battery-percent < 0 ? "--" : "\{root.battery-percent}%");
+            color: root.charging ? Theme.accent : Theme.soft;
+            font-size: 15px;
+        }
+    }
+
+    // Page dots: 5 pages, tap advances.
+    dots := TouchArea {
+        x: (parent.width - self.width) / 2;
+        y: 456px;
+        width: 160px;
+        height: 40px;
+        clicked => { root.current-page = mod(root.current-page + 1, 5); }
+        HorizontalLayout {
+            x: (parent.width - 5 * 10px - 4 * 12px) / 2;
+            y: (parent.height - 10px) / 2;
+            spacing: 12px;
+            for i in 5: Rectangle {
+                width: 10px; height: 10px; border-radius: 5px;
+                background: root.current-page == i ? Theme.accent : Theme.line;
+            }
+        }
+    }
+
+    // Toast (RAM-busy etc.): visible while toast-text != ""
+    if root.toast-text != "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 420px;
+        width: min(360px, toast-label.width + 40px);
+        height: 44px;
+        border-radius: 22px;
+        background: #1a2233ee;
+        border-width: 1px; border-color: Theme.line;
+        toast-label := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.toast-text; color: Theme.ink; font-size: 16px;
+        }
+    }
+
+    // ==================== AOD overlay ====================
+    if root.aod: Rectangle {
+        width: 100%; height: 100%;
+        background: #000000;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 180px;
+            text: root.time-text;
+            color: #6b7690;
+            font-size: 84px;
+            font-weight: 300;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 300px;
+            text: root.date-text;
+            color: Theme.faint;
+            font-size: 17px;
+            letter-spacing: 2px;
+        }
+    }
+}

@@ -1,0 +1,80 @@
+// Shared palette + small components for the watch shell.
+export global Theme {
+    out property <color> ink: #f2f5ff;
+    out property <color> soft: #9fb4d8;
+    out property <color> dim: #55617a;
+    out property <color> faint: #3c4761;
+    out property <color> accent: #35e0b0;
+    out property <color> accent2: #3a7bd5;
+    out property <color> panel: #101728;
+    out property <color> line: #2a3550;
+    out property <color> track: #16202f;
+    out property <color> warn: #ff5566;
+    out property <color> off-dot: #223048;
+}
+
+// One radio indicator: dot + label, tappable.
+export component RadioDot {
+    in property <string> label;
+    in property <bool> active;
+    callback tapped();
+    width: 54px;
+    height: 30px;
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 8px; height: 8px; border-radius: 4px;
+        background: root.active ? Theme.accent : Theme.off-dot;
+    }
+    Text {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: root.active ? Theme.soft : Theme.faint;
+        font-size: 13px;
+        letter-spacing: 1px;
+    }
+    TouchArea { clicked => { root.tapped(); } }
+}
+
+// One label/value line for stats-style pages.
+export component StatRow {
+    in property <string> label;
+    in property <string> value;
+    in property <color> value-color: Theme.ink;
+    width: 330px;
+    height: 48px;
+
+    Text {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: Theme.dim;
+        font-size: 16px;
+        letter-spacing: 2px;
+    }
+    Text {
+        x: parent.width - self.width;
+        y: (parent.height - self.height) / 2;
+        text: root.value;
+        color: root.value-color;
+        font-size: 22px;
+        font-weight: 600;
+    }
+}
+
+// Page title, centered at the top.
+export component PageTitle {
+    in property <string> title;
+    width: 100%;
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 56px;
+        text: root.title;
+        color: Theme.soft;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: 5px;
+    }
+}

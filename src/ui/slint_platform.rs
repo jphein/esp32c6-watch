@@ -63,10 +63,12 @@ impl<'a, 'd> TwoLineFlusher<'a, 'd> {
         scratch: &'a mut [u16],
     ) -> Self {
         // Size invariants: flush_two zips `scratch` against `buf` and sends
-        // `scratch` as one QSPI write — a short scratch silently truncates
-        // that write and desyncs the panel's GRAM address pointer.
+        // the ENTIRE `scratch` as one QSPI write into a fixed WIDTH x 2 window.
+        // A short scratch truncates the write; a long scratch overflows the
+        // window — either way the panel's GRAM address pointer desyncs, so the
+        // buffer must be exactly WIDTH * 2.
         debug_assert_eq!(buf.len(), WIDTH * 2);
-        debug_assert!(scratch.len() >= WIDTH * 2);
+        debug_assert_eq!(scratch.len(), WIDTH * 2);
         Self {
             display,
             buf,

@@ -1,0 +1,124 @@
+import { Theme } from "theme.slint";
+
+export component ClockPage {
+    in property <string> time-text;
+    in property <string> seconds-text;
+    in property <string> date-text;
+    in property <float> minute-progress;
+    in property <int> steps;
+    in property <string> weather-text; // "" when no data
+    in property <string> cpu-text;     // e.g. "160 MHz"
+    in property <bool> gyro-on;
+    // parallax offsets (stage-4 polish feeds these; 0 until then)
+    in property <length> par-x: 0px;
+    in property <length> par-y: 0px;
+    callback cpu-tap();
+    callback gyro-tap();
+    callback apps-tap();
+
+    // Top date pill
+    Rectangle {
+        x: (parent.width - self.width) / 2 + root.par-x / 4;
+        y: 56px + root.par-y / 4;
+        width: date.width + 44px;
+        height: 42px;
+        border-radius: 21px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: Theme.panel;
+        date := Text {
+            x: 22px;
+            y: (parent.height - self.height) / 2;
+            text: root.date-text;
+            color: Theme.soft;
+            font-size: 19px;
+            letter-spacing: 2px;
+        }
+    }
+
+    time := Text {
+        x: (parent.width - self.width) / 2 + root.par-x;
+        y: 138px + root.par-y;
+        text: root.time-text;
+        color: Theme.ink;
+        font-size: 108px;
+        font-weight: 700;
+    }
+    secs := Text {
+        x: (parent.width - self.width) / 2 + root.par-x / 2;
+        y: 282px + root.par-y / 2;
+        text: root.seconds-text;
+        color: Theme.accent;
+        font-size: 40px;
+        font-weight: 600;
+    }
+
+    // Minute progress bar
+    track := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 348px;
+        width: 300px; height: 10px; border-radius: 5px;
+        background: Theme.track;
+        Rectangle {
+            x: 0; y: 0;
+            width: max(10px, track.width * root.minute-progress);
+            height: parent.height;
+            border-radius: 5px;
+            background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
+            animate width { duration: 350ms; easing: ease-out; }
+        }
+    }
+
+    // Steps + weather line
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 376px;
+        text: root.weather-text == ""
+            ? "\{root.steps} STEPS"
+            : "\{root.steps} STEPS  \u{00b7}  \{root.weather-text}";
+        color: Theme.dim;
+        font-size: 18px;
+        letter-spacing: 2px;
+    }
+
+    // Interactive chips row: CPU · GYRO · APPS
+    HorizontalLayout {
+        x: (parent.width - 330px) / 2;
+        y: 408px;
+        width: 330px;
+        height: 36px;
+        spacing: 10px;
+        Rectangle {
+            border-radius: 18px; border-width: 1px; border-color: Theme.line;
+            background: Theme.panel;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: root.cpu-text; color: Theme.soft; font-size: 15px;
+            }
+            TouchArea { clicked => { root.cpu-tap(); } }
+        }
+        Rectangle {
+            border-radius: 18px; border-width: 1px; border-color: Theme.line;
+            background: root.gyro-on ? Theme.track : Theme.panel;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "GYRO"; color: root.gyro-on ? Theme.accent : Theme.soft;
+                font-size: 15px; letter-spacing: 1px;
+            }
+            TouchArea { clicked => { root.gyro-tap(); } }
+        }
+        Rectangle {
+            border-radius: 18px; border-width: 1px; border-color: Theme.line;
+            background: Theme.panel;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "APPS"; color: Theme.accent; font-size: 15px;
+                letter-spacing: 1px;
+            }
+            TouchArea { clicked => { root.apps-tap(); } }
+        }
+    }
+}

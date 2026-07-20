@@ -76,8 +76,8 @@ use crate::peripherals::rtc::Pcf85063aRtc;
 use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
 use crate::ui::slint_platform::{init_platform, TwoLineFlusher, WIDTH};
 
-// Pulls in the `WatchFace` component compiled by slint-build from
-// src/bin/watchface.slint (see build.rs).
+// Pulls in the `WatchShell` component compiled by slint-build from
+// ui/slint/shell.slint (see build.rs).
 slint::include_modules!();
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -95,11 +95,6 @@ fn date_string(dt: &crate::peripherals::rtc::DateTime) -> slint::SharedString {
     slint::format!("{} {:02} {} 20{:02}", weekday, dt.day, month, dt.year)
 }
 
-fn uptime_string() -> slint::SharedString {
-    let s = embassy_time::Instant::now().as_secs();
-    slint::format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
-}
-
 /// Map the UI slider fraction (0.0..1.0) onto the CO5300 brightness range,
 /// keeping a floor so the slider can never black the panel out completely.
 const BRIGHTNESS_MIN: u8 = 0x10;
@@ -108,7 +103,7 @@ fn brightness_raw(frac: f32) -> u8 {
     BRIGHTNESS_MIN + (frac * (0xFF - BRIGHTNESS_MIN) as f32) as u8
 }
 
-/// y-band of the brightness slider on the stats page (see watchface.slint):
+/// y-band of the brightness slider on the power page (page 3, see shell.slint):
 /// horizontal swipes starting here are slider drags, not page switches.
 const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
@@ -191,7 +186,7 @@ async fn main(_spawner: Spawner) -> ! {
     // === Slint platform ===
     let window = init_platform();
 
-    let ui = WatchFace::new().expect("failed to create WatchFace");
+    let ui = WatchShell::new().expect("failed to create WatchShell");
 
     // Radio glyphs: static for now, the demo carries no radio stack.
     ui.set_wifi_on(false);
@@ -246,14 +241,24 @@ async fn main(_spawner: Spawner) -> ! {
                     });
                 }
                 if let Some(sw) = swipe {
-                    // A horizontal drag that started on the brightness slider
-                    // is a slider adjustment, not a page switch.
                     let on_slider =
-                        ui.get_current_page() == 1 && SLIDER_BAND.contains(&sw.start_y);
+                        ui.get_current_page() == 3 && SLIDER_BAND.contains(&sw.start_y);
                     if !on_slider {
                         match sw.direction {
-                            SwipeDirection::Left => ui.set_current_page(1),
-                            SwipeDirection::Right => ui.set_current_page(0),
+                            SwipeDirection::Left => {
+                                ui.set_current_page((ui.get_current_page() + 1).rem_euclid(5))
+                            }
+                            SwipeDirection::Right => {
+                                if ui.get_launcher_open() {
+                                    ui.set_launcher_open(false);
+                                } else {
+                                    ui.set_current_page((ui.get_current_page() + 4).rem_euclid(5))
+                                }
+                            }
+                            // NOTE: launcher overlay renders from plan task 8; until then
+                            // this sets an invisible flag and the next right-swipe closes
+                            // it instead of paging back.
+                            SwipeDirection::Up => ui.set_launcher_open(true),
                             _ => {}
                         }
                     }
@@ -276,7 +281,6 @@ async fn main(_spawner: Spawner) -> ! {
                 ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
                 ui.set_date_text(date_string(&dt));
                 ui.set_minute_progress(dt.seconds as f32 / 59.0);
-                ui.set_uptime_text(uptime_string());
 
                 // Battery telemetry is slow-moving: poll every 5 ticks.
                 if batt_countdown == 0 {
@@ -284,7 +288,6 @@ async fn main(_spawner: Spawner) -> ! {
                     if let Ok(pct) = power.get_battery_percent() {
                         ui.set_battery_percent(pct.min(100) as i32);
                     }
-                    ui.set_battery_mv(power.get_battery_voltage().unwrap_or(0) as i32);
                     ui.set_charging(power.is_charging().unwrap_or(false));
                 }
                 batt_countdown -= 1;
