@@ -1,19 +1,20 @@
 import { Theme, StatRow, PageTitle } from "theme.slint";
 
-// One subsystem read-out cell: dim name over "STATE · NNmA".
+// One subsystem read-out cell: dim name over "STATE · NNmA". Compact 38px so
+// the six-cell grid leaves room for the LP CORE row above TOTAL (see below).
 component PowerCell {
     in property <string> name;
     in property <string> value;
-    height: 48px;
+    height: 38px;
     Text {
-        x: 0; y: 4px;
+        x: 0; y: 2px;
         text: root.name;
         color: Theme.dim; font-size: 12px; letter-spacing: 2px;
     }
     Text {
-        x: 0; y: 21px;
+        x: 0; y: 16px;
         text: root.value;
-        color: Theme.ink; font-size: 17px; font-weight: 600;
+        color: Theme.ink; font-size: 16px; font-weight: 600;
     }
 }
 
@@ -30,6 +31,7 @@ export component PowerPage {
     in property <int> total-ma: -1;      // <0 renders "--"
     in property <string> runtime-text: "--"; // "100%: 4h · left: ~3h"
     in property <int> left-hours: 999;   // colors the runtime row
+    in property <string> lp-core-text: "--"; // LP core, e.g. "idle · 20 MHz"
     in-out property <float> brightness;
     callback brightness-changed(float);
     callback reboot-tap();
@@ -55,6 +57,21 @@ export component PowerPage {
             PowerCell { name: "IMU"; value: root.imu-cell; }
             PowerCell { name: "AUDIO"; value: root.audio-cell; }
         }
+    }
+
+    // LP core (low-power RISC-V) status. Not a live workload — offload got a
+    // RED verdict (task #24), so this is an availability indicator: the core
+    // sits idle/available at its ~20MHz clock (the HP core runs 160MHz). Value
+    // is pushed once from main.rs. Colour is muted (soft) since it's idle, not
+    // an active/alerting reading like TOTAL/RUNTIME. Slots into the space freed
+    // by the compact 38px grid cells; TOTAL/RUNTIME/slider/reboot are unmoved.
+    StatRow {
+        x: (parent.width - 340px) / 2;
+        y: 228px;
+        width: 340px; height: 28px;
+        label: "LP CORE";
+        value: root.lp-core-text;
+        value-color: Theme.soft;
     }
 
     // Total draw, color-coded with the old page's thresholds

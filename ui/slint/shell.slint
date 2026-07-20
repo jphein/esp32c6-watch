@@ -59,6 +59,7 @@ export component WatchShell inherits Window {
     in property <int> total-ma: -1;
     in property <string> runtime-text: "--";
     in property <int> left-hours: 999;
+    in property <string> lp-core-text: "--"; // LP core status (set once at boot)
 
     // --- battery / radios (chrome) ---
     in property <int> battery-percent: -1;
@@ -158,6 +159,7 @@ export component WatchShell inherits Window {
             total-ma: root.total-ma;
             runtime-text: root.runtime-text;
             left-hours: root.left-hours;
+            lp-core-text: root.lp-core-text;
             brightness <=> root.brightness;
             brightness-changed(f) => { root.brightness-changed(f); }
             reboot-tap => { root.reboot-tap(); }

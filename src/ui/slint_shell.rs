@@ -372,6 +372,16 @@ impl ShellUi {
         ui.set_runtime_text(slint::format!("100%: {} \u{00b7} left: {}", full_s, left_s));
     }
 
+    /// Push the LP (low-power RISC-V) core status to the power page. Static for
+    /// now: offload got a RED verdict (task #24), so this is an availability
+    /// indicator, not a live workload. Formatted as "<state> \u{00b7} <mhz> MHz"
+    /// to match the power page's read-out style; set once from main.rs (no page
+    /// gate — the value never changes, so it persists until the page shows).
+    pub fn set_lp_core(&self, state: &str, mhz: u16) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_lp_core_text(slint::format!("{} \u{00b7} {} MHz", state, mhz));
+    }
+
     pub fn set_weather(&self, temp_f: Option<i16>, code: u8) {
         let Some(ui) = self.ui.as_ref() else { return; };
         match temp_f {
