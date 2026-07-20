@@ -58,7 +58,7 @@ use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState};
 use crate::drivers::co5300::Co5300Display;
-use crate::net::smol_mesh::{MeshEvent, PeerView, SmolMesh};
+use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::{fill_beep_buffer, Es8311};
@@ -67,7 +67,6 @@ use crate::peripherals::power::Axp2101Power;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
 use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
 use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
-use crate::ui::pages;
 use crate::ui::slint_shell::{self, ShellUi};
 
 extern crate alloc;
@@ -1218,7 +1217,7 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     slint_shell::PAGE_MESH => {
                         if now >= next_flush {
-                            let mut rows = [PeerView::default(); pages::MESH_MAX_ROWS];
+                            let mut rows = [PeerView::default(); MESH_MAX_ROWS];
                             let n = mesh.peers(now.as_millis(), &mut rows);
                             shell.set_mesh_rows(watch_cfg.node_id, &rows[..n]);
                             next_flush = now + Duration::from_secs(1);

@@ -245,6 +245,8 @@ impl ShellUi {
         }
     }
 
+    // Shell API surface awaiting its first caller (gesture polish, Task 12).
+    #[allow(dead_code)]
     pub fn touch_is_down(&self) -> bool {
         self.touch_down
     }
@@ -415,7 +417,7 @@ impl ShellUi {
         }
         let model: Vec<PeerRow> = rows
             .iter()
-            .take(crate::ui::pages::MESH_MAX_ROWS)
+            .take(crate::net::smol_mesh::MESH_MAX_ROWS)
             .map(|p| {
                 let name = match p.id {
                     Some(id) => {

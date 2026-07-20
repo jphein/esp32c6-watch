@@ -84,6 +84,10 @@ struct Peer {
     rssi_ewma_x8: Option<i32>,
 }
 
+/// Max roster rows the UI renders / the mesh push fills. Owns the constant now
+/// that the embedded-graphics pages module (its former home) is gone.
+pub const MESH_MAX_ROWS: usize = 7;
+
 /// A read-only roster row for the UI: who, how long since we heard them, and
 /// how near they sound (smoothed dBm).
 #[derive(Clone, Copy, Default)]
