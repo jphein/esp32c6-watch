@@ -1266,6 +1266,10 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_gyro(gyro_enabled);
                     shell.set_cpu_mhz(cpu_mhz);
                     shell.set_steps(last_steps);
+                    // LP-core status is a one-shot boot push; re-assert it (same
+                    // static "idle"/20MHz) so the power row isn't blank after a
+                    // scene recreate (wisp's review — same lost-on-recreate class).
+                    shell.set_lp_core("idle", 20);
                     if let Some((t, c)) = last_weather {
                         shell.set_weather(Some(t), c);
                     }
