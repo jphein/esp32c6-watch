@@ -20,6 +20,24 @@ mod net;
 mod peripherals;
 mod ui;
 mod apps;
+mod vendor; // #23 Option-A: vendored esp-radio 0.18 IEEE 802.15.4 driver
+
+// #23 link-test (spike-only): a `#[used]` fn-pointer static forces the vendored
+// 802.15.4 driver's init+RX path to be emitted and LINKED (not dead-code-
+// eliminated), so the linker must resolve the blob symbols (`bt_bb_v2_init_cmplx`
+// et al.) that esp-wifi-sys-esp32c6 links via the wifi build. If this links, the
+// single-image wifi + vendored-154 coexistence is proven at link, not just by nm.
+// NEVER CALLED at runtime — only its address is taken. Removed when RS3 wires the
+// real runtime radio-switch.
+#[used]
+static _RS_VENDOR_LINK_TEST: fn(esp_hal::peripherals::IEEE802154<'static>) = rs_vendor_link_test;
+fn rs_vendor_link_test(radio: esp_hal::peripherals::IEEE802154<'static>) {
+    let mut r = vendor::ieee802154::Ieee802154::new(radio);
+    r.set_config(vendor::ieee802154::Config::default());
+    r.start_receive();
+    let _ = r.raw_received();
+    core::mem::forget(r);
+}
 
 use core::cell::RefCell;
 

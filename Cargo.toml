@@ -99,6 +99,17 @@ wled-wizmote = { path = "crates/wled-wizmote" }
 rssi = { path = "crates/rssi" }
 hunt = { path = "crates/hunt" }
 
+# --- #23 Option-A: vendored esp-radio 0.18 IEEE 802.15.4 driver (src/vendor/
+# ieee802154). Feature specs match esp-radio 0.18 exactly so the vendored code
+# compiles no_std identically. esp-wifi-sys-esp32c6 (the blob archives) is already
+# linked via esp-radio's wifi build. esp32c6 PAC drives the vendored clock helpers.
+esp-phy = "0.2.0"
+esp-sync = "0.2.1"
+docsplay = { version = "0.1", default-features = false }
+esp32c6 = { version = "0.23", features = ["critical-section"] }
+ieee802154 = "0.6.1"
+byte = "0.2.7"
+
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.
 slint = { version = "1.17.1", default-features = false, features = [
