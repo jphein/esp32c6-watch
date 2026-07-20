@@ -1110,6 +1110,13 @@ async fn main(_spawner: Spawner) -> ! {
                     && power_page::is_reboot_zone(last_touch_x, last_touch_y)
                 {
                     println!("REBOOT requested");
+                    // If WiFi is up and an OTA_URL was baked in at build time,
+                    // try to stage an OTA update first; reboot either way.
+                    if wifi_connected && crate::net::ota_http::URL_SET {
+                        if let Err(e) = crate::net::ota_http::ota_update(stack, &mut flash).await {
+                            println!("[OTA] failed: {e}");
+                        }
+                    }
                     esp_hal::system::software_reset();
                 }
 
