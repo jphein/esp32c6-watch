@@ -846,13 +846,26 @@ async fn main(_spawner: Spawner) -> ! {
 
         // === WiFi state machine (one action per iteration) ===
         if wifi_toggle_request && (now - last_wifi_idle_check).as_millis() >= 1000 {
-            wifi_on_request = !wifi_on_request && wifi_has_creds;
             wifi_toggle_request = false;
             last_wifi_idle_check = now;
-            println!("[WIFI] toggled -> {}", if wifi_on_request { "ON" } else { "OFF" });
-        } else if wifi_toggle_request {
-            wifi_toggle_request = false;
+            if wifi_has_creds {
+                wifi_on_request = !wifi_on_request;
+                println!("[WIFI] toggled -> {}", if wifi_on_request { "ON" } else { "OFF" });
+            } else {
+                // No stored SSID: the STA can't associate, so a toggle can't do
+                // anything. Surface it (reuse the RAM-busy toast) instead of a
+                // silent dead button. The creds requirement is intentional —
+                // they're entered in the Settings app.
+                shell.set_toast("No WiFi credentials \u{2014} set in Settings");
+                toast_active = true;
+                toast_until = now + Duration::from_secs(3);
+                println!("[WIFI] tap ignored: no credentials");
+            }
         }
+        // A WIFI tap arriving inside the 1000ms debounce window is NOT dropped:
+        // wifi_toggle_request stays latched and the branch above processes it
+        // once the window clears — rate-limits WiFi start/stop without losing
+        // the tap (the old `else if { = false }` silently ate it).
 
         if wifi_on_request && !wifi_connected {
             if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
