@@ -49,7 +49,10 @@ impl<I: I2c> Es8311<I> {
         // Reg 0x04: dac_osr
         self.write_reg(0x04, 0x10)?;
 
-        // Reg 0x05: adc_div | dac_div
+        // Reg 0x05: adc_div | dac_div — both dividers are 1, encoded as
+        // (div-1): (0 << 4) | 0 = 0. The literal `1 - 1` mirrors the C ref's
+        // (div-1) form; clippy's eq_op fires on it as a false positive here.
+        #[allow(clippy::eq_op)]
         self.write_reg(0x05, ((1 - 1) << 4) | (1 - 1))?;
 
         // Reg 0x06: BCLK divider
