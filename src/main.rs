@@ -39,6 +39,17 @@ fn rs_vendor_link_test(radio: esp_hal::peripherals::IEEE802154<'static>) {
     core::mem::forget(r);
 }
 
+/// RS3: which radio the shared 2.4GHz PHY is currently driving. WiFi/ESP-NOW and
+/// the vendored 802.15.4 sniffer can't drive the baseband at once (coex stripped),
+/// so the watch *switches* at runtime — never coexists. `Scanning` pauses the mesh
+/// tick (see the `radio_mode == Wifi` gate on the ESP-NOW block); exiting `Scanning`
+/// auto-restores WiFi/mesh, so a failed scan can't strand the radio.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RadioMode {
+    Wifi,
+    Scanning,
+}
+
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
@@ -664,6 +675,16 @@ async fn main(_spawner: Spawner) -> ! {
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
     // this, so mesh no longer requires WiFi creds to run.
     let mut radio_started = false;
+    // RS3: runtime WiFi <-> 802.15.4 radio switch. `radio_scan_request` is the
+    // enter/exit trigger — RS5's RadioScan screen will drive it from the UI; for
+    // now it stays false (the scan path stays present + linkable but idle). The
+    // live `Ieee802154` sniffer is held only while `RadioMode::Scanning`.
+    let mut radio_mode = RadioMode::Wifi;
+    let mut ieee: Option<vendor::ieee802154::Ieee802154<'static>> = None;
+    let mut radio_scan_request = false;
+    // Default 802.15.4 channel (Zigbee/Thread commonly 11..=26); RS5 makes it
+    // selectable. 15 is a common Thread channel.
+    const SCAN_CHANNEL: u8 = 15;
     let mut wifi_scanned = false;
     let mut wifi_connected = false;
     let mut ntp_synced = false;
@@ -1122,8 +1143,61 @@ async fn main(_spawner: Spawner) -> ! {
             mesh_channel_pinned = false; // rides the AP channel while associated
         }
 
+        // === RS3: WiFi <-> 802.15.4 runtime switch ===
+        // Enter: quiesce WiFi (disconnect) + let the mesh block below pause
+        // (gated on radio_mode) + bring up the vendored 802.15.4 promiscuous RX.
+        // Exit: drop the sniffer (its Drop releases the PHY/clock guards) and let
+        // WiFi/mesh resume naturally. GUARDED: exit always restores radio_mode to
+        // Wifi, and the mesh block auto-resumes — a scan can never strand the mesh.
+        match (radio_mode, radio_scan_request) {
+            (RadioMode::Wifi, true) => {
+                if wifi_connected {
+                    let _ = wifi_controller.disconnect_async().await;
+                    wifi_connected = false;
+                }
+                wifi_on_request = false; // don't let the WiFi burst re-arm mid-scan
+                // Single-owner by RadioMode → reclaiming the peripheral via steal
+                // is sound (no other IEEE802154 driver exists while in Wifi mode).
+                let radio = unsafe { esp_hal::peripherals::IEEE802154::steal() };
+                let mut dev = vendor::ieee802154::Ieee802154::new(radio);
+                dev.set_config(vendor::ieee802154::Config {
+                    promiscuous: true,
+                    rx_when_idle: true,
+                    channel: SCAN_CHANNEL,
+                    ..Default::default()
+                });
+                dev.start_receive();
+                ieee = Some(dev);
+                radio_mode = RadioMode::Scanning;
+                mesh_channel_pinned = false; // force a re-pin of ch6 on scan exit
+                println!("[SCAN] enter -> 802.15.4 promiscuous RX ch{SCAN_CHANNEL}");
+            }
+            (RadioMode::Scanning, false) => {
+                ieee = None; // Drop frees the 154 HW + releases PHY/clock guards
+                radio_mode = RadioMode::Wifi;
+                println!("[SCAN] exit -> radio restored to WiFi/mesh");
+            }
+            (RadioMode::Scanning, true) => {
+                // Drain received frames. RS4 routes these into crates/scan-model;
+                // for now they're counted/dropped so the RX path is exercised.
+                if let Some(dev) = ieee.as_mut() {
+                    let mut n = 0u32;
+                    while let Some(raw) = dev.raw_received() {
+                        n += 1;
+                        let _ = raw; // RS4: scan_model.ingest(&raw.data, raw.channel)
+                    }
+                    if n > 0 {
+                        println!("[SCAN] +{n} frame(s) ch{SCAN_CHANNEL}");
+                    }
+                }
+            }
+            (RadioMode::Wifi, false) => {}
+        }
+
         // === SMOLv1 mesh (ESP-NOW) ===
-        if radio_started {
+        // Skipped while scanning: WiFi/ESP-NOW and 802.15.4 can't drive the shared
+        // baseband at once, so the mesh tick pauses until scan exit.
+        if radio_started && radio_mode == RadioMode::Wifi {
             if !esp_now_peer_added {
                 let peer = esp_radio::esp_now::PeerInfo {
                     interface: esp_radio::esp_now::EspNowWifiInterface::Station,
