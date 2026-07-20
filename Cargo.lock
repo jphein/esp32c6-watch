@@ -2064,6 +2064,7 @@ dependencies = [
  "static_cell",
  "trouble-host",
  "u8g2-fonts",
+ "wled-wizmote",
 ]
 
 [[package]]

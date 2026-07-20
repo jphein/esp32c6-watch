@@ -94,6 +94,9 @@ embedded-hal-bus = "0.3.0"
 heapless = "0.9"
 u8g2-fonts = "0.8.0"
 
+# Local workspace crates (smol-port). Pure-logic, no_std, host-unit-tested.
+wled-wizmote = { path = "crates/wled-wizmote" }
+
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.
 slint = { version = "1.17.1", default-features = false, features = [

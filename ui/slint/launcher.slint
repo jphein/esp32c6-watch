@@ -84,6 +84,14 @@ component AppIcon {
         Rectangle { x: 31px; y: 19px; width: 6px; height: 21px; border-radius: 2px; background: root.tint; }
         Rectangle { x: 40px; y: 30px; width: 6px; height: 10px; border-radius: 2px; background: root.tint; }
     }
+    // 9 — WLED: a lightbulb (glass globe + filament dot + tapering screw base).
+    if root.id == 9: Rectangle {
+        Rectangle { x: 11px; y: 3px;  width: 24px; height: 24px; border-radius: 12px; background: root.tint; }
+        Rectangle { x: 20px; y: 12px; width: 6px;  height: 6px;  border-radius: 3px; background: #05100a; }
+        Rectangle { x: 16px; y: 26px; width: 14px; height: 5px;  border-radius: 1px; background: root.tint.with-alpha(0.7); }
+        Rectangle { x: 18px; y: 32px; width: 10px; height: 4px;  border-radius: 1px; background: root.tint.with-alpha(0.5); }
+        Rectangle { x: 20px; y: 37px; width: 6px;  height: 3px;  border-radius: 1px; background: root.tint.with-alpha(0.4); }
+    }
 }
 
 // One big app tile: icon over label. Carries its launch idx.
@@ -168,7 +176,7 @@ export component LauncherOverlay {
             HorizontalLayout {
                 spacing: 12px;
                 AppTile { name: "Settings";    accent: #c0ffc0; icon-id: 6; idx: 6; launch(i) => { root.launch-app(i); } }
-                Rectangle { }  // spacer keeps the lone tile half-width
+                AppTile { name: "WLED";        accent: #ffd060; icon-id: 9; idx: 7; launch(i) => { root.launch-app(i); } }
             }
         }
     }

@@ -49,7 +49,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 7] = [
+pub const LAUNCHER_APPS: [AppState; 8] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -57,6 +57,7 @@ pub const LAUNCHER_APPS: [AppState; 7] = [
     AppState::Flappy,
     AppState::Maze,
     AppState::Settings,
+    AppState::Wled, // idx 7 — SYSTEM-section WLED tile (icon-id 9)
 ];
 
 #[derive(Default)]
@@ -69,6 +70,10 @@ pub struct ShellRequests {
     pub cpu_cycle: Cell<bool>,
     pub gyro_toggle: Cell<bool>,
     pub reboot: Cell<bool>,
+    /// WLED remote: a tapped tile's action id (0..8), drained by the loop and
+    /// mapped to a WiZmote broadcast. `wled_close` is the back-chevron/Right-swipe.
+    pub wled_action: Cell<Option<i32>>,
+    pub wled_close: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -214,7 +219,16 @@ impl ShellUi {
         }
 
         if let Some(direction) = swipe {
-            // Launcher overlay first: it swallows nav swipes wherever they
+            // WLED overlay first: it's full-screen over the scene, so swallow all
+            // nav swipes (no paging behind it); Right closes, mirroring the
+            // launcher. Taps still reach the tiles via the pointer events above.
+            if ui.get_wled_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_wled_open(false);
+                }
+                return;
+            }
+            // Launcher overlay next: it swallows nav swipes wherever they
             // start (including the power page's slider band); Right closes.
             if ui.get_launcher_open() {
                 if direction == SwipeDirection::Right {
@@ -447,6 +461,21 @@ impl ShellUi {
         self.ui.as_ref().is_some_and(|ui| ui.get_launcher_open())
     }
 
+    pub fn set_wled_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_wled_open(open);
+    }
+
+    pub fn wled_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_wled_open())
+    }
+
+    /// Feedback line under the WLED tiles ("→ On", "Radio off …", "" = idle).
+    pub fn set_wled_status(&self, text: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_wled_status(SharedString::from(text));
+    }
+
     pub fn page(&self) -> i32 {
         // While suspended, report the page we'll restore on resume.
         self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
@@ -581,6 +610,12 @@ fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> W
                 r.launch.set(Some(*app));
             }
         });
+
+        let r = req.clone();
+        ui.on_wled_emit(move |act| r.wled_action.set(Some(act)));
+
+        let r = req.clone();
+        ui.on_wled_close(move || r.wled_close.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     // Firmware version is a compile-time constant; set it once so the system

@@ -50,4 +50,7 @@ pub enum AppState {
     Mp3Player,
     SmartHome,
     Settings,
+    /// WLED WiZmote remote — a Slint overlay (not a framebuffer app): renders
+    /// through the resident scene, taps broadcast ESP-NOW WiZmote frames.
+    Wled,
 }

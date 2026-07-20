@@ -5,6 +5,7 @@ import { SystemPage } from "system.slint";
 import { PowerPage } from "power.slint";
 import { MeshPage } from "mesh.slint";
 import { LauncherOverlay } from "launcher.slint";
+import { WledRemote } from "wled.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -76,6 +77,9 @@ export component WatchShell inherits Window {
     // --- paging / modes ---
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
+    // WLED remote overlay (a launcher app that lives in the scene, not the fb).
+    in-out property <bool> wled-open: false;
+    in property <string> wled-status: "";
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -88,6 +92,8 @@ export component WatchShell inherits Window {
     callback gyro-tap();
     callback reboot-tap();
     callback launch-app(int); // launcher item index
+    callback wled-emit(int);  // WLED action id (0..8) → main.rs WiZmote broadcast
+    callback wled-close();
 
     in-out property <float> brightness: 0.8;
 
@@ -280,6 +286,14 @@ export component WatchShell inherits Window {
     if root.launcher-open: LauncherOverlay {
         width: 100%; height: 100%;
         launch-app(idx) => { root.launch-app(idx); }
+    }
+
+    // ==================== WLED remote overlay ====================
+    if root.wled-open: WledRemote {
+        width: 100%; height: 100%;
+        status: root.wled-status;
+        emit(a) => { root.wled-emit(a); }
+        close => { root.wled-close(); }
     }
 
     // ==================== AOD overlay ====================

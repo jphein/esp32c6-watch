@@ -36,11 +36,23 @@ component WledTile {
 
 export component WledRemote {
     callback emit(int);
+    callback close();
     in property <string> status;   // main.rs sets e.g. "-> On" after a send; "" = idle
 
     Rectangle { width: 100%; height: 100%; background: #000000; }
 
     PageTitle { title: "WLED"; }
+
+    // Back chevron (top-left, clear of the corner arc). Also closable by a
+    // Right-swipe (handled in slint_shell::handle_touch, like the launcher).
+    back := TouchArea {
+        x: 14px; y: 8px; width: 60px; height: 46px;
+        clicked => { root.close(); }
+        Text {
+            x: 8px; y: (parent.height - self.height) / 2;
+            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
+        }
+    }
 
     VerticalLayout {
         x: 22px;

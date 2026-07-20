@@ -662,6 +662,8 @@ async fn main(_spawner: Spawner) -> ! {
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
+    // WiZmote frame sequence (WLED de-dups on it); wraps, monotonic per send.
+    let mut wled_seq: u32 = 0;
     // Mesh enable flag (MESH chrome dot toggles it). Default OFF (power: the STA
     // radio only comes up when mesh is turned on). Toggling ON starts the radio
     // (below) then the ESP-NOW tick/rx/familiar run; OFF pauses the tick (peer
@@ -687,7 +689,7 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(5)
         } else {
             match app_state {
-                AppState::Watchface | AppState::Launcher => {
+                AppState::Watchface | AppState::Launcher | AppState::Wled => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if shell.has_active_animations() {
@@ -1341,11 +1343,14 @@ async fn main(_spawner: Spawner) -> ! {
         // could never fire. Recording `dispatched` keeps the transition visible.
         let dispatched = app_state;
         match app_state {
-            AppState::Watchface | AppState::Launcher => {
+            AppState::Watchface | AppState::Launcher | AppState::Wled => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
-                if !matches!(prev_app_state, AppState::Watchface | AppState::Launcher) {
+                if !matches!(
+                    prev_app_state,
+                    AppState::Watchface | AppState::Launcher | AppState::Wled
+                ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
                     // the state the per-tick on-change guards won't refresh on
@@ -1378,17 +1383,47 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.request_redraw();
                 }
 
-                // Mirror launcher open-state into the scene, then feed touch. The
-                // shell owns page/launcher navigation via swipes internally.
+                // Mirror overlay open-state into the scene, feed touch, then
+                // reconcile any swipe-driven overlay close (Right-swipe / WLED
+                // back-chevron) back into app_state. The shell owns page/launcher
+                // navigation via swipes internally; WLED is a scene overlay that
+                // shares this Slint branch (no framebuffer of its own).
                 shell.set_launcher_open(app_state == AppState::Launcher);
+                shell.set_wled_open(app_state == AppState::Wled);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
-                // Reconcile app_state with swipe-driven launcher open/close.
-                if shell.launcher_open() != (app_state == AppState::Launcher) {
-                    app_state = if shell.launcher_open() {
-                        AppState::Launcher
-                    } else {
-                        AppState::Watchface
-                    };
+                app_state = if shell.launcher_open() {
+                    AppState::Launcher
+                } else if shell.wled_open() {
+                    AppState::Wled
+                } else {
+                    AppState::Watchface
+                };
+
+                // WLED remote: back-chevron closes; a tapped tile broadcasts a
+                // WiZmote frame over ESP-NOW (reusing the mesh block's broadcast
+                // peer, which is added whenever the radio is up). Fire-and-forget
+                // — WLED controllers listen promiscuously; on-glass channel tuning
+                // vs the controller is a hardware follow-up.
+                if shell.req.wled_close.take() {
+                    shell.set_wled_open(false);
+                    app_state = AppState::Watchface;
+                }
+                if let Some(act) = shell.req.wled_action.take() {
+                    if let Some(btn) = wled_button(act) {
+                        if radio_started && esp_now_peer_added {
+                            wled_seq = wled_seq.wrapping_add(1);
+                            let frame = wled_wizmote::encode_wizmote(btn, wled_seq, batt_pct);
+                            if let Ok(w) =
+                                esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &frame)
+                            {
+                                let _ = w.wait();
+                            }
+                            shell.set_wled_status(wled_status(act));
+                            println!("[WLED] act={act} seq={wled_seq}");
+                        } else {
+                            shell.set_wled_status("Radio off \u{2014} enable WiFi/MESH");
+                        }
+                    }
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1515,59 +1550,70 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
-                    // Apps paint through the framebuffer, now HALF-RES (~51KB, see
-                    // framebuffer.rs). It fits alongside the resident Slint scene
-                    // at the 240KB heap with ~80KB to spare, so a launch no longer
-                    // *needs* the scene gone. We still close the launcher and drop
-                    // the scene here (kept as heap headroom; a post-ship task, #37,
-                    // may remove it as unnecessary), then allocate the fb fallibly.
-                    // The failure path (now practically impossible) recreates the
-                    // scene and stays put with a toast.
                     shell.set_launcher_open(false);
-                    if toast_active {
-                        shell.set_toast("");
-                        toast_active = false;
-                    }
-                    log_heap("pre-fb pre-drop");
-                    shell.suspend_scene();
-                    log_heap("pre-fb post-drop");
-                    match Framebuffer::try_new() {
-                        Some(f) => {
-                            fb = Some(f);
-                            log_heap("app enter");
-                            // Run the SAME per-app setup the old launcher arm did
-                            // (without setup the games boot into garbage).
-                            match target {
-                                AppState::Snake => snake_game.setup(),
-                                AppState::WorldSnake => world_snake.setup(),
-                                AppState::Game2048 => {
-                                    let fb = fb.as_mut().unwrap();
-                                    game_2048.setup();
-                                    game_2048.render(fb);
-                                    fb.flush(&mut display);
-                                }
-                                AppState::Tetris => tetris_game.setup(),
-                                AppState::Flappy => flappy_game.setup(),
-                                AppState::Maze => maze_game.setup(),
-                                AppState::Settings => {}
-                                _ => {}
-                            }
-                            app_state = target;
+                    if target == AppState::Wled {
+                        // WLED is a Slint overlay, not a framebuffer app: it renders
+                        // through the resident scene, so raise the overlay in place
+                        // — no scene suspend, no ~51KB fb alloc. Taps broadcast
+                        // WiZmote frames (drained above); back/Right-swipe closes.
+                        shell.set_wled_status("");
+                        shell.set_wled_open(true);
+                        app_state = AppState::Wled;
+                    } else {
+                        // Games paint through the framebuffer, now HALF-RES (~51KB,
+                        // see framebuffer.rs). It fits alongside the resident Slint
+                        // scene at the 240KB heap with ~80KB to spare, so a launch no
+                        // longer *needs* the scene gone. We still close the launcher
+                        // and drop the scene here (kept as heap headroom; post-ship
+                        // task #37 may remove it), then allocate the fb fallibly. The
+                        // failure path (now practically impossible) recreates the
+                        // scene and stays put with a toast.
+                        if toast_active {
+                            shell.set_toast("");
+                            toast_active = false;
                         }
-                        None => {
-                            // Even with the scene freed the fb won't fit — recreate
-                            // the scene, stay in the shell, and toast. The reset
-                            // guards force a repopulate over the next ticks.
-                            shell.resume_scene();
-                            prev_page = -1;
-                            prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
-                            shell.set_battery(batt_pct, batt_mv, charging);
-                            if let Some(dt) = last_dt.as_ref() {
-                                let _ = shell.set_time(dt);
+                        log_heap("pre-fb pre-drop");
+                        shell.suspend_scene();
+                        log_heap("pre-fb post-drop");
+                        match Framebuffer::try_new() {
+                            Some(f) => {
+                                fb = Some(f);
+                                log_heap("app enter");
+                                // Run the SAME per-app setup the old launcher arm did
+                                // (without setup the games boot into garbage).
+                                match target {
+                                    AppState::Snake => snake_game.setup(),
+                                    AppState::WorldSnake => world_snake.setup(),
+                                    AppState::Game2048 => {
+                                        let fb = fb.as_mut().unwrap();
+                                        game_2048.setup();
+                                        game_2048.render(fb);
+                                        fb.flush(&mut display);
+                                    }
+                                    AppState::Tetris => tetris_game.setup(),
+                                    AppState::Flappy => flappy_game.setup(),
+                                    AppState::Maze => maze_game.setup(),
+                                    AppState::Settings => {}
+                                    _ => {}
+                                }
+                                app_state = target;
                             }
-                            shell.set_toast("RAM busy \u{2014} try again");
-                            toast_active = true;
-                            toast_until = now + Duration::from_secs(3);
+                            None => {
+                                // Even with the scene freed the fb won't fit —
+                                // recreate the scene, stay in the shell, and toast.
+                                // The reset guards force a repopulate over the next
+                                // ticks.
+                                shell.resume_scene();
+                                prev_page = -1;
+                                prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
+                                shell.set_battery(batt_pct, batt_mv, charging);
+                                if let Some(dt) = last_dt.as_ref() {
+                                    let _ = shell.set_time(dt);
+                                }
+                                shell.set_toast("RAM busy \u{2014} try again");
+                                toast_active = true;
+                                toast_until = now + Duration::from_secs(3);
+                            }
                         }
                     }
                 }
@@ -1595,7 +1641,10 @@ async fn main(_spawner: Spawner) -> ! {
                 // Skip when a launch just switched us into an app this iteration:
                 // that app already painted its first frame (e.g. Game2048) and the
                 // trailing shell repaint would clobber it.
-                if matches!(app_state, AppState::Watchface | AppState::Launcher) {
+                if matches!(
+                    app_state,
+                    AppState::Watchface | AppState::Launcher | AppState::Wled
+                ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);
                     } else if screen_state == 1 {
@@ -1871,5 +1920,39 @@ async fn main(_spawner: Spawner) -> ! {
         // that painted straight to the panel and force a repaint. Use the
         // pre-dispatch snapshot, not the (possibly mutated) current app_state.
         prev_app_state = dispatched;
+    }
+}
+
+/// Map a WLED page action id (see ui/slint/wled.slint) to a WiZmote button.
+/// 0 On · 1 Off · 2-5 Preset 1-4 · 6 Dim+ · 7 Dim- · 8 Night.
+fn wled_button(act: i32) -> Option<wled_wizmote::WledButton> {
+    use wled_wizmote::WledButton as B;
+    Some(match act {
+        0 => B::On,
+        1 => B::Off,
+        2 => B::Preset(1),
+        3 => B::Preset(2),
+        4 => B::Preset(3),
+        5 => B::Preset(4),
+        6 => B::BrightUp,
+        7 => B::BrightDown,
+        8 => B::Night,
+        _ => return None,
+    })
+}
+
+/// Short confirmation shown under the WLED tiles after a broadcast.
+fn wled_status(act: i32) -> &'static str {
+    match act {
+        0 => "\u{2192} ON",
+        1 => "\u{2192} OFF",
+        2 => "\u{2192} Preset 1",
+        3 => "\u{2192} Preset 2",
+        4 => "\u{2192} Preset 3",
+        5 => "\u{2192} Preset 4",
+        6 => "\u{2192} Dim +",
+        7 => "\u{2192} Dim \u{2212}",
+        8 => "\u{2192} Night",
+        _ => "",
     }
 }
