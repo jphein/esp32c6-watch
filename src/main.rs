@@ -163,10 +163,11 @@ fn page_scr_name(page: i32) -> &'static str {
     }
 }
 
-/// TEMP diagnostic: log per-region free heap. The ~201KB framebuffer must come
-/// from ONE region, so total-free (HEAP.free()) can look fine while the main
-/// region alone is short. region_stats[0] = main (240KB pool), [1] = reclaimed
-/// (56KB pool). Confirms fragmentation-at-ceiling vs scene-not-freed.
+/// Log per-region free heap at boot / app-enter. The framebuffer must come from
+/// ONE region, so total-free (HEAP.free()) can read fine while the main region
+/// alone is short. region_stats[0] = main (240KB pool), [1] = reclaimed (56KB).
+/// `need` is the half-res fb footprint (205*251) so a launch log shows the
+/// margin at a glance.
 fn log_heap(tag: &str) {
     let stats = esp_alloc::HEAP.stats();
     let region_free = |i: usize| {
@@ -181,7 +182,7 @@ fn log_heap(tag: &str) {
         region_free(0),
         region_free(1),
         esp_alloc::HEAP.free(),
-        410usize * 502,
+        (410usize / 2) * (502usize / 2),
     );
 }
 
@@ -278,16 +279,15 @@ async fn main(_spawner: Spawner) -> ! {
     // RGB332 framebuffer (~201KB) + app allocations live here. The main heap
     // sits in regular DRAM; the small ROM-reclaimed region (~64KB) is added
     // as a second pool so nothing goes to waste.
-    // Main DRAM region. The ~201KB game framebuffer (Framebuffer::try_new) can
-    // only come from THIS region; at 240KB it had only ~1KB margin over the fb
-    // once the Slint scene + BLE + mesh were resident, so a game launch OOM'd
-    // ("RAM busy"). esp-hal's `.stack` is the leftover gap between .bss and RAM
-    // top (RAM 0x6E610), so heap directly eats stack: 240KB left ~47KB stack,
-    // 288KB overflows RAM, and 280KB (~7KB stack) BOOT-LOOPED — the Slint scene
-    // build (WatchShell::new) overran the stack guard. 264KB keeps ~23KB stack,
-    // which builds the scene, while still giving the fb +24KB headroom over 240.
-    // (Radio-on + game may still be tight — durable fix is the fb-shrink, #35.)
-    esp_alloc::heap_allocator!(size: 264 * 1024);
+    // Main DRAM region, back at the original 240KB. The framebuffer is now
+    // HALF-RES (~51KB, see framebuffer.rs) instead of ~201KB, so it fits here
+    // alongside the Slint scene + WiFi + BLE + mesh with ~80KB to spare — no
+    // heap bump needed, and the full ~47KB stack is preserved (a bigger heap
+    // eats the stack, since esp-hal's `.stack` is the leftover gap under RAM
+    // top; 280KB boot-looped on the scene build). This is the durable fix for
+    // the game-launch OOM in EVERY radio state (#35), replacing the 264KB
+    // interim.
+    esp_alloc::heap_allocator!(size: 240 * 1024);
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 56 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -595,7 +595,6 @@ async fn main(_spawner: Spawner) -> ! {
     }
     shell.render(&mut display);
 
-    let mut next_heaplog = Instant::now(); // TEMP diagnostic (strip once bump verified)
     let mut next_rtc = Instant::now();
     let mut next_battery = Instant::now();
     let mut last_frame = Instant::now();
@@ -703,13 +702,6 @@ async fn main(_spawner: Spawner) -> ! {
         .await;
 
         let now = Instant::now();
-        // TEMP diagnostic: periodic per-region heap so the same flash shows the
-        // peak main_free as JP toggles WiFi/BLE/mesh (sizes the fb-shrink fallback
-        // if the region bump alone doesn't clear the WiFi+game case).
-        if now >= next_heaplog {
-            log_heap("tick");
-            next_heaplog = now + Duration::from_secs(2);
-        }
         let dt_ms = (now - last_frame).as_millis() as u32;
         last_frame = now;
 
