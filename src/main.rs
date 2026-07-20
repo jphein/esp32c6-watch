@@ -35,9 +35,13 @@ use esp_hal::{
     delay::Delay,
     dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf},
     dma_buffers,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent},
     i2c::master::{Config as I2cConfig, I2c},
     i2s::master::{Config as I2sConfig, DataFormat, I2s},
+    rtc_cntl::{
+        sleep::{GpioWakeupSource, TimerWakeupSource},
+        wakeup_cause, Rtc,
+    },
     spi::{
         master::{Config as SpiConfig, Spi},
         Mode as SpiMode,
@@ -80,6 +84,12 @@ async fn net_task(
 ) -> ! {
     runner.run().await
 }
+
+/// DS0 spike gate (#29): when true, the AOD idle state (screen_state == 1) parks
+/// the HP core in `rtc.sleep_light()` instead of WFI-idling, waking on a 60s RTC
+/// timer OR touch/button GPIO. Set false to fall back to the shipped WFI AOD.
+/// Not yet the final power policy — this proves the light-sleep handshake on HW.
+const AOD_LIGHT_SLEEP: bool = true;
 
 fn days_to_date(days_since_epoch: i32) -> (u32, u32, u32) {
     let mut y = 1970i32;
@@ -373,6 +383,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut rtc = Pcf85063aRtc::new(RefCellDevice::new(&i2c_ref));
     let _ = rtc.init();
     println!("[RTC] OK");
+
+    // esp-hal RTC (rtc_cntl / LPWR peripheral) — drives HP-core light sleep for
+    // AOD (#29). The wall clock stays on the external PCF85063 above, which is
+    // unaffected by light sleep; this only powers the sleep/wake handshake.
+    let mut rtc_lp = Rtc::new(peripherals.LPWR);
 
     // === IMU ===
     let mut imu = Qmi8658Imu::new(RefCellDevice::new(&i2c_ref));
@@ -698,12 +713,38 @@ async fn main(_spawner: Spawner) -> ! {
             tick
         };
 
-        let _ = select3(
-            Timer::after(tick),
-            touch_int.wait_for_falling_edge(),
-            boot_button.wait_for_falling_edge(),
-        )
-        .await;
+        if AOD_LIGHT_SLEEP && screen_state == 1 {
+            // AOD light-sleep spike (#29 DS0): park the HP core in light sleep
+            // instead of WFI-idling. Wake on a 60s RTC timer OR touch (GPIO15) OR
+            // boot button (GPIO9), both active-low. GPIO wake needs BOTH the pin
+            // armed (`wakeup_enable`) AND the GpioWakeupSource trigger in the wake
+            // set — the timer-only source would never wake on the pins. The clock
+            // is the external PCF85063 (sleep-safe); embassy-time (TIMG0) pauses,
+            // so it lags real time by the sleep span — fine, AOD repaints from the
+            // RTC minute. `sleep_light` blocks (executor paused → mesh quiesces).
+            let timer_wake = TimerWakeupSource::new(core::time::Duration::from_secs(60));
+            let gpio_wake = GpioWakeupSource::new();
+            let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
+            let _ = boot_button.wakeup_enable(true, WakeEvent::LowLevel);
+            let t0 = Instant::now();
+            rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
+            let cause = wakeup_cause();
+            // Disarm so normal falling-edge IRQ handling resumes.
+            let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
+            let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+            println!(
+                "[AOD-SLEEP] woke cause={:?} embassy_lag_ms={}",
+                cause,
+                (Instant::now() - t0).as_millis()
+            );
+        } else {
+            let _ = select3(
+                Timer::after(tick),
+                touch_int.wait_for_falling_edge(),
+                boot_button.wait_for_falling_edge(),
+            )
+            .await;
+        }
 
         let now = Instant::now();
         let dt_ms = (now - last_frame).as_millis() as u32;
