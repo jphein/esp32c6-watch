@@ -501,6 +501,10 @@ async fn main(_spawner: Spawner) -> ! {
     // Sync the power-page slider knob to the real boot brightness (else it shows
     // the Slint default while the panel is at watch_cfg.brightness).
     shell.set_brightness_from_raw(brightness);
+    // Honor the persisted boot page (CFG `S` default). The shell starts on the
+    // clock; apply default_page so the watch boots where the user left it. Until
+    // now this value was written to flash but never read back at boot.
+    shell.set_page(watch_cfg.default_page as i32);
     let mut power_stats = PowerStats::new();
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
@@ -531,6 +535,9 @@ async fn main(_spawner: Spawner) -> ! {
     // auto-cleared once its window elapses (toast_active gates the single clear).
     let mut toast_until = Instant::now();
     let mut toast_active = false;
+    // AOD repaints only when the minute changes; 99 is a sentinel that forces
+    // the first paint on AOD entry (any real minute 0..=59 differs).
+    let mut aod_last_minute: u8 = 99;
 
     // Initial shell paint so the panel shows a live clock immediately instead of
     // waiting up to a full tick for the first loop render.
@@ -596,7 +603,8 @@ async fn main(_spawner: Spawner) -> ! {
         } else if screen_state == 0 {
             Duration::from_secs(30)
         } else if screen_state == 1 {
-            Duration::from_secs(10)
+            // AOD: wake often enough that the minute flip never looks stuck.
+            Duration::from_secs(5)
         } else {
             match app_state {
                 AppState::Watchface | AppState::Launcher => {
@@ -677,8 +685,9 @@ async fn main(_spawner: Spawner) -> ! {
 
         // === RTC 1Hz ===
         // Stash the reading; the shell arm pushes it via shell.set_time (which
-        // no-ops until the second actually ticks).
-        if screen_state >= 2 && now >= next_rtc {
+        // no-ops until the second actually ticks). Read at state >= 1 too so the
+        // AOD minute-gated repaint has a fresh `last_dt` to compare against.
+        if screen_state >= 1 && now >= next_rtc {
             if let Ok(dt) = rtc.get_time() {
                 last_dt = Some(dt);
             }
@@ -767,6 +776,10 @@ async fn main(_spawner: Spawner) -> ! {
             if app_state == AppState::Watchface && shell.page() == slint_shell::PAGE_CLOCK {
                 display.set_brightness(0x18);
                 screen_state = 1;
+                shell.set_aod(true);
+                // Force the first AOD repaint next iteration (99 != any minute)
+                // so the dim overlay appears immediately, not at the next flip.
+                aod_last_minute = 99;
             } else {
                 display.set_brightness(0x00);
                 display.display_off();
@@ -1051,10 +1064,11 @@ async fn main(_spawner: Spawner) -> ! {
                         // the gateway re-broadcasts cached configs every ~10s,
                         // so a same-value re-arm must never wear flash.
                         Some(MeshEvent::CfgScreen { page }) => {
-                            // Live remote page-switch is deferred: the Slint shell
-                            // owns its current page and exposes no setter yet, so a
-                            // CFG `S` downlink only persists the new default for now
-                            // (a follow-up adds ShellUi::set_page). See task-9 notes.
+                            // Switch the visible page live (ShellUi::set_page
+                            // clamps out-of-range). Takes effect immediately on
+                            // the watchface; if we're in an app it sets the page
+                            // the shell returns to. The save stays edge-triggered.
+                            shell.set_page(page as i32);
                             if watch_cfg.default_page != page {
                                 watch_cfg.default_page = page;
                                 match config_offset.map(|off| {
@@ -1147,9 +1161,9 @@ async fn main(_spawner: Spawner) -> ! {
             prev_radios = radios;
         }
 
-        // === AOD (real always-on display lands in task 11) ===
-        // For now screen_state 1 just stays dim showing the last frame; skip the
-        // render/interaction work until the panel is off entirely.
+        // === screen off ===
+        // State 0 = panel fully off: skip all render/interaction work. State 1
+        // (AOD) falls through — the shell arm renders it minute-gated below.
         if screen_state == 0 {
             continue;
         }
@@ -1335,9 +1349,20 @@ async fn main(_spawner: Spawner) -> ! {
                 // Skip when a launch just switched us into an app this iteration:
                 // that app already painted its first frame (e.g. Game2048) and the
                 // trailing shell repaint would clobber it.
-                if screen_state >= 2 && matches!(app_state, AppState::Watchface | AppState::Launcher)
-                {
-                    shell.render(&mut display);
+                if matches!(app_state, AppState::Watchface | AppState::Launcher) {
+                    if screen_state >= 2 {
+                        shell.render(&mut display);
+                    } else if screen_state == 1 {
+                        // AOD: repaint only when the minute changes so the dim
+                        // scene isn't driven every wake. last_dt is refreshed at
+                        // state >= 1 above; set_time (shell arm) dirtied the scene.
+                        if let Some(dt) = last_dt.as_ref() {
+                            if dt.minutes != aod_last_minute {
+                                aod_last_minute = dt.minutes;
+                                shell.render(&mut display);
+                            }
+                        }
+                    }
                 }
             }
 

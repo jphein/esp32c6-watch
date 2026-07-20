@@ -398,6 +398,17 @@ impl ShellUi {
         self.ui.get_current_page()
     }
 
+    /// Jump to a page (boot default_page, CFG `S` remote page-switch). Out-of-range
+    /// values fall back to the clock so a bad downlink can't blank the shell.
+    pub fn set_page(&self, page: i32) {
+        let p = if (0..PAGE_COUNT).contains(&page) {
+            page
+        } else {
+            PAGE_CLOCK
+        };
+        self.ui.set_current_page(p);
+    }
+
     /// Push the mesh roster. `age_ms` on a [`PeerView`] is already an age
     /// (ms since we last heard the peer — see `SmolMesh::peers`), so it is
     /// divided directly; no wall-clock parameter is needed.
