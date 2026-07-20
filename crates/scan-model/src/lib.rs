@@ -5,6 +5,23 @@
 //! adapted from the radio's `ReceivedFrame` (RSSI/LQI are passthrough — the
 //! radio supplies them, we don't parse them from the PDU). No protocol
 //! classifier here: Zigbee-vs-Thread is deferred to v2 (v1 shows "802.15.4 PAN").
+//!
+//! # Frame-format caveat (v1 — 2006 MHR, best-effort)
+//!
+//! [`parse_mac_header`] implements the **802.15.4-2003/2006** MAC header only.
+//! It does **not** handle 2015 (frame version ≥ 2) frames:
+//! - **Sequence-number suppression** (FCF bit 8, 2015): the sequence byte is
+//!   absent, so the fixed 3-byte MHR prefix assumed here is off-by-one → the
+//!   PAN id / source address parse wrong, or the frame reads as malformed.
+//! - **2015 PAN-ID compression** uses a different truth table than the single
+//!   bit-6 rule applied here.
+//!
+//! **Thread uses 2015 frames** (enhanced-acks and some MAC commands suppress
+//! the sequence number), so **PAN read-outs on a live Thread network will be
+//! wrong or missing** — do not trust them. Zigbee (2006 frames) parses
+//! correctly. These are accuracy gaps, never panics: the parser is fully
+//! bounds-checked (oracle: 0 panics over 112 adversarial frames). Full 2015
+//! parsing is deferred to v2 (tracking issue jphein/esp32c6-watch#1).
 #![cfg_attr(not(test), no_std)]
 
 use heapless::index_set::FnvIndexSet;
@@ -51,10 +68,11 @@ pub struct MacHeader {
     pub src_addr: Option<u16>,
 }
 
-/// Parse an 802.15.4 MAC header. `frame` starts at the Frame Control Field
-/// (MHR) — the caller strips any PHY length byte; the FCS is ignored. Returns
-/// `None` if the frame is too short or its addressing fields run past the
-/// buffer (malformed).
+/// Parse an 802.15.4 **2003/2006** MAC header (see the crate-level frame-format
+/// caveat — 2015 / Thread frames are not handled). `frame` starts at the Frame
+/// Control Field (MHR) — the caller strips any PHY length byte; the FCS is
+/// ignored. Returns `None` if the frame is too short or its addressing fields
+/// run past the buffer (malformed).
 pub fn parse_mac_header(frame: &[u8]) -> Option<MacHeader> {
     if frame.len() < 3 {
         return None; // need FCF (2 B) + sequence number (1 B)
@@ -208,12 +226,18 @@ impl ScanState {
         self.total = self.total.saturating_add(1);
 
         // Channel energy — counted whether or not the header parses.
-        if channel >= CH_MIN && ((channel - CH_MIN) as usize) < CH_COUNT {
+        let in_band = channel >= CH_MIN && ((channel - CH_MIN) as usize) < CH_COUNT;
+        if in_band {
             let cs = &mut self.channels[(channel - CH_MIN) as usize];
             cs.frames = cs.frames.saturating_add(1);
             if rssi > cs.peak_rssi {
                 cs.peak_rssi = rssi;
             }
+        } else {
+            // Off-band channel (caller bug): count it in `total` but don't
+            // attribute it to a PAN — a PAN can't sit on a non-existent channel,
+            // and this keeps `PanEntry.channel` from ever recording nonsense.
+            return;
         }
 
         // PAN accounting needs a parseable header carrying a PAN id.
@@ -327,6 +351,16 @@ mod tests {
         assert_eq!(s.total, 1);
         assert_eq!(s.channels[4].frames, 1, "energy still counts on the channel");
         assert!(s.pans.is_empty(), "no PAN from a malformed header");
+    }
+
+    #[test]
+    fn fold_out_of_band_channel_counts_total_only() {
+        let mut s = ScanState::new();
+        s.fold_frame(99, &beacon(), -50); // above ch 26 (caller bug)
+        s.fold_frame(3, &beacon(), -50); //  below ch 11
+        assert_eq!(s.total, 2, "off-band frames still bump total");
+        assert!(s.pans.is_empty(), "no PAN attributed to an off-band channel");
+        assert!(s.channels.iter().all(|c| c.frames == 0), "no channel stat touched");
     }
 
     #[test]
