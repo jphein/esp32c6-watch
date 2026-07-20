@@ -33,7 +33,10 @@ pub const BRIDGE_PORT: u16 = 8090;
 pub const MAX_TRANSCRIPT: usize = 256;
 /// Idle timeout while waiting for the bridge's response (Azure round-trip).
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Socket idle timeout.
+/// Socket idle timeout for the CONNECT + STREAM phase only. It is cleared before
+/// `read_response` so it can't pre-empt the deliberate [`RESPONSE_TIMEOUT`] while
+/// waiting on Azure (a slow round-trip past this would otherwise idle-abort the
+/// read and spuriously fail an otherwise-good transcription).
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Source of captured audio: yields successive chunks of **mono 16 kHz
@@ -109,6 +112,11 @@ pub async fn stream_utterance_to<S: PcmSource>(
     write_all(&mut socket, b"0\r\n\r\n").await?;
 
     // --- response (bounded, Azure round-trip) -------------------------------
+    // Drop the connect/stream idle timeout: `with_timeout(RESPONSE_TIMEOUT)` is
+    // now the single authoritative deadline. Without this, SOCKET_TIMEOUT (15s)
+    // would idle-abort `socket.read()` before the 30s response budget and fail a
+    // slow-but-valid Azure transcription with "socket read failed".
+    socket.set_timeout(None);
     let text = match with_timeout(RESPONSE_TIMEOUT, read_response(&mut socket)).await {
         Ok(r) => r?,
         Err(_) => return Err("response timeout"),
