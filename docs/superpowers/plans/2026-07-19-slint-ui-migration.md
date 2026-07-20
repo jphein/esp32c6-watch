@@ -1204,6 +1204,18 @@ git commit -m "feat(ui): Slint system page with live heap stats"
 
 ### Task 6: Power page (stats rows + brightness slider + reboot)
 
+> **AMENDED during execution (2026-07-19):** the baseline below lost the old
+> page's core feature — the per-subsystem mA monitor. As built: a 2-column
+> subsystem grid (CPU/DISPLAY/WIFI/BLE/IMU/AUDIO, each "name · state · mA"),
+> full-width color-coded TOTAL row, RUNTIME row (100%/left estimates), slider
+> at y366 (SLIDER_BAND unchanged), reboot at y414 h36 (clears page dots). The
+> separate BATTERY row was consolidated away (chrome pill + system page carry
+> it). The mA/total/runtime estimation math moved from `power_page.rs` into
+> `PowerStats` methods in `src/peripherals/power_stats.rs` (UI-free), with the
+> old eg page delegating to it — so Task 13 deletes rendering only. Page-index
+> constants (PAGE_CLOCK..PAGE_MESH, PAGE_COUNT) were also introduced in
+> `slint_shell.rs` here and replace all magic page indices.
+
 **Files:**
 - Create: `ui/slint/power.slint`
 - Modify: `ui/slint/shell.slint`, `src/ui/slint_shell.rs`
@@ -2013,7 +2025,8 @@ git commit -m "feat(ui): Familiar status cluster + gyro parallax on the Slint cl
 
 - [ ] **Step 1: Untangle survivors**
 
-- `pages::MESH_MAX_ROWS` is still used by the mesh push → move the constant to `src/net/smol_mesh.rs` (`pub const MESH_MAX_ROWS: usize = 7;`) and update the two use sites (`main.rs` mesh push, `slint_shell.rs` if referenced).
+- `pages::MESH_MAX_ROWS` is still used by the mesh push → move the constant to `src/net/smol_mesh.rs` (`pub const MESH_MAX_ROWS: usize = 7;`) and update the use sites (`main.rs` mesh push, `slint_shell.rs` — it references it since Task 3).
+- `power_page.rs` is rendering-only by now (Task 6 moved the mA/total/runtime estimation math into `PowerStats` methods in `src/peripherals/power_stats.rs`) — confirm no estimation logic remains before deleting.
 - `FamUi` already moved in Task 12.
 - `t9_keyboard` stays (used by `apps/settings.rs` — verify with `grep -rn "t9_keyboard" src/`).
 - `Framebuffer::new()` (infallible) now unused → delete it, keep `try_new()`.
