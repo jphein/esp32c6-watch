@@ -269,6 +269,8 @@ header.nav{
 .feat .kbadge{position:absolute; top:20px; right:20px; font-family:var(--font-mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; padding:4px 9px; border-radius:99px; border:1px solid var(--line); color:var(--dim)}
 .feat.wip .kbadge{color:var(--warm); border-color:color-mix(in srgb,var(--warm) 40%, transparent)}
 .feat.soon .kbadge{color:var(--accent2); border-color:color-mix(in srgb,var(--accent2) 40%, transparent)}
+.feat.done .kbadge{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%, transparent)}
+.feat.done{border-color:color-mix(in srgb,var(--accent) 26%, var(--line))}
 /* flagship */
 .feat.flag{grid-column:span 6; background:
     radial-gradient(120% 140% at 100% 0%, color-mix(in srgb,var(--accent) 12%, transparent), transparent 60%), var(--panel);
@@ -576,20 +578,36 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
         <p>HTTP over-the-air firmware updates into an A/B partition layout — flash <span class="mono">ota_1</span> while running from <span class="mono">ota_0</span>, then flip.</p>
       </article>
 
-      <!-- Slint migration WIP -->
-      <article class="feat wip reveal">
-        <span class="kbadge">in progress</span>
-        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 3v9l6 3"/></svg></div>
-        <h3>Slint UI migration</h3>
-        <p>The whole shell is moving off <span class="mono">embedded-graphics</span> onto Slint — freeing the ~202 KB framebuffer from boot and streaming 2-line RGB565 strips straight to panel GRAM. Live on <span class="mono">feat/slint-shell</span>.</p>
+      <!-- Slint migration SHIPPED -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.2.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></div>
+        <h3>Slint UI shell</h3>
+        <p>The whole shell now runs on Slint — the 5-page carousel + launcher, always-on display, and the Mesh Familiar creature. The software renderer streams 2-line RGB565 strips straight to panel GRAM, so the ~202 KB framebuffer left boot entirely (fixing the boot-OOM) and is allocated on demand only for full-frame games. Merged to <span class="mono">main</span>.</p>
       </article>
 
-      <!-- Radio scan SOON -->
+      <!-- defmt-rtt debug AVAILABLE -->
+      <article class="feat done reveal">
+        <span class="kbadge">dev · available</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7 9 3 3-3 3M13 15h4"/></svg></div>
+        <h3>defmt-rtt debug</h3>
+        <p>Feature-gated <span class="mono">defmt</span> logging over an RTT channel (probe-rs) — wire-speed structured logs with no serial monitor. Opt-in at build time, off by default.</p>
+      </article>
+
+      <!-- Radio scan UPCOMING -->
       <article class="feat soon reveal">
         <span class="kbadge">upcoming</span>
         <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></div>
         <h3>Radio Scan · Zigbee/Thread</h3>
-        <p>A passive 802.15.4 monitor using the C6's native radio — sniff nearby Zigbee/Thread PAN IDs, channels, and RSSI. A dedicated mode that tears the mesh down first, because the three radios share one PHY.</p>
+        <p>A passive 802.15.4 monitor using the C6's native radio — sniff nearby Zigbee/Thread PAN IDs, channels, and RSSI. A dedicated scan mode that tears the mesh down first, because all three radios share one PHY. Scoped, not yet built.</p>
+      </article>
+
+      <!-- Mic capture UPCOMING -->
+      <article class="feat soon reveal">
+        <span class="kbadge">upcoming</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6"/></svg></div>
+        <h3>Mic capture · dB meter</h3>
+        <p>Audio input from the onboard ES8311 codec over I²S RX — sampling the ADC to drive a live sound-level (dB) meter on the watch. Scoped, not yet built.</p>
       </article>
     </div>
   </div>
@@ -647,7 +665,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
             <div class="rows" style="gap:1.5cqw">
               <div class="srow"><span class="k">CHIP</span><span class="v">ESP32-C6 · RISC-V</span></div>
               <div class="srow"><span class="k">DISPLAY</span><span class="v">410x502 AMOLED</span></div>
-              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.1.0</span></div>
+              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.2.0</span></div>
               <div class="srow"><span class="k">HEAP</span><span class="v acc">123k free</span></div>
               <div class="srow"><span class="k">UPTIME</span><span class="v">02:41:07</span></div>
               <div class="srow"><span class="k">BATTERY</span><span class="v">78% · 4012 mV</span></div>
