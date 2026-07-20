@@ -4,6 +4,26 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-07-20
+
+On-glass fixes on top of v0.3.0: WiFi actually works, the radio toggles are
+finger-sized, and the sensors page shows steps.
+
+### Fixed
+- **WiFi toggle** — no longer drops taps (removed a debounce window that silently
+  ate a WIFI tap within 1s of the periodic idle check) and no longer silently
+  no-ops without credentials — it now toasts "No WiFi credentials — set in
+  Settings". With credentials present, WiFi auto-connects and the toggle is a
+  responsive off↔on.
+
+### Changed
+- **Larger radio tap targets** — the WIFI / BLE / MESH hit areas grew 66×44 →
+  78×64 (+72%) so they're reliably finger-tappable; the visible dots stay aligned
+  with the battery pill, hit areas span the top strip without clipping the corners.
+
+### Added
+- **Step count on the Sensors page.**
+
 ## [0.3.0] — 2026-07-20
 
 Migration tail + hardening on top of the Slint shell: always-on display, the
