@@ -1,0 +1,9 @@
+[package]
+name = "hunt"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std treasure-hunt (warmer/colder) game logic over RSSI. Host-testable; consumes crates/rssi. Ported from smol clock/src/hunt.rs (logic split from its OLED render)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rssi = { path = "../rssi" }
