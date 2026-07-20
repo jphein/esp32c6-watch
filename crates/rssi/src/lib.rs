@@ -167,8 +167,20 @@ impl core::fmt::Write for Line {
     }
 }
 
-/// ASCII-safe left-truncate to `n` bytes (magical nouns are ASCII, so a byte
-/// boundary is a char boundary — never panics).
+/// Left-truncate to at most `n` bytes, on a UTF-8 char boundary — never panics.
+///
+/// Fed **untrusted mesh peer names** (arrive over ESP-NOW, attacker-controllable,
+/// not guaranteed ASCII), so it must not byte-slice mid-multibyte-char (that would
+/// panic "not a char boundary" = a remote-crash vector). Walks back from `n` to the
+/// largest char boundary ≤ `n`. (Diverges from smol's verbatim `clip` on purpose —
+/// smol carries the same latent panic; flagged for reverse-upstream.)
 pub fn clip(s: &str, n: usize) -> &str {
-    &s[..s.len().min(n)]
+    if s.len() <= n {
+        return s;
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }

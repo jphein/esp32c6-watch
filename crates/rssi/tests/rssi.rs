@@ -78,3 +78,18 @@ fn clip_left_truncates() {
     assert_eq!(clip("abcdef", 3), "abc");
     assert_eq!(clip("ab", 5), "ab"); // shorter than n -> unchanged
 }
+
+#[test]
+fn clip_never_panics_on_multibyte_utf8() {
+    // Untrusted mesh peer names may be non-ASCII. Cutting mid-multibyte-char must
+    // NOT panic (byte-slice would); it truncates to the char boundary <= n.
+    assert_eq!(clip("café", 4), "caf"); // 'é' is 2 bytes at [3,5); n=4 is mid-char
+    assert_eq!(clip("café", 5), "café"); // exactly fits
+    assert_eq!(clip("a🎯b", 3), "a"); // '🎯' is 4 bytes; n=3 lands inside it
+    assert_eq!(clip("🎯", 2), ""); // n before the first char boundary -> empty
+    // fuzz-ish: every prefix length over a multibyte string returns valid UTF-8
+    let s = "αβγδε"; // each Greek letter is 2 bytes
+    for n in 0..=s.len() + 2 {
+        let _ = clip(s, n); // must not panic for any n
+    }
+}
