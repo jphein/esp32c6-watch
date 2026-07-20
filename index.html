@@ -1,0 +1,1068 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esp32c6-watch — 100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch</title>
+<meta name="description" content="A 100% Rust, no_std firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch — Slint UI, ESP-NOW mesh, a migrating Mesh Familiar, games, BLE, WiFi, OTA, and a hardware pedometer, all on a RISC-V microcontroller.">
+<meta name="theme-color" content="#000000">
+<meta property="og:title" content="esp32c6-watch">
+<meta property="og:description" content="100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch — Slint UI, ESP-NOW mesh, a migrating Familiar creature, games, and more.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/fonts.css">
+<style>
+/* ============================ TOKENS ============================ */
+:root{
+  /* page chrome — dark (AMOLED-native default) */
+  --bg:#000000; --bg2:#05070d; --panel:#0a1120; --panel-2:#0d1626;
+  --ink:#f2f5ff; --soft:#9fb4d8; --dim:#6b7794; --faint:#39435c;
+  --accent:#35e0b0; --accent2:#3a7bd5; --warn:#ff5566; --warm:#ffd166;
+  --line:#1a2540; --line-2:#141d33;
+  --hero-grad:linear-gradient(155deg,#140b2e 0%,#000000 52%,#002733 100%);
+  --card-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 24px 48px -28px rgba(0,0,0,.9);
+  --glow:0 0 42px -8px rgba(53,224,176,.55);
+
+  /* device tokens — always the real AMOLED palette, both themes */
+  --d-bg:#000; --d-ink:#f2f5ff; --d-soft:#9fb4d8; --d-dim:#55617a; --d-faint:#3c4761;
+  --d-accent:#35e0b0; --d-accent2:#3a7bd5; --d-panel:#101728; --d-line:#2a3550;
+  --d-track:#16202f; --d-warn:#ff5566; --d-warm:#ffd166; --d-off:#223048;
+
+  --font-display:'Chakra Petch','Segoe UI',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  --font-body:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --maxw:1180px;
+}
+/* light theme — only when the system asks for it AND the user hasn't forced dark */
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#eaeef6; --bg2:#f4f6fb; --panel:#ffffff; --panel-2:#f2f5fb;
+    --ink:#0e1524; --soft:#33436a; --dim:#5c688a; --faint:#a6b0c7;
+    --accent:#0c9b74; --accent2:#2a5cae; --warn:#d23a4c; --warm:#b9791a;
+    --line:#dde3ef; --line-2:#e7ebf5;
+    --hero-grad:linear-gradient(155deg,#e9e6fb 0%,#f4f6fb 50%,#dff1ee 100%);
+    --card-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 20px 40px -30px rgba(20,40,80,.35);
+    --glow:0 0 42px -12px rgba(12,155,116,.4);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#eaeef6; --bg2:#f4f6fb; --panel:#ffffff; --panel-2:#f2f5fb;
+  --ink:#0e1524; --soft:#33436a; --dim:#5c688a; --faint:#a6b0c7;
+  --accent:#0c9b74; --accent2:#2a5cae; --warn:#d23a4c; --warm:#b9791a;
+  --line:#dde3ef; --line-2:#e7ebf5;
+  --hero-grad:linear-gradient(155deg,#e9e6fb 0%,#f4f6fb 50%,#dff1ee 100%);
+  --card-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 20px 40px -30px rgba(20,40,80,.35);
+  --glow:0 0 42px -12px rgba(12,155,116,.4);
+}
+
+/* ============================ BASE ============================ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:var(--font-body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+}
+h1,h2,h3,h4{font-family:var(--font-display); font-weight:600; line-height:1.06; letter-spacing:-.01em; margin:0}
+a{color:inherit; text-decoration:none}
+p{margin:0 0 1em}
+.mono{font-family:var(--font-mono)}
+::selection{background:rgba(53,224,176,.28); color:var(--ink)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px}
+img,svg{max-width:100%}
+
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 26px}
+.eyebrow{font-family:var(--font-mono); font-size:12.5px; letter-spacing:.28em; text-transform:uppercase; color:var(--accent); font-weight:500}
+.section{padding:110px 0; position:relative}
+.section-head{max-width:720px; margin-bottom:56px}
+.section-head h2{font-size:clamp(30px,4.6vw,50px); margin:14px 0 18px}
+.section-head p{color:var(--soft); font-size:18px}
+.lead{color:var(--soft)}
+
+/* faint grain + grid texture layered on the page */
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+}
+main{position:relative; z-index:1}
+
+/* ============================ NAV ============================ */
+header.nav{
+  position:sticky; top:0; z-index:50;
+  backdrop-filter:blur(14px) saturate(140%); -webkit-backdrop-filter:blur(14px) saturate(140%);
+  background:color-mix(in srgb, var(--bg) 74%, transparent);
+  border-bottom:1px solid var(--line);
+}
+.nav-in{display:flex; align-items:center; gap:24px; height:64px; max-width:var(--maxw); margin:0 auto; padding:0 26px}
+.brand{display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:700; letter-spacing:-.01em; font-size:18px}
+.brand svg{width:26px; height:26px; filter:drop-shadow(0 0 10px rgba(53,224,176,.5))}
+.brand b{color:var(--accent); font-weight:700}
+.nav-links{display:flex; gap:26px; margin-left:auto; font-size:14.5px; font-family:var(--font-mono); letter-spacing:.02em}
+.nav-links a{color:var(--soft); transition:color .18s}
+.nav-links a:hover{color:var(--ink)}
+.nav-actions{display:flex; align-items:center; gap:10px; margin-left:8px}
+.icon-btn{display:grid; place-items:center; width:38px; height:38px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--soft); cursor:pointer; transition:.18s}
+.icon-btn:hover{color:var(--ink); border-color:var(--accent); box-shadow:var(--glow)}
+.icon-btn svg{width:18px; height:18px}
+.gh-btn{display:inline-flex; align-items:center; gap:8px; height:38px; padding:0 15px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--ink); font-family:var(--font-mono); font-size:13.5px; transition:.18s; white-space:nowrap}
+.gh-btn:hover{border-color:var(--accent); box-shadow:var(--glow)}
+.gh-btn svg{width:17px;height:17px}
+@media (max-width:860px){.nav-links{display:none}}
+
+/* theme toggle icon swap */
+:root[data-theme="light"] .ic-moon,:root:not([data-theme="dark"]) .ic-moon{display:none}
+:root[data-theme="light"] .ic-sun,:root:not([data-theme="dark"]) .ic-sun{display:block}
+.ic-sun{display:none}
+@media (prefers-color-scheme: light){:root:not([data-theme]) .ic-sun{display:block}:root:not([data-theme]) .ic-moon{display:none}}
+:root[data-theme="dark"] .ic-moon{display:block}
+:root[data-theme="dark"] .ic-sun{display:none}
+
+/* ============================ HERO ============================ */
+.hero{position:relative; overflow:hidden; background:var(--hero-grad)}
+.hero canvas{position:absolute; inset:0; width:100%; height:100%; z-index:0; opacity:.9}
+.hero::after{ /* vignette + fade to page */
+  content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
+  background:radial-gradient(120% 80% at 78% 18%, transparent 40%, var(--bg) 100%),
+             linear-gradient(180deg,transparent 60%, var(--bg) 100%);
+}
+.hero-in{position:relative; z-index:2; display:grid; grid-template-columns:1.15fr .85fr; gap:48px; align-items:center;
+  max-width:var(--maxw); margin:0 auto; padding:96px 26px 120px}
+.hero h1{font-size:clamp(46px,8vw,88px); font-weight:700; letter-spacing:-.03em; margin:20px 0 0; font-family:var(--font-mono)}
+.hero h1 .c6{color:var(--accent)}
+.hero .tag{font-family:var(--font-display); font-weight:600; font-size:clamp(19px,2.4vw,26px); color:var(--ink); margin:16px 0 0; line-height:1.2}
+.hero .desc{color:var(--soft); font-size:18.5px; max-width:37ch; margin:22px 0 0}
+.hero .hw{font-family:var(--font-mono); font-size:13px; color:var(--dim); margin-top:20px; letter-spacing:.02em}
+.hero .hw b{color:var(--soft); font-weight:500}
+.cta{display:flex; flex-wrap:wrap; gap:14px; margin-top:34px}
+.btn{display:inline-flex; align-items:center; gap:9px; height:52px; padding:0 24px; border-radius:13px; font-family:var(--font-mono); font-size:15px; font-weight:500; cursor:pointer; transition:.2s; border:1px solid transparent}
+.btn-primary{background:linear-gradient(120deg,var(--accent) 0%, #4ff0c4 100%); color:#04120d; font-weight:600; box-shadow:0 10px 30px -10px rgba(53,224,176,.6)}
+.btn-primary:hover{transform:translateY(-2px); box-shadow:0 16px 40px -12px rgba(53,224,176,.75)}
+.btn-ghost{background:color-mix(in srgb,var(--panel) 60%, transparent); border-color:var(--line); color:var(--ink)}
+.btn-ghost:hover{border-color:var(--accent); transform:translateY(-2px)}
+.btn svg{width:18px;height:18px}
+@media (max-width:900px){
+  .hero-in{grid-template-columns:1fr; gap:20px; padding:64px 26px 90px}
+  .hero .desc{max-width:none}
+  .hero-device{order:-1; margin:0 auto}
+}
+
+/* ============================ DEVICE MOCKUP ============================ */
+.device{
+  --w:264px;
+  position:relative; width:var(--w); aspect-ratio:410/502; margin:0 auto;
+  border-radius:15% / 12.2%;
+  background:
+    radial-gradient(130% 90% at 50% 0%, #0b1424 0%, #000 62%);
+  padding:calc(var(--w) * .045);
+  box-shadow:
+    0 0 0 2px #1c2436,
+    0 0 0 8px #05070d,
+    0 0 0 9px #222a3d,
+    0 30px 70px -24px rgba(0,0,0,.9),
+    0 0 60px -12px rgba(53,224,176,.25);
+}
+.device::after{ /* glass sheen */
+  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+  background:linear-gradient(150deg, rgba(255,255,255,.10) 0%, transparent 34%);
+  mix-blend-mode:screen;
+}
+.hero-device .device{--w:300px}
+.screen{
+  position:relative; width:100%; height:100%; border-radius:12.5% / 10.2%;
+  background:var(--d-bg); overflow:hidden; color:var(--d-ink);
+  font-family:var(--font-mono); container-type:inline-size;
+}
+/* crown button */
+.device .crown{position:absolute; right:-5px; top:32%; width:6px; height:15%; border-radius:3px;
+  background:linear-gradient(90deg,#2a3550,#0c1220); box-shadow:0 0 8px rgba(0,0,0,.6)}
+
+/* screen chrome shared by all mockups */
+.scr-chrome{position:absolute; inset:0; pointer-events:none}
+.radio-dots{position:absolute; top:5.5%; left:8%; display:flex; gap:9px; font-size:8.5px; letter-spacing:.12em}
+.rdot{display:flex; align-items:center; gap:4px; color:var(--d-faint)}
+.rdot i{width:6px;height:6px;border-radius:50%;background:var(--d-off); display:block}
+.rdot.on{color:var(--d-soft)} .rdot.on i{background:var(--d-accent); box-shadow:0 0 6px var(--d-accent)}
+.batt{position:absolute; top:5%; right:8%; display:flex; align-items:center; gap:5px; font-size:9px; color:var(--d-soft)}
+.batt .cell{width:20px;height:11px;border:1.4px solid var(--d-line); border-radius:3px; position:relative; padding:1.4px}
+.batt .cell::after{content:"";position:absolute; right:-3px; top:3px; width:2px; height:5px; background:var(--d-line); border-radius:0 1px 1px 0}
+.batt .fill{height:100%; width:78%; background:var(--d-accent); border-radius:1px; display:block}
+.page-dots{position:absolute; bottom:5%; left:0; right:0; display:flex; justify-content:center; gap:7px}
+.page-dots i{width:6px;height:6px;border-radius:50%;background:var(--d-faint)}
+.page-dots i.a{background:var(--d-accent); box-shadow:0 0 6px var(--d-accent)}
+
+/* clock page */
+.pg{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center}
+.datepill{margin-top:12.5%; padding:2.5% 7%; border:1px solid var(--d-line); border-radius:99px; background:var(--d-panel); color:var(--d-soft); font-size:8.5px; letter-spacing:.18em}
+.clock-time{font-size:24.5cqw; font-weight:700; color:var(--d-ink); line-height:1; margin-top:6%; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+.clock-secs{font-size:9cqw; font-weight:600; color:var(--d-accent); margin-top:1%}
+.minbar{width:73%; height:2.2cqw; border-radius:99px; background:var(--d-track); margin-top:7%; overflow:hidden}
+.minbar i{display:block; height:100%; width:62%; border-radius:99px; background:linear-gradient(90deg,var(--d-accent2),var(--d-accent))}
+.stepline{font-size:8px; letter-spacing:.14em; color:var(--d-dim); margin-top:5%}
+.chips{display:flex; gap:5px; margin-top:5.5%}
+.chip{padding:3% 8%; border:1px solid var(--d-line); border-radius:99px; background:var(--d-panel); font-size:7.5px; letter-spacing:.08em; color:var(--d-soft)}
+.chip.hl{color:var(--d-accent)}
+
+/* generic page title + stat rows (sensors/system/power/mesh) */
+.pg-title{margin-top:13%; font-size:8.5px; letter-spacing:.42em; color:var(--d-soft); font-weight:600}
+.rows{width:80%; margin-top:9%; display:flex; flex-direction:column; gap:2.2cqw}
+.srow{display:flex; justify-content:space-between; align-items:baseline}
+.srow .k{font-size:7.5px; letter-spacing:.16em; color:var(--d-dim)}
+.srow .v{font-size:10.5px; font-weight:600; color:var(--d-ink)}
+.srow .v.acc{color:var(--d-accent)} .srow .v.warm{color:var(--d-warm)} .srow .v.warn{color:var(--d-warn)}
+.pg-foot{position:absolute; bottom:13%; font-size:7.5px; letter-spacing:.16em; color:var(--d-dim)}
+
+/* power grid */
+.pgrid{width:82%; margin-top:8%; display:grid; grid-template-columns:1fr 1fr; gap:3.5cqw 6cqw}
+.pcell .n{font-size:6.8px; letter-spacing:.14em; color:var(--d-dim)}
+.pcell .val{font-size:9px; font-weight:600; color:var(--d-ink); margin-top:1px}
+.sliderrow{width:80%; margin-top:7%}
+.sliderrow .lbl{font-size:7px; letter-spacing:.16em; color:var(--d-dim)}
+.slider{position:relative; height:3cqw; border-radius:99px; background:var(--d-track); margin-top:4%}
+.slider i{position:absolute; left:0; top:0; height:100%; width:66%; border-radius:99px; background:linear-gradient(90deg,var(--d-accent2),var(--d-accent))}
+.slider b{position:absolute; left:63%; top:50%; transform:translateY(-50%); width:5cqw; height:5cqw; border-radius:50%; background:var(--d-ink)}
+.rebtn{margin-top:6%; padding:2.5% 12%; border:1px solid var(--d-warn); border-radius:99px; background:#200a10; color:var(--d-warn); font-size:8px; letter-spacing:.2em}
+
+/* mesh rows */
+.mself{margin-top:9%; font-size:11px; font-weight:600; color:var(--d-accent)}
+.mrows{width:84%; margin-top:6%; display:flex; flex-direction:column; gap:1.6cqw}
+.mrow{display:flex; align-items:center; justify-content:space-between; background:var(--d-panel); border-radius:6px; padding:2.4cqw 3.6cqw}
+.mrow .nm{font-size:8px; color:var(--d-ink); overflow:hidden; white-space:nowrap; text-overflow:ellipsis; max-width:52%}
+.mrow .rs{font-size:7.5px; color:var(--d-soft)}
+.mrow .ag{font-size:7.5px; color:var(--d-dim)}
+
+/* launcher grid */
+.lgrid{width:84%; margin-top:9%; display:grid; grid-template-columns:1fr 1fr; gap:2.6cqw}
+.ltile{background:var(--d-panel); border:1px solid var(--d-line); border-radius:8px; padding:4cqw 3cqw; font-size:8px; letter-spacing:.04em}
+
+/* familiar orb on clock */
+.fam{position:absolute; bottom:19%; right:12%; width:8.5cqw; height:8.5cqw; border-radius:50%;
+  background:radial-gradient(circle at 35% 30%, #7ff5da, var(--d-accent) 55%, #0e5f4b);
+  box-shadow:0 0 12px 2px rgba(53,224,176,.55)}
+
+/* ============================ BADGE STRIP ============================ */
+.strip{border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--bg2)}
+.strip-in{display:flex; flex-wrap:wrap; gap:10px 12px; align-items:center; justify-content:center; padding:22px 26px; max-width:var(--maxw); margin:0 auto}
+.pill{display:inline-flex; align-items:center; gap:8px; padding:7px 14px; border:1px solid var(--line); border-radius:99px; background:var(--panel); font-family:var(--font-mono); font-size:12.5px; color:var(--soft)}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--accent); box-shadow:0 0 8px var(--accent)}
+.pill.b i{background:var(--accent2); box-shadow:0 0 8px var(--accent2)}
+.pill.w i{background:var(--warm); box-shadow:0 0 8px var(--warm)}
+
+/* ============================ STAT TILES ============================ */
+.stats{display:grid; grid-template-columns:repeat(6,1fr); gap:16px}
+.stat{background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:22px 20px; box-shadow:var(--card-shadow)}
+.stat .num{font-family:var(--font-mono); font-size:clamp(24px,3vw,32px); font-weight:600; color:var(--ink); letter-spacing:-.02em}
+.stat .num small{font-size:.55em; color:var(--accent); font-weight:500}
+.stat .lab{font-size:12.5px; color:var(--dim); margin-top:6px; letter-spacing:.03em}
+@media (max-width:960px){.stats{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}}
+
+/* ============================ FEATURE GRID ============================ */
+.features{display:grid; grid-template-columns:repeat(12,1fr); gap:18px}
+.feat{grid-column:span 4; background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px; box-shadow:var(--card-shadow); position:relative; overflow:hidden; transition:.22s}
+.feat:hover{border-color:color-mix(in srgb,var(--accent) 55%, var(--line)); transform:translateY(-3px)}
+.feat .ic{width:44px; height:44px; border-radius:12px; display:grid; place-items:center; background:color-mix(in srgb,var(--accent) 14%, transparent); border:1px solid color-mix(in srgb,var(--accent) 34%, transparent); margin-bottom:18px}
+.feat .ic svg{width:23px; height:23px; stroke:var(--accent); fill:none; stroke-width:1.7}
+.feat h3{font-size:20px; margin-bottom:9px; letter-spacing:0}
+.feat p{color:var(--soft); font-size:15px; margin:0}
+.feat .kbadge{position:absolute; top:20px; right:20px; font-family:var(--font-mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; padding:4px 9px; border-radius:99px; border:1px solid var(--line); color:var(--dim)}
+.feat.wip .kbadge{color:var(--warm); border-color:color-mix(in srgb,var(--warm) 40%, transparent)}
+.feat.soon .kbadge{color:var(--accent2); border-color:color-mix(in srgb,var(--accent2) 40%, transparent)}
+/* flagship */
+.feat.flag{grid-column:span 6; background:
+    radial-gradient(120% 140% at 100% 0%, color-mix(in srgb,var(--accent) 12%, transparent), transparent 60%), var(--panel);
+  border-color:color-mix(in srgb,var(--accent) 40%, var(--line))}
+.feat.flag .ic{background:color-mix(in srgb,var(--accent) 20%, transparent)}
+.feat.wide{grid-column:span 6}
+@media (max-width:900px){.feat,.feat.flag,.feat.wide{grid-column:span 6}}
+@media (max-width:600px){.feat,.feat.flag,.feat.wide{grid-column:span 12}}
+
+/* ============================ SLINT GALLERY ============================ */
+.gallery{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:30px 24px; justify-items:center}
+.gcard{display:flex; flex-direction:column; align-items:center; gap:16px; text-align:center}
+.gcard .cap{font-family:var(--font-mono); font-size:13px; color:var(--soft)}
+.gcard .cap b{display:block; color:var(--ink); font-size:15px; letter-spacing:.02em; margin-bottom:3px; font-family:var(--font-display); font-weight:600}
+
+/* ============================ SPECS + PARTITION ============================ */
+.two{display:grid; grid-template-columns:1fr 1fr; gap:40px}
+@media (max-width:860px){.two{grid-template-columns:1fr; gap:34px}}
+.spectable{width:100%; border-collapse:collapse; font-size:15px}
+.spectable td{padding:14px 4px; border-bottom:1px solid var(--line); vertical-align:top}
+.spectable td:first-child{color:var(--dim); font-family:var(--font-mono); font-size:13px; letter-spacing:.02em; width:38%; white-space:nowrap}
+.spectable td:last-child{color:var(--ink)}
+.spectable tr:last-child td{border-bottom:none}
+.card-lg{background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px 28px; box-shadow:var(--card-shadow)}
+.card-lg h3{font-size:19px; margin-bottom:16px}
+.flashbar{display:flex; height:46px; border-radius:10px; overflow:hidden; border:1px solid var(--line); font-family:var(--font-mono); font-size:10px}
+.flashbar div{display:grid; place-items:center; color:#04120d; overflow:hidden; white-space:nowrap; position:relative}
+.flashbar .seg-nvs{flex:.6; background:#2a3550; color:var(--soft)}
+.flashbar .seg-a{flex:8; background:linear-gradient(90deg,#3a7bd5,#4a8be0); color:#02121f}
+.flashbar .seg-b{flex:8; background:linear-gradient(90deg,#35e0b0,#5fead0)}
+.flashbar .seg-cfg{flex:.9; background:#ffd166; color:#231a00}
+.plegend{display:flex; flex-wrap:wrap; gap:14px; margin-top:16px; font-family:var(--font-mono); font-size:12px; color:var(--dim)}
+.plegend span{display:inline-flex; align-items:center; gap:7px}
+.plegend i{width:11px;height:11px;border-radius:3px; display:block}
+
+/* ============================ ARCH LAYERS ============================ */
+.layers{display:flex; flex-direction:column; gap:12px}
+.layer{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 20px; display:flex; align-items:center; gap:18px; box-shadow:var(--card-shadow)}
+.layer .lname{font-family:var(--font-mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); min-width:112px; font-weight:500}
+.layer .lmods{display:flex; flex-wrap:wrap; gap:7px}
+.layer .lmods code{font-family:var(--font-mono); font-size:12.5px; color:var(--soft); background:var(--panel-2); border:1px solid var(--line); border-radius:7px; padding:4px 9px}
+.layer:nth-child(2) .lname{color:var(--accent2)}
+.stacklist{display:grid; grid-template-columns:1fr 1fr; gap:10px 22px; margin-top:4px}
+.dep{display:flex; align-items:baseline; justify-content:space-between; gap:10px; border-bottom:1px solid var(--line); padding:9px 2px; font-family:var(--font-mono); font-size:13.5px}
+.dep .dn{color:var(--ink)} .dep .dv{color:var(--dim); font-size:12px}
+@media (max-width:600px){.stacklist{grid-template-columns:1fr}}
+
+/* ============================ CODE / TERMINAL ============================ */
+.term{background:#05070d; border:1px solid var(--line); border-radius:16px; overflow:hidden; box-shadow:var(--card-shadow)}
+.term-bar{display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); background:#080b14}
+.term-bar i{width:11px;height:11px;border-radius:50%}
+.term-bar .r{background:#ff5f57} .term-bar .y{background:#febc2e} .term-bar .g{background:#28c840}
+.term-bar span{margin-left:8px; font-family:var(--font-mono); font-size:12.5px; color:#6b7794}
+.term pre{margin:0; padding:22px 22px; overflow-x:auto; font-family:var(--font-mono); font-size:13.5px; line-height:1.85; color:#c6d2ec; -webkit-text-size-adjust:100%}
+.term .c{color:#55617a}       /* comment */
+.term .p{color:#35e0b0}       /* prompt / command */
+.term .s{color:#ffd166}       /* string */
+.term .k{color:#3a7bd5}       /* keyword-ish */
+
+/* ============================ PRIOR ART ============================ */
+.origin{background:
+  radial-gradient(130% 130% at 0% 0%, color-mix(in srgb,var(--accent) 13%, transparent), transparent 55%),
+  var(--panel);
+  border:1px solid color-mix(in srgb,var(--accent) 42%, var(--line)); border-radius:20px; padding:34px 34px;
+  display:grid; grid-template-columns:auto 1fr; gap:28px; align-items:center; box-shadow:var(--card-shadow); margin-bottom:46px}
+.origin .badge{font-family:var(--font-mono); font-size:11px; letter-spacing:.2em; text-transform:uppercase; color:var(--accent)}
+.origin h3{font-size:26px; margin:10px 0 12px}
+.origin p{color:var(--soft); font-size:16px; margin:0}
+.origin .mark{width:96px; height:96px; border-radius:22px; display:grid; place-items:center; background:#000; border:1px solid var(--d-line); box-shadow:var(--glow)}
+.origin .mark svg{width:56px;height:56px}
+.origin a.src{display:inline-flex; align-items:center; gap:7px; margin-top:14px; font-family:var(--font-mono); font-size:13px; color:var(--accent)}
+.origin a.src:hover{text-decoration:underline}
+@media (max-width:640px){.origin{grid-template-columns:1fr; text-align:left} .origin .mark{margin:0}}
+
+.thread{margin-top:44px}
+.thread-h{display:flex; align-items:center; gap:14px; margin-bottom:22px}
+.thread-h h3{font-size:15px; font-family:var(--font-mono); letter-spacing:.16em; text-transform:uppercase; color:var(--accent); font-weight:500; white-space:nowrap}
+.thread-h .ln{height:1px; background:var(--line); flex:1}
+.grid-art{display:grid; grid-template-columns:repeat(auto-fill,minmax(268px,1fr)); gap:16px}
+.art{background:var(--panel); border:1px solid var(--line); border-radius:15px; padding:19px 20px; box-shadow:var(--card-shadow); transition:.2s; display:flex; flex-direction:column}
+.art:hover{border-color:color-mix(in srgb,var(--accent) 45%, var(--line)); transform:translateY(-2px)}
+.art .top{display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:8px}
+.art .nm{font-family:var(--font-display); font-weight:600; font-size:16.5px; color:var(--ink)}
+.art .nm a:hover{color:var(--accent)}
+.art .ext{font-family:var(--font-mono); font-size:11px; color:var(--dim)}
+.art .ext a{color:var(--accent)} .art .ext a:hover{text-decoration:underline}
+.art .what{font-size:13.5px; color:var(--soft); margin:0 0 12px}
+.art .infl{font-size:12.5px; color:var(--dim); border-top:1px dashed var(--line); padding-top:11px; margin-top:auto}
+.art .infl b{color:var(--accent); font-weight:500; font-family:var(--font-mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; display:block; margin-bottom:3px}
+
+/* ============================ FOOTER ============================ */
+footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 50px; position:relative; z-index:1}
+.foot-grid{display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:36px}
+.foot-grid h4{font-family:var(--font-mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--dim); font-weight:500; margin-bottom:16px}
+.foot-grid a{display:block; color:var(--soft); font-size:14.5px; padding:5px 0; transition:.15s}
+.foot-grid a:hover{color:var(--accent)}
+.foot-brand{display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:700; font-size:19px; margin-bottom:14px}
+.foot-brand svg{width:28px;height:28px}
+.foot-brand b{color:var(--accent)}
+.lic{display:inline-flex; gap:8px; margin-top:14px}
+.lic span{font-family:var(--font-mono); font-size:11.5px; padding:5px 11px; border:1px solid var(--line); border-radius:99px; color:var(--soft)}
+.foot-bottom{max-width:var(--maxw); margin:44px auto 0; padding:24px 26px 0; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; font-family:var(--font-mono); font-size:12.5px; color:var(--dim)}
+.foot-bottom a{color:var(--soft)} .foot-bottom a:hover{color:var(--accent)}
+@media (max-width:760px){.foot-grid{grid-template-columns:1fr 1fr} .foot-brand-col{grid-column:span 2}}
+
+/* reveal on scroll */
+.reveal{opacity:0; transform:translateY(22px); transition:opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1; transform:none}
+@media (prefers-reduced-motion: reduce){.reveal{opacity:1; transform:none; transition:none}}
+</style>
+</head>
+<body>
+
+<!-- ============================ NAV ============================ -->
+<header class="nav">
+  <div class="nav-in">
+    <a class="brand" href="#top" aria-label="esp32c6-watch home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><use href="#logo"/></svg>
+      <span>esp32<b>c6</b>-watch</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#ui">Slint UI</a>
+      <a href="#hardware">Hardware</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#build">Build</a>
+      <a href="#priorart">Prior Art</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="themeToggle" aria-label="Toggle color theme" title="Toggle theme">
+        <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+        <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>
+      </button>
+      <a class="gh-btn" href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12a11.5 11.5 0 0 0 7.9 10.9c.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5A11.5 11.5 0 0 0 23.5 12C23.5 5.7 18.3.5 12 .5Z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============================ HERO ============================ -->
+<section class="hero">
+  <canvas id="mesh" aria-hidden="true"></canvas>
+  <div class="hero-in">
+    <div class="hero-copy">
+      <div class="eyebrow">100% Rust · no_std · RISC-V</div>
+      <h1><span>esp32</span><span class="c6">c6</span><span>-watch</span></h1>
+      <p class="tag">A whole smartwatch OS on a bare-metal microcontroller.</p>
+      <p class="desc">Open-source firmware for the Waveshare&nbsp;ESP32-C6-Touch-AMOLED-2.06 — a Slint&nbsp;UI, an ESP-NOW mesh, a creature that hops between boards, seven games, and a hardware pedometer. No RTOS beyond an async executor. No PSRAM. No cloud.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12a11.5 11.5 0 0 0 7.9 10.9c.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5A11.5 11.5 0 0 0 23.5 12C23.5 5.7 18.3.5 12 .5Z"/></svg>
+          View source
+        </a>
+        <a class="btn btn-ghost" href="#build">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0 5-5m-5 5-5-5M5 21h14"/></svg>
+          Build &amp; flash
+        </a>
+      </div>
+      <p class="hw"><b>Waveshare ESP32-C6-Touch-AMOLED-2.06</b> · CO5300 410×502 AMOLED · QMI8658 IMU · 512 KB SRAM · 16 MB flash</p>
+    </div>
+
+    <!-- HERO WATCHFACE (live clock) -->
+    <div class="hero-device">
+      <div class="device">
+        <span class="crown" aria-hidden="true"></span>
+        <div class="screen" role="img" aria-label="Watchface showing the current time in teal on a black AMOLED display">
+          <div class="pg">
+            <div class="datepill" id="wf-date">MON 20 JUL</div>
+            <div class="clock-time" id="wf-time">10:24</div>
+            <div class="clock-secs" id="wf-secs">37</div>
+            <div class="minbar"><i id="wf-min"></i></div>
+            <div class="stepline">6,214 STEPS · 21°C CLEAR</div>
+            <div class="chips"><span class="chip">160 MHz</span><span class="chip">GYRO</span><span class="chip hl">APPS</span></div>
+            <span class="fam" title="The Mesh Familiar"></span>
+          </div>
+          <div class="scr-chrome">
+            <div class="radio-dots">
+              <span class="rdot"><i></i>WIFI</span>
+              <span class="rdot"><i></i>BLE</span>
+              <span class="rdot on"><i></i>MESH</span>
+            </div>
+            <div class="batt"><span class="cell"><span class="fill"></span></span>78%</div>
+            <div class="page-dots"><i class="a"></i><i></i><i></i><i></i><i></i></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- badge strip -->
+<div class="strip">
+  <div class="strip-in">
+    <span class="pill"><i></i>esp-hal + Embassy</span>
+    <span class="pill b"><i></i>Slint software renderer</span>
+    <span class="pill"><i></i>SMOLv1 ESP-NOW mesh</span>
+    <span class="pill b"><i></i>trouble-host BLE GATT</span>
+    <span class="pill w"><i></i>A/B OTA</span>
+    <span class="pill"><i></i>MQTT → Home Assistant</span>
+    <span class="pill b"><i></i>embedded-graphics games</span>
+  </div>
+</div>
+
+<!-- ============================ OVERVIEW ============================ -->
+<section class="section" id="overview">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">The gist</div>
+      <h2>Rust on the wrist, straight to the metal.</h2>
+      <p>The watch renders to an onboard CO5300 AMOLED over QSPI DMA and talks to a fleet of sibling boards directly over ESP-NOW — no router, no broker in the middle. It is a hardware target of the <a href="https://github.com/jphein/smol" target="_blank" rel="noopener" style="color:var(--accent)">smol</a> mesh project and a port of the original <a href="https://github.com/infinition/waveshare-watch-rs" target="_blank" rel="noopener" style="color:var(--accent)">waveshare-watch-rs</a> from the ESP32-S3 to the C6.</p>
+    </div>
+    <div class="stats reveal">
+      <div class="stat"><div class="num">512<small> KB</small></div><div class="lab">SRAM — no PSRAM</div></div>
+      <div class="stat"><div class="num">16<small> MB</small></div><div class="lab">flash · A/B OTA</div></div>
+      <div class="stat"><div class="num">410<small>×502</small></div><div class="lab">AMOLED pixels</div></div>
+      <div class="stat"><div class="num">3<small> radios</small></div><div class="lab">WiFi · BLE · 802.15.4</div></div>
+      <div class="stat"><div class="num">1.6<small> KB</small></div><div class="lab">Slint line-flush, no framebuffer</div></div>
+      <div class="stat"><div class="num">7<small> apps</small></div><div class="lab">games + settings</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ FEATURES ============================ -->
+<section class="section" id="features" style="padding-top:20px">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">What it does</div>
+      <h2>A full watch, plus a mesh, plus a menagerie.</h2>
+      <p>Everything below runs in a single <span class="mono">no_std</span> binary on one RISC-V core.</p>
+    </div>
+
+    <div class="features">
+      <!-- Flagship: Familiar -->
+      <article class="feat flag reveal">
+        <span class="kbadge">flagship</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3c3.5 0 6 2.4 6 5.6 0 2.2-1.3 3.6-1.3 5.4 0 2 1.3 2.6 1.3 4M12 3C8.5 3 6 5.4 6 8.6c0 2.2 1.3 3.6 1.3 5.4 0 2-1.3 2.6-1.3 4"/><circle cx="9.5" cy="9" r="1"/><circle cx="14.5" cy="9" r="1"/></svg></div>
+        <h3>The Mesh Familiar</h3>
+        <p>One living creature inhabits exactly one board at a time. Pull the plug and it <em>hops to a neighbour</em> over the mesh and keeps living there — every other node shows a Weasley-clock pointer toward wherever it currently is. Exactly-one-holder arbitration, migration on loss, and orphan re-election, ported byte-for-byte from the smol fleet.</p>
+      </article>
+
+      <!-- Mesh -->
+      <article class="feat wide reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><circle cx="12" cy="10" r="2"/><path d="M6.6 7.3 10.6 9M17.4 7.3 13.4 9M12 12v4"/></svg></div>
+        <h3>SMOLv1 ESP-NOW mesh</h3>
+        <p>Routerless fleet networking with HELLO / ACK / TIME / CFG / RELAY frames. Loop-free time authority: the watch does its own NTP and both adopts time from and serves it to the fleet. Wire-compatible with the wider <span class="mono">smol</span> project.</p>
+      </article>
+
+      <!-- Slint UI -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="3.5"/><path d="M9 6h6M10 18h4"/></svg></div>
+        <h3>Slint watchface + 5 pages</h3>
+        <p>A swipeable carousel — Clock, Sensors, System, Power, and Mesh — rendered by the Slint software renderer with persistent chrome (radio dots, battery pill, page dots).</p>
+      </article>
+
+      <!-- Launcher / games -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="2.5" y="7" width="19" height="10" rx="4"/><path d="M7 10v4M5 12h4"/><circle cx="16" cy="11" r="1"/><circle cx="18.5" cy="13.5" r="1"/></svg></div>
+        <h3>Launcher + 7 apps</h3>
+        <p>Snake, World Snake, 2048, Tetris, Flappy Bird, a tilt-controlled Maze, and Settings — full-frame <span class="mono">embedded-graphics</span> apps that take the panel over from the shell.</p>
+      </article>
+
+      <!-- Pedometer -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M9 4c1.5 0 2.5 1.2 2.5 3s-.6 4-1 6c-.3 1.5-2 2-3 1s-1-2.5-.5-4S7.5 4 9 4Z"/><path d="M15.5 9c1.2 0 2 1 2 2.4s-.5 3.2-.8 4.8c-.3 1.4-1.8 1.8-2.7.9"/></svg></div>
+        <h3>Hardware pedometer</h3>
+        <p>Step counting runs on the QMI8658 IMU's dedicated pedometer engine — it keeps counting even while the rest of the IMU is idle, so steps survive sleep.</p>
+      </article>
+
+      <!-- BLE -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M8 6.5 16 17l-4 3V4l4 3-8 10.5"/></svg></div>
+        <h3>BLE GATT server</h3>
+        <p>A Bluetooth Low Energy peripheral built on <span class="mono">trouble-host</span> — a pure-Rust host stack riding esp-radio's controller.</p>
+      </article>
+
+      <!-- WiFi / NTP -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M2.5 8.5a14 14 0 0 1 19 0M5.5 12a9.5 9.5 0 0 1 13 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none"/></svg></div>
+        <h3>WiFi + NTP</h3>
+        <p>Station mode with time-shared radio bursts for NTP, then it drops association to free the PHY for the mesh. Radios are off at boot, toggled from the watchface.</p>
+      </article>
+
+      <!-- Weather -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M7 17.5a4 4 0 0 1 .4-8 5.5 5.5 0 0 1 10.4 1.3 3.5 3.5 0 0 1-.3 6.7Z"/></svg></div>
+        <h3>Weather</h3>
+        <p>Live conditions fetched over WiFi and folded onto the watchface line beside your step count.</p>
+      </article>
+
+      <!-- MQTT / HA -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 21v-8.5L12 5l9 7.5V21"/><path d="M9.5 21v-5h5v5"/></svg></div>
+        <h3>MQTT → Home Assistant</h3>
+        <p>Publishes typed entities into Home Assistant over MQTT, using the same discovery conventions the smol fleet does — one device, many sensors.</p>
+      </article>
+
+      <!-- OTA -->
+      <article class="feat reveal">
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0 4 4m-4-4-4 4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg></div>
+        <h3>OTA updates</h3>
+        <p>HTTP over-the-air firmware updates into an A/B partition layout — flash <span class="mono">ota_1</span> while running from <span class="mono">ota_0</span>, then flip.</p>
+      </article>
+
+      <!-- Slint migration WIP -->
+      <article class="feat wip reveal">
+        <span class="kbadge">in progress</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 3v9l6 3"/></svg></div>
+        <h3>Slint UI migration</h3>
+        <p>The whole shell is moving off <span class="mono">embedded-graphics</span> onto Slint — freeing the ~202 KB framebuffer from boot and streaming 2-line RGB565 strips straight to panel GRAM. Live on <span class="mono">feat/slint-shell</span>.</p>
+      </article>
+
+      <!-- Radio scan SOON -->
+      <article class="feat soon reveal">
+        <span class="kbadge">upcoming</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></div>
+        <h3>Radio Scan · Zigbee/Thread</h3>
+        <p>A passive 802.15.4 monitor using the C6's native radio — sniff nearby Zigbee/Thread PAN IDs, channels, and RSSI. A dedicated mode that tears the mesh down first, because the three radios share one PHY.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ SLINT GALLERY ============================ -->
+<section class="section" id="ui" style="background:var(--bg2); border-top:1px solid var(--line); border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">The interface</div>
+      <h2>Five pages, one carousel.</h2>
+      <p>Faithful CSS reproductions of the Slint shell — the exact palette, type scale, and layout that renders on the glass. Swipe between them; the launcher overlays from the Clock page.</p>
+    </div>
+
+    <div class="gallery reveal">
+      <!-- CLOCK -->
+      <figure class="gcard" style="margin:0">
+        <div class="device"><span class="crown"></span><div class="screen">
+          <div class="pg">
+            <div class="datepill">MON 20 JUL</div>
+            <div class="clock-time" style="font-size:24cqw">10:24</div>
+            <div class="clock-secs">37</div>
+            <div class="minbar"><i></i></div>
+            <div class="stepline">6,214 STEPS · 21°C</div>
+            <div class="chips"><span class="chip">160 MHz</span><span class="chip">GYRO</span><span class="chip hl">APPS</span></div>
+            <span class="fam"></span>
+          </div>
+          <div class="scr-chrome"><div class="radio-dots"><span class="rdot"><i></i>WIFI</span><span class="rdot"><i></i>BLE</span><span class="rdot on"><i></i>MESH</span></div><div class="batt"><span class="cell"><span class="fill"></span></span>78%</div><div class="page-dots"><i class="a"></i><i></i><i></i><i></i><i></i></div></div>
+        </div></div>
+        <figcaption class="cap"><b>Clock</b>time · date · minute ring</figcaption>
+      </figure>
+
+      <!-- SENSORS -->
+      <figure class="gcard" style="margin:0">
+        <div class="device"><span class="crown"></span><div class="screen">
+          <div class="pg">
+            <div class="pg-title">SENSORS</div>
+            <div class="rows">
+              <div class="srow"><span class="k">ACCEL</span><span class="v acc">+0.02 −0.98 +0.03 g</span></div>
+              <div class="srow"><span class="k">GYRO</span><span class="v">+1.2 −0.4 +0.0 dps</span></div>
+              <div class="srow"><span class="k">IMU TEMP</span><span class="v warm">27.5 C</span></div>
+            </div>
+            <div class="pg-foot">QMI8658 · 100ms</div>
+          </div>
+          <div class="scr-chrome"><div class="radio-dots"><span class="rdot"><i></i>WIFI</span><span class="rdot"><i></i>BLE</span><span class="rdot on"><i></i>MESH</span></div><div class="batt"><span class="cell"><span class="fill"></span></span>78%</div><div class="page-dots"><i></i><i class="a"></i><i></i><i></i><i></i></div></div>
+        </div></div>
+        <figcaption class="cap"><b>Sensors</b>live IMU readout</figcaption>
+      </figure>
+
+      <!-- SYSTEM -->
+      <figure class="gcard" style="margin:0">
+        <div class="device"><span class="crown"></span><div class="screen">
+          <div class="pg">
+            <div class="pg-title">SYSTEM</div>
+            <div class="rows" style="gap:1.5cqw">
+              <div class="srow"><span class="k">CHIP</span><span class="v">ESP32-C6 · RISC-V</span></div>
+              <div class="srow"><span class="k">DISPLAY</span><span class="v">410x502 AMOLED</span></div>
+              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.1.0</span></div>
+              <div class="srow"><span class="k">HEAP</span><span class="v acc">123k free</span></div>
+              <div class="srow"><span class="k">UPTIME</span><span class="v">02:41:07</span></div>
+              <div class="srow"><span class="k">BATTERY</span><span class="v">78% · 4012 mV</span></div>
+            </div>
+          </div>
+          <div class="scr-chrome"><div class="radio-dots"><span class="rdot"><i></i>WIFI</span><span class="rdot"><i></i>BLE</span><span class="rdot on"><i></i>MESH</span></div><div class="batt"><span class="cell"><span class="fill"></span></span>78%</div><div class="page-dots"><i></i><i></i><i class="a"></i><i></i><i></i></div></div>
+        </div></div>
+        <figcaption class="cap"><b>System</b>chip · heap · uptime</figcaption>
+      </figure>
+
+      <!-- POWER -->
+      <figure class="gcard" style="margin:0">
+        <div class="device"><span class="crown"></span><div class="screen">
+          <div class="pg">
+            <div class="pg-title">POWER</div>
+            <div class="pgrid">
+              <div class="pcell"><div class="n">CPU</div><div class="val">160MHz · 38mA</div></div>
+              <div class="pcell"><div class="n">DISPLAY</div><div class="val">ON · 42mA</div></div>
+              <div class="pcell"><div class="n">WIFI</div><div class="val">PS · 20mA</div></div>
+              <div class="pcell"><div class="n">BLE</div><div class="val">ADV · 8mA</div></div>
+              <div class="pcell"><div class="n">IMU</div><div class="val">ON · 3mA</div></div>
+              <div class="pcell"><div class="n">AUDIO</div><div class="val">OFF · 0mA</div></div>
+            </div>
+            <div class="rows" style="width:82%; margin-top:6%; gap:1.2cqw">
+              <div class="srow"><span class="k">TOTAL</span><span class="v warm">111mA</span></div>
+              <div class="srow"><span class="k">RUNTIME</span><span class="v acc">left: ~7h</span></div>
+            </div>
+            <div class="sliderrow"><div class="lbl">BRIGHTNESS</div><div class="slider"><i></i><b></b></div></div>
+            <div class="rebtn">REBOOT</div>
+          </div>
+          <div class="scr-chrome"><div class="radio-dots"><span class="rdot"><i></i>WIFI</span><span class="rdot"><i></i>BLE</span><span class="rdot on"><i></i>MESH</span></div><div class="batt"><span class="cell"><span class="fill"></span></span>78%</div><div class="page-dots"><i></i><i></i><i></i><i class="a"></i><i></i></div></div>
+        </div></div>
+        <figcaption class="cap"><b>Power</b>per-subsystem mA · slider</figcaption>
+      </figure>
+
+      <!-- MESH -->
+      <figure class="gcard" style="margin:0">
+        <div class="device"><span class="crown"></span><div class="screen">
+          <div class="pg">
+            <div class="pg-title">MESH</div>
+            <div class="mself">#042 Jade Herald</div>
+            <div class="mrows">
+              <div class="mrow"><span class="nm">#017 Draconic Dominion</span><span class="rs">−58 dBm</span><span class="ag">2s</span></div>
+              <div class="mrow"><span class="nm">#231 Eldritch Nexus</span><span class="rs">−71 dBm</span><span class="ag">4s</span></div>
+              <div class="mrow"><span class="nm">#088 Astral Conduit</span><span class="rs">−80 dBm</span><span class="ag">9s</span></div>
+              <div class="mrow"><span class="nm">#140 Verdant Sigil</span><span class="rs">−67 dBm</span><span class="ag">1s</span></div>
+            </div>
+          </div>
+          <div class="scr-chrome"><div class="radio-dots"><span class="rdot"><i></i>WIFI</span><span class="rdot"><i></i>BLE</span><span class="rdot on"><i></i>MESH</span></div><div class="batt"><span class="cell"><span class="fill"></span></span>78%</div><div class="page-dots"><i></i><i></i><i></i><i></i><i class="a"></i></div></div>
+        </div></div>
+        <figcaption class="cap"><b>Mesh</b>Marauder's Watch roster</figcaption>
+      </figure>
+
+      <!-- LAUNCHER -->
+      <figure class="gcard" style="margin:0">
+        <div class="device"><span class="crown"></span><div class="screen">
+          <div class="pg">
+            <div class="pg-title">APPS</div>
+            <div class="lgrid">
+              <div class="ltile" style="color:#00e000">Snake</div>
+              <div class="ltile" style="color:#00ff80">World Snake</div>
+              <div class="ltile" style="color:#f0d000">2048</div>
+              <div class="ltile" style="color:#00d0f0">Tetris</div>
+              <div class="ltile" style="color:#ffffff">Flappy Bird</div>
+              <div class="ltile" style="color:#8090ff">Maze (Tilt)</div>
+              <div class="ltile" style="color:#c0ffc0">Settings</div>
+              <div class="ltile" style="color:var(--d-dim)">— · —</div>
+            </div>
+          </div>
+        </div></div>
+        <figcaption class="cap"><b>Launcher</b>overlay from Clock</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ HARDWARE ============================ -->
+<section class="section" id="hardware">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">The board</div>
+      <h2>Waveshare ESP32-C6-Touch-AMOLED-2.06</h2>
+      <p>A wrist-sized dev board that Espressif never called a watch — so this firmware makes it one.</p>
+    </div>
+    <div class="two">
+      <div class="reveal">
+        <table class="spectable">
+          <tr><td>Board</td><td>Waveshare ESP32-C6-Touch-AMOLED-2.06</td></tr>
+          <tr><td>MCU</td><td>ESP32-C6 · single-core RISC-V @ up to 160 MHz · <span class="mono">riscv32imac-unknown-none-elf</span></td></tr>
+          <tr><td>Memory</td><td>512 KB SRAM on-chip — <b>no PSRAM</b> (the RGB332 framebuffer lives in SRAM)</td></tr>
+          <tr><td>Display</td><td>CO5300 AMOLED · 410×502 · QSPI with DMA</td></tr>
+          <tr><td>Touch</td><td>FT3168 capacitive controller (I²C)</td></tr>
+          <tr><td>IMU</td><td>QMI8658 6-axis accel + gyro, hardware pedometer engine</td></tr>
+          <tr><td>Audio</td><td>I²S</td></tr>
+          <tr><td>Radios</td><td>WiFi 6 (2.4 GHz) · Bluetooth&nbsp;5 LE · native 802.15.4 (Zigbee/Thread)</td></tr>
+          <tr><td>Flash</td><td>16 MB · A/B OTA partition layout</td></tr>
+          <tr><td>Power</td><td>battery-backed RTC · live current estimation · CPU clock scaling</td></tr>
+        </table>
+      </div>
+      <div class="reveal">
+        <div class="card-lg">
+          <h3>16 MB flash map <span class="mono" style="color:var(--dim); font-size:13px; font-weight:400">partitions.csv</span></h3>
+          <div class="flashbar" aria-hidden="true">
+            <div class="seg-nvs">nvs</div>
+            <div class="seg-a">ota_0 · 4 MB</div>
+            <div class="seg-b" style="color:#02140f">ota_1 · 4 MB</div>
+            <div class="seg-cfg">cfg</div>
+          </div>
+          <div class="plegend">
+            <span><i style="background:#2a3550"></i>nvs / otadata / phy — 28 KB</span>
+            <span><i style="background:#3a7bd5"></i>ota_0 — running app</span>
+            <span><i style="background:#35e0b0"></i>ota_1 — OTA target</span>
+            <span><i style="background:#ffd166"></i>config (spiffs) — 64 KB</span>
+          </div>
+          <p style="color:var(--soft); font-size:14.5px; margin:22px 0 0">Two 4 MB app slots let the watch download a new build into the idle slot over HTTP, verify it, and flip the boot pointer — the same OTA discipline as the wider smol fleet, on a chip with no room to spare.</p>
+        </div>
+        <div class="card-lg" style="margin-top:18px">
+          <h3>The memory story</h3>
+          <p style="color:var(--soft); font-size:14.5px; margin:0">With no PSRAM, every byte counts. The Slint migration drops the boot framebuffer entirely: the software renderer streams two-line RGB565 strips (~1.6 KB) straight to panel GRAM, and full-frame <span class="mono">embedded-graphics</span> apps allocate the ~202 KB framebuffer on demand — freed the moment you swipe back to the shell.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ ARCHITECTURE ============================ -->
+<section class="section" id="architecture" style="background:var(--bg2); border-top:1px solid var(--line); border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">Under the hood</div>
+      <h2>Layered, and honestly small.</h2>
+      <p>One binary, five source layers, and a carefully pinned <span class="mono">esp-rs</span> stack.</p>
+    </div>
+    <div class="two" style="align-items:start">
+      <div class="reveal">
+        <div class="layers">
+          <div class="layer"><span class="lname">apps</span><div class="lmods"><code>snake</code><code>world_snake</code><code>game2048</code><code>tetris</code><code>flappy</code><code>maze</code><code>settings</code></div></div>
+          <div class="layer"><span class="lname">ui</span><div class="lmods"><code>slint_shell</code><code>slint_platform</code><code>watchface</code><code>launcher</code><code>power_page</code><code>t9_keyboard</code></div></div>
+          <div class="layer"><span class="lname">net</span><div class="lmods"><code>smol_mesh</code><code>familiar</code><code>weather</code><code>mqtt_ha</code><code>ota_http</code><code>names</code></div></div>
+          <div class="layer"><span class="lname">peripherals</span><div class="lmods"><code>wifi</code><code>ble</code><code>imu</code><code>touch</code><code>rtc</code><code>power</code><code>power_stats</code><code>audio</code><code>cpu_clock</code></div></div>
+          <div class="layer"><span class="lname">drivers</span><div class="lmods"><code>co5300</code><code>qspi_bus</code><code>framebuffer</code></div></div>
+        </div>
+      </div>
+      <div class="reveal">
+        <div class="card-lg">
+          <h3>Dependency stack</h3>
+          <div class="stacklist">
+            <div class="dep"><span class="dn">esp-hal</span><span class="dv">~1.1</span></div>
+            <div class="dep"><span class="dn">esp-rtos</span><span class="dv">0.3</span></div>
+            <div class="dep"><span class="dn">esp-radio</span><span class="dv">0.18</span></div>
+            <div class="dep"><span class="dn">embassy-executor</span><span class="dv">0.10</span></div>
+            <div class="dep"><span class="dn">embassy-net</span><span class="dv">0.9</span></div>
+            <div class="dep"><span class="dn">embassy-time</span><span class="dv">0.5</span></div>
+            <div class="dep"><span class="dn">slint</span><span class="dv">1.17</span></div>
+            <div class="dep"><span class="dn">trouble-host</span><span class="dv">0.6</span></div>
+            <div class="dep"><span class="dn">embedded-graphics</span><span class="dv">0.8</span></div>
+            <div class="dep"><span class="dn">u8g2-fonts</span><span class="dv">0.8</span></div>
+            <div class="dep"><span class="dn">esp-storage</span><span class="dv">0.9</span></div>
+            <div class="dep"><span class="dn">heapless</span><span class="dv">0.9</span></div>
+          </div>
+          <p style="color:var(--dim); font-size:13px; margin:20px 0 0; font-family:var(--font-mono)">edition 2024 · rustc 1.88 · esp-radio coex = WiFi + BLE</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ BUILD ============================ -->
+<section class="section" id="build">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">Quickstart</div>
+      <h2>Build &amp; flash in one command.</h2>
+      <p>Stable Rust with the RISC-V bare-metal target (pinned in <span class="mono">rust-toolchain.toml</span>) and <span class="mono">espflash</span>. WiFi/BLE are off at boot and toggled from the watchface.</p>
+    </div>
+    <div class="term reveal">
+      <div class="term-bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>esp32c6-watch — cargo run --release</span></div>
+<pre><span class="c"># install the flash tool</span>
+<span class="p">cargo</span> install espflash
+
+<span class="c"># WiFi creds live only in your local .cargo/config.toml (gitignored)</span>
+<span class="p">cp</span> .cargo/config.example.toml .cargo/config.toml
+<span class="c"># then add under [env]:</span>
+<span class="c">#   WIFI_SSID = <span class="s">"YourNetwork"</span></span>
+<span class="c">#   WIFI_PASS = <span class="s">"YourPassword"</span></span>
+
+<span class="c"># build the release firmware</span>
+<span class="p">cargo</span> build <span class="k">--release</span>
+
+<span class="c"># flash + monitor — the configured runner does this on `cargo run`</span>
+<span class="p">espflash</span> flash <span class="k">--monitor --chip</span> esp32c6 \
+  target/riscv32imac-unknown-none-elf/release/esp32c6-watch</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ PRIOR ART ============================ -->
+<section class="section" id="priorart" style="background:var(--bg2); border-top:1px solid var(--line)">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">Standing on shoulders</div>
+      <h2>Prior art &amp; inspirations</h2>
+      <p>This watch is a port with a lineage. It began as someone else's firmware and grew inside a mesh project that studied dozens of others. Everything that shaped it is credited here.</p>
+    </div>
+
+    <!-- ORIGIN highlight -->
+    <div class="origin reveal">
+      <div class="mark"><svg viewBox="0 0 64 64"><use href="#logo"/></svg></div>
+      <div>
+        <div class="badge">◆ The origin</div>
+        <h3>infinition/waveshare-watch-rs</h3>
+        <p>The original 100% Rust watch firmware, written by <b>Fabien&nbsp;(infinition)</b> for the ESP32-<b>S3</b>-Touch-AMOLED-2.06. This project is a direct port of it to the ESP32-<b>C6</b> — reworked for a chip with no PSRAM (RGB332 framebuffer in SRAM), no SD slot, no TE pin, and a different GPIO map. Dual-licensed MIT OR Apache-2.0; deep thanks to the upstream author for the foundation.</p>
+        <a class="src" href="https://github.com/infinition/waveshare-watch-rs" target="_blank" rel="noopener">github.com/infinition/waveshare-watch-rs →</a>
+      </div>
+    </div>
+
+    <!-- THREAD: Rust / ESP toolkit -->
+    <div class="thread reveal">
+      <div class="thread-h"><h3>Rust &amp; the esp-rs stack</h3><div class="ln"></div></div>
+      <div class="grid-art">
+        <div class="art"><div class="top"><span class="nm">esp-hal + Embassy</span><span class="ext"><a href="https://github.com/esp-rs/esp-hal" target="_blank" rel="noopener">esp-rs ↗</a></span></div><p class="what">Bare-metal HAL and async executor for Espressif RISC-V chips.</p><div class="infl"><b>Foundation</b>The whole firmware runs no_std on esp-hal, driven by Embassy tasks — no RTOS.</div></div>
+        <div class="art"><div class="top"><span class="nm">Slint</span><span class="ext"><a href="https://slint.dev" target="_blank" rel="noopener">slint.dev ↗</a></span></div><p class="what">A declarative UI toolkit with a no_std MCU software renderer.</p><div class="infl"><b>The new shell</b>The watchface + 5 pages are Slint, streaming line-strips to GRAM with no framebuffer.</div></div>
+        <div class="art"><div class="top"><span class="nm">zhangzqs/esp-clock-rs</span><span class="ext"><a href="https://github.com/zhangzqs/esp-clock-rs" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">A cross-platform Slint clock for ESP boards, message-driven and std-based.</p><div class="infl"><b>Slint-on-ESP proof</b>Showed the toolkit is viable on Espressif silicon — studied, then trimmed down for no_std.</div></div>
+        <div class="art"><div class="top"><span class="nm">mgrenonville/esp32-mipidsi-clock</span><span class="ext"><a href="https://github.com/mgrenonville/esp32-mipidsi-clock" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">Slint + Embassy running no_std on an ESP32-C6.</p><div class="infl"><b>Closest cousin</b>Same chip, same toolkit — validated the desktop-simulator iteration pattern.</div></div>
+        <div class="art"><div class="top"><span class="nm">trouble-host</span><span class="ext"><a href="https://github.com/embassy-rs/trouble" target="_blank" rel="noopener">embassy-rs ↗</a></span></div><p class="what">A pure-Rust, no_std BLE host stack.</p><div class="infl"><b>Bluetooth</b>Powers the watch's GATT server on top of esp-radio's controller.</div></div>
+        <div class="art"><div class="top"><span class="nm">embedded-graphics</span><span class="ext"><a href="https://github.com/embedded-graphics/embedded-graphics" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">The 2D drawing crate for embedded displays.</p><div class="infl"><b>Games layer</b>Every game and the legacy shell draw through it; u8g2 fonts render the type.</div></div>
+        <div class="art"><div class="top"><span class="nm">esp-rs/awesome-esp-rust</span><span class="ext"><a href="https://github.com/esp-rs/awesome-esp-rust" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">The curated index of the Rust-on-ESP ecosystem.</p><div class="infl"><b>Map of the territory</b>Where most of the projects on this page were first surfaced.</div></div>
+      </div>
+    </div>
+
+    <!-- THREAD: mesh / routing -->
+    <div class="thread reveal">
+      <div class="thread-h"><h3>Mesh &amp; routing</h3><div class="ln"></div></div>
+      <div class="grid-art">
+        <div class="art"><div class="top"><span class="nm">Meshtastic</span><span class="ext"><a href="https://meshtastic.org" target="_blank" rel="noopener">meshtastic.org ↗</a></span></div><p class="what">Open-source long-range off-grid mesh messaging on cheap radios.</p><div class="infl"><b>Gateway model</b>The MQTT-proxy bridge + routed multi-hop with self-healing re-election lineage.</div></div>
+        <div class="art"><div class="top"><span class="nm">painlessMesh</span><span class="ext"><a href="https://gitlab.com/painlessMesh/painlessMesh" target="_blank" rel="noopener">GitLab ↗</a></span></div><p class="what">A true ad-hoc, self-organizing WiFi mesh library for ESP.</p><div class="infl"><b>Self-healing topology</b>Table-free organization that rides re-election — the mesh's structural model.</div></div>
+        <div class="art"><div class="top"><span class="nm">ZHNetwork</span><span class="ext"><a href="https://github.com/aZholtikov/ZHNetwork" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">An ESP-NOW mesh network library.</p><div class="infl"><b>Flood + dedup</b>Table-free flooding with msgid de-duplication (and the TTL hazard deliberately avoided via hop-count decrement).</div></div>
+        <div class="art"><div class="top"><span class="nm">Althea / Babel</span><span class="ext"><a href="https://www.althea.net" target="_blank" rel="noopener">althea.net ↗</a></span></div><p class="what">Incentivized mesh built on the Babel loop-avoiding routing protocol.</p><div class="infl"><b>Metrics &amp; freshness</b>The ETX link-quality metric and monotonic-seqno freshness gate; per-link auth is a tracked goal.</div></div>
+        <div class="art"><div class="top"><span class="nm">esp_wifi_repeater</span><span class="ext"><a href="https://github.com/martin-ger/esp_wifi_repeater" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">A full-featured WiFi repeater/NAT firmware for ESP.</p><div class="infl"><b>Coexist + health</b>Single-radio dual-role coexistence and retained gateway-health publishing.</div></div>
+      </div>
+    </div>
+
+    <!-- THREAD: local-first HA -->
+    <div class="thread reveal">
+      <div class="thread-h"><h3>Local-first ESP ↔ Home Assistant</h3><div class="ln"></div></div>
+      <div class="grid-art">
+        <div class="art"><div class="top"><span class="nm">WLED</span><span class="ext"><a href="https://github.com/Aircoookie/WLED" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">The ubiquitous ESP LED-control firmware.</p><div class="infl"><b>Typed entities</b>"One HA device, many typed entities," plus ESP-NOW interop conventions.</div></div>
+        <div class="art"><div class="top"><span class="nm">ESPHome</span><span class="ext"><a href="https://esphome.io" target="_blank" rel="noopener">esphome.io ↗</a></span></div><p class="what">Declarative firmware + first-class HA integration.</p><div class="infl"><b>Discovery &amp; OTA</b>MQTT-discovery conventions, entity taxonomy, and OTA-as-an-HA-Update-entity.</div></div>
+        <div class="art"><div class="top"><span class="nm">Tasmota</span><span class="ext"><a href="https://tasmota.github.io/docs/" target="_blank" rel="noopener">docs ↗</a></span></div><p class="what">MQTT-first firmware for ESP smart-home gear.</p><div class="infl"><b>Runtime config</b>Runtime config over MQTT with no reflash, and cmnd/stat/tele topic conventions.</div></div>
+        <div class="art"><div class="top"><span class="nm">Battery-Emulator</span><span class="ext"><a href="https://github.com/dalathegreat/Battery-Emulator" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">Bridges EV battery packs into home energy systems.</p><div class="infl"><b>Live wiring</b>Its SOC/HV data is republished into the smol mesh — a live protocol-bridge → HA-over-MQTT.</div></div>
+        <div class="art"><div class="top"><span class="nm">esp-link</span><span class="ext"><a href="https://github.com/jeelabs/esp-link" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">WiFi-serial bridge with network firmware programming.</p><div class="infl"><b>Network-delivered firmware</b>Early prior-art for the OTA idea, in spirit.</div></div>
+        <div class="art"><div class="top"><span class="nm">ESP3D</span><span class="ext"><a href="https://github.com/luc-github/ESP3D" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">WiFi bridge + web UI for 3D printers.</p><div class="infl"><b>Appliance ethos</b>The "manage the physical thing from a clean web surface" attitude.</div></div>
+        <div class="art"><div class="top"><span class="nm">lattic</span><span class="ext">reference</span></div><p class="what">An ESP-NOW → MQTT → Home Assistant bridge.</p><div class="infl"><b>Well-trodden path</b>Evidence the mesh-to-HA pattern is proven — keeps the framing honest.</div></div>
+        <div class="art"><div class="top"><span class="nm">Bermuda / ESPresense</span><span class="ext"><a href="https://espresense.com" target="_blank" rel="noopener">espresense.com ↗</a></span></div><p class="what">BLE-beacon room-presence for Home Assistant.</p><div class="infl"><b>Presence (deferred)</b>The advertise-only BLE room-presence idea — parked pending async BLE on the C-series.</div></div>
+      </div>
+    </div>
+
+    <!-- THREAD: audacity + UX -->
+    <div class="thread reveal">
+      <div class="thread-h"><h3>Cheap-ESP audacity &amp; handheld UX</h3><div class="ln"></div></div>
+      <div class="grid-art">
+        <div class="art"><div class="top"><span class="nm">atomic14</span><span class="ext"><a href="https://github.com/atomic14" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">Chris Greening's tiny-ESP + OLED handheld builds.</p><div class="infl"><b>The form factor</b>The single-button, tiny-screen handheld idiom that shaped the sibling smol board.</div></div>
+        <div class="art"><div class="top"><span class="nm">LeafMiner</span><span class="ext">reference</span></div><p class="what">A "$5 ESP doing something gloriously improbable" project.</p><div class="infl"><b>Audacity</b>The soul of running a mesh MMO and a living creature on a coin-priced chip.</div></div>
+        <div class="art"><div class="top"><span class="nm">ESP32 Marauder</span><span class="ext"><a href="https://github.com/justcallmekoko/ESP32Marauder" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">A WiFi/BLE offensive-and-analysis toolkit on cheap ESP hardware.</p><div class="infl"><b>Menu UX + radio kinship</b>The tiny-screen menu-driven handheld shape; direct kin to the upcoming Radio Scan.</div></div>
+        <div class="art"><div class="top"><span class="nm">Marauder's Watch</span><span class="ext"><a href="https://github.com/justcallmekoko/ESP32Marauder" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">The wrist-worn Marauder variant.</p><div class="infl"><b>Names the Mesh page</b>"Every node shows where every other node is" — by ESP-NOW roster RSSI, no BLE.</div></div>
+      </div>
+    </div>
+
+    <!-- THREAD: remote-mgmt + lean embedded -->
+    <div class="thread reveal">
+      <div class="thread-h"><h3>Remote management &amp; lean real-time</h3><div class="ln"></div></div>
+      <div class="grid-art">
+        <div class="art"><div class="top"><span class="nm">PiKVM</span><span class="ext"><a href="https://github.com/pikvm/pikvm" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">Open, secure, out-of-band KVM-over-IP.</p><div class="infl"><b>Remote-appliance ethos</b>The "manage the physical thing from anywhere, cleanly" posture behind the HA control surface.</div></div>
+        <div class="art"><div class="top"><span class="nm">GRBL</span><span class="ext"><a href="https://github.com/grbl/grbl" target="_blank" rel="noopener">GitHub ↗</a></span></div><p class="what">The classic real-time g-code motion controller for AVR/ARM.</p><div class="infl"><b>Out-of-band commands</b>Interleaving real-time control with a streamed buffer — the shape of the coexist RX drain.</div></div>
+      </div>
+    </div>
+
+    <p class="lead reveal" style="text-align:center; margin:52px auto 0; max-width:64ch; font-size:15px; color:var(--dim)">
+      The full inspiration audit — 18 projects across 5 threads, with shipped/deferred/gap status for each borrow — lives in the smol project's <a href="https://github.com/jphein/smol" target="_blank" rel="noopener" style="color:var(--accent)">research notes</a>.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<!-- ============================ FOOTER ============================ -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand-col">
+        <div class="foot-brand"><svg viewBox="0 0 64 64"><use href="#logo"/></svg><span>esp32<b>c6</b>-watch</span></div>
+        <p style="color:var(--soft); font-size:14.5px; max-width:38ch">100% Rust <span class="mono">no_std</span> firmware for the Waveshare ESP32-C6 AMOLED smartwatch. A port of <a href="https://github.com/infinition/waveshare-watch-rs" target="_blank" rel="noopener" style="color:var(--accent)">infinition/waveshare-watch-rs</a>, and a hardware target of the <a href="https://github.com/jphein/smol" target="_blank" rel="noopener" style="color:var(--accent)">smol</a> mesh fleet.</p>
+        <div class="lic"><span>MIT</span><span>OR</span><span>Apache-2.0</span></div>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">Repository</a>
+        <a href="https://github.com/jphein/esp32c6-watch/tree/feat/slint-shell" target="_blank" rel="noopener">feat/slint-shell branch</a>
+        <a href="https://github.com/jphein/esp32c6-watch/blob/main/README.md" target="_blank" rel="noopener">README</a>
+        <a href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">Issues</a>
+      </div>
+      <div>
+        <h4>Lineage</h4>
+        <a href="https://github.com/infinition/waveshare-watch-rs" target="_blank" rel="noopener">waveshare-watch-rs (origin)</a>
+        <a href="https://github.com/jphein/smol" target="_blank" rel="noopener">smol mesh fleet</a>
+        <a href="https://www.waveshare.com/wiki/ESP32-C6-Touch-AMOLED-2.06" target="_blank" rel="noopener">Waveshare board wiki</a>
+        <a href="https://slint.dev" target="_blank" rel="noopener">Slint</a>
+      </div>
+    </div>
+  </div>
+  <div class="foot-bottom">
+    <span>© 2026 · dual-licensed MIT OR Apache-2.0 · attribution to Fabien&nbsp;(infinition)</span>
+    <span>Built with Rust, Embassy &amp; Slint · <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">jphein/esp32c6-watch</a></span>
+  </div>
+</footer>
+
+<!-- shared logo symbol -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="logo" viewBox="0 0 64 64">
+    <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a7bd5"/><stop offset="1" stop-color="#35e0b0"/></linearGradient></defs>
+    <rect x="14" y="6" width="36" height="52" rx="13" fill="#000"/>
+    <rect x="14" y="6" width="36" height="52" rx="13" fill="none" stroke="url(#lg)" stroke-width="2.5"/>
+    <g stroke="#35e0b0" stroke-width="1.6" opacity="0.55" stroke-linecap="round"><line x1="32" y1="32" x2="22" y2="19"/><line x1="32" y1="32" x2="43" y2="21"/><line x1="32" y1="32" x2="24" y2="45"/><line x1="32" y1="32" x2="42" y2="44"/></g>
+    <g fill="#3a7bd5"><circle cx="22" cy="19" r="2.6"/><circle cx="43" cy="21" r="2.6"/><circle cx="24" cy="45" r="2.6"/><circle cx="42" cy="44" r="2.6"/></g>
+    <circle cx="32" cy="32" r="5.4" fill="#35e0b0"/>
+    <circle cx="32" cy="32" r="9.5" fill="none" stroke="#35e0b0" stroke-width="1.4" opacity="0.6"/>
+  </symbol>
+</svg>
+
+<script>
+/* ---------- theme toggle (defaults to system, remembers override) ---------- */
+(function(){
+  var root=document.documentElement, KEY='c6w-theme';
+  try{var saved=localStorage.getItem(KEY); if(saved==='light'||saved==='dark') root.setAttribute('data-theme',saved);}catch(e){}
+  document.getElementById('themeToggle').addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    if(!cur){ // following system → flip to the opposite of what's showing
+      cur = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    var next = cur==='dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme',next);
+    try{localStorage.setItem(KEY,next);}catch(e){}
+  });
+})();
+
+/* ---------- live watchface clock ---------- */
+(function(){
+  var t=document.getElementById('wf-time'), s=document.getElementById('wf-secs'),
+      d=document.getElementById('wf-date'), m=document.getElementById('wf-min');
+  if(!t) return;
+  var DOW=['SUN','MON','TUE','WED','THU','FRI','SAT'],
+      MON=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  function p(n){return (n<10?'0':'')+n;}
+  function tick(){
+    var now=new Date();
+    t.textContent=p(now.getHours())+':'+p(now.getMinutes());
+    s.textContent=p(now.getSeconds());
+    d.textContent=DOW[now.getDay()]+' '+now.getDate()+' '+MON[now.getMonth()];
+    if(m) m.style.width=((now.getSeconds()/60)*100).toFixed(1)+'%';
+  }
+  tick(); setInterval(tick,1000);
+})();
+
+/* ---------- scroll reveal ---------- */
+(function(){
+  var els=document.querySelectorAll('.reveal');
+  if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in');});return;}
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target);} });
+  },{threshold:0.12, rootMargin:'0px 0px -8% 0px'});
+  els.forEach(function(e){io.observe(e);});
+})();
+
+/* ---------- hero mesh constellation ---------- */
+(function(){
+  var c=document.getElementById('mesh'); if(!c) return;
+  var reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var ctx=c.getContext('2d'), DPR=Math.min(window.devicePixelRatio||1,2), W,H,nodes,raf;
+  function seed(){
+    var hero=c.parentElement; W=hero.clientWidth; H=hero.clientHeight;
+    c.width=W*DPR; c.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
+    var count=Math.max(26, Math.round(W*H/26000)); nodes=[];
+    for(var i=0;i<count;i++){
+      nodes.push({x:Math.random()*W, y:Math.random()*H,
+        vx:(Math.random()-.5)*0.22, vy:(Math.random()-.5)*0.22,
+        r:Math.random()*1.6+0.8});
+    }
+  }
+  function frame(){
+    ctx.clearRect(0,0,W,H);
+    for(var i=0;i<nodes.length;i++){
+      var a=nodes[i];
+      if(!reduce){a.x+=a.vx; a.y+=a.vy;
+        if(a.x<0||a.x>W)a.vx*=-1; if(a.y<0||a.y>H)a.vy*=-1;}
+      for(var j=i+1;j<nodes.length;j++){
+        var b=nodes[j], dx=a.x-b.x, dy=a.y-b.y, dist=Math.sqrt(dx*dx+dy*dy);
+        if(dist<132){
+          var o=(1-dist/132)*0.5;
+          ctx.strokeStyle='rgba(53,224,176,'+o.toFixed(3)+')';
+          ctx.lineWidth=0.7;
+          ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+        }
+      }
+    }
+    for(var k=0;k<nodes.length;k++){
+      var n=nodes[k];
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,6.2832);
+      ctx.fillStyle=(k%5===0)?'rgba(58,123,213,0.9)':'rgba(53,224,176,0.75)';
+      ctx.fill();
+    }
+    if(!reduce) raf=requestAnimationFrame(frame);
+  }
+  seed(); frame();
+  var to; addEventListener('resize',function(){clearTimeout(to); to=setTimeout(function(){cancelAnimationFrame(raf); seed(); frame();},180);});
+})();
+</script>
+</body>
+</html>
