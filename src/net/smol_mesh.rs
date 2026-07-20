@@ -20,10 +20,16 @@
 //!   CFG      "SMOLv1 CFG NNN<KEY><value>"            gw→leaf, target 255 = all
 //!   RELAY    "SMOLv1 RELAY NNN MMMMM F C " + chunk   leaf uplink, ~15s, ≤4 frags
 //!   RELAYACK "SMOLv1 RELAYACK MMMMM BBB"             gw→leaf unicast frag bitmap
+//! fleet. FAM frames (the Mesh Familiar, #57) are decoded here and routed to
+//! [`crate::net::familiar`] via [`MeshEvent::Fam`]. Frames the watch doesn't
+//! speak yet (SNK, RELAY, CFG, ...) are counted and ignored — hearing them
+//! still marks the peer as alive.
 
 use alloc::vec::Vec;
 use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
 use esp_println::println;
+
+use crate::net::familiar::{encode_fam, parse_fam, FamFrame, FAM_CALL, FAM_FRAME_LEN, FAM_PREFIX};
 
 const HELLO_PREFIX: &[u8] = b"SMOLv1 HELLO ";
 const ACK_PREFIX: &[u8] = b"SMOLv1 ACK ";
@@ -104,6 +110,9 @@ pub enum MeshEvent {
     /// CFG key `R` (#52): remote reboot. Transient — never persisted; the
     /// caller should boot-debounce, then `esp_hal::system::software_reset()`.
     CfgReboot,
+    /// A decoded SMOLv1 FAM frame (+ its RSSI, which weights the familiar's
+    /// orphan-takeover stagger). Route to `FamState::ingest`.
+    Fam { frame: FamFrame, rssi: i32 },
 }
 
 /// A leaf's single outstanding RELAY message (mode.rs RelayTx): retained so
@@ -353,6 +362,25 @@ impl SmolMesh {
             .count()
     }
 
+    /// Fill `out` with the ids of currently-live, id-known peers, returning
+    /// the count. The familiar's stand-in for the fleet's RSSI-sorted roster
+    /// (wander-destination candidates).
+    pub fn live_peer_ids(&self, now_ms: u64, out: &mut [u8]) -> usize {
+        let mut n = 0;
+        for p in &self.peers {
+            if n == out.len() {
+                break;
+            }
+            if let Some(id) = p.id {
+                if id != self.id && now_ms.saturating_sub(p.last_rx_ms) < PEER_STALE_MS {
+                    out[n] = id;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     fn ensure_unicast_peer(esp_now: &mut EspNow<'_>, mac: [u8; 6]) {
         if esp_now.peer_exists(&mac) {
             return;
@@ -560,6 +588,19 @@ impl SmolMesh {
     }
 
     /// Handle one received ESP-NOW payload.
+    /// Broadcast a SMOLv1 FAM frame (heartbeat/handoff) for the familiar
+    /// state machine. Fixed 29-byte binary frame, fleet wire format.
+    pub fn broadcast_fam(&mut self, esp_now: &mut EspNow<'_>, f: &FamFrame) {
+        let mut buf = [0u8; FAM_FRAME_LEN];
+        if let Some(len) = encode_fam(f, &mut buf) {
+            if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..len]) {
+                let _ = w.wait();
+            }
+        }
+    }
+
+    /// Handle one received ESP-NOW payload. `rssi` comes from the frame's RX
+    /// control info and feeds the familiar's takeover weighting.
     pub fn handle_rx(
         &mut self,
         esp_now: &mut EspNow<'_>,
@@ -667,8 +708,21 @@ impl SmolMesh {
             }
             return None;
         }
+        if data.starts_with(FAM_PREFIX) {
+            if let Some(f) = parse_fam(data) {
+                // The broadcaster is the holder for H/X frames, the caller
+                // for C frames (mirrors the fleet's mode.rs routing).
+                let sender_id = if f.kind == FAM_CALL { f.target } else { f.holder };
+                self.upsert_peer(src, Some(sender_id), now_ms, rssi);
+                let rssi_w = rssi.unwrap_or(-127) as i32;
+                return Some(MeshEvent::Fam { frame: f, rssi: rssi_w });
+            }
+            // Malformed FAM: still proof of life.
+            self.upsert_peer(src, None, now_ms, rssi);
+            return None;
+        }
         if data.starts_with(SMOL_PREFIX) {
-            // A fleet frame we don't speak yet (SNK/FAM/...):
+            // A fleet frame we don't speak yet (SNK/RELAY/CFG/...):
             // still proof of life for the peer.
             self.upsert_peer(src, None, now_ms, rssi);
             self.other_frames_heard += 1;

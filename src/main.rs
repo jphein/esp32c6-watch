@@ -559,6 +559,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut wifi_connect_attempts: u8 = 0;
     // SMOLv1 mesh: node id comes from flash config (default 042).
     let mut mesh = SmolMesh::new(watch_cfg.node_id);
+    // Mesh Familiar (fleet #57): always-on holder/arbitration state machine,
+    // ticked alongside mesh.tick. The creature renders on the watchface.
+    let mut familiar = crate::net::familiar::FamState::new(watch_cfg.node_id);
     let mut esp_now_peer_added = false;
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
@@ -595,6 +598,18 @@ async fn main(_spawner: Spawner) -> ! {
                 AppState::Launcher | AppState::Settings => Duration::from_millis(100),
                 _ => Duration::from_millis(33),
             }
+        };
+        // Mesh Familiar cadence override: a holder must beat every ~1.5 s and
+        // a non-holder must notice a dead holder within FAM_LOST_MS (~12 s),
+        // so the idle 10/30 s sleeps are capped while the mesh is up.
+        let tick = if esp_now_peer_added {
+            if familiar.needs_fast_tick() {
+                tick.min(Duration::from_millis(400))
+            } else {
+                tick.min(Duration::from_secs(3))
+            }
+        } else {
+            tick
         };
 
         let _ = select3(
@@ -1067,8 +1082,33 @@ async fn main(_spawner: Spawner) -> ! {
                                 println!("[CFG] reboot ignored (boot debounce)");
                             }
                         }
+                        Some(MeshEvent::Fam { frame, rssi }) => {
+                            let unix_now = mesh.unix_now(uptime_secs).unwrap_or(0);
+                            familiar.ingest(&frame, rssi, now_ms, unix_now);
+                        }
                         None => {}
                     }
+                }
+
+                // Mesh Familiar tick (fleet #57): arbitration + holder beats,
+                // driven every loop alongside mesh.tick. Any frame it emits
+                // (heartbeat/handoff) is broadcast on the fleet wire format.
+                {
+                    let unix_now = mesh.unix_now(uptime_secs).unwrap_or(0);
+                    let mut ids = [0u8; 16];
+                    let n = mesh.live_peer_ids(now_ms, &mut ids);
+                    if let Some(frame) = familiar.tick(&ids[..n], now_ms, unix_now) {
+                        mesh.broadcast_fam(&mut esp_now, &frame);
+                    }
+                    // Snapshot for the watchface (dirty-rendered like mesh_peers).
+                    let fam_ui = crate::ui::watchface::FamUi {
+                        known: familiar.known(),
+                        holding: familiar.is_holder(),
+                        mood: familiar.mood(),
+                        hunger: familiar.creature().hunger_level(unix_now),
+                        stage: familiar.creature().stage_level(unix_now),
+                    };
+                    watchface.fam = fam_ui;
                 }
             }
         }
