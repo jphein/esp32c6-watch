@@ -55,6 +55,7 @@ use crate::apps::maze::MazeGame;
 use crate::apps::settings::SettingsApp;
 use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
+use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState};
 use crate::drivers::co5300::Co5300Display;
 use crate::net::smol_mesh::{MeshEvent, SmolMesh};
@@ -475,6 +476,8 @@ async fn main(_spawner: Spawner) -> ! {
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
     let mut snake_game = SnakeGame::new();
+    // World Snake shares the SMOLv1 node id so its SNK frames name us.
+    let mut world_snake = WorldSnakeApp::new(watch_cfg.node_id);
     let mut game_2048 = Game2048::new();
     let mut tetris_game = TetrisGame::new();
     let mut flappy_game = FlappyGame::new();
@@ -931,7 +934,31 @@ async fn main(_spawner: Spawner) -> ! {
                     mesh.broadcast_diag(&mut esp_now, rec.as_bytes());
                     next_diag = now + Duration::from_secs(60);
                 }
+                // World Snake mesh service (only while the app is active):
+                // feed it the mesh Unix clock (food/treasure buckets converge
+                // fleet-wide) and drain its phase-jittered 5 Hz SNK snapshot.
+                if app_state == AppState::WorldSnake {
+                    if let Some(unix) = mesh.unix_now(uptime_secs) {
+                        world_snake.set_unix(unix);
+                    }
+                    let mut snk = [0u8; crate::apps::world_snake::SNK_TX_BUF];
+                    if let Some(n) = world_snake.pending_tx(&mut snk) {
+                        if let Ok(w) =
+                            esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &snk[..n])
+                        {
+                            let _ = w.wait();
+                        }
+                    }
+                }
                 while let Some(rx) = esp_now.receive() {
+                    // SNK frames route to World Snake when it's active; they
+                    // also fall through to mesh.handle_rx, which counts them
+                    // as proof of life for the sending peer.
+                    if app_state == AppState::WorldSnake
+                        && rx.data().starts_with(crate::apps::world_snake::SNK_PREFIX)
+                    {
+                        world_snake.handle_rx(rx.data());
+                    }
                     if let Some(MeshEvent::TimeAdopted { unix, from_id }) = mesh.handle_rx(
                         &mut esp_now,
                         rx.info.src_address,
@@ -1190,6 +1217,28 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
 
+            AppState::WorldSnake => {
+                let input = AppInput {
+                    touch: None,
+                    swipe: swipe_event,
+                    tap: tap_event,
+                    accel,
+                    dt_ms: dt_ms.max(1),
+                };
+                world_snake.update(&input);
+                // Remote peers dead-reckon between our steps, so repaint on a
+                // steady cadence rather than only on local steps.
+                if now >= next_flush {
+                    world_snake.render(&mut fb);
+                    fb.flush(&mut display);
+                    next_flush = now + Duration::from_millis(33);
+                }
+                if boot_button.is_low() {
+                    app_state = AppState::Launcher;
+                    Timer::after(Duration::from_millis(200)).await;
+                }
+            }
+
             AppState::Launcher => {
                 if let Ok((point, _)) = touch.poll() {
                     if let Some(tp) = point {
@@ -1200,6 +1249,7 @@ async fn main(_spawner: Spawner) -> ! {
                     app_state = new_state;
                     match app_state {
                         AppState::Snake => snake_game.setup(),
+                        AppState::WorldSnake => world_snake.setup(),
                         AppState::Game2048 => {
                             game_2048.setup();
                             game_2048.render(&mut fb);

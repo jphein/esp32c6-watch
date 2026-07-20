@@ -26,6 +26,7 @@ struct MenuItem {
 
 const MENU_ITEMS: &[MenuItem] = &[
     MenuItem { name: "Snake", state: AppState::Snake, bg_color: Rgb565::new(2, 20, 2), text_color: Rgb565::GREEN },
+    MenuItem { name: "World Snake", state: AppState::WorldSnake, bg_color: Rgb565::new(0, 16, 8), text_color: Rgb565::new(16, 63, 8) },
     MenuItem { name: "2048", state: AppState::Game2048, bg_color: Rgb565::new(15, 10, 0), text_color: Rgb565::YELLOW },
     MenuItem { name: "Tetris", state: AppState::Tetris, bg_color: Rgb565::new(0, 10, 15), text_color: Rgb565::CYAN },
     MenuItem { name: "Flappy Bird", state: AppState::Flappy, bg_color: Rgb565::new(15, 12, 0), text_color: Rgb565::WHITE },
