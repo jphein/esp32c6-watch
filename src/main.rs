@@ -514,8 +514,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut next_battery = Instant::now();
     let mut last_frame = Instant::now();
     let mut next_flush = Instant::now();
+    // "Power down" now only gates the gyro: the accel stays on at 62.5Hz
+    // so the QMI8658's hardware pedometer keeps counting in the background.
     let _ = imu.power_down();
     let mut imu_powered = false;
+    let mut next_step_poll = Instant::now();
     let mut was_touching = false;
 
     // Radio state (user intent vs. actual radio state, per the S3 design).
@@ -617,6 +620,16 @@ async fn main(_spawner: Spawner) -> ! {
                 watchface.update_date(dt.day, dt.month, dt.year);
             }
             next_rtc = now + Duration::from_secs(1);
+        }
+
+        // === Pedometer ===
+        // The hardware step counter runs even while the IMU is "powered
+        // down" (gyro off, accel on). One cheap 3-byte I2C read per minute.
+        if now >= next_step_poll {
+            if let Ok(steps) = imu.read_step_count() {
+                watchface.steps = steps;
+            }
+            next_step_poll = now + Duration::from_secs(60);
         }
 
         // === Battery ===
