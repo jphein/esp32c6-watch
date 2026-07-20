@@ -17,6 +17,7 @@ export component HuntPage {
     in property <bool> warmer: false;             // trend up  (Rust-owned; drives color)
     in property <bool> colder: false;             // trend down
     callback next-target();
+    callback close();
 
     // Hero/arrow color from the Rust-owned trend flags (no string matching).
     property <brush> hero-color: root.found ? Theme.accent
@@ -24,7 +25,20 @@ export component HuntPage {
                                : root.colder ? Theme.accent2
                                : Theme.ink;
 
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
     PageTitle { title: "HUNT"; }
+
+    // Back chevron (top-left, clear of the corner arc). Right-swipe also closes
+    // (slint_shell::handle_touch), matching the launcher / WLED overlays.
+    back := TouchArea {
+        x: 14px; y: 8px; width: 60px; height: 46px;
+        clicked => { root.close(); }
+        Text {
+            x: 8px; y: (parent.height - self.height) / 2;
+            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
+        }
+    }
 
     // Target being sought.
     Text {

@@ -664,6 +664,8 @@ async fn main(_spawner: Spawner) -> ! {
     let mut esp_now_peer_added = false;
     // WiZmote frame sequence (WLED de-dups on it); wraps, monotonic per send.
     let mut wled_seq: u32 = 0;
+    // RSSI treasure-hunt game state (fed from the mesh roster while Hunt is open).
+    let mut hunt_state = hunt::HuntState::new();
     // Mesh enable flag (MESH chrome dot toggles it). Default OFF (power: the STA
     // radio only comes up when mesh is turned on). Toggling ON starts the radio
     // (below) then the ESP-NOW tick/rx/familiar run; OFF pauses the tick (peer
@@ -689,10 +691,17 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(5)
         } else {
             match app_state {
-                AppState::Watchface | AppState::Launcher | AppState::Wled => {
+                AppState::Watchface
+                | AppState::Launcher
+                | AppState::Wled
+                | AppState::Hunt => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
-                    if shell.has_active_animations() {
+                    if app_state == AppState::Hunt {
+                        // Warmer/colder wants a responsive feel; the RSSI EWMA +
+                        // 1.5s trend lag keep 4 Hz from flickering.
+                        Duration::from_millis(250)
+                    } else if shell.has_active_animations() {
                         Duration::from_millis(33)
                     } else {
                         match shell.page() {
@@ -1343,13 +1352,19 @@ async fn main(_spawner: Spawner) -> ! {
         // could never fire. Recording `dispatched` keeps the transition visible.
         let dispatched = app_state;
         match app_state {
-            AppState::Watchface | AppState::Launcher | AppState::Wled => {
+            AppState::Watchface
+            | AppState::Launcher
+            | AppState::Wled
+            | AppState::Hunt => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
                 if !matches!(
                     prev_app_state,
-                    AppState::Watchface | AppState::Launcher | AppState::Wled
+                    AppState::Watchface
+                        | AppState::Launcher
+                        | AppState::Wled
+                        | AppState::Hunt
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1390,11 +1405,14 @@ async fn main(_spawner: Spawner) -> ! {
                 // shares this Slint branch (no framebuffer of its own).
                 shell.set_launcher_open(app_state == AppState::Launcher);
                 shell.set_wled_open(app_state == AppState::Wled);
+                shell.set_hunt_open(app_state == AppState::Hunt);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
                 app_state = if shell.launcher_open() {
                     AppState::Launcher
                 } else if shell.wled_open() {
                     AppState::Wled
+                } else if shell.hunt_open() {
+                    AppState::Hunt
                 } else {
                     AppState::Watchface
                 };
@@ -1424,6 +1442,36 @@ async fn main(_spawner: Spawner) -> ! {
                             shell.set_wled_status("Radio off \u{2014} enable WiFi/MESH");
                         }
                     }
+                }
+
+                // Hunt: back-chevron closes; "next" cycles the roster target; each
+                // tick feeds the target's raw RSSI from the mesh roster the watch
+                // already tracks (no new radio frames). With no live peers the view
+                // reads LOST/reacquiring — hunt is a mesh-dependent game.
+                if shell.req.hunt_close.take() {
+                    shell.set_hunt_open(false);
+                    app_state = AppState::Watchface;
+                }
+                if app_state == AppState::Hunt {
+                    let now_ms = now.as_millis();
+                    let mut ids = [0u8; MESH_MAX_ROWS];
+                    let n_ids = mesh.live_peer_ids(now_ms, &mut ids);
+                    if shell.req.hunt_next.take() || hunt_state.target().is_none() {
+                        hunt_state.cycle_target(&ids[..n_ids], now_ms);
+                    }
+                    // Target's current raw RSSI from the roster (None if unheard).
+                    let present_raw = hunt_state.target().and_then(|t| {
+                        let mut rows = [PeerView::default(); MESH_MAX_ROWS];
+                        let n = mesh.peers(now_ms, &mut rows);
+                        rows[..n]
+                            .iter()
+                            .find(|p| p.id == Some(t))
+                            .and_then(|p| p.rssi_dbm.map(|r| r as i32))
+                    });
+                    let view = hunt_state.update(present_raw, now_ms);
+                    shell.set_hunt(&view);
+                } else {
+                    let _ = shell.req.hunt_next.take(); // drop a late "next" tap
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1559,6 +1607,18 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_wled_status("");
                         shell.set_wled_open(true);
                         app_state = AppState::Wled;
+                    } else if target == AppState::Hunt {
+                        // Hunt is a Slint overlay too — raise it and seed the target
+                        // from the current roster (the per-tick feed does the rest).
+                        // No scene suspend, no fb.
+                        if hunt_state.target().is_none() {
+                            let now_ms = now.as_millis();
+                            let mut ids = [0u8; MESH_MAX_ROWS];
+                            let n_ids = mesh.live_peer_ids(now_ms, &mut ids);
+                            hunt_state.cycle_target(&ids[..n_ids], now_ms);
+                        }
+                        shell.set_hunt_open(true);
+                        app_state = AppState::Hunt;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -1643,7 +1703,10 @@ async fn main(_spawner: Spawner) -> ! {
                 // trailing shell repaint would clobber it.
                 if matches!(
                     app_state,
-                    AppState::Watchface | AppState::Launcher | AppState::Wled
+                    AppState::Watchface
+                        | AppState::Launcher
+                        | AppState::Wled
+                        | AppState::Hunt
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);

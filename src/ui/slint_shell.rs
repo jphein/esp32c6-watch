@@ -49,7 +49,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 8] = [
+pub const LAUNCHER_APPS: [AppState; 9] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -58,6 +58,7 @@ pub const LAUNCHER_APPS: [AppState; 8] = [
     AppState::Maze,
     AppState::Settings,
     AppState::Wled, // idx 7 — SYSTEM-section WLED tile (icon-id 9)
+    AppState::Hunt, // idx 8 — GAMES-section HUNT tile (icon-id 10)
 ];
 
 #[derive(Default)]
@@ -74,6 +75,9 @@ pub struct ShellRequests {
     /// mapped to a WiZmote broadcast. `wled_close` is the back-chevron/Right-swipe.
     pub wled_action: Cell<Option<i32>>,
     pub wled_close: Cell<bool>,
+    /// Hunt: "next target" tap cycles the roster; `hunt_close` is back/Right-swipe.
+    pub hunt_next: Cell<bool>,
+    pub hunt_close: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -225,6 +229,13 @@ impl ShellUi {
             if ui.get_wled_open() {
                 if direction == SwipeDirection::Right {
                     ui.set_wled_open(false);
+                }
+                return;
+            }
+            // Hunt overlay: same contract — swallow nav swipes, Right closes.
+            if ui.get_hunt_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_hunt_open(false);
                 }
                 return;
             }
@@ -476,6 +487,46 @@ impl ShellUi {
         ui.set_wled_status(SharedString::from(text));
     }
 
+    pub fn set_hunt_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_hunt_open(open);
+    }
+
+    pub fn hunt_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_hunt_open())
+    }
+
+    /// Push one hunt tick: maps `hunt::HuntView` onto the HuntPage props. The
+    /// view→UI derivations (target noun, bar fraction, trend arrow/flags) live
+    /// here in the UI layer so main.rs only owns the RSSI feed + game state.
+    pub fn set_hunt(&self, v: &hunt::HuntView) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        let noun = v.target.map_or("--", |id| names::name_for_id(id).1);
+        ui.set_hunt_seek(slint::format!("SEEK {noun}"));
+        ui.set_hunt_hero(SharedString::from(v.trend.word()));
+        let arrow = match v.trend {
+            hunt::Trend::Warmer => "\u{2191}",
+            hunt::Trend::Colder => "\u{2193}",
+            _ => "",
+        };
+        ui.set_hunt_arrow(SharedString::from(arrow));
+        let frac = (rssi::bar_px(v.smoothed_rssi, 1000) as f32 / 1000.0).clamp(0.0, 1.0);
+        ui.set_hunt_bar(frac);
+        if v.present {
+            ui.set_hunt_rssi(slint::format!("{} dBm", v.smoothed_rssi));
+        } else {
+            ui.set_hunt_rssi(SharedString::from("--"));
+        }
+        ui.set_hunt_bucket(SharedString::from(rssi::label(v.proximity).trim_end()));
+        ui.set_hunt_hot(matches!(
+            v.proximity,
+            rssi::Proximity::Here | rssi::Proximity::Near
+        ));
+        ui.set_hunt_found(v.trend == hunt::Trend::Found);
+        ui.set_hunt_warmer(v.trend == hunt::Trend::Warmer);
+        ui.set_hunt_colder(v.trend == hunt::Trend::Colder);
+    }
+
     pub fn page(&self) -> i32 {
         // While suspended, report the page we'll restore on resume.
         self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
@@ -616,6 +667,12 @@ fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> W
 
         let r = req.clone();
         ui.on_wled_close(move || r.wled_close.set(true));
+
+        let r = req.clone();
+        ui.on_hunt_next(move || r.hunt_next.set(true));
+
+        let r = req.clone();
+        ui.on_hunt_close(move || r.hunt_close.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     // Firmware version is a compile-time constant; set it once so the system

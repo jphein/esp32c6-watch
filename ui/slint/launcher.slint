@@ -92,6 +92,12 @@ component AppIcon {
         Rectangle { x: 18px; y: 32px; width: 10px; height: 4px;  border-radius: 1px; background: root.tint.with-alpha(0.5); }
         Rectangle { x: 20px; y: 37px; width: 6px;  height: 3px;  border-radius: 1px; background: root.tint.with-alpha(0.4); }
     }
+    // 10 — Hunt: a radar/target (concentric rings + centre pip) for the RSSI hunt.
+    if root.id == 10: Rectangle {
+        Rectangle { x: 3px;  y: 3px;  width: 40px; height: 40px; border-radius: 20px; border-width: 3px; border-color: root.tint; }
+        Rectangle { x: 11px; y: 11px; width: 24px; height: 24px; border-radius: 12px; border-width: 2px; border-color: root.tint.with-alpha(0.6); }
+        Rectangle { x: 19px; y: 19px; width: 8px;  height: 8px;  border-radius: 4px; background: root.tint; }
+    }
 }
 
 // One big app tile: icon over label. Carries its launch idx.
@@ -152,8 +158,8 @@ export component LauncherOverlay {
         x: 22px; y: 58px;
         width: parent.width - 44px;
         height: parent.height - 74px;
-        // Content = GAMES header + 3 tile rows + SYSTEM header + 1 tile row + gaps.
-        viewport-height: 584px;
+        // Content = GAMES header + 4 tile rows + SYSTEM header + 1 tile row + gaps.
+        viewport-height: 712px;
         VerticalLayout {
             spacing: 12px;
             SectionHeader { title: "GAMES"; }
@@ -171,6 +177,11 @@ export component LauncherOverlay {
                 spacing: 12px;
                 AppTile { name: "Flappy Bird"; accent: #ffffff; icon-id: 4; idx: 4; launch(i) => { root.launch-app(i); } }
                 AppTile { name: "Maze (Tilt)"; accent: #8090ff; icon-id: 5; idx: 5; launch(i) => { root.launch-app(i); } }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Hunt";        accent: #ff7a3d; icon-id: 10; idx: 8; launch(i) => { root.launch-app(i); } }
+                Rectangle { }  // spacer keeps the lone tile half-width
             }
             SectionHeader { title: "SYSTEM"; }
             HorizontalLayout {

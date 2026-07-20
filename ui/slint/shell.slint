@@ -6,6 +6,7 @@ import { PowerPage } from "power.slint";
 import { MeshPage } from "mesh.slint";
 import { LauncherOverlay } from "launcher.slint";
 import { WledRemote } from "wled.slint";
+import { HuntPage } from "hunt.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -80,6 +81,19 @@ export component WatchShell inherits Window {
     // WLED remote overlay (a launcher app that lives in the scene, not the fb).
     in-out property <bool> wled-open: false;
     in property <string> wled-status: "";
+    // Hunt overlay (RSSI treasure-hunt; also scene-resident). Fields pushed each
+    // tick from hunt::HuntView via ShellUi::set_hunt.
+    in-out property <bool> hunt-open: false;
+    in property <string> hunt-seek: "SEEK --";
+    in property <string> hunt-hero: "LOST";
+    in property <string> hunt-arrow: "";
+    in property <float> hunt-bar: 0.0;
+    in property <string> hunt-rssi: "";
+    in property <string> hunt-bucket: "";
+    in property <bool> hunt-hot: false;
+    in property <bool> hunt-found: false;
+    in property <bool> hunt-warmer: false;
+    in property <bool> hunt-colder: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -94,6 +108,8 @@ export component WatchShell inherits Window {
     callback launch-app(int); // launcher item index
     callback wled-emit(int);  // WLED action id (0..8) → main.rs WiZmote broadcast
     callback wled-close();
+    callback hunt-next();     // cycle to the next roster target
+    callback hunt-close();
 
     in-out property <float> brightness: 0.8;
 
@@ -294,6 +310,23 @@ export component WatchShell inherits Window {
         status: root.wled-status;
         emit(a) => { root.wled-emit(a); }
         close => { root.wled-close(); }
+    }
+
+    // ==================== Hunt overlay ====================
+    if root.hunt-open: HuntPage {
+        width: 100%; height: 100%;
+        seek-text: root.hunt-seek;
+        hero-text: root.hunt-hero;
+        arrow: root.hunt-arrow;
+        bar-frac: root.hunt-bar;
+        rssi-text: root.hunt-rssi;
+        bucket: root.hunt-bucket;
+        hot: root.hunt-hot;
+        found: root.hunt-found;
+        warmer: root.hunt-warmer;
+        colder: root.hunt-colder;
+        next-target => { root.hunt-next(); }
+        close => { root.hunt-close(); }
     }
 
     // ==================== AOD overlay ====================

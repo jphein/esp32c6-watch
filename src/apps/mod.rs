@@ -53,4 +53,7 @@ pub enum AppState {
     /// WLED WiZmote remote — a Slint overlay (not a framebuffer app): renders
     /// through the resident scene, taps broadcast ESP-NOW WiZmote frames.
     Wled,
+    /// RSSI treasure-hunt (warmer/colder) — a Slint overlay driven live from the
+    /// mesh roster's smoothed RSSI. Also scene-resident (no framebuffer).
+    Hunt,
 }
