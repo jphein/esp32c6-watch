@@ -42,6 +42,11 @@ const BATTERY_PAD_Y: i32 = 4;
 const BATTERY_REGION_W: i32 = 240;
 const BATTERY_REGION_H: i32 = 52;
 
+// Step counter (footprint glyph + count), left of the battery bar.
+// Kept outside battery_region (x >= 85) so battery redraws don't erase it.
+const STEPS_X: i32 = 14;
+const STEPS_Y: i32 = 175;
+
 // Mesh status indicator (top-right, mirrors the wifi/ble icons top-left)
 const MESH_X: i32 = 300;
 const MESH_Y: i32 = 10;
@@ -122,6 +127,7 @@ pub struct RenderOutcome {
     pub battery_region: Option<FlushRegion>,
     pub gyro_region: Option<FlushRegion>,
     pub mesh_region: Option<FlushRegion>,
+    pub steps_region: Option<FlushRegion>,
     pub weather_region: Option<FlushRegion>,
 }
 
@@ -144,6 +150,10 @@ pub struct WatchFace {
     pub mesh_peers: u8,
     /// Last peer count actually drawn, for dirty tracking.
     mesh_drawn: u8,
+    /// Step count from the IMU's hardware pedometer.
+    pub steps: u32,
+    /// Last step count actually drawn, for dirty tracking.
+    steps_drawn: u32,
     /// Current outside temperature in Fahrenheit (Open-Meteo). None until the
     /// first successful fetch of a WiFi window; nothing is drawn while None.
     pub weather_temp_f: Option<i16>,
@@ -169,6 +179,8 @@ impl WatchFace {
             cpu_mhz: 160,
             mesh_peers: 0,
             mesh_drawn: 0,
+            steps: 0,
+            steps_drawn: 0,
             weather_temp_f: None,
             weather_code: 0,
             weather_drawn: (None, 0),
@@ -532,7 +544,9 @@ impl WatchFace {
             || self.battery_changed
             || self.gyro_changed
             || self.mesh_peers != self.mesh_drawn
+            || self.steps != self.steps_drawn
             || (self.weather_temp_f, self.weather_code) != self.weather_drawn
+            || self.steps != self.steps_drawn
     }
 
     /// Draw the big HH:MM (logisoso92) with small seconds (logisoso24)
@@ -607,6 +621,45 @@ impl WatchFace {
 
     pub fn mesh_region() -> FlushRegion {
         FlushRegion::new(MESH_X - 4, MESH_Y - 8, 70, 30)
+    }
+
+    /// Small footprint glyph (two offset foot pads + heel dots) + step
+    /// count, left of the battery bar. Count capped at 99999 to stay
+    /// inside the region (and out of the battery redraw region).
+    fn draw_steps_indicator<D: DrawTarget<Color = Rgb565>>(
+        d: &mut D,
+        steps: u32,
+    ) -> Result<(), D::Error> {
+        let glyph = Rgb565::CSS_GRAY;
+        let x = STEPS_X;
+        let y = STEPS_Y;
+        let pad = |dx: i32, dy: i32| {
+            RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(x + dx, y + dy), Size::new(5, 8)),
+                Size::new(2, 2),
+            )
+            .into_styled(PrimitiveStyle::with_fill(glyph))
+        };
+        let heel = |dx: i32, dy: i32| {
+            Circle::new(Point::new(x + dx, y + dy), 3)
+                .into_styled(PrimitiveStyle::with_fill(glyph))
+        };
+        // Left foot (higher) and right foot (lower), mid-stride.
+        pad(0, 0).draw(d)?;
+        heel(1, 9).draw(d)?;
+        pad(7, 5).draw(d)?;
+        heel(8, 14).draw(d)?;
+        // Count
+        let mut buf = [0u8; 5];
+        let s = fmt_u32_5(&mut buf, steps.min(99_999));
+        let st = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+        Text::new(s, Point::new(x + 18, y + 15), st).draw(d)?;
+        Ok(())
+    }
+
+    pub fn steps_region() -> FlushRegion {
+        // Glyph (13px) + 5 digits of FONT_10X20 (50px) + padding.
+        FlushRegion::new(STEPS_X - 4, STEPS_Y - 4, 78, 28)
     }
 
     /// Weather readout: "72F Rain" left of the date. Draws nothing until the
@@ -761,6 +814,10 @@ impl WatchFace {
             // Battery bar + percentage (more space below date)
             self.draw_battery(d, cx, BATTERY_Y)?;
 
+            // Step count (footprints, left of the battery bar)
+            Self::draw_steps_indicator(d, self.steps)?;
+            self.steps_drawn = self.steps;
+
             // Gyro section (only when enabled)
             if self.gyro_enabled {
                 Circle::new(Point::new(GYRO_CX - GYRO_R, GYRO_CY - GYRO_R), (GYRO_R * 2) as u32)
@@ -826,6 +883,18 @@ impl WatchFace {
             Self::draw_mesh_indicator(d, self.mesh_peers)?;
             self.mesh_drawn = self.mesh_peers;
             outcome.mesh_region = Some(Self::mesh_region());
+        }
+
+        if self.steps != self.steps_drawn {
+            Rectangle::new(
+                Point::new(Self::steps_region().x as i32, Self::steps_region().y as i32),
+                Size::new(Self::steps_region().w as u32, Self::steps_region().h as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+            .draw(d)?;
+            Self::draw_steps_indicator(d, self.steps)?;
+            self.steps_drawn = self.steps;
+            outcome.steps_region = Some(Self::steps_region());
         }
 
         if (self.weather_temp_f, self.weather_code) != self.weather_drawn {
@@ -951,6 +1020,23 @@ fn fmt_ss<'a>(buf: &'a mut [u8; 2], s: u8) -> &'a str {
     buf[0] = b'0' + s / 10;
     buf[1] = b'0' + s % 10;
     core::str::from_utf8(buf).unwrap_or("??")
+}
+
+/// Format a u32 (max 99999) without leading zeros into a 5-byte buffer.
+fn fmt_u32_5<'a>(buf: &'a mut [u8; 5], v: u32) -> &'a str {
+    let mut div = 10_000u32;
+    let mut p = 0;
+    let mut started = false;
+    while div > 0 {
+        let digit = (v / div) % 10;
+        if digit != 0 || started || div == 1 {
+            buf[p] = b'0' + digit as u8;
+            p += 1;
+            started = true;
+        }
+        div /= 10;
+    }
+    core::str::from_utf8(&buf[..p]).unwrap_or("?")
 }
 
 fn fmt_u8<'a>(buf: &'a mut [u8; 3], v: u8) -> &'a str {
