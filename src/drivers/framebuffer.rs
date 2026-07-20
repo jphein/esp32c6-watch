@@ -61,6 +61,19 @@ impl Framebuffer {
         }
     }
 
+    /// Allocate without aborting on OOM: games grab ~201KB on entry and the
+    /// shell reclaims it on exit. `None` = the heap can't fit a frame right now
+    /// (e.g. a WiFi window is holding the RAM), so the caller stays in the shell.
+    pub fn try_new() -> Option<Self> {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.try_reserve_exact(PIXEL_COUNT).ok()?;
+        buf.resize(PIXEL_COUNT, 0);
+        let mut row: Vec<u16> = Vec::new();
+        row.try_reserve_exact(WIDTH).ok()?;
+        row.resize(WIDTH, 0);
+        Some(Self { buf, row })
+    }
+
     pub fn clear_color(&mut self, color: Rgb565) {
         self.buf.fill(rgb565_to_332(RawU16::from(color).into_inner()));
     }

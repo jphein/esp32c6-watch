@@ -315,10 +315,14 @@ async fn main(_spawner: Spawner) -> ! {
     let mut shell = ShellUi::new();
     println!("[SLINT] shell up");
 
-    let mut fb = Framebuffer::new();
-    fb.clear_color(Rgb565::BLACK);
-    fb.flush(&mut display);
-    println!("[FB] OK (RGB332 in SRAM)");
+    // The ~201KB RGB332 framebuffer must NOT be resident while the Slint scene
+    // is: the C6's SRAM can't hold both, so allocating it at boot OOM-panics.
+    // Keep fb=None in shell mode; games/Settings allocate it fallibly on entry
+    // (Framebuffer::try_new) and drop it on exit. Blank the panel directly via
+    // the Co5300 (no framebuffer) so the first shell.render lands on black.
+    let mut fb: Option<Framebuffer> = None;
+    display.fill_screen(Rgb565::BLACK);
+    println!("[HEAP] boot free: {}", esp_alloc::HEAP.free());
 
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
     let mut touch_rst = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
@@ -524,6 +528,10 @@ async fn main(_spawner: Spawner) -> ! {
     // Shell push-guards: only re-push radio chrome / re-pace page data on change.
     let mut prev_radios: (bool, bool, u8) = (false, false, 0);
     let mut prev_page: i32 = -1;
+    // RAM-busy toast lifecycle: shown when a launch can't allocate the fb, then
+    // auto-cleared once its window elapses (toast_active gates the single clear).
+    let mut toast_until = Instant::now();
+    let mut toast_active = false;
 
     // Initial shell paint so the panel shows a live clock immediately instead of
     // waiting up to a full tick for the first loop render.
@@ -1148,6 +1156,13 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         // === App state machine ===
+        // Snapshot the state we dispatch on THIS iteration. The app→shell guard
+        // below ("force a fresh repaint on return") compares against the state we
+        // *ran*, not the one we're about to run next — a game arm that exits to
+        // Watchface mutates app_state mid-match, so recording app_state at the end
+        // would make prev_app_state == app_state at the next top and the guard
+        // could never fire. Recording `dispatched` keeps the transition visible.
+        let dispatched = app_state;
         match app_state {
             AppState::Watchface | AppState::Launcher => {
                 // Just came back from an app that painted straight to the panel
@@ -1257,24 +1272,45 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
-                    // Close the launcher, then run the SAME per-app setup the old
-                    // launcher arm did (without setup the games boot into garbage).
-                    shell.set_launcher_open(false);
-                    match target {
-                        AppState::Snake => snake_game.setup(),
-                        AppState::WorldSnake => world_snake.setup(),
-                        AppState::Game2048 => {
-                            game_2048.setup();
-                            game_2048.render(&mut fb);
-                            fb.flush(&mut display);
+                    // Apps paint through the framebuffer; allocate it fallibly on
+                    // entry (~201KB). If the heap can't fit it right now, stay in
+                    // the shell and toast instead of aborting.
+                    match Framebuffer::try_new() {
+                        Some(f) => {
+                            fb = Some(f);
+                            println!("[HEAP] app enter free: {}", esp_alloc::HEAP.free());
+                            // Close the launcher, then run the SAME per-app setup
+                            // the old launcher arm did (without setup the games
+                            // boot into garbage).
+                            shell.set_launcher_open(false);
+                            if toast_active {
+                                shell.set_toast("");
+                                toast_active = false;
+                            }
+                            match target {
+                                AppState::Snake => snake_game.setup(),
+                                AppState::WorldSnake => world_snake.setup(),
+                                AppState::Game2048 => {
+                                    let fb = fb.as_mut().unwrap();
+                                    game_2048.setup();
+                                    game_2048.render(fb);
+                                    fb.flush(&mut display);
+                                }
+                                AppState::Tetris => tetris_game.setup(),
+                                AppState::Flappy => flappy_game.setup(),
+                                AppState::Maze => maze_game.setup(),
+                                AppState::Settings => {}
+                                _ => {}
+                            }
+                            app_state = target;
                         }
-                        AppState::Tetris => tetris_game.setup(),
-                        AppState::Flappy => flappy_game.setup(),
-                        AppState::Maze => maze_game.setup(),
-                        AppState::Settings => {}
-                        _ => {}
+                        None => {
+                            // Heap can't fit a frame — keep app_state in the shell.
+                            shell.set_toast("RAM busy \u{2014} try again");
+                            toast_active = true;
+                            toast_until = now + Duration::from_secs(3);
+                        }
                     }
-                    app_state = target;
                 }
 
                 // BOOT button toggles the launcher overlay.
@@ -1289,6 +1325,13 @@ async fn main(_spawner: Spawner) -> ! {
                     Timer::after(Duration::from_millis(200)).await;
                 }
 
+                // Auto-clear the RAM-busy toast once its window elapses (guarded
+                // so we only push the empty string a single time).
+                if toast_active && now >= toast_until {
+                    shell.set_toast("");
+                    toast_active = false;
+                }
+
                 // Repaint if the scene is dirty (full-frame, line-streamed).
                 // Skip when a launch just switched us into an app this iteration:
                 // that app already painted its first frame (e.g. Game2048) and the
@@ -1300,6 +1343,10 @@ async fn main(_spawner: Spawner) -> ! {
             }
 
             AppState::Snake => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 let prev_score = snake_game.score();
                 let input = AppInput {
                     touch: None,
@@ -1311,8 +1358,8 @@ async fn main(_spawner: Spawner) -> ! {
                 match snake_game.update(&input) {
                     AppResult::Continue => {
                         if snake_game.stepped() {
-                            snake_game.render(&mut fb);
-                            fb.flush(&mut display);
+                            snake_game.render(fb_ref);
+                            fb_ref.flush(&mut display);
                             // Beep when food eaten via I2S DMA
                             if snake_game.score() > prev_score {
                                 // Unmute codec, then raise the amp, then play
@@ -1330,15 +1377,23 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     AppResult::Exit => {
                         app_state = AppState::Watchface;
+                        fb = None;
+                        println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     }
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Watchface;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             AppState::WorldSnake => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -1350,17 +1405,23 @@ async fn main(_spawner: Spawner) -> ! {
                 // Remote peers dead-reckon between our steps, so repaint on a
                 // steady cadence rather than only on local steps.
                 if now >= next_flush {
-                    world_snake.render(&mut fb);
-                    fb.flush(&mut display);
+                    world_snake.render(fb_ref);
+                    fb_ref.flush(&mut display);
                     next_flush = now + Duration::from_millis(33);
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             AppState::Game2048 => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -1370,16 +1431,22 @@ async fn main(_spawner: Spawner) -> ! {
                 };
                 game_2048.update(&input);
                 if swipe_event.is_some() {
-                    game_2048.render(&mut fb);
-                    fb.flush(&mut display);
+                    game_2048.render(fb_ref);
+                    fb_ref.flush(&mut display);
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             AppState::Tetris => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -1389,16 +1456,22 @@ async fn main(_spawner: Spawner) -> ! {
                 };
                 tetris_game.update(&input);
                 if tetris_game.stepped() || swipe_event.is_some() || tap_event {
-                    tetris_game.render(&mut fb);
-                    fb.flush(&mut display);
+                    tetris_game.render(fb_ref);
+                    fb_ref.flush(&mut display);
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             AppState::Flappy => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 let touch_down = touch_int.is_low();
                 let fake_touch = if touch_down {
                     Some(crate::peripherals::touch::TouchPoint {
@@ -1417,18 +1490,24 @@ async fn main(_spawner: Spawner) -> ! {
                     dt_ms: dt_ms.max(1),
                 };
                 flappy_game.update(&input);
-                flappy_game.render(&mut fb);
+                flappy_game.render(fb_ref);
                 if now >= next_flush {
-                    fb.flush(&mut display);
+                    fb_ref.flush(&mut display);
                     next_flush = now + Duration::from_millis(33);
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             AppState::Maze => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -1438,17 +1517,23 @@ async fn main(_spawner: Spawner) -> ! {
                 };
                 maze_game.update(&input);
                 if now >= next_flush {
-                    maze_game.render(&mut fb);
-                    fb.flush(&mut display);
+                    maze_game.render(fb_ref);
+                    fb_ref.flush(&mut display);
                     next_flush = now + Duration::from_millis(33);
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             AppState::Settings => {
+                let Some(fb_ref) = fb.as_mut() else {
+                    app_state = AppState::Watchface;
+                    continue;
+                };
                 // CONNECT pressed in Settings: persist creds to flash and
                 // (re)start WiFi with them.
                 use crate::peripherals::wifi::WifiState;
@@ -1493,24 +1578,28 @@ async fn main(_spawner: Spawner) -> ! {
                     last_touch_x = tp.x;
                     last_touch_y = tp.y;
                 }
-                settings_app.render(&mut fb);
+                settings_app.render(fb_ref);
                 if now >= next_flush {
-                    fb.flush(&mut display);
+                    fb_ref.flush(&mut display);
                     next_flush = now + Duration::from_millis(50);
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                     Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
             _ => {
                 app_state = AppState::Watchface;
+                fb = None;
             }
         }
 
         // Track the arm we ran so the shell arm can detect a return from an app
-        // that painted straight to the panel and force a repaint.
-        prev_app_state = app_state;
+        // that painted straight to the panel and force a repaint. Use the
+        // pre-dispatch snapshot, not the (possibly mutated) current app_state.
+        prev_app_state = dispatched;
     }
 }
