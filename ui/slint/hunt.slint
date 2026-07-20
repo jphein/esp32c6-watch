@@ -1,0 +1,112 @@
+import { Theme, PageTitle } from "theme.slint";
+
+// Treasure-hunt (#60) page — RSSI warmer/colder. Rust (ShellUi) pushes values
+// derived from `hunt::HuntView` each tick; the "NEXT" area taps `next-target`
+// (Rust calls HuntState::cycle_target). Functional layout — luna polishes later.
+// Corner-safe: content kept within ~30..380 x / ~56..448 y (clears chrome + dots
+// + the ~48px rounded-corner safe inset).
+export component HuntPage {
+    in property <string> seek-text: "SEEK --";   // "SEEK <Noun>"
+    in property <string> hero-text: "LOST";       // WARMER/COLDER/SAME/FOUND!/LOST
+    in property <string> arrow: "";               // "↑" / "↓" / ""  (Rust picks the glyph)
+    in property <float> bar-frac: 0.0;            // 0..1 from rssi::bar_px
+    in property <string> rssi-text: "";           // "-59 dBm"
+    in property <string> bucket: "";              // HERE/NEAR/ROOM/FAR/GONE
+    in property <bool> hot: false;                // proximity Here/Near -> accent bar
+    in property <bool> found: false;              // FOUND! -> celebratory accent
+    in property <bool> warmer: false;             // trend up  (Rust-owned; drives color)
+    in property <bool> colder: false;             // trend down
+    callback next-target();
+
+    // Hero/arrow color from the Rust-owned trend flags (no string matching).
+    property <brush> hero-color: root.found ? Theme.accent
+                               : root.warmer ? Theme.warm
+                               : root.colder ? Theme.accent2
+                               : Theme.ink;
+
+    PageTitle { title: "HUNT"; }
+
+    // Target being sought.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 104px;
+        text: root.seek-text;
+        color: Theme.soft;
+        font-size: 20px;
+        letter-spacing: 1px;
+    }
+
+    // Hero: the big warmer/colder word + trend arrow.
+    HorizontalLayout {
+        x: (parent.width - self.width) / 2;
+        y: 168px;
+        spacing: 12px;
+        Text {
+            text: root.hero-text;
+            color: root.hero-color;
+            font-size: 56px;
+            font-weight: 700;
+        }
+        Text {
+            text: root.arrow;
+            color: root.hero-color;
+            font-size: 56px;
+            font-weight: 700;
+        }
+    }
+
+    // Proximity bar (bar_px fraction), track + fill.
+    track := Rectangle {
+        x: 40px;
+        y: 268px;
+        width: parent.width - 80px;
+        height: 26px;
+        border-radius: 13px;
+        background: Theme.track;
+        border-width: 1px;
+        border-color: Theme.line;
+        Rectangle {
+            x: 0; y: 0;
+            width: parent.width * clamp(root.bar-frac, 0.0, 1.0);
+            height: parent.height;
+            border-radius: 13px;
+            background: root.found ? Theme.accent
+                      : root.hot ? Theme.accent
+                      : Theme.warm;
+        }
+    }
+
+    // Bottom readout: "<rssi>dBm  <BUCKET>".
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 312px;
+        text: root.rssi-text + (root.bucket != "" ? "  " + root.bucket : "");
+        color: Theme.dim;
+        font-size: 18px;
+        letter-spacing: 1px;
+    }
+
+    // NEXT TARGET tap area (cycles the target peer).
+    next-area := TouchArea {
+        x: (parent.width - self.width) / 2;
+        y: 380px;
+        width: 240px;
+        height: 56px;
+        clicked => { root.next-target(); }
+        Rectangle {
+            width: 100%; height: 100%;
+            border-radius: 16px;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.line;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "NEXT TARGET";
+                color: Theme.soft;
+                font-size: 18px;
+                letter-spacing: 2px;
+            }
+        }
+    }
+}
