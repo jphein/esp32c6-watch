@@ -541,6 +541,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut aod_last_minute: u8 = 99;
     // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
     let mut prev_fam = FamUi::default();
+    // Last pushed step count, cached so the shell can be re-populated after a
+    // scene recreate (the pedometer only polls once a minute).
+    let mut last_steps: u32 = 0;
+    // Last weather (temp_f, code), cached for re-push after a scene recreate:
+    // it's fetched only during a WiFi/NTP window, which may be a long way off.
+    let mut last_weather: Option<(i16, u8)> = None;
 
     // Initial shell paint so the panel shows a live clock immediately instead of
     // waiting up to a full tick for the first loop render.
@@ -706,6 +712,7 @@ async fn main(_spawner: Spawner) -> ! {
         // down" (gyro off, accel on). One cheap 3-byte I2C read per minute.
         if now >= next_step_poll {
             if let Ok(s) = imu.read_step_count() {
+                last_steps = s;
                 shell.set_steps(s);
             }
             next_step_poll = now + Duration::from_secs(60);
@@ -920,6 +927,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // Weather fetch in the same WiFi window (fire-and-forget,
                     // bounded at 8s; logs [WX] failed and moves on).
                     if let Some(wx) = crate::net::weather::fetch(stack).await {
+                        last_weather = Some((wx.temp_f, wx.code));
                         shell.set_weather(Some(wx.temp_f), wx.code);
                     }
                     wifi_on_request = false; // WiFi burst complete
@@ -1202,6 +1210,31 @@ async fn main(_spawner: Spawner) -> ! {
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
                 if !matches!(prev_app_state, AppState::Watchface | AppState::Launcher) {
+                    // Returning from a game: the Slint scene was dropped on launch
+                    // to free heap for the framebuffer. Recreate it, then re-push
+                    // the state the per-tick on-change guards won't refresh on
+                    // their own (a fresh scene is all defaults). Runs before the
+                    // page-data match below, so prev_page = -1 re-pushes page data
+                    // this same iteration.
+                    shell.resume_scene();
+                    prev_page = -1;
+                    shell.set_radios(wifi_connected, ble_on, last_mesh_peers);
+                    prev_radios = (wifi_connected, ble_on, last_mesh_peers);
+                    shell.set_fam(&prev_fam);
+                    shell.set_battery(batt_pct, batt_mv, charging);
+                    shell.set_brightness_from_raw(brightness);
+                    shell.set_gyro(gyro_enabled);
+                    shell.set_cpu_mhz(cpu_mhz);
+                    shell.set_steps(last_steps);
+                    if let Some((t, c)) = last_weather {
+                        shell.set_weather(Some(t), c);
+                    }
+                    // We only return from a game while awake, so AOD is off; make
+                    // it explicit against the fresh scene's default.
+                    shell.set_aod(false);
+                    if let Some(dt) = last_dt.as_ref() {
+                        let _ = shell.set_time(dt);
+                    }
                     shell.request_redraw();
                 }
 
@@ -1326,21 +1359,25 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
-                    // Apps paint through the framebuffer; allocate it fallibly on
-                    // entry (~201KB). If the heap can't fit it right now, stay in
-                    // the shell and toast instead of aborting.
+                    // Apps paint through the ~201KB RGB332 framebuffer, which
+                    // cannot fit in the C6's SRAM alongside the resident Slint
+                    // scene. Close the launcher and DROP the scene first (frees
+                    // ~30-40KB), THEN allocate the fb — that's what makes the
+                    // launch succeed. On the (now near-impossible) failure path,
+                    // recreate the scene and stay put with a toast.
+                    shell.set_launcher_open(false);
+                    if toast_active {
+                        shell.set_toast("");
+                        toast_active = false;
+                    }
+                    shell.suspend_scene();
+                    println!("[HEAP] scene dropped, free: {}", esp_alloc::HEAP.free());
                     match Framebuffer::try_new() {
                         Some(f) => {
                             fb = Some(f);
                             println!("[HEAP] app enter free: {}", esp_alloc::HEAP.free());
-                            // Close the launcher, then run the SAME per-app setup
-                            // the old launcher arm did (without setup the games
-                            // boot into garbage).
-                            shell.set_launcher_open(false);
-                            if toast_active {
-                                shell.set_toast("");
-                                toast_active = false;
-                            }
+                            // Run the SAME per-app setup the old launcher arm did
+                            // (without setup the games boot into garbage).
                             match target {
                                 AppState::Snake => snake_game.setup(),
                                 AppState::WorldSnake => world_snake.setup(),
@@ -1359,7 +1396,16 @@ async fn main(_spawner: Spawner) -> ! {
                             app_state = target;
                         }
                         None => {
-                            // Heap can't fit a frame — keep app_state in the shell.
+                            // Even with the scene freed the fb won't fit — recreate
+                            // the scene, stay in the shell, and toast. The reset
+                            // guards force a repopulate over the next ticks.
+                            shell.resume_scene();
+                            prev_page = -1;
+                            prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
+                            shell.set_battery(batt_pct, batt_mv, charging);
+                            if let Some(dt) = last_dt.as_ref() {
+                                let _ = shell.set_time(dt);
+                            }
                             shell.set_toast("RAM busy \u{2014} try again");
                             toast_active = true;
                             toast_until = now + Duration::from_secs(3);

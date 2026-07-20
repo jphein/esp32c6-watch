@@ -73,7 +73,13 @@ pub struct ShellRequests {
 
 pub struct ShellUi {
     window: Rc<MinimalSoftwareWindow>,
-    ui: WatchShell,
+    /// The Slint scene. `None` while a game holds the framebuffer: the ~201KB
+    /// RGB332 fb and the resident WatchShell scene can't both fit in the C6's
+    /// SRAM, so the scene is dropped on game launch (freeing heap so
+    /// `Framebuffer::try_new` fits) and recreated on return. The window +
+    /// platform are set-once globals and stay put; only the component is
+    /// droppable (the window holds a weak ref, so `= None` frees it).
+    ui: Option<WatchShell>,
     pub req: Rc<ShellRequests>,
     /// Long-lived roster model: set_mesh_rows swaps its contents in place
     /// instead of allocating a fresh ModelRc per push.
@@ -83,65 +89,22 @@ pub struct ShellUi {
     touch_down: bool,
     last_pos: slint::LogicalPosition,
     last_second: u8,
+    /// Current page, preserved across a suspend so the recreated scene returns
+    /// to where the user was rather than snapping back to the clock.
+    saved_page: i32,
 }
 
 impl ShellUi {
     /// Call exactly once per boot (registers the Slint platform).
     pub fn new() -> Self {
         let window = init_platform();
-        let ui = WatchShell::new().expect("failed to create WatchShell");
         let req = Rc::new(ShellRequests::default());
-
-        {
-            let r = req.clone();
-            ui.on_brightness_changed(move |frac| r.brightness.set(Some(brightness_raw(frac))));
-        }
-        {
-            let r = req.clone();
-            ui.on_wifi_tap(move || r.wifi_toggle.set(true));
-        }
-        {
-            let r = req.clone();
-            ui.on_ble_tap(move || r.ble_toggle.set(true));
-        }
-        {
-            let r = req.clone();
-            ui.on_mesh_tap(move || r.mesh_toggle.set(true));
-        }
-        {
-            let r = req.clone();
-            ui.on_cpu_tap(move || r.cpu_cycle.set(true));
-        }
-        {
-            let r = req.clone();
-            ui.on_gyro_tap(move || r.gyro_toggle.set(true));
-        }
-        {
-            let r = req.clone();
-            ui.on_reboot_tap(move || r.reboot.set(true));
-        }
-        {
-            let r = req.clone();
-            ui.on_launch_app(move |idx| {
-                if let Some(app) = LAUNCHER_APPS.get(idx as usize) {
-                    r.launch.set(Some(*app));
-                }
-            });
-        }
-
         let mesh_model: Rc<VecModel<PeerRow>> = Rc::new(VecModel::default());
-        ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
-
-        // Firmware version is a compile-time constant; set it once so the
-        // system page shows the real Cargo version (single source of truth)
-        // instead of a hardcoded string that drifts.
-        ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
-
-        ui.show().expect("show failed");
+        let ui = build_scene(&req, &mesh_model);
 
         Self {
             window,
-            ui,
+            ui: Some(ui),
             req,
             mesh_model,
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
@@ -149,7 +112,36 @@ impl ShellUi {
             touch_down: false,
             last_pos: slint::LogicalPosition::new(0.0, 0.0),
             last_second: 0xFF,
+            saved_page: PAGE_CLOCK,
         }
+    }
+
+    /// Drop the Slint scene to free ~30-40KB of heap so a game's ~201KB
+    /// framebuffer fits (the two can't coexist in the C6's SRAM). The window +
+    /// platform are set-once globals and survive; the current page is saved for
+    /// the recreate. Idempotent — safe to call when already suspended.
+    pub fn suspend_scene(&mut self) {
+        if let Some(ui) = self.ui.as_ref() {
+            self.saved_page = ui.get_current_page();
+            let _ = ui.hide();
+        }
+        self.ui = None;
+    }
+
+    /// Recreate the scene after a game exits: fresh component, callbacks
+    /// re-registered, mesh model re-bound, page restored. The caller re-pushes
+    /// live data (battery/time/radios/fam/page-data) after this. Idempotent.
+    pub fn resume_scene(&mut self) {
+        if self.ui.is_some() {
+            return;
+        }
+        let ui = build_scene(&self.req, &self.mesh_model);
+        ui.set_current_page(self.saved_page);
+        self.ui = Some(ui);
+        // Fresh scene = time_text is back at its "--:--" default; clear the
+        // 1Hz gate so the caller's next set_time repaints the clock even if the
+        // second hasn't ticked since the game launched.
+        self.last_second = 0xFF;
     }
 
     // === input ===
@@ -163,6 +155,10 @@ impl ShellUi {
         swipe: Option<SwipeDirection>,
         swipe_start_y: u16,
     ) {
+        // No scene to route touches to while a game holds the framebuffer.
+        let Some(ui) = self.ui.as_ref() else {
+            return;
+        };
         if let Some(tp) = point {
             let pos = slint::LogicalPosition::new(tp.x as f32, tp.y as f32);
             let event = if self.touch_down {
@@ -188,15 +184,15 @@ impl ShellUi {
             // at x ≈ -1 and slam brightness to the floor. Taps and slider
             // drags keep the normal release at last_pos. The task-9 hardware
             // gate verifies this gesture behavior.
-            let slider_drag = !self.ui.get_launcher_open()
-                && self.ui.get_current_page() == PAGE_POWER
+            let slider_drag = !ui.get_launcher_open()
+                && ui.get_current_page() == PAGE_POWER
                 && SLIDER_BAND.contains(&swipe_start_y);
             // Vertical swipes while the launcher is open belong to the Flickable's
             // own scroll/fling; releasing off-screen would kill its momentum. Keep
             // the natural release — Flickable's drag-capture suppresses stray item
             // clicks on a real scroll. (slider_drag already excludes launcher-open,
             // so the two are mutually exclusive.)
-            let launcher_scroll = self.ui.get_launcher_open()
+            let launcher_scroll = ui.get_launcher_open()
                 && matches!(swipe, Some(SwipeDirection::Up) | Some(SwipeDirection::Down));
             let directional = matches!(swipe, Some(d) if d != SwipeDirection::Tap)
                 && !slider_drag
@@ -220,30 +216,30 @@ impl ShellUi {
         if let Some(direction) = swipe {
             // Launcher overlay first: it swallows nav swipes wherever they
             // start (including the power page's slider band); Right closes.
-            if self.ui.get_launcher_open() {
+            if ui.get_launcher_open() {
                 if direction == SwipeDirection::Right {
-                    self.ui.set_launcher_open(false);
+                    ui.set_launcher_open(false);
                 }
                 return;
             }
             // Horizontal swipes starting on the power page's brightness
             // slider are slider drags, not page switches.
             let on_slider =
-                self.ui.get_current_page() == PAGE_POWER && SLIDER_BAND.contains(&swipe_start_y);
+                ui.get_current_page() == PAGE_POWER && SLIDER_BAND.contains(&swipe_start_y);
             if on_slider {
                 return;
             }
             match direction {
                 SwipeDirection::Left => {
-                    self.ui.set_current_page((self.ui.get_current_page() + 1).rem_euclid(PAGE_COUNT))
+                    ui.set_current_page((ui.get_current_page() + 1).rem_euclid(PAGE_COUNT))
                 }
                 SwipeDirection::Right => {
-                    self.ui.set_current_page(
-                        (self.ui.get_current_page() + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT),
+                    ui.set_current_page(
+                        (ui.get_current_page() + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT),
                     )
                 }
-                SwipeDirection::Up if self.ui.get_current_page() == PAGE_CLOCK => {
-                    self.ui.set_launcher_open(true)
+                SwipeDirection::Up if ui.get_current_page() == PAGE_CLOCK => {
+                    ui.set_launcher_open(true)
                 }
                 _ => {}
             }
@@ -264,72 +260,81 @@ impl ShellUi {
             return false;
         }
         self.last_second = dt.seconds;
-        self.ui.set_time_text(slint::format!("{:02}:{:02}", dt.hours, dt.minutes));
-        self.ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
+        let Some(ui) = self.ui.as_ref() else { return true; };
+        ui.set_time_text(slint::format!("{:02}:{:02}", dt.hours, dt.minutes));
+        ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
         let weekday = WEEKDAYS[(dt.weekday % 7) as usize];
         let month = MONTHS[(dt.month.clamp(1, 12) - 1) as usize];
-        self.ui.set_date_text(slint::format!(
+        ui.set_date_text(slint::format!(
             "{} {:02} {} 20{:02}", weekday, dt.day, month, dt.year
         ));
-        self.ui.set_minute_progress(dt.seconds as f32 / 59.0);
+        ui.set_minute_progress(dt.seconds as f32 / 59.0);
         true
     }
 
     pub fn set_battery(&self, pct: u8, mv: u16, charging: bool) {
-        self.ui.set_battery_percent(pct.min(100) as i32);
-        self.ui.set_charging(charging);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_battery_percent(pct.min(100) as i32);
+        ui.set_charging(charging);
         let _ = mv; // chrome shows percent; power page (task 6) consumes mv
     }
 
     pub fn set_radios(&self, wifi: bool, ble: bool, mesh_peers: u8) {
-        self.ui.set_wifi_on(wifi);
-        self.ui.set_ble_on(ble);
-        self.ui.set_mesh_peers(mesh_peers as i32);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_wifi_on(wifi);
+        ui.set_ble_on(ble);
+        ui.set_mesh_peers(mesh_peers as i32);
     }
 
     pub fn set_steps(&self, steps: u32) {
-        self.ui.set_steps(steps as i32);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_steps(steps as i32);
     }
 
     pub fn set_cpu_mhz(&self, mhz: u16) {
-        self.ui.set_cpu_text(slint::format!("{} MHz", mhz));
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_cpu_text(slint::format!("{} MHz", mhz));
     }
 
     pub fn set_gyro(&self, on: bool) {
-        self.ui.set_gyro_on(on);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_gyro_on(on);
     }
 
     pub fn set_sensors(&self, accel: (f32, f32, f32), gyro: (i16, i16, i16), temp_dc: i16) {
         // Sensors update at 100ms; skip the 3 SharedString allocs when the page
         // isn't showing rather than relying on caller discipline.
-        if self.ui.get_current_page() != PAGE_SENSORS { return; }
-        self.ui.set_accel_text(slint::format!(
+        let Some(ui) = self.ui.as_ref() else { return; };
+        if ui.get_current_page() != PAGE_SENSORS { return; }
+        ui.set_accel_text(slint::format!(
             "{:+.2} {:+.2} {:+.2} g", accel.0, accel.1, accel.2
         ));
-        self.ui.set_gyro_text(slint::format!(
+        ui.set_gyro_text(slint::format!(
             "{:+.1} {:+.1} {:+.1} dps", gyro.0 as f32 / 10.0, gyro.1 as f32 / 10.0,
             gyro.2 as f32 / 10.0
         ));
-        self.ui.set_imu_temp_text(slint::format!("{:.1} C", temp_dc as f32 / 10.0));
+        ui.set_imu_temp_text(slint::format!("{:.1} C", temp_dc as f32 / 10.0));
     }
 
     pub fn set_system(&self, heap_free: usize, batt_pct: u8, batt_mv: u16) {
         // System page refreshes at 2s; skip the SharedString allocs when the
         // page isn't showing rather than relying on caller discipline.
-        if self.ui.get_current_page() != PAGE_SYSTEM {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        if ui.get_current_page() != PAGE_SYSTEM {
             return;
         }
-        self.ui.set_heap_text(slint::format!("{}k free", heap_free / 1024));
+        ui.set_heap_text(slint::format!("{}k free", heap_free / 1024));
         let s = embassy_time::Instant::now().as_secs();
-        self.ui.set_uptime_text(slint::format!(
+        ui.set_uptime_text(slint::format!(
             "{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60
         ));
-        self.ui.set_battery_text(slint::format!("{}% \u{00b7} {} mV", batt_pct, batt_mv));
+        ui.set_battery_text(slint::format!("{}% \u{00b7} {} mV", batt_pct, batt_mv));
     }
 
     pub fn set_power(&self, stats: &crate::peripherals::power_stats::PowerStats) {
         // Power page refreshes at 1s; skip the alloc churn when not showing.
-        if self.ui.get_current_page() != PAGE_POWER {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        if ui.get_current_page() != PAGE_POWER {
             return;
         }
         use crate::peripherals::power_stats::{on_off, BATTERY_CAPACITY_MAH};
@@ -338,62 +343,64 @@ impl ShellUi {
         // with the legacy eg renderer until task 13 deletes it). SDCARD is
         // omitted: the C6 board has no SD slot and main.rs never sets sd_on.
         // cpu-text (clock chip) is untouched — the CPU cell has its own MHz.
-        self.ui.set_cpu_cell(slint::format!(
+        ui.set_cpu_cell(slint::format!(
             "{}MHz \u{00b7} {}mA", stats.cpu_mhz, stats.base_ma()
         ));
-        self.ui.set_display_cell(slint::format!(
+        ui.set_display_cell(slint::format!(
             "{} \u{00b7} {}mA", stats.display_label(), stats.display_ma()
         ));
-        self.ui.set_wifi_cell(slint::format!(
+        ui.set_wifi_cell(slint::format!(
             "{} \u{00b7} {}mA", stats.wifi_label(), stats.wifi_ma()
         ));
-        self.ui.set_ble_cell(slint::format!(
+        ui.set_ble_cell(slint::format!(
             "{} \u{00b7} {}mA", on_off(stats.ble_on), stats.ble_ma()
         ));
-        self.ui.set_imu_cell(slint::format!(
+        ui.set_imu_cell(slint::format!(
             "{} \u{00b7} {}mA", on_off(stats.imu_on), stats.imu_ma()
         ));
-        self.ui.set_audio_cell(slint::format!(
+        ui.set_audio_cell(slint::format!(
             "{} \u{00b7} {}mA", on_off(stats.audio_on), stats.audio_ma()
         ));
-        self.ui.set_total_ma(stats.total_ma() as i32);
+        ui.set_total_ma(stats.total_ma() as i32);
         let full = stats.full_runtime_hours(BATTERY_CAPACITY_MAH);
         let left = stats.estimated_hours(BATTERY_CAPACITY_MAH);
-        self.ui.set_left_hours(left as i32);
+        ui.set_left_hours(left as i32);
         let full_s: SharedString =
             if full >= 999 { "--".into() } else { slint::format!("{}h", full) };
         let left_s: SharedString =
             if left >= 999 { "--".into() } else { slint::format!("~{}h", left) };
-        self.ui
-            .set_runtime_text(slint::format!("100%: {} \u{00b7} left: {}", full_s, left_s));
+        ui.set_runtime_text(slint::format!("100%: {} \u{00b7} left: {}", full_s, left_s));
     }
 
     pub fn set_weather(&self, temp_f: Option<i16>, code: u8) {
+        let Some(ui) = self.ui.as_ref() else { return; };
         match temp_f {
-            Some(t) => self
-                .ui
-                .set_weather_text(slint::format!("{}\u{00b0}F {}", t, weather_label(code))),
-            None => self.ui.set_weather_text(SharedString::new()),
+            Some(t) => {
+                ui.set_weather_text(slint::format!("{}\u{00b0}F {}", t, weather_label(code)))
+            }
+            None => ui.set_weather_text(SharedString::new()),
         }
     }
 
     pub fn set_brightness_from_raw(&self, raw: u8) {
-        self.ui
-            .set_brightness((raw.saturating_sub(BRIGHTNESS_MIN)) as f32
-                / (0xFF - BRIGHTNESS_MIN) as f32);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_brightness((raw.saturating_sub(BRIGHTNESS_MIN)) as f32
+            / (0xFF - BRIGHTNESS_MIN) as f32);
     }
 
     pub fn set_aod(&self, on: bool) {
-        self.ui.set_aod(on);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_aod(on);
     }
 
     /// Push the Mesh Familiar snapshot to the clock nook (task 12).
     pub fn set_fam(&self, f: &crate::net::familiar::FamUi) {
-        self.ui.set_fam_known(f.known);
-        self.ui.set_fam_holding(f.holding);
-        self.ui.set_fam_mood(f.mood as i32);
-        self.ui.set_fam_hunger(f.hunger as i32);
-        self.ui.set_fam_stage(f.stage as i32);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_fam_known(f.known);
+        ui.set_fam_holding(f.holding);
+        ui.set_fam_mood(f.mood as i32);
+        ui.set_fam_hunger(f.hunger as i32);
+        ui.set_fam_stage(f.stage as i32);
     }
 
     /// Feed scaled accel into the clock's parallax offsets, clamped to ±12px so
@@ -401,35 +408,44 @@ impl ShellUi {
     /// with the gyro toy enabled. `par-x`/`par-y` are `length` in .slint; the
     /// generated setters take logical pixels as f32.
     pub fn set_parallax(&self, ax: f32, ay: f32) {
-        self.ui.set_par_x((ax * 12.0).clamp(-12.0, 12.0));
-        self.ui.set_par_y((ay * 12.0).clamp(-12.0, 12.0));
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_par_x((ax * 12.0).clamp(-12.0, 12.0));
+        ui.set_par_y((ay * 12.0).clamp(-12.0, 12.0));
     }
 
     pub fn set_toast(&self, text: &str) {
-        self.ui.set_toast_text(SharedString::from(text));
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_toast_text(SharedString::from(text));
     }
 
     pub fn set_launcher_open(&self, open: bool) {
-        self.ui.set_launcher_open(open);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_launcher_open(open);
     }
 
     pub fn launcher_open(&self) -> bool {
-        self.ui.get_launcher_open()
+        // No launcher while a game holds the framebuffer (scene suspended).
+        self.ui.as_ref().is_some_and(|ui| ui.get_launcher_open())
     }
 
     pub fn page(&self) -> i32 {
-        self.ui.get_current_page()
+        // While suspended, report the page we'll restore on resume.
+        self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
     }
 
     /// Jump to a page (boot default_page, CFG `S` remote page-switch). Out-of-range
-    /// values fall back to the clock so a bad downlink can't blank the shell.
-    pub fn set_page(&self, page: i32) {
+    /// values fall back to the clock so a bad downlink can't blank the shell. While
+    /// the scene is suspended the target is stashed and applied on resume.
+    pub fn set_page(&mut self, page: i32) {
         let p = if (0..PAGE_COUNT).contains(&page) {
             page
         } else {
             PAGE_CLOCK
         };
-        self.ui.set_current_page(p);
+        self.saved_page = p;
+        if let Some(ui) = self.ui.as_ref() {
+            ui.set_current_page(p);
+        }
     }
 
     /// Push the mesh roster. `age_ms` on a [`PeerView`] is already an age
@@ -438,16 +454,16 @@ impl ShellUi {
     pub fn set_mesh_rows(&self, our_id: u8, rows: &[PeerView]) {
         // Mesh page refreshes at 1s; skip the row-string allocs when the
         // page isn't showing rather than relying on caller discipline.
-        if self.ui.get_current_page() != PAGE_MESH {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        if ui.get_current_page() != PAGE_MESH {
             return;
         }
         // The self banner is static per boot (node id never changes); the
         // property defaults to "", so format it on the first on-page push
         // only instead of re-allocating it every 1s refresh.
-        if self.ui.get_mesh_self_text().is_empty() {
+        if ui.get_mesh_self_text().is_empty() {
             let (adj, noun) = names::name_for_id(our_id);
-            self.ui
-                .set_mesh_self_text(slint::format!("#{:03} {} {}", our_id, adj, noun));
+            ui.set_mesh_self_text(slint::format!("#{:03} {} {}", our_id, adj, noun));
         }
         let model: Vec<PeerRow> = rows
             .iter()
@@ -489,8 +505,12 @@ impl ShellUi {
         self.window.window().request_redraw();
     }
 
-    /// Run timers/animations and repaint if the scene is dirty.
+    /// Run timers/animations and repaint if the scene is dirty. No-op while the
+    /// scene is suspended (a game owns the panel via the framebuffer).
     pub fn render(&mut self, display: &mut Co5300Display) {
+        if self.ui.is_none() {
+            return;
+        }
         slint::platform::update_timers_and_animations();
         self.window.draw_if_needed(|renderer| {
             let mut flusher =
@@ -499,6 +519,56 @@ impl ShellUi {
             flusher.flush_pending();
         });
     }
+}
+
+/// Build a fresh WatchShell: wire the callback→request cells, bind the mesh
+/// model, stamp the firmware version, and show it on the (shared) window.
+/// Used by `ShellUi::new` and by `resume_scene` after a suspend, so callback
+/// registration lives in one place.
+fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> WatchShell {
+    let ui = WatchShell::new().expect("failed to create WatchShell");
+    {
+        let r = req.clone();
+        ui.on_brightness_changed(move |frac| r.brightness.set(Some(brightness_raw(frac))));
+    }
+    {
+        let r = req.clone();
+        ui.on_wifi_tap(move || r.wifi_toggle.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_ble_tap(move || r.ble_toggle.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_mesh_tap(move || r.mesh_toggle.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_cpu_tap(move || r.cpu_cycle.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_gyro_tap(move || r.gyro_toggle.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_reboot_tap(move || r.reboot.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_launch_app(move |idx| {
+            if let Some(app) = LAUNCHER_APPS.get(idx as usize) {
+                r.launch.set(Some(*app));
+            }
+        });
+    }
+    ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
+    // Firmware version is a compile-time constant; set it once so the system
+    // page shows the real Cargo version instead of a string that drifts.
+    ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
+    ui.show().expect("show failed");
+    ui
 }
 
 fn weather_label(code: u8) -> &'static str {
