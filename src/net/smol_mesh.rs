@@ -42,6 +42,20 @@ struct Peer {
     mac: [u8; 6],
     id: Option<u8>,
     last_rx_ms: u64,
+    /// EWMA of per-frame receive RSSI, dBm scaled x8 (alpha = 1/4). ESP-NOW
+    /// carries a per-packet RSSI in the rx control info; smoothing it gives
+    /// the Marauder's-Watch near/far signal without BLE.
+    rssi_ewma_x8: Option<i32>,
+}
+
+/// A read-only roster row for the UI: who, how long since we heard them, and
+/// how near they sound (smoothed dBm).
+#[derive(Clone, Copy, Default)]
+pub struct PeerView {
+    pub mac: [u8; 6],
+    pub id: Option<u8>,
+    pub age_ms: u64,
+    pub rssi_dbm: Option<i8>,
 }
 
 pub enum MeshEvent {
@@ -164,11 +178,19 @@ impl SmolMesh {
         });
     }
 
-    fn upsert_peer(&mut self, mac: [u8; 6], id: Option<u8>, now_ms: u64) -> bool {
+    fn upsert_peer(&mut self, mac: [u8; 6], id: Option<u8>, now_ms: u64, rssi: Option<i8>) -> bool {
         if let Some(p) = self.peers.iter_mut().find(|p| p.mac == mac) {
             p.last_rx_ms = now_ms;
             if id.is_some() {
                 p.id = id;
+            }
+            if let Some(dbm) = rssi {
+                let sample = (dbm as i32) << 3;
+                p.rssi_ewma_x8 = Some(match p.rssi_ewma_x8 {
+                    // EWMA alpha = 1/4: ewma += (sample - ewma) / 4
+                    Some(e) => e + (sample - e) / 4,
+                    None => sample,
+                });
             }
             false
         } else {
@@ -176,9 +198,42 @@ impl SmolMesh {
                 mac,
                 id,
                 last_rx_ms: now_ms,
+                rssi_ewma_x8: rssi.map(|dbm| (dbm as i32) << 3),
             });
             true
         }
+    }
+
+    /// Snapshot the roster into `out`, ordered by id (known ids first,
+    /// ascending; anonymous MACs last, freshest first). Returns row count.
+    pub fn peers(&self, now_ms: u64, out: &mut [PeerView]) -> usize {
+        let mut n = 0;
+        for p in &self.peers {
+            if n >= out.len() {
+                break;
+            }
+            out[n] = PeerView {
+                mac: p.mac,
+                id: p.id,
+                age_ms: now_ms.saturating_sub(p.last_rx_ms),
+                rssi_dbm: p.rssi_ewma_x8.map(|e| (e >> 3).clamp(-128, 127) as i8),
+            };
+            n += 1;
+        }
+        // Tiny roster: insertion sort, no alloc.
+        let rows = &mut out[..n];
+        let key = |r: &PeerView| match r.id {
+            Some(id) => (0u8, id as u64, 0u64),
+            None => (1u8, 0, r.age_ms),
+        };
+        for i in 1..rows.len() {
+            let mut j = i;
+            while j > 0 && key(&rows[j - 1]) > key(&rows[j]) {
+                rows.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        n
     }
 
     /// The ~2s HELLO/TIME tick. Call from the main loop; no-ops until due.
@@ -230,18 +285,21 @@ impl SmolMesh {
         }
     }
 
-    /// Handle one received ESP-NOW payload.
+    /// Handle one received ESP-NOW payload. `rssi` is the per-frame receive
+    /// RSSI in dBm from the rx control info, if the radio reported one; it
+    /// feeds the per-peer near/far EWMA.
     pub fn handle_rx(
         &mut self,
         esp_now: &mut EspNow<'_>,
         src: [u8; 6],
         data: &[u8],
+        rssi: Option<i8>,
         now_ms: u64,
         uptime_secs: u64,
     ) -> Option<MeshEvent> {
         if let Some(rest) = data.strip_prefix(HELLO_PREFIX) {
             let id = parse_id(rest)?;
-            let new = self.upsert_peer(src, Some(id), now_ms);
+            let new = self.upsert_peer(src, Some(id), now_ms, rssi);
             if new {
                 println!("[MESH] hello from id{id} {src:02x?}");
             }
@@ -257,7 +315,7 @@ impl SmolMesh {
         }
         if let Some(rest) = data.strip_prefix(ACK_PREFIX) {
             let id = parse_id(rest)?;
-            self.upsert_peer(src, None, now_ms);
+            self.upsert_peer(src, None, now_ms, rssi);
             if id == self.id {
                 if now_ms.saturating_sub(self.last_ack_for_us_ms) > PEER_STALE_MS {
                     println!("[MESH] link Connected (acked by {src:02x?})");
@@ -273,7 +331,7 @@ impl SmolMesh {
             let id = parse_id(&rest[0..3])?;
             let unix = parse_u10(&rest[4..14])?;
             let synced_at = parse_u10(&rest[15..25])?;
-            self.upsert_peer(src, Some(id), now_ms);
+            self.upsert_peer(src, Some(id), now_ms, rssi);
             // Loop-free adoption: strictly-newer authority wins; inherit
             // the origin's synced_at so freshness can't inflate in a cycle.
             if synced_at > self.synced_at {
@@ -287,7 +345,7 @@ impl SmolMesh {
         if data.starts_with(SMOL_PREFIX) {
             // A fleet frame we don't speak yet (SNK/FAM/RELAY/CFG/...):
             // still proof of life for the peer.
-            self.upsert_peer(src, None, now_ms);
+            self.upsert_peer(src, None, now_ms, rssi);
             self.other_frames_heard += 1;
         }
         None

@@ -1,5 +1,5 @@
 // Multi-page system with swipe transitions
-// Pages: Clock | Sensors | System Info
+// Pages: Clock | Sensors | System Info | Power | Mesh
 
 use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
@@ -10,6 +10,8 @@ use embedded_graphics::text::{Alignment, Text};
 
 use crate::board;
 use crate::drivers::co5300::DisplayError;
+use crate::net::names;
+use crate::net::smol_mesh::PeerView;
 
 const W: u16 = board::LCD_WIDTH;
 const H: u16 = board::LCD_HEIGHT;
@@ -21,26 +23,29 @@ pub enum Page {
     Sensors = 1,
     System = 2,
     Power = 3,
+    Mesh = 4,
 }
 
 impl Page {
-    pub fn count() -> usize { 4 }
+    pub fn count() -> usize { 5 }
 
     pub fn next(self) -> Self {
         match self {
             Page::Clock => Page::Sensors,
             Page::Sensors => Page::System,
             Page::System => Page::Power,
-            Page::Power => Page::Clock,
+            Page::Power => Page::Mesh,
+            Page::Mesh => Page::Clock,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Page::Clock => Page::Power,
+            Page::Clock => Page::Mesh,
             Page::Sensors => Page::Clock,
             Page::System => Page::Sensors,
             Page::Power => Page::System,
+            Page::Mesh => Page::Power,
         }
     }
 
@@ -55,6 +60,7 @@ impl Page {
             Page::Sensors => "SENSORS",
             Page::System => "SYSTEM",
             Page::Power => "POWER",
+            Page::Mesh => "MESH",
         }
     }
 }
@@ -130,6 +136,166 @@ pub fn draw_system_page<D: DrawTarget<Color = Rgb565>>(
     let mut buf = [0u8; 12];
     let vs = fmt_mv(&mut buf, batt_mv);
     Text::with_alignment(vs, Point::new(cx, 400), dim, Alignment::Center).draw(display)?;
+
+    Ok(())
+}
+
+// === Marauder's Watch: the mesh roster page ===
+// One row per known SMOLv1 peer: realm name + id, a near/far bar driven by
+// the per-peer RSSI EWMA, staleness dimming. Ported from smol #58.
+
+/// RSSI mapped to the bar: `FAR_DBM` = empty (far), `NEAR_DBM` = full (near).
+const NEAR_DBM: i32 = -40;
+const FAR_DBM: i32 = -90;
+/// Fresh below this age; dimmed above it (matches the mesh PEER_STALE_MS).
+const ROW_STALE_MS: u64 = 3_000;
+/// Very stale above this: dimmest tier, empty-ish presence.
+const ROW_GONE_MS: u64 = 30_000;
+/// Rows that fit under the header on the 410x502 panel.
+pub const MESH_MAX_ROWS: usize = 7;
+
+fn fmt_id3(buf: &mut [u8; 5], id: u8) -> &str {
+    buf[0] = b'i';
+    buf[1] = b'd';
+    buf[2] = b'0' + (id / 100) % 10;
+    buf[3] = b'0' + (id / 10) % 10;
+    buf[4] = b'0' + id % 10;
+    core::str::from_utf8(&buf[..]).unwrap_or("id???")
+}
+
+/// Draw the Marauder's Watch mesh roster.
+pub fn draw_mesh_page<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    my_id: u8,
+    rows: &[PeerView],
+) -> Result<(), D::Error> {
+    let cx = W as i32 / 2;
+    let cyan = MonoTextStyle::new(&FONT_10X20, Rgb565::CYAN);
+    let white = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+    let dim = MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_GRAY);
+    let dimmer = MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_DIM_GRAY);
+
+    Text::with_alignment("MESH", Point::new(cx, 40), cyan, Alignment::Center).draw(display)?;
+
+    // Our own banner: "id042 Celestial Herald".
+    let (adj, noun) = names::name_for_id(my_id);
+    let mut hdr = [0u8; 32];
+    let mut n = 0;
+    let mut idbuf = [0u8; 5];
+    for &b in fmt_id3(&mut idbuf, my_id).as_bytes() {
+        hdr[n] = b;
+        n += 1;
+    }
+    hdr[n] = b' ';
+    n += 1;
+    for &b in adj.as_bytes() {
+        hdr[n] = b;
+        n += 1;
+    }
+    hdr[n] = b' ';
+    n += 1;
+    for &b in noun.as_bytes() {
+        hdr[n] = b;
+        n += 1;
+    }
+    Text::with_alignment(
+        core::str::from_utf8(&hdr[..n]).unwrap_or("id???"),
+        Point::new(cx, 75),
+        white,
+        Alignment::Center,
+    )
+    .draw(display)?;
+
+    if rows.is_empty() {
+        Text::with_alignment("No fleet heard", Point::new(cx, 250), dim, Alignment::Center)
+            .draw(display)?;
+        Text::with_alignment("listening ch6", Point::new(cx, 285), dimmer, Alignment::Center)
+            .draw(display)?;
+        return Ok(());
+    }
+
+    let mut y: i32 = 130;
+    for row in rows.iter().take(MESH_MAX_ROWS) {
+        let text_style = if row.age_ms < ROW_STALE_MS {
+            white
+        } else if row.age_ms < ROW_GONE_MS {
+            dim
+        } else {
+            dimmer
+        };
+
+        // Realm name (derived from the id, exactly like the fleet does) + id.
+        let mut namebuf = [0u8; 24];
+        let name: &str = match row.id {
+            Some(id) => {
+                let (adj, noun) = names::name_for_id(id);
+                let mut n = 0;
+                for &b in adj.as_bytes() {
+                    namebuf[n] = b;
+                    n += 1;
+                }
+                namebuf[n] = b' ';
+                n += 1;
+                for &b in noun.as_bytes() {
+                    namebuf[n] = b;
+                    n += 1;
+                }
+                core::str::from_utf8(&namebuf[..n]).unwrap_or("?")
+            }
+            None => "Unnamed",
+        };
+        Text::new(name, Point::new(20, y), text_style).draw(display)?;
+
+        let idtext: &str = match row.id {
+            Some(id) => fmt_id3(&mut idbuf, id),
+            None => "id???",
+        };
+        Text::with_alignment(idtext, Point::new(390, y), dimmer, Alignment::Right)
+            .draw(display)?;
+
+        // Near/far bar from the RSSI EWMA: full = near, empty = far.
+        let track = Rectangle::new(Point::new(20, y + 8), Size::new(300, 12));
+        track
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::CSS_DIM_GRAY, 1))
+            .draw(display)?;
+        if let Some(dbm) = row.rssi_dbm {
+            let frac = ((dbm as i32 - FAR_DBM) * 1000 / (NEAR_DBM - FAR_DBM)).clamp(0, 1000);
+            let fill_w = (296 * frac / 1000).max(2) as u32;
+            let fill_color = if row.age_ms >= ROW_STALE_MS {
+                Rgb565::CSS_DIM_GRAY // stale: presence remembered, not live
+            } else if frac >= 666 {
+                Rgb565::GREEN // near
+            } else if frac >= 333 {
+                Rgb565::YELLOW
+            } else {
+                Rgb565::RED // far
+            };
+            Rectangle::new(Point::new(22, y + 10), Size::new(fill_w, 8))
+                .into_styled(PrimitiveStyle::with_fill(fill_color))
+                .draw(display)?;
+
+            // "-62dB" right of the bar.
+            let mut rbuf = [0u8; 5];
+            let v = (-(dbm as i32)).clamp(0, 99) as u8;
+            rbuf[0] = b'-';
+            rbuf[1] = b'0' + v / 10;
+            rbuf[2] = b'0' + v % 10;
+            rbuf[3] = b'd';
+            rbuf[4] = b'B';
+            Text::with_alignment(
+                core::str::from_utf8(&rbuf).unwrap_or("--dB"),
+                Point::new(390, y + 20),
+                dimmer,
+                Alignment::Right,
+            )
+            .draw(display)?;
+        } else {
+            Text::with_alignment("--dB", Point::new(390, y + 20), dimmer, Alignment::Right)
+                .draw(display)?;
+        }
+
+        y += 46;
+    }
 
     Ok(())
 }
