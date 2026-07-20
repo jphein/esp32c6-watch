@@ -73,10 +73,22 @@ firmware. Two independent decision gates:
 ownership, gated by RS0's verdict.**
 - **GAP-B refactor:** move `wifi_controller`, `wifi_interfaces` (or its unpacked
   `esp_now` + `station`) into **`Option<_>` slots** so they can be dropped and
-  replaced. Audit the ~12+ inline use sites (verified on 78356f2: `esp_now`
-  at main.rs 476, 916 `set_channel`, 934 `add_peer`, 955 `tick`, 979
-  `broadcast_diag`, 992 `send`, 1016/1018 `relay_*`; `station` → `net_task`) and
-  route them through the `Option` (early-`continue` when `None` during scan).
+  replaced. Route **ALL** `esp_now` object use sites through the `Option`
+  (early-`continue` when `None` during scan). Complete enumeration verified on
+  78356f2 (oracle-corrected — the RX-drain trio was previously missed):
+  - `476` — `let mut esp_now = wifi_interfaces.esp_now;` (the binding → Option slot)
+  - `916` — `esp_now.set_channel(...)`
+  - `941` — `esp_now.add_peer(peer)` (NB: 934 is the `PeerInfo` struct, not the call)
+  - `955` — `mesh.tick(&mut esp_now, …)`
+  - `979` — `mesh.broadcast_diag(&mut esp_now, …)`
+  - `992` — `esp_now.send(…)`
+  - `1016` — `mesh.relay_emit(&mut esp_now, …)`
+  - `1018` — `mesh.relay_retransmit(&mut esp_now, …)`
+  - **`1019` — `esp_now.receive()` (the RX drain loop — easy to miss, critical)**
+  - **`1031` — `mesh.handle_rx(&mut esp_now, …)`**
+  - **`1112` — `mesh.broadcast_fam(&mut esp_now, …)`**
+  (`esp_now_peer_added` at 582/630/933/946/952 is a separate bool flag, not the
+  object — reset it on teardown too.) Also `station` → `net_task`.
 - `src/net/radio_mode.rs`:
   - `enter_scan()`: pause mesh logic → (Gate A path) drop the WiFi bundle +
     stop net_task → `Ieee802154::new(IEEE802154)` (first time) / `IEEE802154::
@@ -106,8 +118,8 @@ ownership, gated by RS0's verdict.**
   `passive · headers only · payloads encrypted`.
 - `ui/slint/shell.slint`: add `in property <int> scan-phase`, `in-out property
   <bool> scan-open`, and `if root.scan-open: RadioScanOverlay {…}` — **the same
-  overlay pattern as launcher/AOD** (`if root.launcher-open` / `if root.aod`,
-  shell.slint:250/256). Callbacks `scan-confirm() / scan-exit() / scan-reboot()`.
+  overlay pattern as launcher/AOD** (`if root.launcher-open` @ shell.slint:259 /
+  `if root.aod` @ 265). Callbacks `scan-confirm() / scan-exit() / scan-reboot()`.
 - `ui/slint/theme.slint`: `ScanRow` struct (mirrors `PeerRow`).
 - Iterate visuals in `slint-viewer` with dummy data.
 - **Accept:** renders in slint-viewer across all four phases.
@@ -120,7 +132,7 @@ ownership, gated by RS0's verdict.**
   - `ShellRequests`: `scan_confirm/scan_exit/scan_reboot: Cell<bool>`.
   - setters: `set_scan_open`, `set_scan_phase`, `set_scan_channels(&[…;16])`,
     `set_scan_pans(&[PanEntry])` — **gated on `scan_open`, VecModel swap-in-place
-    exactly like `set_mesh_rows`** (slint_shell.rs:402). Wire the new callbacks
+    exactly like `set_mesh_rows`** (slint_shell.rs:404). Wire the new callbacks
     like `wifi-tap`/`launch-app`.
 - `src/main.rs` launch dispatch — **CRITICAL (oracle RS6):** branch
   `AppState::RadioScan` **BEFORE** the launch-drain `Framebuffer::try_new(...)`
@@ -132,6 +144,12 @@ ownership, gated by RS0's verdict.**
     drop):** games drop the Slint scene to free RAM for the fb; **RadioScan must
     NOT drop the scene** — it renders through it. Ensure the RadioScan branch is
     on the shell side of that split, never the scene-drop side.
+    ⚠️ **RE-VALIDATE when #27 merges:** the `Option<WatchShell>` scene-drop
+    mechanism is **not in the integration HEAD yet** — it lives on
+    `feat/migration-tail` (unmerged). This "render-through-scene, don't drop it"
+    instruction (and the identical one in mic-capture MC5) must be re-checked
+    against the actual scene-drop API once #27 lands, since the exact
+    hook/method it exposes will determine how RadioScan opts out of the drop.
 - **Accept (HW):** launcher → Radio Scan → **Warn**; Back cancels with radios
   untouched; Scan → live results; Exit → mesh restored (per RS0 strategy).
 
@@ -162,8 +180,11 @@ ownership, gated by RS0's verdict.**
   teardown → **reboot-on-exit is the BLE path** unless a task-teardown refactor
   lands first. RS0 Gate B decides.
 - **GAP-B (ESP-NOW):** `esp_now`/`station` come from the `wifi_interfaces` bundle
-  (main.rs:476, 483) and are ticked inline at ~12+ sites → RS3 must Option-slot
-  them and re-derive from the fresh bundle on restore.
+  (main.rs:476, 483) and are used inline at **11 `esp_now` object sites** (full
+  list in RS3 — incl. the oracle-caught RX-drain trio `receive()` @1019,
+  `handle_rx` @1031, `broadcast_fam` @1112; 16 total `esp_now` textual
+  occurrences counting the `esp_now_peer_added` flag + type paths) → RS3 must
+  Option-slot them and re-derive from the fresh bundle on restore.
 
 ## Deferred to v2 (out of this plan)
 - Zigbee vs Thread classifier (JP: v2). v1 shows "802.15.4 PAN" only.
