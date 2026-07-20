@@ -97,14 +97,20 @@ beyond what porting requires.
 
 ## Landing order
 
-1. Shared `slint_platform` module + Slint shell with Clock/Stats parity,
-   replacing the eg watchface in `main` (framebuffer still boot-allocated).
-2. Remaining pages: Sensors, System, Power, Mesh.
-3. Launcher in Slint + eg-app handover + on-demand framebuffer (boot alloc
-   removed here).
-4. Polish: Familiar creature treatment, gyro parallax offsets, AOD scene.
+(Amended at planning time: the full shell is built and exercised through the
+`slint-demo` harness first, then `main` cuts over once — this avoids a
+parity-reduced intermediate where four pages would temporarily disappear.)
 
-Each stage is a flashable, revertible commit on its own branch/PR.
+1. Shared `slint_platform` module; demo bin rewired to it.
+2. Full Slint shell built page-by-page (clock, sensors, system, power, mesh,
+   launcher), verified via the demo harness; `main` untouched.
+3. Single cutover: `main`'s watchface+launcher arms replaced by shell mode
+   (framebuffer still boot-allocated), then on-demand framebuffer + toast,
+   then AOD.
+4. Polish (Familiar creature, gyro parallax) and eg shell code deletion.
+
+Each step is a compiling, revertible commit on `feat/slint-shell`; hardware
+gates at the cutover, the memory change, AOD, and final ship.
 
 ## Open items
 
