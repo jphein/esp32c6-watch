@@ -216,6 +216,25 @@ fn is_night(unix_now: u32) -> bool {
     !(NIGHT_END_H..NIGHT_START_H).contains(&hour)
 }
 
+/// A UI snapshot of the familiar for the Slint clock cluster, rebuilt from
+/// [`FamState`] each tick. Mirrors the discrete semantics the old embedded-
+/// graphics watchface drew (deleted in task 13): `holding` draws the live
+/// creature, `known && !holding` the "away" marker. Derives `PartialEq` so the
+/// main loop only pushes on change.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct FamUi {
+    /// A familiar exists somewhere on the mesh (heard or hosted).
+    pub known: bool,
+    /// This watch is the current holder — draw the live creature.
+    pub holding: bool,
+    /// Mood token (cosmetic color): 0 idle, 1 happy, 2 hungry, 3 sleeping.
+    pub mood: u8,
+    /// Hunger 0..=2 (full / peckish / hungry) — a 3-step bar.
+    pub hunger: u8,
+    /// Growth stage 0..=3 (egg / hatchling / juvenile / adult) — scales the body.
+    pub stage: u8,
+}
+
 // ===========================================================================
 // FamState — holder / arbitration / migration state machine (always-on).
 // ===========================================================================

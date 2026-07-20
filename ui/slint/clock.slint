@@ -12,6 +12,12 @@ export component ClockPage {
     // parallax offsets (stage-4 polish feeds these; 0 until then)
     in property <length> par-x: 0px;
     in property <length> par-y: 0px;
+    // --- Mesh Familiar nook (fed by ShellUi::set_fam) ---
+    in property <bool> fam-known;
+    in property <bool> fam-holding;
+    in property <int> fam-mood;    // 0 idle 1 happy 2 hungry 3 sleeping
+    in property <int> fam-hunger;  // 0 full 1 peckish 2 hungry
+    in property <int> fam-stage;   // 0 egg 1 hatchling 2 juvenile 3 adult
     callback cpu-tap();
     callback gyro-tap();
     callback apps-tap();
@@ -119,6 +125,79 @@ export component ClockPage {
                 letter-spacing: 1px;
             }
             TouchArea { clicked => { root.apps-tap(); } }
+        }
+    }
+
+    // Mesh Familiar nook — left margin, beside the big time. A compact status
+    // cluster (not sprite art): body color = mood token, body size = growth
+    // stage, a 3-step hunger bar; "away" hollow dot when known-but-not-holding.
+    if root.fam-known: Rectangle {
+        x: 18px;
+        y: 150px;
+        width: 60px;
+        height: 94px;
+        border-radius: 16px;
+        background: root.fam-holding ? #0e1c15 : Theme.panel;
+        border-width: 1px;
+        border-color: root.fam-holding ? Theme.accent : Theme.line;
+
+        // Creature body: grows with stage when holding; hollow dot when away.
+        body := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 16px;
+            width: root.fam-holding ? (22px + root.fam-stage * 6px) : 18px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: !root.fam-holding ? #16281c
+                : root.fam-mood == 1 ? Theme.warm      // happy — gold
+                : root.fam-mood == 2 ? #e08a3a         // hungry — orange
+                : root.fam-mood == 3 ? Theme.accent2   // sleeping — blue
+                : Theme.accent;                        // idle — teal
+            border-width: root.fam-holding ? 0px : 2px;
+            border-color: Theme.line;
+
+            // Awake eyes: two dark dots.
+            if root.fam-holding && root.fam-mood != 3: Rectangle {
+                x: parent.width * 0.28 - 2.5px;
+                y: parent.height * 0.40;
+                width: 5px; height: 5px; border-radius: 2.5px;
+                background: #05100a;
+            }
+            if root.fam-holding && root.fam-mood != 3: Rectangle {
+                x: parent.width * 0.72 - 2.5px;
+                y: parent.height * 0.40;
+                width: 5px; height: 5px; border-radius: 2.5px;
+                background: #05100a;
+            }
+            // Sleeping: a little "z".
+            if root.fam-holding && root.fam-mood == 3: Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "z";
+                color: #05100a;
+                font-size: 16px;
+                font-weight: 700;
+            }
+        }
+
+        // Hunger bar (holder only): discrete full / two-thirds / one-third.
+        if root.fam-holding: Rectangle {
+            x: 8px;
+            y: parent.height - 16px;
+            width: parent.width - 16px;
+            height: 5px;
+            border-radius: 2.5px;
+            background: Theme.track;
+            Rectangle {
+                x: 0;
+                y: 0;
+                height: 100%;
+                border-radius: 2.5px;
+                width: parent.width * (root.fam-hunger == 0 ? 1.0
+                    : root.fam-hunger == 1 ? 0.66 : 0.33);
+                background: root.fam-hunger == 0 ? Theme.accent
+                    : root.fam-hunger == 1 ? Theme.warm : Theme.warn;
+            }
         }
     }
 }

@@ -58,6 +58,7 @@ use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState};
 use crate::drivers::co5300::Co5300Display;
+use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
@@ -538,6 +539,8 @@ async fn main(_spawner: Spawner) -> ! {
     // AOD repaints only when the minute changes; 99 is a sentinel that forces
     // the first paint on AOD entry (any real minute 0..=59 differs).
     let mut aod_last_minute: u8 = 99;
+    // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
+    let mut prev_fam = FamUi::default();
 
     // Initial shell paint so the panel shows a live clock immediately instead of
     // waiting up to a full tick for the first loop render.
@@ -1125,8 +1128,21 @@ async fn main(_spawner: Spawner) -> ! {
                     if let Some(frame) = familiar.tick(&ids[..n], now_ms, unix_now) {
                         mesh.broadcast_fam(&mut esp_now, &frame);
                     }
-                    // The creature UI snapshot returns in task 12 (Familiar on the
-                    // Slint watchface); the mesh arbitration/beat above stays live.
+                    // Push the creature UI snapshot to the Slint clock nook
+                    // (task 12), gated on change so we don't churn properties.
+                    // stage/hunger are age-derived on the Creature, not FamState.
+                    let creature = familiar.creature();
+                    let fam = FamUi {
+                        known: familiar.known(),
+                        holding: familiar.is_holder(),
+                        mood: familiar.mood(),
+                        hunger: creature.hunger_level(unix_now),
+                        stage: creature.stage_level(unix_now),
+                    };
+                    if fam != prev_fam {
+                        shell.set_fam(&fam);
+                        prev_fam = fam;
+                    }
                 }
             }
         }
@@ -1243,6 +1259,18 @@ async fn main(_spawner: Spawner) -> ! {
                 // 1Hz clock push (no-ops until the second actually ticks).
                 if let Some(dt) = last_dt.as_ref() {
                     let _ = shell.set_time(dt);
+                }
+
+                // Gyro parallax: nudge the clock face by scaled accel while the
+                // gyro toy is on (page-0 arm already paces at 33ms for this). Off
+                // the clock or with gyro off, the offsets stay at their last value
+                // — reset to neutral once so the face doesn't freeze askew.
+                if shell.page() == slint_shell::PAGE_CLOCK {
+                    if gyro_enabled {
+                        shell.set_parallax(accel.0, accel.1);
+                    } else {
+                        shell.set_parallax(0.0, 0.0);
+                    }
                 }
 
                 // Drain UI requests raised by the Slint callbacks.

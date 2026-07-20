@@ -26,6 +26,12 @@ export component WatchShell inherits Window {
     in property <bool> gyro-on: false;
     in property <length> par-x: 0px;
     in property <length> par-y: 0px;
+    // Mesh Familiar (clock nook); fed by ShellUi::set_fam.
+    in property <bool> fam-known: false;
+    in property <bool> fam-holding: false;
+    in property <int> fam-mood: 0;
+    in property <int> fam-hunger: 0;
+    in property <int> fam-stage: 0;
 
     // sensors page (live at 100ms while showing)
     in property <string> accel-text: "--";
@@ -109,6 +115,11 @@ export component WatchShell inherits Window {
             gyro-on: root.gyro-on;
             par-x: root.par-x;
             par-y: root.par-y;
+            fam-known: root.fam-known;
+            fam-holding: root.fam-holding;
+            fam-mood: root.fam-mood;
+            fam-hunger: root.fam-hunger;
+            fam-stage: root.fam-stage;
             cpu-tap => { root.cpu-tap(); }
             gyro-tap => { root.gyro-tap(); }
             apps-tap => { root.launcher-open = true; }

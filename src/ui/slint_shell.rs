@@ -382,6 +382,24 @@ impl ShellUi {
         self.ui.set_aod(on);
     }
 
+    /// Push the Mesh Familiar snapshot to the clock nook (task 12).
+    pub fn set_fam(&self, f: &crate::net::familiar::FamUi) {
+        self.ui.set_fam_known(f.known);
+        self.ui.set_fam_holding(f.holding);
+        self.ui.set_fam_mood(f.mood as i32);
+        self.ui.set_fam_hunger(f.hunger as i32);
+        self.ui.set_fam_stage(f.stage as i32);
+    }
+
+    /// Feed scaled accel into the clock's parallax offsets, clamped to ±12px so
+    /// the time/date never collide with the chrome. Fed only on the clock page
+    /// with the gyro toy enabled. `par-x`/`par-y` are `length` in .slint; the
+    /// generated setters take logical pixels as f32.
+    pub fn set_parallax(&self, ax: f32, ay: f32) {
+        self.ui.set_par_x((ax * 12.0).clamp(-12.0, 12.0));
+        self.ui.set_par_y((ay * 12.0).clamp(-12.0, 12.0));
+    }
+
     pub fn set_toast(&self, text: &str) {
         self.ui.set_toast_text(SharedString::from(text));
     }
