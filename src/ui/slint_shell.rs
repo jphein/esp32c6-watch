@@ -50,23 +50,11 @@ pub fn brightness_raw(frac: f32) -> u8 {
 /// starting here are slider drags, not page switches.
 pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
-/// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
-/// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 13] = [
-    AppState::Snake,
-    AppState::WorldSnake,
-    AppState::Game2048,
-    AppState::Tetris,
-    AppState::Flappy,
-    AppState::Maze,
-    AppState::Settings,
-    AppState::Wled,   // idx 7 — SYSTEM-section WLED tile (icon-id 9)
-    AppState::Hunt,   // idx 8 — GAMES-section HUNT tile (icon-id 10)
-    AppState::Energy,  // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
-    AppState::Climate, // idx 10 — SYSTEM-section CLIMATE tile (icon-id 12)
-    AppState::Voice,   // idx 11 — SYSTEM-section VOICE tile (icon-id 7)
-    AppState::Sound,   // idx 12 — SYSTEM-section SOUND-meter tile (icon-id 8)
-];
+// The launcher launch-index → AppState mapping now lives in the app registry
+// (src/apps/registry.rs): `REGISTRY[idx].state`, exposed via
+// `registry::launch_state(idx)`. The launcher tiles are built from the same
+// registry (see `build_launcher_rows`), so the idx→app contract is
+// single-sourced instead of a hand-kept parallel array.
 
 #[derive(Default)]
 pub struct ShellRequests {
@@ -839,8 +827,8 @@ fn build_scene(
     {
         let r = req.clone();
         ui.on_launch_app(move |idx| {
-            if let Some(app) = LAUNCHER_APPS.get(idx as usize) {
-                r.launch.set(Some(*app));
+            if let Some(app) = crate::apps::registry::launch_state(idx as usize) {
+                r.launch.set(Some(app));
             }
         });
 
@@ -876,11 +864,59 @@ fn build_scene(
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
+    // Launcher tiles are built once from the app registry (single source of
+    // truth) — static per boot, so a plain VecModel the scene owns is enough.
+    ui.set_launcher_rows(ModelRc::from(Rc::new(VecModel::from(build_launcher_rows()))));
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
     ui.show().expect("show failed");
     ui
+}
+
+/// Build the launcher's row model from the app registry — the single source of
+/// truth for tile metadata. One header row per section (in display order:
+/// Audio, Games, System), then that section's apps in registry order chunked
+/// two-per-row; a lone trailing tile gets a spacer (`present = false`). The tile
+/// `idx` is the app's registry position, so `launch_app(idx)` maps back through
+/// `registry::launch_state(idx)`.
+fn build_launcher_rows() -> Vec<LauncherRow> {
+    use crate::apps::registry::{AppDescriptor, Section, REGISTRY};
+    let tile = |idx: usize, d: &AppDescriptor| LauncherTile {
+        name: SharedString::from(d.name),
+        accent: color_from_rgb(d.accent),
+        icon_id: d.icon_id as i32,
+        idx: idx as i32,
+        present: true,
+    };
+    let mut rows: Vec<LauncherRow> = Vec::new();
+    for sec in [Section::Audio, Section::Games, Section::System] {
+        rows.push(LauncherRow {
+            is_header: true,
+            header: SharedString::from(sec.label()),
+            a: LauncherTile::default(),
+            b: LauncherTile::default(),
+        });
+        let apps: Vec<(usize, &AppDescriptor)> = REGISTRY
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.section == sec)
+            .collect();
+        for pair in apps.chunks(2) {
+            let a = tile(pair[0].0, pair[0].1);
+            let b = match pair.get(1) {
+                Some((i, d)) => tile(*i, d),
+                None => LauncherTile::default(), // present:false -> spacer
+            };
+            rows.push(LauncherRow { is_header: false, header: SharedString::new(), a, b });
+        }
+    }
+    rows
+}
+
+/// 0xRRGGBB -> Slint opaque color.
+fn color_from_rgb(rgb: u32) -> slint::Color {
+    slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
 fn weather_label(code: u8) -> &'static str {
