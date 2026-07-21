@@ -1,0 +1,16 @@
+# finder — nearest-peer range/proximity meter (smol-port #45 item 7).
+#
+# Pure no_std, host-testable game/utility logic — no radio, no rendering. A
+# consumer of the ESP-NOW roster RSSI the mesh already tracks (no new frames),
+# built on crates/rssi (RssiSmoother + proximity), exactly like crates/hunt. The
+# Slint mesh page folds in a FinderView later (a small main.rs step, not here).
+[package]
+name = "finder"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Pure no_std nearest-peer range/proximity meter over mesh-roster RSSI: which peer is closest + how near (closer/farther bars, smoothed proximity). Host-testable; consumes crates/rssi. smol-port #45 item 7."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rssi = { path = "../rssi" }
