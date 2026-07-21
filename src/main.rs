@@ -730,6 +730,10 @@ async fn main(_spawner: Spawner) -> ! {
     // open-signal so the session spawns once per screen visit.
     let mut climate_active = false;
     let mut energy_active = false;
+    // #58 finding-(b): true when the shared session RAISED the WiFi hold (i.e. WiFi
+    // was off when a HA screen opened). Cleared on the both-closed transition so we
+    // drop WiFi promptly → mesh re-pins ch6, WITHOUT clobbering a manual WiFi-on.
+    let mut session_holds_wifi = false;
     let mut climate_running = false;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
@@ -1611,8 +1615,20 @@ async fn main(_spawner: Spawner) -> ! {
                         climate_open.signal(());
                         climate_running = true;
                     }
-                } else if climate_running {
-                    climate_close.signal(());
+                } else {
+                    // Both screens closed → RELEASE the WiFi hold we raised so the
+                    // idle path drops WiFi + re-pins mesh ch6 PROMPTLY (finding-b:
+                    // don't rely on the 300s idle backstop — it resets on every
+                    // interaction, so an active user would keep the mesh off-fleet
+                    // indefinitely). Gated on session_holds_wifi → a manual WiFi-on
+                    // (toggle then Climate) is preserved. Then end the session.
+                    if session_holds_wifi {
+                        wifi_on_request = false;
+                        session_holds_wifi = false;
+                    }
+                    if climate_running {
+                        climate_close.signal(());
+                    }
                 }
                 // Climate screen: route setpoint/mode commands + push the roster.
                 if app_state == AppState::Climate {
@@ -1827,6 +1843,9 @@ async fn main(_spawner: Spawner) -> ! {
                         // session block below.
                         shell.set_energy_open(true);
                         energy_active = true;
+                        if !wifi_on_request {
+                            session_holds_wifi = true; // we're raising the hold
+                        }
                         wifi_on_request = true;
                         app_state = AppState::Energy;
                     } else if target == AppState::Climate {
@@ -1835,6 +1854,9 @@ async fn main(_spawner: Spawner) -> ! {
                         // below); released on session return (both Ok + Err).
                         shell.set_climate_open(true);
                         climate_active = true;
+                        if !wifi_on_request {
+                            session_holds_wifi = true; // we're raising the hold
+                        }
                         wifi_on_request = true;
                         app_state = AppState::Climate;
                     } else {
