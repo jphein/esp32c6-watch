@@ -8,10 +8,11 @@ import { LauncherOverlay } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
+import { ClimateOverlay, ClimateCard } from "climate.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
-export { PeerRow }
+export { PeerRow, ClimateCard }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -101,6 +102,11 @@ export component WatchShell inherits Window {
     in property <int> energy-solar-w: 0;
     in property <int> energy-grid-w: 0;
     in property <bool> energy-charging: false;
+    // Climate overlay (#58): cards + connection banner; selected-index is UI-owned.
+    in-out property <bool> climate-open: false;
+    in property <[ClimateCard]> climate-cards;
+    in property <int> climate-conn: 0;   // 0 disconnected · 1 connecting · 2 live
+    in-out property <int> climate-selected: -1;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -118,6 +124,9 @@ export component WatchShell inherits Window {
     callback hunt-next();     // cycle to the next roster target
     callback hunt-close();
     callback energy-close();
+    callback climate-set-temp(int, float); // (card-id, new setpoint)
+    callback climate-set-mode(int, int);   // (card-id, hvac-mode 0..5)
+    callback climate-closed();             // back-chevron / right-swipe → mesh
 
     in-out property <float> brightness: 0.8;
 
@@ -345,6 +354,17 @@ export component WatchShell inherits Window {
         grid-w: root.energy-grid-w;
         charging: root.energy-charging;
         close => { root.energy-close(); }
+    }
+
+    // ==================== Climate overlay (#58) ====================
+    if root.climate-open: ClimateOverlay {
+        width: 100%; height: 100%;
+        cards: root.climate-cards;
+        conn-state: root.climate-conn;
+        selected-index <=> root.climate-selected;
+        set-temp(id, t) => { root.climate-set-temp(id, t); }
+        set-mode(id, m) => { root.climate-set-mode(id, m); }
+        closed => { root.climate-closed(); }
     }
 
     // ==================== AOD overlay ====================

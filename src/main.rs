@@ -86,6 +86,50 @@ async fn net_task(
     runner.run().await
 }
 
+// #58 climate: alias the model source so the stub→real-crate swap stays localized
+// (same one-line pattern as mqtt_climate.rs / slint_shell.rs). Provides
+// HvacMode / ClimateState. Swap = change this line + the two peers.
+use crate::net::climate_model_stub as climate_model;
+
+/// Map the UI's hvac-mode int (0..5, from the ClimateOverlay segmented control)
+/// back to the model enum for a `SetMode` command.
+fn hvac_from_ui(m: i32) -> climate_model::HvacMode {
+    use climate_model::HvacMode as H;
+    match m {
+        1 => H::Heat,
+        2 => H::Cool,
+        3 => H::Auto,
+        4 => H::FanOnly,
+        5 => H::Dry,
+        _ => H::Off,
+    }
+}
+
+/// #58: holds the long-lived HA climate MQTT session while the Climate screen is
+/// up. Waits for `open`, runs the session until `close` (or an error) ends it,
+/// then signals `done` — on BOTH the Ok and Err paths — so main.rs releases the
+/// WiFi hold + returns to mesh unconditionally (oracle-t10 invariant b: an error
+/// return must never leave WiFi held).
+#[embassy_executor::task]
+async fn climate_task(
+    stack: embassy_net::Stack<'static>,
+    state: &'static crate::net::mqtt_climate::ClimateStateMutex,
+    cmd_rx: crate::net::mqtt_climate::ClimateCmdReceiver,
+    open: &'static crate::net::mqtt_climate::CloseSignal,
+    close: &'static crate::net::mqtt_climate::CloseSignal,
+    done: &'static crate::net::mqtt_climate::CloseSignal,
+) {
+    loop {
+        open.wait().await;
+        if let Err(e) =
+            crate::net::mqtt_climate::run_climate_session(stack, state, cmd_rx, close).await
+        {
+            println!("[CLIM] session ended: {e}");
+        }
+        done.signal(()); // fires on Ok AND Err → main restores mesh unconditionally
+    }
+}
+
 fn days_to_date(days_since_epoch: i32) -> (u32, u32, u32) {
     let mut y = 1970i32;
     let mut remaining = days_since_epoch;
@@ -542,6 +586,40 @@ async fn main(_spawner: Spawner) -> ! {
     );
     _spawner.spawn(net_task(runner).expect("net_task token"));
 
+    // #58: HA climate session infrastructure. The session runs in its own task
+    // (holds WiFi while the Climate screen is open); main.rs drives it via the
+    // open/close signals, reads the shared ClimateState for the UI each tick, and
+    // releases the WiFi hold on `done` (both Ok + Err arms — see climate_task).
+    static CLIMATE_STATE: StaticCell<crate::net::mqtt_climate::ClimateStateMutex> =
+        StaticCell::new();
+    static CLIMATE_CMDS: StaticCell<crate::net::mqtt_climate::ClimateCmdChannel> = StaticCell::new();
+    static CLIMATE_OPEN: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
+    static CLIMATE_CLOSE: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
+    static CLIMATE_DONE: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
+    // Shared (&) refs, not the &mut StaticCell::init yields — both the task and
+    // the main loop hold them (Signal/Channel/Mutex methods take &self).
+    let climate_state: &'static crate::net::mqtt_climate::ClimateStateMutex =
+        CLIMATE_STATE.init(embassy_sync::mutex::Mutex::new(climate_model::ClimateState::new()));
+    let climate_cmds: &'static crate::net::mqtt_climate::ClimateCmdChannel =
+        CLIMATE_CMDS.init(embassy_sync::channel::Channel::new());
+    let climate_open: &'static crate::net::mqtt_climate::CloseSignal =
+        CLIMATE_OPEN.init(embassy_sync::signal::Signal::new());
+    let climate_close: &'static crate::net::mqtt_climate::CloseSignal =
+        CLIMATE_CLOSE.init(embassy_sync::signal::Signal::new());
+    let climate_done: &'static crate::net::mqtt_climate::CloseSignal =
+        CLIMATE_DONE.init(embassy_sync::signal::Signal::new());
+    _spawner.spawn(
+        climate_task(
+            stack,
+            climate_state,
+            climate_cmds.receiver(),
+            climate_open,
+            climate_close,
+            climate_done,
+        )
+        .expect("climate_task token"),
+    );
+
     println!("=== All systems GO! ===");
 
     // === State ===
@@ -641,6 +719,11 @@ async fn main(_spawner: Spawner) -> ! {
     // DEBUG: auto-enable WiFi at boot while we diagnose the connect issue,
     // so no watchface tap is needed. Revert to `false` once stable.
     let mut wifi_on_request = wifi_has_creds;
+    // #58: Climate session lifecycle. climate_active holds WiFi while the screen
+    // is open (cleared on session return); climate_running gates the one-shot
+    // open-signal so the session spawns once per screen visit.
+    let mut climate_active = false;
+    let mut climate_running = false;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -695,7 +778,8 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Launcher
                 | AppState::Wled
                 | AppState::Hunt
-                | AppState::Energy => {
+                | AppState::Energy
+                | AppState::Climate => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -1357,7 +1441,8 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Launcher
             | AppState::Wled
             | AppState::Hunt
-            | AppState::Energy => {
+            | AppState::Energy
+            | AppState::Climate => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1368,6 +1453,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Wled
                         | AppState::Hunt
                         | AppState::Energy
+                        | AppState::Climate
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1410,6 +1496,7 @@ async fn main(_spawner: Spawner) -> ! {
                 shell.set_wled_open(app_state == AppState::Wled);
                 shell.set_hunt_open(app_state == AppState::Hunt);
                 shell.set_energy_open(app_state == AppState::Energy);
+                shell.set_climate_open(app_state == AppState::Climate);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
                 app_state = if shell.launcher_open() {
                     AppState::Launcher
@@ -1419,6 +1506,8 @@ async fn main(_spawner: Spawner) -> ! {
                     AppState::Hunt
                 } else if shell.energy_open() {
                     AppState::Energy
+                } else if shell.climate_open() {
+                    AppState::Climate
                 } else {
                     AppState::Watchface
                 };
@@ -1484,6 +1573,82 @@ async fn main(_spawner: Spawner) -> ! {
                 if shell.req.energy_close.take() {
                     shell.set_energy_open(false);
                     app_state = AppState::Watchface;
+                }
+
+                // === #58: Climate session lifecycle ===
+                // Session return (climate_task signals `done` after the session
+                // ends on BOTH the Ok and Err paths): release the WiFi hold +
+                // dismiss the overlay UNCONDITIONALLY — oracle-t10 invariant b, an
+                // error return must never leave WiFi held.
+                if climate_done.try_take().is_some() {
+                    climate_running = false;
+                    climate_active = false;
+                    shell.set_climate_open(false);
+                    if app_state == AppState::Climate {
+                        app_state = AppState::Watchface;
+                    }
+                }
+                // Back-chevron / right-swipe / detail-back → end the session; the
+                // done-poll above then restores mesh once it returns.
+                if shell.req.climate_closed.take() {
+                    climate_active = false; // stop holding WiFi
+                    if climate_running {
+                        climate_close.signal(());
+                    } else {
+                        // Never started (WiFi never came up) — close immediately.
+                        shell.set_climate_open(false);
+                        if app_state == AppState::Climate {
+                            app_state = AppState::Watchface;
+                        }
+                    }
+                }
+                if app_state == AppState::Climate {
+                    // Hold WiFi up while the screen is open.
+                    climate_active = true;
+                    wifi_on_request = true;
+                    // Start the session once WiFi is associated (one-shot per visit).
+                    if wifi_connected && !climate_running {
+                        climate_open.signal(());
+                        climate_running = true;
+                    }
+                    // Route queued UI commands → session (card idx → ObjId lookup).
+                    if let Some((id, temp)) = shell.req.climate_set_temp.take() {
+                        let obj = {
+                            let st = climate_state.lock().await;
+                            st.entities.get(id as usize).map(|(o, _)| o.clone())
+                        };
+                        if let Some(obj) = obj {
+                            let _ = climate_cmds
+                                .sender()
+                                .try_send(crate::net::mqtt_climate::ClimateCmd::SetTemp { obj, temp });
+                        }
+                    }
+                    if let Some((id, mode)) = shell.req.climate_set_mode.take() {
+                        let obj = {
+                            let st = climate_state.lock().await;
+                            st.entities.get(id as usize).map(|(o, _)| o.clone())
+                        };
+                        if let Some(obj) = obj {
+                            let _ = climate_cmds.sender().try_send(
+                                crate::net::mqtt_climate::ClimateCmd::SetMode {
+                                    obj,
+                                    mode: hvac_from_ui(mode),
+                                },
+                            );
+                        }
+                    }
+                    // Push the roster + connection banner (0 off · 1 connecting · 2 live).
+                    let st = climate_state.lock().await;
+                    let conn = if !climate_running || st.entities.is_empty() {
+                        1
+                    } else {
+                        2
+                    };
+                    shell.set_climate(&st, conn);
+                } else {
+                    // Off the Climate screen — drop stale queued taps.
+                    let _ = shell.req.climate_set_temp.take();
+                    let _ = shell.req.climate_set_mode.take();
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1638,6 +1803,14 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_energy(72, 3400, -1200, true);
                         shell.set_energy_open(true);
                         app_state = AppState::Energy;
+                    } else if target == AppState::Climate {
+                        // #58: raise the Climate overlay + hold WiFi up. The MQTT
+                        // session task starts once WiFi associates (Climate tick
+                        // below); released on session return (both Ok + Err).
+                        shell.set_climate_open(true);
+                        climate_active = true;
+                        wifi_on_request = true;
+                        app_state = AppState::Climate;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -1727,6 +1900,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Wled
                         | AppState::Hunt
                         | AppState::Energy
+                        | AppState::Climate
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);
