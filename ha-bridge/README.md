@@ -83,20 +83,23 @@ client id so the two flows coexist.
 
 | Direction | Topic | Payload |
 |---|---|---|
-| HA → watch (state) | `watch/energy/state` (**retained**) | `{"batt":78,"solar":3400,"grid":-1200,"chg":true}` |
+| HA → watch (state) | `watch/energy/state` (**retained**) | `{"battery_pct":78,"solar_w":3400,"grid_w":-1200,"charging":true}` |
 | bridge → all (availability, LWT) | `watch/energy/avail` (**retained**) | `online` \| `offline` |
 
-One aggregate JSON object (compact); any field may be `null` until first seen:
+One aggregate JSON object (compact); the bridge always publishes **full state** (all four
+keys every frame — never partial deltas), so the watch replaces its state wholesale. A field
+is JSON `null` only before that sensor's first reading and **never regresses** to null once
+known (values persist in the flow's context). Treat `null` as "unknown / keep last".
 
 | Key | Type | Meaning |
 |---|---|---|
-| `batt` | int 0..100 | home battery state-of-charge, % |
-| `solar` | int ≥ 0 | solar production, **watts** (kW sensors auto-scaled) |
-| `grid` | int, **signed** | grid power, watts — **> 0 importing** (buying), **< 0 exporting** (selling) |
-| `chg` | bool | home battery charging |
+| `battery_pct` | int 0..100 | home battery state-of-charge, % |
+| `solar_w` | int ≥ 0 | solar production, **watts** (kW sensors auto-scaled) |
+| `grid_w` | int, **signed** | grid power, watts — **> 0 importing** (buying), **< 0 exporting** (selling) |
+| `charging` | bool | home battery charging |
 
-Maps 1:1 onto `EnergyPage` (`ui/slint/energy.slint`): `batt → battery-pct`,
-`solar → solar-w`, `grid → grid-w`, `chg → charging`.
+Keys mirror the `EnergyPage` (`ui/slint/energy.slint`) properties 1:1:
+`battery_pct → battery-pct`, `solar_w → solar-w`, `grid_w → grid-w`, `charging → charging`.
 
 **Availability / `conn-state`.** The screen shows *connecting…* until the retained
 `watch/energy/state` first arrives, the live readout once it has data, and *HA unreachable*

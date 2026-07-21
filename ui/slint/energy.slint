@@ -7,8 +7,8 @@ import { Theme, PageTitle } from "theme.slint";
 // the loop (main.rs) — this file does not touch the network.
 //
 // === Data contract (ha-bridge/energy-bridge.flow.json → main.rs → here) ===
-//   Bridge publishes retained `watch/energy/state`:
-//     {"batt":pct, "solar":W, "grid":W(signed +import/-export), "chg":bool}
+//   Bridge publishes retained `watch/energy/state` (full state every frame):
+//     {"battery_pct":pct, "solar_w":W, "grid_w":W(signed +import/-export), "charging":bool}
 //   which main.rs decodes and sets on these properties every update:
 //     in property <int>  battery-pct : home battery 0..100
 //     in property <int>  solar-w     : solar production, watts (>= 0)
