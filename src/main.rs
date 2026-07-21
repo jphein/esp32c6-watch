@@ -236,6 +236,27 @@ fn log_heap(tag: &str) {
     );
 }
 
+/// DEBUG (crash bisect): largest contiguous block esp_alloc can currently hand
+/// out. esp_alloc exposes only per-region *free totals*, not a largest-block
+/// stat — but the WiFi RX-pool alloc needs a CONTIGUOUS block, so fragmentation
+/// (not just total free) is what matters. Probe it by binary-searching fallible
+/// allocations, each freed immediately (no lasting perturbation). Single-caller
+/// on the boot main path, right before wifi.connect().
+fn largest_free_block() -> usize {
+    let mut lo = 0usize;
+    let mut hi = esp_alloc::HEAP.free();
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        if v.try_reserve_exact(mid).is_ok() {
+            lo = mid; // this size fit; `v` frees it on drop
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// CFG key `R` boot debounce (reference main.rs REBOOT_DEBOUNCE_MS): within
 /// this window a retained/re-armed reboot command is consumed but ignored,
 /// so a stale `R` can never reboot-loop the watch.
@@ -1086,6 +1107,15 @@ async fn main(_spawner: Spawner) -> ! {
                         Err(e) => println!("[SCAN] failed: {e:?}"),
                     }
                 }
+                // DEBUG (crash bisect #59): heap right before the boot WiFi
+                // connect — the ppRecycleRxPkt near-null store is the esp-radio
+                // RX-pool alloc failing here. free=total, largest=biggest
+                // contiguous block (fragmentation matters for the pool).
+                println!(
+                    "[HEAP] pre-wifi free={} largest={}",
+                    esp_alloc::HEAP.free(),
+                    largest_free_block(),
+                );
                 match embassy_time::with_timeout(
                     Duration::from_secs(15),
                     wifi_controller.connect_async(),
