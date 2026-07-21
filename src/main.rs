@@ -1711,6 +1711,28 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 // Climate back-chevron / right-swipe → dismiss + stop wanting it.
                 if shell.req.climate_closed.take() {
+                    // oracle-t9 flush-on-close: if the user tapped ± then left before
+                    // the 400ms debounce fired (sent_at still None), publish the
+                    // pending setpoint NOW so the adjustment isn't silently deferred
+                    // to the next Climate visit. (The session is still draining
+                    // cmd_rx this tick — it hasn't torn down yet.)
+                    if let Some(p) = climate_pending.as_ref() {
+                        if p.sent_at.is_none() {
+                            let obj = {
+                                let st = climate_state.lock().await;
+                                st.entities.get(p.id as usize).map(|(o, _)| o.clone())
+                            };
+                            if let Some(obj) = obj {
+                                let _ = climate_cmds.sender().try_send(
+                                    crate::net::mqtt_climate::ClimateCmd::SetTemp {
+                                        obj,
+                                        temp: p.temp,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    climate_pending = None; // optimistic state doesn't outlive the screen
                     climate_active = false;
                     shell.set_climate_open(false);
                     if app_state == AppState::Climate {
