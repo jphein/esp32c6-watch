@@ -104,26 +104,26 @@ fn hvac_from_ui(m: i32) -> climate_model::HvacMode {
     }
 }
 
-/// #58: holds the long-lived HA climate MQTT session while the Climate screen is
-/// up. Waits for `open`, runs the session until `close` (or an error) ends it,
+/// #58: holds the long-lived HA climate HTTP polling session while the Climate
+/// screen is up. Waits for `open`, runs the session until `close` (or an error) ends it,
 /// then signals `done` — on BOTH the Ok and Err paths — so main.rs releases the
 /// WiFi hold + returns to mesh unconditionally (oracle-t10 invariant b: an error
 /// return must never leave WiFi held).
 #[embassy_executor::task]
 async fn climate_task(
     stack: embassy_net::Stack<'static>,
-    state: &'static crate::net::mqtt_climate::ClimateStateMutex,
-    energy: &'static crate::net::mqtt_climate::EnergyStateMutex,
-    cmd_rx: crate::net::mqtt_climate::ClimateCmdReceiver,
-    open: &'static crate::net::mqtt_climate::CloseSignal,
-    close: &'static crate::net::mqtt_climate::CloseSignal,
-    done: &'static crate::net::mqtt_climate::CloseSignal,
+    state: &'static crate::net::http_climate::ClimateStateMutex,
+    energy: &'static crate::net::http_climate::EnergyStateMutex,
+    cmd_rx: crate::net::http_climate::ClimateCmdReceiver,
+    open: &'static crate::net::http_climate::CloseSignal,
+    close: &'static crate::net::http_climate::CloseSignal,
+    done: &'static crate::net::http_climate::CloseSignal,
 ) {
     loop {
         open.wait().await;
-        // One session feeds BOTH the Climate + Energy screens (shared CONNECT).
+        // One session feeds BOTH the Climate + Energy screens (shared poll loop).
         if let Err(e) =
-            crate::net::mqtt_climate::run_climate_session(stack, state, energy, cmd_rx, close).await
+            crate::net::http_climate::run_climate_session(stack, state, energy, cmd_rx, close).await
         {
             println!("[CLIM] session ended: {e}");
         }
@@ -652,27 +652,27 @@ async fn main(_spawner: Spawner) -> ! {
     // (holds WiFi while the Climate screen is open); main.rs drives it via the
     // open/close signals, reads the shared ClimateState for the UI each tick, and
     // releases the WiFi hold on `done` (both Ok + Err arms — see climate_task).
-    static CLIMATE_STATE: StaticCell<crate::net::mqtt_climate::ClimateStateMutex> =
+    static CLIMATE_STATE: StaticCell<crate::net::http_climate::ClimateStateMutex> =
         StaticCell::new();
-    static ENERGY_STATE: StaticCell<crate::net::mqtt_climate::EnergyStateMutex> = StaticCell::new();
-    static CLIMATE_CMDS: StaticCell<crate::net::mqtt_climate::ClimateCmdChannel> = StaticCell::new();
-    static CLIMATE_OPEN: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
-    static CLIMATE_CLOSE: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
-    static CLIMATE_DONE: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
+    static ENERGY_STATE: StaticCell<crate::net::http_climate::EnergyStateMutex> = StaticCell::new();
+    static CLIMATE_CMDS: StaticCell<crate::net::http_climate::ClimateCmdChannel> = StaticCell::new();
+    static CLIMATE_OPEN: StaticCell<crate::net::http_climate::CloseSignal> = StaticCell::new();
+    static CLIMATE_CLOSE: StaticCell<crate::net::http_climate::CloseSignal> = StaticCell::new();
+    static CLIMATE_DONE: StaticCell<crate::net::http_climate::CloseSignal> = StaticCell::new();
     // Shared (&) refs, not the &mut StaticCell::init yields — both the task and
     // the main loop hold them (Signal/Channel/Mutex methods take &self).
-    let climate_state: &'static crate::net::mqtt_climate::ClimateStateMutex =
+    let climate_state: &'static crate::net::http_climate::ClimateStateMutex =
         CLIMATE_STATE.init(embassy_sync::mutex::Mutex::new(climate_model::ClimateState::new()));
-    let climate_energy: &'static crate::net::mqtt_climate::EnergyStateMutex = ENERGY_STATE.init(
-        embassy_sync::mutex::Mutex::new(crate::net::mqtt_climate::EnergyState::default()),
+    let climate_energy: &'static crate::net::http_climate::EnergyStateMutex = ENERGY_STATE.init(
+        embassy_sync::mutex::Mutex::new(crate::net::http_climate::EnergyState::default()),
     );
-    let climate_cmds: &'static crate::net::mqtt_climate::ClimateCmdChannel =
+    let climate_cmds: &'static crate::net::http_climate::ClimateCmdChannel =
         CLIMATE_CMDS.init(embassy_sync::channel::Channel::new());
-    let climate_open: &'static crate::net::mqtt_climate::CloseSignal =
+    let climate_open: &'static crate::net::http_climate::CloseSignal =
         CLIMATE_OPEN.init(embassy_sync::signal::Signal::new());
-    let climate_close: &'static crate::net::mqtt_climate::CloseSignal =
+    let climate_close: &'static crate::net::http_climate::CloseSignal =
         CLIMATE_CLOSE.init(embassy_sync::signal::Signal::new());
-    let climate_done: &'static crate::net::mqtt_climate::CloseSignal =
+    let climate_done: &'static crate::net::http_climate::CloseSignal =
         CLIMATE_DONE.init(embassy_sync::signal::Signal::new());
     _spawner.spawn(
         climate_task(
@@ -1650,8 +1650,8 @@ async fn main(_spawner: Spawner) -> ! {
                     app_state = AppState::Watchface;
                 }
 
-                // === #58: shared HA MQTT session (feeds Climate + Energy screens) ===
-                // climate_task holds ONE CONNECT while EITHER screen is open; each
+                // === #58: shared HA HTTP session (feeds Climate + Energy screens) ===
+                // climate_task holds ONE poll loop while EITHER screen is open; each
                 // screen reads its shared state (ClimateState / EnergyState). Reset
                 // `running` on session return (done fires on Ok AND Err); it
                 // restarts below if a screen is still open (error resilience).
@@ -1715,7 +1715,7 @@ async fn main(_spawner: Spawner) -> ! {
                         };
                         if let Some(obj) = obj {
                             let _ = climate_cmds.sender().try_send(
-                                crate::net::mqtt_climate::ClimateCmd::SetMode {
+                                crate::net::http_climate::ClimateCmd::SetMode {
                                     obj,
                                     mode: hvac_from_ui(mode),
                                 },
@@ -1735,7 +1735,7 @@ async fn main(_spawner: Spawner) -> ! {
                                 st.entities.get(p.id as usize).map(|(o, _)| o.clone())
                             {
                                 let _ = climate_cmds.sender().try_send(
-                                    crate::net::mqtt_climate::ClimateCmd::SetTemp {
+                                    crate::net::http_climate::ClimateCmd::SetTemp {
                                         obj,
                                         temp: p.temp,
                                     },

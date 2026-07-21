@@ -10,11 +10,12 @@ pub mod familiar;
 // dead-code until the bidirectional climate session is wired from main.rs.
 #[allow(dead_code)]
 pub mod mqtt_ha;
-// Bidirectional MQTT climate session. Unwired until main.rs spawns it for the
-// Climate screen (integrator's serial step); silence dead-code until then, same
-// as voice_stt, rather than churn per-item attributes.
+// Plain-HTTP climate + energy client for the native `esp32c6_watch` HA component
+// (replaces the removed `mqtt_climate` MQTT session; same public surface, so main.rs
+// wiring is unchanged bar the module path). Some public API is only exercised via
+// the climate_task spawn path; silence dead-code as with the other net modules.
 #[allow(dead_code)]
-pub mod mqtt_climate;
+pub mod http_climate;
 pub mod names;
 pub mod ota_http;
 pub mod smol_mesh;
