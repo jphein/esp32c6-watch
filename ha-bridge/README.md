@@ -53,6 +53,9 @@ the 2 Tuya minisplits (Layer A below) light up once integrated.
 
 ## Layer A — integrate the 2 Tuya minisplits (so they appear on the watch)
 
+**Full walkthrough:** [`layer-a-tuya.md`](layer-a-tuya.md) — tinytuya `local_key` extraction,
+a LocalTuya climate DPS template, and the verify steps. Summary below.
+
 They're **Tuya-compatible**, so once they're `climate.*` entities in HA the bridge picks
 them up automatically. Recommended path — **LocalTuya** (local control, no cloud latency):
 
