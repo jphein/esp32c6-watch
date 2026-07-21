@@ -1625,31 +1625,13 @@ async fn main(_spawner: Spawner) -> ! {
                 // back-chevron) back into app_state. The shell owns page/launcher
                 // navigation via swipes internally; WLED is a scene overlay that
                 // shares this Slint branch (no framebuffer of its own).
-                shell.set_launcher_open(app_state == AppState::Launcher);
-                shell.set_wled_open(app_state == AppState::Wled);
-                shell.set_hunt_open(app_state == AppState::Hunt);
-                shell.set_energy_open(app_state == AppState::Energy);
-                shell.set_climate_open(app_state == AppState::Climate);
-                shell.set_voice_open(app_state == AppState::Voice);
-                shell.set_mic_open(app_state == AppState::Sound);
+                // Mirror app_state -> overlay open-flags, feed touch, then
+                // reconcile any swipe-driven close back into app_state. All three
+                // are table-driven (OVERLAYS in slint_shell.rs) so adding an
+                // overlay app doesn't fan out here.
+                shell.mirror_overlays(app_state);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
-                app_state = if shell.launcher_open() {
-                    AppState::Launcher
-                } else if shell.wled_open() {
-                    AppState::Wled
-                } else if shell.hunt_open() {
-                    AppState::Hunt
-                } else if shell.energy_open() {
-                    AppState::Energy
-                } else if shell.climate_open() {
-                    AppState::Climate
-                } else if shell.voice_open() {
-                    AppState::Voice
-                } else if shell.mic_open() {
-                    AppState::Sound
-                } else {
-                    AppState::Watchface
-                };
+                app_state = shell.reconcile_overlay();
 
                 // WLED remote: back-chevron closes; a tapped tile broadcasts a
                 // WiZmote frame over ESP-NOW (reusing the mesh block's broadcast
