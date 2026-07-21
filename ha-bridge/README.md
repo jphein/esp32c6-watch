@@ -88,6 +88,31 @@ HA. But if the real Node-RED climate flow is *also* deployed and subscribed to
 `climate.set_*` on a nonexistent entity). Run the mock when that flow is **not**
 deployed, or point `MQTT_HOST` at a scratch broker.
 
+## Bench testing — `mock-energy-publisher.py` (NO live HA)
+
+Validate the watch's **Energy** screen (home battery / solar / grid) against a
+**fake** feed. Only touches `watch/energy/#` (never calls HA); mirrors the real
+`energy-bridge.flow.json` contract:
+
+- `watch/energy/state` **(retained)** = `{"batt":78,"solar":3400,"grid":-1200,"chg":true}`
+  (`batt` 0-100 · `solar` W≥0 · `grid` W signed, **+import / −export** · `chg` bool)
+- `watch/energy/avail` **(retained)** = `online` | `offline` (`offline` is the LWT)
+
+```bash
+export MQTT_PASS=$(bw get password mosquitto)
+python3 mock-energy-publisher.py           # online + retained state, drifting every 3s
+```
+Runs a solar day/night sweep with battery charge/discharge, so `grid` flips
+**EXPORT ↔ IDLE ↔ IMPORT** and the battery goes low(red) → charging(teal) →
+discharging every ~120 s cycle — every colour branch in `energy.slint`. Each log
+line is tagged `[EXPORT chg]` / `[IMPORT LOW]` etc. so you can eyeball the state.
+
+- `--dry-run` prints sample frames offline (no broker/paho). `--once` seeds one
+  frame. **`--clear`** wipes the retained `state`+`avail` topics when done.
+- On clean exit (or crash → LWT) it publishes `avail=offline`, so the screen's
+  offline handling is testable too.
+- Same env vars as the climate mock (`MQTT_HOST`/`PORT`/`USER`/`PASS`).
+
 ## Layer A — integrate the 2 Tuya minisplits (so they appear on the watch)
 
 They're **Tuya-compatible**, so once they're `climate.*` entities in HA the bridge picks
