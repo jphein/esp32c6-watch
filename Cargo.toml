@@ -3,7 +3,7 @@ members = [".", "crates/*"]
 
 [package]
 name = "esp32c6-watch"
-version = "0.4.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -101,6 +101,9 @@ hunt = { path = "crates/hunt" }
 # #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —
 # replaces src/net/climate_model_stub.rs.
 climate-model = { path = "crates/climate-model" }
+# #28: pure-logic mic sound-level DSP (rms_dbfs) — host-unit-tested. Drives the
+# SoundLevel meter from the shared mic capture (MIC_CH).
+mic-dsp = { path = "crates/mic-dsp" }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

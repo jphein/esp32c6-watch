@@ -21,10 +21,12 @@ use embassy_net::{tcp::TcpSocket, Ipv4Address, Stack};
 use embassy_time::{with_timeout, Duration};
 use heapless::String;
 
-/// STT bridge default address (familiar's LAN IP) — dotted-quad, no DNS.
+/// STT bridge default address — ubox0's VLAN-11 IP, reachable from the roam
+/// (VLAN 11) network the watch is on; the old 10.0.6.107 sat on VLAN 6, which
+/// roam is firewalled off from. Dotted-quad, no DNS.
 /// MC5 can pass a different address to [`stream_utterance_to`] (e.g. from config).
 pub fn default_bridge_ip() -> Ipv4Address {
-    Ipv4Address::new(10, 0, 6, 107)
+    Ipv4Address::new(10, 0, 11, 11)
 }
 /// STT bridge port (matches `watch_bridge.py` default / systemd `BRIDGE_PORT`).
 pub const BRIDGE_PORT: u16 = 8090;

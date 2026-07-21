@@ -9,6 +9,8 @@ import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
+import { VoicePage } from "voice.slint";
+import { SoundLevel } from "soundlevel.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -108,6 +110,19 @@ export component WatchShell inherits Window {
     in property <[ClimateCard]> climate-cards;
     in property <int> climate-conn: 0;   // 0 disconnected · 1 connecting · 2 live
     in-out property <int> climate-selected: -1;
+    // Voice-to-text overlay (#42, push-to-talk). State/level/transcript pushed
+    // from the Rust loop; the PTT button emits pressed/released, driven by
+    // physical touch (release detected off the INT pin while the loop streams).
+    in-out property <bool> voice-open: false;
+    in property <int> voice-state: 0;   // 0 idle 1 listening 2 sending 3 result 4 error 5 connecting
+    in property <float> voice-level: 0.0;
+    in property <string> voice-transcript;
+    in property <string> voice-error;
+    // SoundLevel meter overlay (#28): live dBFS + peak-hold, both in [-60, 0],
+    // pushed from the Rust loop draining the shared mic capture through rms_dbfs.
+    in-out property <bool> mic-open: false;
+    in property <float> mic-dbfs: -60;
+    in property <float> mic-peak: -60;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -128,6 +143,8 @@ export component WatchShell inherits Window {
     callback climate-set-temp(int, float); // (card-id, new setpoint)
     callback climate-set-mode(int, int);   // (card-id, hvac-mode 0..5)
     callback climate-closed();             // back-chevron / right-swipe → mesh
+    callback voice-ptt-pressed();  // finger down on the PTT button → start capture
+    callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
 
     in-out property <float> brightness: 0.8;
 
@@ -367,6 +384,24 @@ export component WatchShell inherits Window {
         set-temp(id, t) => { root.climate-set-temp(id, t); }
         set-mode(id, m) => { root.climate-set-mode(id, m); }
         closed => { root.climate-closed(); }
+    }
+
+    // ==================== Voice overlay ====================
+    if root.voice-open: VoicePage {
+        width: 100%; height: 100%;
+        voice-state: root.voice-state;
+        level: root.voice-level;
+        transcript: root.voice-transcript;
+        error-text: root.voice-error;
+        ptt-pressed => { root.voice-ptt-pressed(); }
+        ptt-released => { root.voice-ptt-released(); }
+    }
+
+    // ==================== SoundLevel meter overlay ====================
+    if root.mic-open: SoundLevel {
+        width: 100%; height: 100%;
+        mic-dbfs: root.mic-dbfs;
+        mic-peak: root.mic-peak;
     }
 
     // ==================== AOD overlay ====================

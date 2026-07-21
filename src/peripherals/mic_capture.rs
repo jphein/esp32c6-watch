@@ -36,8 +36,12 @@ pub const MIC_PGA_GAIN: u8 = 0x0A;
 pub const MONO_CHUNK: usize = 512;
 /// The stereo read that yields one `MONO_CHUNK` (2× — interleaved L/R).
 pub const STEREO_CHUNK: usize = MONO_CHUNK * 2;
-/// Circular RX DMA ring size (≈128 ms @16k stereo) — MC5 allocates this static.
-pub const MIC_RING_LEN: usize = 8192;
+/// Circular RX DMA ring. Sized so esp-hal's circular special-case (len <= CHUNK*2)
+/// splits it into exactly 3 descriptors of MIC_RING_LEN/3 = STEREO_CHUNK bytes each.
+/// That makes `available()` grow in whole STEREO_CHUNK units and lets the capture task
+/// pop the ENTIRE available amount into a ring-sized buffer with no partial-window
+/// remainder. 3072 B = 3 × 1024 ≈ 48 ms @16k stereo. MC5 allocates this static.
+pub const MIC_RING_LEN: usize = STEREO_CHUNK * 3;
 /// Channel depth (chunks buffered between the capture task and the streamer).
 pub const MIC_CHANNEL_DEPTH: usize = 8;
 
@@ -52,6 +56,13 @@ type MicReceiver = Receiver<'static, CriticalSectionRawMutex, MicChunk, MIC_CHAN
 /// `enable_adc`) and false on release; the capture task only pushes while set,
 /// and [`MicPcmSource`] ends the utterance the instant it clears.
 pub static RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// Meter gate (#28). Set while the SoundLevel screen is open; the capture task
+/// pushes chunks whenever EITHER this OR [`RECORDING`] is set, so the shared
+/// mic feeds the level meter (drained by the main loop → `mic_dsp::rms_dbfs`)
+/// as well as voice PTT. Voice + meter are mutually-exclusive screens, so a
+/// single [`MIC_CHANNEL`] with one active consumer at a time suffices.
+pub static METER: AtomicBool = AtomicBool::new(false);
 
 /// [`PcmSource`] backed by [`MIC_CHANNEL`]. Hand `voice_stt::stream_utterance`
 /// a `&mut MicPcmSource` while the button is held.
@@ -102,29 +113,71 @@ pub async fn mic_capture_task(
     ring: &'static mut [u8; MIC_RING_LEN],
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, MicChunk, MIC_CHANNEL_DEPTH>,
 ) {
-    let mut xfer = match i2s_rx.read_dma_circular(ring) {
-        Ok(x) => x,
-        Err(_) => return, // RX DMA failed to start; nothing to do
-    };
-    let mut stereo = [0u8; STEREO_CHUNK];
-    loop {
-        let avail = xfer.available().unwrap_or(0);
-        if avail < STEREO_CHUNK {
-            Timer::after(Duration::from_millis(4)).await;
-            continue;
+    // Circular RX with FULL-DRAIN + OVERRUN RECOVERY. esp-hal's DmaTransferRxCircular
+    // has two traps this navigates:
+    //  (1) `pop(buf)` returns Err(BufferTooSmall) unless buf.len() >= the *entire*
+    //      currently-available amount, and `available()` grows in whole-descriptor
+    //      (STEREO_CHUNK) units. Popping into a small STEREO_CHUNK buffer therefore
+    //      fails the instant one descriptor completes — the consumer never receives
+    //      bytes (the real zero-PCM cause). So we pop the WHOLE ring's worth into
+    //      `popbuf` (ring-sized) and process it in STEREO_CHUNK windows. MIC_RING_LEN
+    //      = 3×STEREO_CHUNK, so a pop is always a whole number of windows (no partial
+    //      remainder → no dropped samples).
+    //  (2) once the ring laps (all descriptors CPU-owned) `available()`/`pop()` return
+    //      Err(Late) permanently, and pop() is the only thing that re-arms descriptors
+    //      (owner → DMA). Draining the full amount every tick keeps the ring empty so
+    //      this never happens in steady state; the outer loop re-arms via a fresh
+    //      read_dma_circular if it ever does (e.g. a one-off startup stall).
+    //
+    // WriteBuffer needs a `&'static mut`, so re-materialise one from the (truly
+    // 'static) ring by raw pointer on each restart; the previous transfer is always
+    // dropped first, so there is never an aliasing `&mut`.
+    // NOTE (mic HARDWARE-blocked): this RX capture pipeline is correct and proven
+    // end-to-end (DMA delivery + frame flow verified on-hardware). The ES8311 ADC serial
+    // output ASDOUT→GPIO21 is dead at the HARDWARE level (see scratch/mic-debug/lucid.md),
+    // so captured audio is silent until the board is fixed — no firmware change here alters
+    // that. Playback (shared codec/clock) works. Kept intact so the mic "just works" once
+    // the HW is repaired.
+    let ring_ptr: *mut [u8; MIC_RING_LEN] = ring;
+    let mut popbuf = [0u8; MIC_RING_LEN]; // holds a full ring's worth (max available)
+    'restart: loop {
+        let ring_ref: &'static mut [u8; MIC_RING_LEN] = unsafe { &mut *ring_ptr };
+        let mut xfer = match i2s_rx.read_dma_circular(ring_ref) {
+            Ok(x) => x,
+            Err(_) => {
+                Timer::after(Duration::from_millis(50)).await;
+                continue 'restart; // RX DMA failed to start; retry
+            }
+        };
+        loop {
+            let avail = match xfer.available() {
+                Ok(n) => n,
+                Err(_) => break, // Late/overrun → drop xfer & re-arm the descriptor chain
+            };
+            if avail == 0 {
+                Timer::after(Duration::from_millis(4)).await;
+                continue;
+            }
+            // Pop the ENTIRE available amount — popbuf is ring-sized so it always fits,
+            // and pop() re-arms every consumed descriptor (owner → DMA), preventing lap.
+            let n = match xfer.pop(&mut popbuf[..]) {
+                Ok(n) => n,
+                Err(_) => break, // BufferTooSmall can't happen (popbuf = ring); a Late → re-arm
+            };
+            if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
+                continue; // idle: popped = drained + re-armed; just discard
+            }
+            let mut off = 0;
+            while off + STEREO_CHUNK <= n {
+                let window = &popbuf[off..off + STEREO_CHUNK];
+                let mut mono_buf = [0u8; MONO_CHUNK];
+                let m = voice_stt::stereo_to_mono_le(window, &mut mono_buf, MIC_RIGHT_CHANNEL);
+                if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
+                    let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
+                }
+                off += STEREO_CHUNK;
+            }
         }
-        if xfer.pop(&mut stereo).is_err() {
-            Timer::after(Duration::from_millis(4)).await;
-            continue;
-        }
-        if !RECORDING.load(Ordering::Relaxed) {
-            continue; // idle: discard (keeps the circular ring drained)
-        }
-        // One STEREO_CHUNK pop -> exactly MONO_CHUNK mono bytes.
-        let mut mono_buf = [0u8; MONO_CHUNK];
-        let m = voice_stt::stereo_to_mono_le(&stereo, &mut mono_buf, MIC_RIGHT_CHANNEL);
-        if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
-            let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
-        }
+        // xfer dropped here → outer loop re-arms the transfer (recover from overrun)
     }
 }

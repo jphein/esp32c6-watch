@@ -53,8 +53,6 @@ use embedded_hal_bus::i2c::RefCellDevice;
 use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
-    dma::{DmaRxBuf, DmaTxBuf},
-    dma_buffers,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     spi::{
@@ -151,9 +149,7 @@ async fn main(_spawner: Spawner) -> ! {
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(80))
         .with_mode(SpiMode::_0);
-    let (rx_buf, rx_desc, tx_buf, tx_desc) = dma_buffers!(8000);
-    let dma_rx = DmaRxBuf::new(rx_desc, rx_buf).unwrap();
-    let dma_tx = DmaTxBuf::new(tx_desc, tx_buf).unwrap();
+    // Raw SpiDma (no SpiDmaBus wrapper); QspiBus owns its own TX DmaTxBuf.
     let spi = Spi::new(peripherals.SPI2, spi_config)
         .expect("SPI failed")
         .with_sck(peripherals.GPIO0)
@@ -161,8 +157,7 @@ async fn main(_spawner: Spawner) -> ! {
         .with_sio1(peripherals.GPIO2)
         .with_sio2(peripherals.GPIO3)
         .with_sio3(peripherals.GPIO4)
-        .with_dma(peripherals.DMA_CH0)
-        .with_buffers(dma_rx, dma_tx);
+        .with_dma(peripherals.DMA_CH0);
     let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
     let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
     let mut display = Co5300Display::new(QspiBus::new(spi, cs), reset);

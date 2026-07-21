@@ -40,7 +40,7 @@ export component RadioScanOverlay {
             border-radius: 18px;
             border-width: 2px;
             border-color: Theme.warn;
-            background: #1a0a0e; // one-off dark-red pair for Theme.warn
+            background: Theme.warn-panel;
             VerticalLayout {
                 padding: 20px;
                 spacing: 12px;
@@ -78,7 +78,7 @@ export component RadioScanOverlay {
             border-radius: 24px;
             border-width: 1px;
             border-color: Theme.accent;
-            background: #08201a; // one-off dark-teal pair for Theme.accent
+            background: Theme.accent-bg;
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
@@ -224,7 +224,7 @@ export component RadioScanOverlay {
             border-radius: 24px;
             border-width: 1px;
             border-color: Theme.warn;
-            background: #200a10;
+            background: Theme.warn-bg;
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;

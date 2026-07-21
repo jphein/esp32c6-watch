@@ -63,4 +63,13 @@ pub enum AppState {
     /// (WiFi held while the screen is up, released on close) to view + command
     /// Nest / minisplit setpoints & modes via the Node-RED bridge.
     Climate,
+    /// Voice-to-text (push-to-talk, #42) — a Slint overlay: hold streams mic PCM
+    /// over HTTP to the LAN STT bridge, release shows the transcript. Scene-
+    /// resident (no framebuffer); capture runs in the shared `mic_capture_task`,
+    /// streamed by `voice_stt::stream_utterance` while the button is held.
+    Voice,
+    /// Sound-level meter (#28) — a Slint overlay (SoundLevel) showing live dBFS +
+    /// peak-hold. Subscribes to the SAME shared `mic_capture_task`/MIC_CH as Voice
+    /// (METER gate), draining chunks through `mic_dsp::rms_dbfs`. No WiFi (local).
+    Sound,
 }

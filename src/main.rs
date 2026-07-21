@@ -24,6 +24,7 @@ mod apps;
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
+use embassy_futures::join::join;
 use embassy_futures::select::select3;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::Rgb565;
@@ -33,8 +34,7 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf},
-    dma_buffers,
+    dma::DmaDescriptor,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent},
     i2c::master::{Config as I2cConfig, I2c},
     i2s::master::{Config as I2sConfig, DataFormat, I2s},
@@ -64,11 +64,13 @@ use crate::apps::{App, AppInput, AppResult, AppState};
 use crate::drivers::co5300::Co5300Display;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
+use crate::net::voice_stt;
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::{fill_beep_buffer, Es8311};
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
+use crate::peripherals::mic_capture;
 use crate::peripherals::power::Axp2101Power;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
 use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
@@ -358,9 +360,17 @@ async fn main(_spawner: Spawner) -> ! {
     // clearing the whole overflow band. (Trimming the RECLAIMED pool CANNOT help:
     // it lives in dram2_seg at 0x4086E610.., ABOVE the stack ceiling, so its size
     // never moves _bss_end — measured: a 56→48KB trim dropped total .bss 8KB in
-    // `size` but left _stack_end frozen.) Follow-up v0.5.1: box the session's
-    // socket buffers so the future leaves .bss and the main pool can be restored.
-    esp_alloc::heap_allocator!(size: 228 * 1024);
+    // `size` but left _stack_end frozen.) Follow-up: box the session/voice socket
+    // buffers so those futures leave .bss and the main pool can be restored.
+    //
+    // Voice-wire (#42/#28): the shared mic_capture adds ~14KB .bss (MIC_RING 8KB
+    // StaticCell + MIC_CH channel + the capture-task future), which dropped the
+    // gap-stack 51.6KB→37.9KB — under the 46KB guardrail (would fire at boot; the
+    // #59 stack-floor tripwire caught it at measure-time). Trim the MAIN pool
+    // 228KB→214KB to lower _bss_end ~14KB → stack back to ~51.6KB (v0.5.1 glass-
+    // proven). 214KB still leaves ~54KB spare above the 51KB fb (#35 intact); the
+    // reclaimed pool + reviewed mic buffers are untouched.
+    esp_alloc::heap_allocator!(size: 214 * 1024);
     // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
     // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
     // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
@@ -431,9 +441,9 @@ async fn main(_spawner: Spawner) -> ! {
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(80))
         .with_mode(SpiMode::_0);
-    let (rx_buf, rx_desc, tx_buf, tx_desc) = dma_buffers!(8000);
-    let dma_rx = DmaRxBuf::new(rx_desc, rx_buf).unwrap();
-    let dma_tx = DmaTxBuf::new(tx_desc, tx_buf).unwrap();
+    // Raw SpiDma (no SpiDmaBus wrapper): QspiBus owns a single TX DmaTxBuf and
+    // drives non-blocking DMA flushes itself (see drivers/qspi_bus.rs). No RX
+    // buffer is needed — the panel is write-only.
     let spi = Spi::new(peripherals.SPI2, spi_config)
         .expect("SPI failed")
         .with_sck(peripherals.GPIO0)
@@ -441,8 +451,7 @@ async fn main(_spawner: Spawner) -> ! {
         .with_sio1(peripherals.GPIO2)
         .with_sio2(peripherals.GPIO3)
         .with_sio3(peripherals.GPIO4)
-        .with_dma(peripherals.DMA_CH0)
-        .with_buffers(dma_rx, dma_tx);
+        .with_dma(peripherals.DMA_CH0);
     let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
     let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
     let mut display = Co5300Display::new(QspiBus::new(spi, cs), reset);
@@ -528,22 +537,57 @@ async fn main(_spawner: Spawner) -> ! {
         .expect("I2S failed")
         .with_mclk(peripherals.GPIO19);
     static I2S_TX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
+    // BCLK/WS are driven from the RX side below (RX-master): on esp-hal 1.1.1 the C6 I2S
+    // RX is its own master with its own clock signals I2SI_BCK/I2SI_WS. The mic RX runs
+    // continuously from boot, keeping the ES8311 clocked; TX (beep) shares those physical
+    // pins and its DAC latches DOUT on them. TX keeps only its data-out line here.
     let mut i2s_tx = i2s_periph
         .i2s_tx
-        .with_bclk(peripherals.GPIO20)
-        .with_ws(peripherals.GPIO22)
-        .with_dout(peripherals.GPIO21)
+        .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
         .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
-    // TODO(#42 voice MC5, wiring-wave C2 — DEFERRED): `i2s_periph.i2s_rx` is
-    // still available here (partial move; tx took i2s_tx). Wire it per nebula's
-    // MC5 snippet: `i2s_periph.i2s_rx.with_din(GPIO23).build(I2S_RX_DESC…)`
-    // (BLOCKING mode), MIC_RING/MIC_CH StaticCells, `spawner.spawn(
-    // mic_capture_task(i2s_rx, MIC_RING.init(…), mic_ch.sender()))`, PTT via
-    // join(stream_utterance, watch_release) + enable_adc(MIC_PGA_GAIN) gating,
-    // and an AppState::Voice launcher tile → voice.slint (already merged, inert).
-    // Deferred: needs nebula's exact snippet (offline until ~16:20) — not safe to
-    // author solo unverified. mic_capture.rs / voice_stt.rs / voice.slint are on
-    // main, inert, ready to wire.
+    // === I2S RX for mic capture — the SINGLE shared owner (#42 voice + #28 meter) ===
+    // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx).
+    // ROOT-CAUSE FIX (mic read floor / zero usable PCM): the C6 I2S RX is master
+    // with its OWN clock signals I2SI_BCK / I2SI_WS (esp-hal 1.1.1 master.rs:
+    // bclk_rx_signal=I2SI_BCK @2231, ws_rx_signal=I2SI_WS @2241) — NOT the TX
+    // signals (I2SO_BCK/I2SO_WS) routed above — and set_rx_clock (@2029) enables a
+    // separate rx clock module. So RX must drive BCLK/WS itself; otherwise the
+    // ES8311 is unclocked whenever TX (beep) is idle → its ADC never shifts data
+    // out → the RX DMA ring only ever sees a static line → the meter floors. We
+    // therefore route BCLK (GPIO20) + WS (GPIO22) + DIN (GPIO23) on the RX builder.
+    // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
+    // mic_capture_task drives it via read_dma_circular + poll. This is the ONLY
+    // place I2S0/DMA_CH1 is claimed — both the voice PTT stream and the SoundLevel
+    // meter subscribe to MIC_CH, never re-owning I2S.
+    //
+    // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
+    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds
+    // its walk from chain.last() expecting last.next → first; a padded array (we had
+    // 8, copied from the one-shot TX side) leaves trailing EMPTY descriptors whose
+    // next=null, so the first available() poll derefs null. descriptor_count() gives
+    // the exact count (3 for an 8KB ring @ CHUNK_SIZE=4092) → last is the real wrap.
+    const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
+        mic_capture::MIC_RING_LEN,
+        esp_hal::dma::CHUNK_SIZE,
+        true, // circular
+    );
+    static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
+    let i2s_rx = i2s_periph
+        .i2s_rx
+        .with_bclk(peripherals.GPIO20) // RX master → ES8311 BCLK
+        .with_ws(peripherals.GPIO22)   // RX master → ES8311 WS/LRCK
+        .with_din(peripherals.GPIO21)  // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
+        .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
+    // Mic PCM channel (capture task → consumers) + the DMA capture ring.
+    // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.
+    static MIC_CH: mic_capture::MicChannel = mic_capture::MicChannel::new();
+    static MIC_RING: StaticCell<[u8; mic_capture::MIC_RING_LEN]> = StaticCell::new();
+    let mic_ring = MIC_RING.init([0u8; mic_capture::MIC_RING_LEN]);
+    _spawner.spawn(
+        mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
+            .expect("mic_capture_task token"),
+    );
+    println!("[AUDIO] I2S RX (mic) ready on GPIO23");
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
@@ -798,6 +842,15 @@ async fn main(_spawner: Spawner) -> ! {
     let mut climate_running = false;
     // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
     let mut climate_pending: Option<ClimatePending> = None;
+    // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
+    // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
+    let mut meter_on = false;
+    let mut meter_peak = mic_dsp::DBFS_FLOOR;
+    // Voice PTT network-readiness latch: set true when a PTT press arrives before
+    // WiFi+DHCP are up (we show "Connecting…" state 5 instead of a doomed connect),
+    // cleared back to idle ("Hold to talk", state 0) the moment the link comes up.
+    // Only ever gates the Voice-page idle↔connecting display; never holds WiFi.
+    let mut voice_wait_ready = false;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -853,7 +906,9 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Wled
                 | AppState::Hunt
                 | AppState::Energy
-                | AppState::Climate => {
+                | AppState::Climate
+                | AppState::Voice
+                | AppState::Sound => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -1516,7 +1571,9 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Wled
             | AppState::Hunt
             | AppState::Energy
-            | AppState::Climate => {
+            | AppState::Climate
+            | AppState::Voice
+            | AppState::Sound => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1528,6 +1585,8 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Hunt
                         | AppState::Energy
                         | AppState::Climate
+                        | AppState::Voice
+                        | AppState::Sound
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1571,6 +1630,8 @@ async fn main(_spawner: Spawner) -> ! {
                 shell.set_hunt_open(app_state == AppState::Hunt);
                 shell.set_energy_open(app_state == AppState::Energy);
                 shell.set_climate_open(app_state == AppState::Climate);
+                shell.set_voice_open(app_state == AppState::Voice);
+                shell.set_mic_open(app_state == AppState::Sound);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
                 app_state = if shell.launcher_open() {
                     AppState::Launcher
@@ -1582,6 +1643,10 @@ async fn main(_spawner: Spawner) -> ! {
                     AppState::Energy
                 } else if shell.climate_open() {
                     AppState::Climate
+                } else if shell.voice_open() {
+                    AppState::Voice
+                } else if shell.mic_open() {
+                    AppState::Sound
                 } else {
                     AppState::Watchface
                 };
@@ -1660,6 +1725,28 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 // Climate back-chevron / right-swipe → dismiss + stop wanting it.
                 if shell.req.climate_closed.take() {
+                    // oracle-t9 flush-on-close: if the user tapped ± then left before
+                    // the 400ms debounce fired (sent_at still None), publish the
+                    // pending setpoint NOW so the adjustment isn't silently deferred
+                    // to the next Climate visit. (The session is still draining
+                    // cmd_rx this tick — it hasn't torn down yet.)
+                    if let Some(p) = climate_pending.as_ref() {
+                        if p.sent_at.is_none() {
+                            let obj = {
+                                let st = climate_state.lock().await;
+                                st.entities.get(p.id as usize).map(|(o, _)| o.clone())
+                            };
+                            if let Some(obj) = obj {
+                                let _ = climate_cmds.sender().try_send(
+                                    crate::net::mqtt_climate::ClimateCmd::SetTemp {
+                                        obj,
+                                        temp: p.temp,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    climate_pending = None; // optimistic state doesn't outlive the screen
                     climate_active = false;
                     shell.set_climate_open(false);
                     if app_state == AppState::Climate {
@@ -1672,9 +1759,14 @@ async fn main(_spawner: Spawner) -> ! {
                 // ended (Ok close or Err), closing the screen(s) frees WiFi, so it
                 // can never be stranded held.
                 let climate_session_want = climate_active || energy_active;
-                if climate_session_want {
+                // Voice also needs WiFi (STT upload) but NOT the MQTT session, so it
+                // widens the WiFi HOLD without touching the session start/stop. Keyed
+                // on app_state==Voice: leaving the screen drops it out of wifi_want →
+                // the release arm below frees WiFi + re-pins mesh (never stranded).
+                let wifi_want = climate_session_want || app_state == AppState::Voice;
+                if wifi_want {
                     wifi_on_request = true;
-                    if wifi_connected && !climate_running {
+                    if climate_session_want && wifi_connected && !climate_running {
                         climate_open.signal(());
                         climate_running = true;
                     }
@@ -1815,6 +1907,135 @@ async fn main(_spawner: Spawner) -> ! {
                         es.charging,
                     );
                     shell.set_energy_conn(conn);
+                }
+
+                // Voice push-to-talk: on the finger-down Slint reported
+                // (voice_ptt_pressed), stream the mic to the STT bridge while the
+                // button is HELD, then show the transcript on release.
+                //
+                // Release is detected off the PHYSICAL touch INT pin, not the Slint
+                // `ptt-released` callback: the loop is parked in the stream `.await`
+                // for the whole hold, so it can't dispatch Slint pointer events —
+                // the callback can't fire until we're already done. `voice_ptt_released`
+                // is drained here only to keep the cell from staling (advisory).
+                //
+                // join (NOT select): `MicPcmSource::next_chunk` returns 0 the instant
+                // `RECORDING` clears, so `stream_utterance` self-terminates on release,
+                // flushes the final HTTP chunk, and does the STT round-trip. `select`
+                // would cancel that mid-flush and drop the transcript.
+                let voice_pressed = shell.req.voice_ptt_pressed.take();
+                let _ = shell.req.voice_ptt_released.take();
+                // Network readiness for STT: WiFi associated AND DHCP landed (an IPv4
+                // config exists) — the exact precondition `socket.connect()` needs.
+                // Same snapshot the NTP burst gates on (line ~1261); both reads are
+                // non-blocking, so consulting them here NEVER parks the loop.
+                //
+                // This is the deadlock-safe seam: WiFi bring-up is driven by the loop's
+                // WiFi state machine (line ~1162), but `stream_utterance` is join-parked
+                // from INSIDE this loop for the entire PTT hold. If we awaited "WiFi up"
+                // inside the stream, the loop that raises WiFi could never run → wedge.
+                // So the link MUST be confirmed up BEFORE we enter the stream await.
+                let voice_net_ready = wifi_connected && stack.config_v4().is_some();
+                // Waiting-to-talk latch: flip "Connecting…" → "Hold to talk" the instant
+                // the link lands so the user knows they can now talk. Only ever touches
+                // the idle(0)/connecting(5) band — never a live listening/result/error.
+                if app_state == AppState::Voice && voice_wait_ready && voice_net_ready {
+                    shell.set_voice_state(0); // idle: "Hold to talk"
+                    voice_wait_ready = false;
+                    shell.request_redraw();
+                }
+                // PTT pressed before the link is up: a connect() here is the reported
+                // "connect failed" bug. Don't attempt — show "Connecting…" and latch.
+                // WiFi bring-up keeps running in the loop (we did NOT park in a stream),
+                // so a beat later the latch above flips to "Hold to talk" and the next
+                // press streams. No WiFi hold is added here → mesh-restore invariant
+                // (oracle-t10 inv-b) is untouched; the wifi_want block still owns it.
+                if app_state == AppState::Voice && voice_pressed && !voice_net_ready {
+                    shell.set_voice_state(5); // connecting (waiting for WiFi/DHCP)
+                    voice_wait_ready = true;
+                    shell.request_redraw();
+                }
+                if app_state == AppState::Voice && voice_pressed && voice_net_ready {
+                    use core::sync::atomic::Ordering;
+                    // Power the analog mic/ADC path, then arm the capture gate.
+                    let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
+                    // Flush any chunks left buffered by a prior utterance so stale
+                    // audio can't be prepended to this one, then arm + source.
+                    let rx = MIC_CH.receiver();
+                    while rx.try_receive().is_ok() {}
+                    mic_capture::RECORDING.store(true, Ordering::Relaxed);
+                    shell.set_voice_state(1); // listening
+                    let mut src = mic_capture::MicPcmSource::new(rx);
+
+                    // Release watcher: poll the INT pin (HIGH = no touch = finger up),
+                    // then clear RECORDING (ends the source) and flip to "sending".
+                    let watch_release = async {
+                        loop {
+                            if touch_int.is_high() {
+                                break;
+                            }
+                            Timer::after(Duration::from_millis(20)).await;
+                        }
+                        mic_capture::RECORDING.store(false, Ordering::Relaxed);
+                        shell.set_voice_state(2); // sending (STT round-trip in flight)
+                    };
+
+                    let (result, ()) =
+                        join(voice_stt::stream_utterance(stack, &mut src), watch_release).await;
+
+                    // Ensure the gate is down (belt-and-suspenders), then power the mic off.
+                    mic_capture::RECORDING.store(false, Ordering::Relaxed);
+                    let _ = audio_codec.disable_adc();
+
+                    match result {
+                        Ok(t) if !t.is_empty() => {
+                            shell.set_voice_transcript(t.as_str());
+                            shell.set_voice_state(3); // result
+                        }
+                        Ok(_) => {
+                            shell.set_voice_error(""); // → page's "No speech heard"
+                            shell.set_voice_state(4);
+                        }
+                        Err(e) => {
+                            shell.set_voice_error(e);
+                            shell.set_voice_state(4); // error
+                        }
+                    }
+                    shell.request_redraw(); // paint the transcript/error promptly
+                }
+
+                // #28 sound-level meter: drain the SHARED capture → dBFS + peak-hold
+                // on SoundLevel. Non-blocking (unlike the PTT flow, which parks the
+                // loop): update once per tick so the screen stays responsive. Arms
+                // the ADC + METER gate on entry, tears them down on close so the
+                // codec draws ~0mA when the meter isn't open.
+                if app_state == AppState::Sound {
+                    if !meter_on {
+                        let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
+                        mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
+                        meter_peak = mic_dsp::DBFS_FLOOR;
+                        meter_on = true;
+                    }
+                    // Drain all buffered chunks; rms the newest for a live meter.
+                    let rx = MIC_CH.receiver();
+                    let mut latest: Option<f32> = None;
+                    while let Ok(chunk) = rx.try_receive() {
+                        let n = chunk.len() / 2;
+                        let mut samples = [0i16; mic_capture::MONO_CHUNK / 2];
+                        for i in 0..n {
+                            samples[i] = i16::from_le_bytes([chunk[2 * i], chunk[2 * i + 1]]);
+                        }
+                        latest = Some(mic_dsp::rms_dbfs(&samples[..n]));
+                    }
+                    if let Some(dbfs) = latest {
+                        // Peak-hold with slow decay so it tracks down after a transient.
+                        meter_peak = (meter_peak - 0.5).max(dbfs).max(mic_dsp::DBFS_FLOOR);
+                        shell.set_mic_level(dbfs, meter_peak);
+                    }
+                } else if meter_on {
+                    mic_capture::METER.store(false, core::sync::atomic::Ordering::Relaxed);
+                    let _ = audio_codec.disable_adc();
+                    meter_on = false;
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1985,6 +2206,35 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         wifi_on_request = true;
                         app_state = AppState::Climate;
+                    } else if target == AppState::Voice {
+                        // Voice-to-text (#42): a Slint overlay (scene-resident, no
+                        // fb). Open in idle; the PTT flow below drives capture +
+                        // transcript. Reset to idle each open so a prior transcript
+                        // or error doesn't linger.
+                        shell.set_voice_state(0);
+                        shell.set_voice_transcript("");
+                        shell.set_voice_error("");
+                        voice_wait_ready = false; // drop any stale "Connecting…" latch
+                        shell.set_voice_open(true);
+                        // STT is WiFi-dependent (HTTP to the LAN bridge). Hold WiFi
+                        // up like climate/energy: raise it here, release + restore
+                        // mesh on close. The hold is keyed on app_state==Voice in the
+                        // WiFi-want block below, so leaving the screen (right-swipe →
+                        // reconcile → app_state=Watchface) deterministically frees it
+                        // → never strands the mesh. session_holds_wifi guards a manual
+                        // WiFi-on (toggle then Voice) so we don't drop it on close.
+                        if !wifi_on_request {
+                            session_holds_wifi = true; // we're raising the hold
+                        }
+                        wifi_on_request = true;
+                        app_state = AppState::Voice;
+                    } else if target == AppState::Sound {
+                        // Sound-level meter (#28): a Slint overlay (scene-resident,
+                        // no fb). NO WiFi — rms_dbfs is local. The per-tick meter
+                        // block below arms the ADC + METER gate on entry and drains
+                        // MIC_CH → rms_dbfs → dBFS/peak; tears them down on close.
+                        shell.set_mic_open(true);
+                        app_state = AppState::Sound;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -2075,6 +2325,8 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Hunt
                         | AppState::Energy
                         | AppState::Climate
+                        | AppState::Voice
+                        | AppState::Sound
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);

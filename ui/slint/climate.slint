@@ -1,4 +1,4 @@
-import { Theme, PageTitle } from "theme.slint";
+import { Theme, PageTitle, BackChevron } from "theme.slint";
 
 // HA Climate control screen (design spec §C). Standalone overlay — renders
 // through the resident scene like WLED/Energy (no framebuffer). Two views:
@@ -91,18 +91,13 @@ export component ClimateOverlay {
 
     PageTitle { title: "CLIMATE"; }
 
-    // Back chevron: in detail → back to list; in list → close (return to mesh).
-    Rectangle {
-        x: 8px; y: 6px; width: 78px; height: 64px;  // big finger hit-area (#40 discipline)
-        Text {
-            x: 8px; y: (parent.height - self.height) / 2;
-            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
-        }
-        TouchArea {
-            clicked => {
-                if (root.selected-index >= 0) { root.selected-index = -1; }
-                else { root.closed(); }
-            }
+    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // 78x64 placement (fixes the old climate x8/y6 vs others x14/y8 drift; P3).
+    // In detail → back to list; in list → close (return to mesh).
+    BackChevron {
+        clicked => {
+            if (root.selected-index >= 0) { root.selected-index = -1; }
+            else { root.closed(); }
         }
     }
 
@@ -217,7 +212,10 @@ export component ClimateOverlay {
 
         // setpoint stepper: −  [ NN° ]  +
         minus := Rectangle {
-            x: 40px; y: 262px; width: 64px; height: 64px; border-radius: 32px;
+            // 72x72 finger target (grows symmetrically around the same centre as
+            // the old 64x64, so the setpoint stays aligned) — meets the enlarged
+            // tap-target bar set for the WIFI/BLE/MESH dots (glass, not pixels).
+            x: 40px; y: 258px; width: 72px; height: 72px; border-radius: 36px;
             background: mta.pressed ? Theme.line : Theme.panel;
             border-width: 1px; border-color: mta.pressed ? Theme.accent : Theme.line;
             animate background, border-color { duration: 120ms; easing: ease-out; }
@@ -235,7 +233,8 @@ export component ClimateOverlay {
             color: Theme.accent; font-size: 46px; font-weight: 700;
         }
         plus := Rectangle {
-            x: parent.width - self.width - 40px; y: 262px; width: 64px; height: 64px; border-radius: 32px;
+            // 72x72 finger target (matches `minus`) — meets the enlarged tap bar.
+            x: parent.width - self.width - 40px; y: 258px; width: 72px; height: 72px; border-radius: 36px;
             background: pta.pressed ? Theme.line : Theme.panel;
             border-width: 1px; border-color: pta.pressed ? Theme.accent : Theme.line;
             animate background, border-color { duration: 120ms; easing: ease-out; }
