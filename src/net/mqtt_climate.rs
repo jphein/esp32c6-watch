@@ -1,12 +1,15 @@
-//! Bidirectional MQTT 3.1.1 session for Home Assistant climate control.
+//! Bidirectional MQTT 3.1.1 session for Home Assistant climate + energy.
 //!
 //! Companion to [`crate::net::mqtt_ha`] (which stays a fire-and-forget publish
 //! burst for telemetry). This module holds an **open, long-lived** session for
-//! as long as the Climate screen is up: it SUBSCRIBEs to the bridge's state +
-//! roster topics, reacts to inbound retained/state PUBLISHes by upserting a
-//! shared [`ClimateState`], PUBLISHes setpoint/mode commands the UI queues, and
-//! keeps the link alive with PINGREQ. Hand-rolled for the same reasons as
-//! `mqtt_ha` (no crate wants the watch's short-radio-window model).
+//! as long as the Climate or Energy screen is up: it SUBSCRIBEs to the bridge's
+//! climate state + roster topics AND the retained `watch/energy/state` snapshot,
+//! reacts to inbound PUBLISHes by upserting a shared [`ClimateState`] /
+//! replacing a shared [`EnergyState`], PUBLISHes setpoint/mode commands the
+//! Climate UI queues, and keeps the link alive with PINGREQ. One CONNECT +
+//! keepalive feeds both screens (the "same bidirectional channel"). Energy is
+//! consume-only. Hand-rolled for the same reasons as `mqtt_ha` (no crate wants
+//! the watch's short-radio-window model).
 //!
 //! ## Reuse
 //! The low-level MQTT framing primitives live in [`mqtt_ha`] and are reused
@@ -41,10 +44,11 @@
 //! session as an embassy task or drives it from the Climate-screen branch:
 //! ```ignore
 //! static CLIMATE_STATE: StaticCell<ClimateStateMutex> = StaticCell::new();
+//! static ENERGY_STATE:  StaticCell<EnergyStateMutex>  = StaticCell::new();
 //! static CLIMATE_CMDS:  StaticCell<ClimateCmdChannel> = StaticCell::new();
 //! static CLIMATE_CLOSE: StaticCell<CloseSignal>       = StaticCell::new();
-//! // ... init, then:
-//! let res = run_climate_session(stack, state, cmds.receiver(), close).await;
+//! // ... init, then (one session feeds both the Climate and Energy screens):
+//! let res = run_climate_session(stack, state, energy, cmds.receiver(), close).await;
 //! // on return (Ok or Err) main.rs restores RadioMode -> mesh (never stranded).
 //! ```
 
@@ -92,6 +96,50 @@ pub type ClimateCmdSender = Sender<'static, CriticalSectionRawMutex, ClimateCmd,
 /// Screen-close signal — fire it to end the session with a clean DISCONNECT.
 pub type CloseSignal = Signal<CriticalSectionRawMutex, ()>;
 
+/// Live HA energy snapshot consumed from retained `watch/energy/state` (v0.4.1).
+/// Small, `Copy`, behind the same [`Mutex`] pattern as [`ClimateState`]. Numeric
+/// fields are `Option` so the UI can distinguish "no data yet" from a real 0.
+///
+/// **PROVISIONAL contract** — field names/units pending confirmation from
+/// luna-website (owner of the `watch/energy/state` JSON). See [`parse_energy`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnergyState {
+    /// Home battery state of charge, 0..=100 %.
+    pub battery_pct: Option<u8>,
+    /// Solar/PV production, watts (≥ 0).
+    pub solar_w: Option<i32>,
+    /// Grid flow, watts, **signed: + = importing, − = exporting**.
+    pub grid_w: Option<i32>,
+    /// Battery is charging.
+    pub charging: bool,
+}
+
+impl EnergyState {
+    pub const fn new() -> Self {
+        Self {
+            battery_pct: None,
+            solar_w: None,
+            grid_w: None,
+            charging: false,
+        }
+    }
+
+    /// True once at least one numeric field has been received (UI "connecting…"
+    /// vs live gate).
+    pub fn has_data(&self) -> bool {
+        self.battery_pct.is_some() || self.solar_w.is_some() || self.grid_w.is_some()
+    }
+}
+
+impl Default for EnergyState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Shared energy snapshot — session replaces it, the Energy screen reads it.
+pub type EnergyStateMutex = Mutex<CriticalSectionRawMutex, EnergyState>;
+
 /// A command the UI queues for the session to PUBLISH to
 /// `watch/climate/<obj>/set`. `HvacMode` is `climate-model`'s own enum (no
 /// parallel type — carried straight through to `encode_set_mode`).
@@ -128,6 +176,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Once a frame's type byte arrives, its remainder must land within this — a
 /// broker that dribbles half a frame can't stall the session.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Persistent-phase writes (PINGREQ, command publish, DISCONNECT) run after the
+/// socket idle timeout is cleared — they must not be able to block forever. A
+/// broker that completes the handshake then stops reading (TCP zero-window)
+/// would otherwise wedge a write inside a `select4` arm, so we never return to
+/// re-check `DEAD_TIMEOUT` and the WiFi radio is held → mesh stranded. Bounding
+/// each write makes a stuck write error out → session returns → caller restores
+/// mesh. (oracle-t10-review)
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Largest inbound frame body we buffer. A state payload is ~150 B and the
 /// roster ~200 B; anything larger is treated as a protocol error (bounded,
@@ -137,6 +193,9 @@ const INBOUND_CAP: usize = 1024;
 // Topics (kept as plain consts — the bridge contract from spec §A/§B).
 const STATE_WILDCARD: &str = "watch/climate/+/state";
 const ROSTER_TOPIC: &str = "watch/climate/roster";
+/// Retained energy snapshot published by luna-website's HA energy bridge
+/// (v0.4.1). Consume-only (no watch→HA energy commands).
+const ENERGY_TOPIC: &str = "watch/energy/state";
 const STATE_PREFIX: &str = "watch/climate/";
 const STATE_SUFFIX: &str = "/state";
 const SET_PREFIX: &str = "watch/climate/";
@@ -153,13 +212,21 @@ const TOPIC_CAP: usize = 96;
 /// never stranded by this function (structural guarantee: no early return
 /// leaves the radio held).
 ///
+/// This is the unified HA consume+command session: it subscribes the climate
+/// topics AND `watch/energy/state`, so whichever screen (Climate or Energy) is
+/// open, both shared states stay live off one CONNECT/keepalive (the "same
+/// bidirectional channel" the integrator was promised). Energy is consume-only
+/// (no commands); commands only ever flow from the Climate UI via `cmd_rx`.
+///
 /// - `stack`   — the (already-associated) embassy-net stack; WiFi must be up.
-/// - `state`   — shared roster the session upserts as state PUBLISHes arrive.
-/// - `cmd_rx`  — UI → session command queue (setpoint/mode).
+/// - `state`   — shared climate roster; upserted as climate state PUBLISHes arrive.
+/// - `energy`  — shared [`EnergyState`]; replaced as `watch/energy/state` arrives.
+/// - `cmd_rx`  — UI → session command queue (setpoint/mode; Climate only).
 /// - `close`   — fire to request a clean session shutdown.
 pub async fn run_climate_session(
     stack: Stack<'static>,
     state: &'static ClimateStateMutex,
+    energy: &'static EnergyStateMutex,
     cmd_rx: ClimateCmdReceiver,
     close: &'static CloseSignal,
 ) -> Result<(), Error> {
@@ -224,22 +291,30 @@ pub async fn run_climate_session(
                     Err(_) => return Err("frame read timeout"),
                 };
                 match type_byte & 0xF0 {
-                    0x30 => handle_publish(type_byte, &inbuf[..n], state).await,
+                    0x30 => handle_publish(type_byte, &inbuf[..n], state, energy).await,
                     0xD0 => {} // PINGRESP — last_rx already refreshed above
                     _ => {}    // unexpected control packet — ignore
                 }
             }
 
             // --- outbound command from the UI ---
+            // Bounded write: a broker that stops reading (zero-window) must not
+            // wedge this and strand the radio (oracle-t10-review).
             Either4::Second(cmd) => {
-                send_command(&mut socket, &cmd).await?;
+                match with_timeout(WRITE_TIMEOUT, send_command(&mut socket, &cmd)).await {
+                    Ok(r) => r?,
+                    Err(_) => return Err("command write timeout (broker not reading)"),
+                }
                 next_ping = Instant::now() + PING_INTERVAL; // we just sent
             }
 
-            // --- screen closed: clean DISCONNECT ---
+            // --- screen closed: clean DISCONNECT (best-effort, never blocking) ---
             Either4::Third(()) => {
-                let _ = write_all(&mut socket, &[0xE0, 0x00]).await; // DISCONNECT
-                let _ = socket.flush().await;
+                let _ = with_timeout(WRITE_TIMEOUT, async {
+                    let _ = write_all(&mut socket, &[0xE0, 0x00]).await; // DISCONNECT
+                    let _ = socket.flush().await;
+                })
+                .await;
                 socket.close();
                 println!("[CLIM] session closed");
                 return Ok(());
@@ -250,7 +325,11 @@ pub async fn run_climate_session(
                 if Instant::now() - last_rx > DEAD_TIMEOUT {
                     return Err("keepalive timeout (broker silent)");
                 }
-                write_all(&mut socket, &[0xC0, 0x00]).await?; // PINGREQ
+                // Bounded PINGREQ write (see WRITE_TIMEOUT / oracle-t10-review).
+                match with_timeout(WRITE_TIMEOUT, write_all(&mut socket, &[0xC0, 0x00])).await {
+                    Ok(r) => r?,
+                    Err(_) => return Err("PINGREQ write timeout (broker not reading)"),
+                }
                 next_ping = Instant::now() + PING_INTERVAL;
             }
         }
@@ -260,7 +339,7 @@ pub async fn run_climate_session(
 // --- SUBSCRIBE + SUBACK -----------------------------------------------------
 
 async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
-    let topics = [STATE_WILDCARD, ROSTER_TOPIC];
+    let topics = [STATE_WILDCARD, ROSTER_TOPIC, ENERGY_TOPIC];
 
     // remaining length = 2 (packet id) + sum(2-byte len + topic + 1-byte QoS)
     let mut remaining = 2usize;
@@ -301,7 +380,12 @@ async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
 /// the QoS bits (we subscribe QoS 0, but a QoS>0 delivery is handled defensively
 /// by skipping its 2-byte packet id). All slicing is checked — a malformed frame
 /// is silently skipped, never a panic.
-async fn handle_publish(type_byte: u8, body: &[u8], state: &ClimateStateMutex) {
+async fn handle_publish(
+    type_byte: u8,
+    body: &[u8],
+    state: &ClimateStateMutex,
+    energy: &EnergyStateMutex,
+) {
     if body.len() < 2 {
         return;
     }
@@ -329,6 +413,12 @@ async fn handle_publish(type_byte: u8, body: &[u8], state: &ClimateStateMutex) {
             }
             // parse_state == None (malformed / empty retained-clear) -> skip.
         }
+        Some(TopicKind::Energy) => {
+            if let Some(next) = parse_energy(payload) {
+                *energy.lock().await = next;
+            }
+            // parse_energy == None (malformed / empty) -> keep last-known state.
+        }
         Some(TopicKind::Roster) => {
             // Belt-and-suspenders per spec §A: the wildcard state subscription
             // is authoritative for what renders, so the roster is informational
@@ -341,6 +431,7 @@ async fn handle_publish(type_byte: u8, body: &[u8], state: &ClimateStateMutex) {
 
 enum TopicKind<'a> {
     State(&'a str),
+    Energy,
     Roster,
 }
 
@@ -349,6 +440,9 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
     let t = core::str::from_utf8(topic).ok()?;
     if t == ROSTER_TOPIC {
         return Some(TopicKind::Roster);
+    }
+    if t == ENERGY_TOPIC {
+        return Some(TopicKind::Energy);
     }
     let mid = t.strip_prefix(STATE_PREFIX)?.strip_suffix(STATE_SUFFIX)?;
     if mid.is_empty() || mid.contains('/') {
@@ -422,4 +516,75 @@ async fn read_remaining_len(socket: &mut TcpSocket<'_>) -> Result<usize, Error> 
         mult *= 128;
     }
     Err("malformed remaining length")
+}
+
+// --- energy payload parsing (v0.4.1) ---------------------------------------
+
+/// Parse a `watch/energy/state` retained JSON payload into an [`EnergyState`].
+///
+/// Same untrusted-input discipline as the climate parse: bounded, panic-free,
+/// checked slicing only. Returns `None` on empty / non-UTF-8 / no recognizable
+/// numeric field (caller keeps the last-known state). Number parsing is
+/// float-tolerant (`87` or `87.0`); unknown extra fields are ignored.
+///
+/// **PROVISIONAL** — keys `battery_pct` / `solar_w` / `grid_w` / `charging` and
+/// the `grid_w` +import/−export sign convention are the scaffold contract,
+/// pending luna-website's confirmation. Adjust the four `json_*` keys / casts
+/// below to match; the rest of the pipeline is contract-agnostic.
+pub fn parse_energy(bytes: &[u8]) -> Option<EnergyState> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let s = core::str::from_utf8(bytes).ok()?;
+
+    let battery_pct = json_num(s, "battery_pct").map(|v| v.clamp(0.0, 100.0) as u8);
+    let solar_w = json_num(s, "solar_w").map(|v| v as i32);
+    let grid_w = json_num(s, "grid_w").map(|v| v as i32);
+    let charging = json_bool(s, "charging").unwrap_or(false);
+
+    // Require at least one numeric field so a stray/empty object doesn't wipe
+    // a good last-known snapshot.
+    if battery_pct.is_none() && solar_w.is_none() && grid_w.is_none() {
+        return None;
+    }
+
+    Some(EnergyState {
+        battery_pct,
+        solar_w,
+        grid_w,
+        charging,
+    })
+}
+
+/// Slice starting just after `"<key>":` (whitespace-trimmed). Bounded key buffer.
+fn json_value_after<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let mut needle: String<40> = String::new();
+    needle.push('"').ok()?;
+    needle.push_str(key).ok()?;
+    needle.push('"').ok()?;
+    let idx = s.find(needle.as_str())?;
+    let after_key = &s[idx + needle.len()..];
+    let colon = after_key.find(':')?;
+    Some(after_key[colon + 1..].trim_start())
+}
+
+/// Extract a numeric value for `"<key>":<number>` (accepts int/float, signed).
+fn json_num(s: &str, key: &str) -> Option<f32> {
+    let after = json_value_after(s, key)?;
+    let end = after
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E'))
+        .unwrap_or(after.len());
+    after[..end].parse::<f32>().ok()
+}
+
+/// Extract a boolean value for `"<key>":true|false`.
+fn json_bool(s: &str, key: &str) -> Option<bool> {
+    let after = json_value_after(s, key)?;
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
