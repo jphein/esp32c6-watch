@@ -1,4 +1,4 @@
-import { Theme } from "theme.slint";
+import { Theme, PageTitle } from "theme.slint";
 
 // PROTOTYPE (direction check) — categorised launcher with drawn vector icons +
 // big finger tiles. Icons are lightweight Slint shapes (no bitmaps) so they cost
@@ -21,7 +21,7 @@ component AppIcon {
         Rectangle { x: 30px; y: 26px; width: 12px; height: 12px; border-radius: 3px; background: root.tint; }
         Rectangle { x: 30px; y: 13px; width: 12px; height: 12px; border-radius: 3px; background: root.tint; }
         Rectangle { x: 30px; y: 2px;  width: 13px; height: 13px; border-radius: 4px; background: root.tint;
-            Rectangle { x: 8px; y: 3px; width: 3px; height: 3px; border-radius: 1.5px; background: #05100a; } }
+            Rectangle { x: 8px; y: 3px; width: 3px; height: 3px; border-radius: 1.5px; background: Theme.on-accent; } }
     }
     // 2 — 2048: a 2x2 tile grid.
     if root.id == 2: Rectangle {
@@ -56,7 +56,7 @@ component AppIcon {
     if root.id == 4: Rectangle {
         Rectangle { x: 7px; y: 10px; width: 28px; height: 28px; border-radius: 14px; background: root.tint;
             Rectangle { x: 4px; y: 12px; width: 12px; height: 9px; border-radius: 4px; background: root.tint.with-alpha(0.45); } // wing
-            Rectangle { x: 19px; y: 7px; width: 4px; height: 4px; border-radius: 2px; background: #05100a; } // eye
+            Rectangle { x: 19px; y: 7px; width: 4px; height: 4px; border-radius: 2px; background: Theme.on-accent; } // eye
         }
         Rectangle { x: 34px; y: 21px; width: 7px; height: 5px; border-radius: 1px; background: Theme.warm; } // beak
     }
@@ -87,7 +87,7 @@ component AppIcon {
     // 9 — WLED: a lightbulb (glass globe + filament dot + tapering screw base).
     if root.id == 9: Rectangle {
         Rectangle { x: 11px; y: 3px;  width: 24px; height: 24px; border-radius: 12px; background: root.tint; }
-        Rectangle { x: 20px; y: 12px; width: 6px;  height: 6px;  border-radius: 3px; background: #05100a; }
+        Rectangle { x: 20px; y: 12px; width: 6px;  height: 6px;  border-radius: 3px; background: Theme.on-accent; }
         Rectangle { x: 16px; y: 26px; width: 14px; height: 5px;  border-radius: 1px; background: root.tint.with-alpha(0.7); }
         Rectangle { x: 18px; y: 32px; width: 10px; height: 4px;  border-radius: 1px; background: root.tint.with-alpha(0.5); }
         Rectangle { x: 20px; y: 37px; width: 6px;  height: 3px;  border-radius: 1px; background: root.tint.with-alpha(0.4); }
@@ -156,15 +156,15 @@ export component LauncherOverlay {
     // Scrim (watchface faintly behind).
     Rectangle { width: 100%; height: 100%; background: #05080aF2; }
 
-    Text {
-        x: (parent.width - self.width) / 2; y: 22px;
-        text: "APPS"; color: Theme.ink; font-size: 22px; font-weight: 600; letter-spacing: 4px;
-    }
+    // Title uses the shared PageTitle convention (#31) — same y/size/letter-
+    // spacing as every other overlay's heading; the Flickable drops to y96 to
+    // clear it (matching the climate/list content start).
+    PageTitle { title: "APPS"; }
 
     Flickable {
-        x: 22px; y: 58px;
+        x: 22px; y: 96px;
         width: parent.width - 44px;
-        height: parent.height - 74px;
+        height: parent.height - 112px;
         // Content = GAMES header + 4 tile rows + SYSTEM header + 2 tile rows + gaps.
         viewport-height: 840px;
         VerticalLayout {
@@ -194,7 +194,7 @@ export component LauncherOverlay {
             HorizontalLayout {
                 spacing: 12px;
                 AppTile { name: "Settings";    accent: #c0ffc0; icon-id: 6; idx: 6; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "WLED";        accent: #ffd060; icon-id: 9; idx: 7; launch(i) => { root.launch-app(i); } }
+                AppTile { name: "WLED";        accent: Theme.warm; icon-id: 9; idx: 7; launch(i) => { root.launch-app(i); } }
             }
             HorizontalLayout {
                 spacing: 12px;
