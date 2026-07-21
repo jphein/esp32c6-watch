@@ -236,6 +236,39 @@ fn log_heap(tag: &str) {
     );
 }
 
+// ── DEBUG (crash #59): main gap-stack paint + high-watermark probe (lucid's
+// discriminator). Paint the unused gap-stack once at boot; scan it each tick to
+// see how deep the WiFi-connect burst drives the stack. free_min==0 ⇒ the stack
+// reached _stack_end (overflow into the WPA/MAC globals below it). THROWAWAY.
+unsafe extern "C" {
+    static _stack_start: u8;
+    static _stack_end: u8;
+}
+const STACK_PAINT: u32 = 0xC5C5_C5C5;
+
+#[inline(never)]
+fn paint_stack() {
+    let end = unsafe { core::ptr::addr_of!(_stack_end) as usize };
+    let sp: usize;
+    unsafe { core::arch::asm!("mv {}, sp", out(reg) sp) };
+    let mut a = end;
+    while a < sp.saturating_sub(1024) {
+        unsafe { (a as *mut u32).write_volatile(STACK_PAINT) };
+        a += 4;
+    }
+}
+
+/// (free_min_bytes, used_max_bytes). free_min == 0 ⇒ overflow reached _stack_end.
+fn stack_watermark() -> (usize, usize) {
+    let end = unsafe { core::ptr::addr_of!(_stack_end) as usize };
+    let start = unsafe { core::ptr::addr_of!(_stack_start) as usize };
+    let mut a = end;
+    while a < start && unsafe { (a as *const u32).read_volatile() } == STACK_PAINT {
+        a += 4;
+    }
+    (a - end, start - a)
+}
+
 /// CFG key `R` boot debounce (reference main.rs REBOOT_DEBOUNCE_MS): within
 /// this window a retained/re-armed reboot command is consumed but ignored,
 /// so a stale `R` can never reboot-loop the watch.
@@ -344,6 +377,7 @@ async fn main(_spawner: Spawner) -> ! {
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    paint_stack(); // DEBUG #59: fill the gap-stack so the watermark scan works
 
     println!("=== smol watch v2 (C6 AMOLED, Embassy) ===");
     let delay = Delay::new();
@@ -535,8 +569,10 @@ async fn main(_spawner: Spawner) -> ! {
     // === Radio: WiFi STA + BLE, both OFF at boot (see the S3 power notes) ===
     // In esp-radio 0.18 `set_config` is what starts the controller, so we
     // build the station config here but only apply it on the first toggle.
+    log_heap("pre-wifi"); // DEBUG #59: heap right before the WiFi driver alloc
     let (mut wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("WiFi init failed");
+    log_heap("post-wifi"); // DEBUG #59: heap after — RX/TX pool now allocated
     let ble_connector =
         BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
     // trouble-host GATT server: wrap the HCI transport and hand it to the
@@ -876,6 +912,13 @@ async fn main(_spawner: Spawner) -> ! {
         let dt_ms = (now - last_frame).as_millis() as u32;
         last_frame = now;
 
+        // DEBUG #59: stack high-watermark + heap each tick (the connect burst
+        // crashes early, so this is bounded). free_min==0 ⇒ stack hit _stack_end.
+        {
+            let (sf, su) = stack_watermark();
+            println!("[STACKWM] free_min={} used_max={} heap_free={}", sf, su, esp_alloc::HEAP.free());
+        }
+
         // === IMU gating ===
         let need_imu = screen_state >= 2
             && (gyro_enabled
@@ -1094,6 +1137,10 @@ async fn main(_spawner: Spawner) -> ! {
                 {
                     Ok(Ok(_)) => {
                         println!("[WIFI] connected");
+                        {
+                            let (sf, su) = stack_watermark();
+                            println!("[STACKWM] @connected free_min={} used_max={} heap_free={}", sf, su, esp_alloc::HEAP.free());
+                        }
                         wifi_connect_attempts = 0;
                         wifi_connected = true;
                         if settings_connect_pending {
