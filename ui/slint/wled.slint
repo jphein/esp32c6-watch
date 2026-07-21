@@ -1,4 +1,4 @@
-import { Theme, PageTitle } from "theme.slint";
+import { Theme, PageTitle, BackChevron } from "theme.slint";
 
 // WLED WiZmote remote page (smol #25 port, UI half). Standalone overlay-style
 // component, like SoundLevel / VoicePage. Big finger tiles; tapping one fires
@@ -43,16 +43,10 @@ export component WledRemote {
 
     PageTitle { title: "WLED"; }
 
-    // Back chevron (top-left, clear of the corner arc). Also closable by a
-    // Right-swipe (handled in slint_shell::handle_touch, like the launcher).
-    back := TouchArea {
-        x: 14px; y: 8px; width: 78px; height: 64px;  // 78x64 finger hit-area (P2-B, uniform w/ climate)
-        clicked => { root.close(); }
-        Text {
-            x: 8px; y: (parent.height - self.height) / 2;
-            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
-        }
-    }
+    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // 78x64 placement so overlays never drift. Right-swipe also closes
+    // (slint_shell::handle_touch, like the launcher).
+    BackChevron { clicked => { root.close(); } }
 
     VerticalLayout {
         x: 22px;
