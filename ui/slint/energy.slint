@@ -2,21 +2,29 @@ import { Theme, PageTitle } from "theme.slint";
 
 // Home energy screen — shows YOUR HOUSE's battery / solar / grid (not the
 // watch's own battery, which lives in the chrome pill). Standalone overlay-style
-// page like SoundLevel / VoicePage / WledRemote. Pure presentation; the data
-// path (a BATT/energy ESP-NOW frame + MQTT-retained consume via HA) is a
-// deferred net task — NOT wired here.
+// page like SoundLevel / VoicePage / WledRemote. Pure presentation; the live
+// values arrive over MQTT from the Node-RED energy bridge and are pushed in by
+// the loop (main.rs) — this file does not touch the network.
 //
-// Interface (for the data wiring later):
-//   in property <int>  battery-pct : home battery 0..100
-//   in property <int>  solar-w     : solar production, watts (>= 0)
-//   in property <int>  grid-w      : grid power, watts — SIGNED: >0 importing
-//                                     (buying), <0 exporting (selling)
-//   in property <bool> charging    : home battery charging
+// === Data contract (ha-bridge/energy-bridge.flow.json → main.rs → here) ===
+//   Bridge publishes retained `watch/energy/state`:
+//     {"batt":pct, "solar":W, "grid":W(signed +import/-export), "chg":bool}
+//   which main.rs decodes and sets on these properties every update:
+//     in property <int>  battery-pct : home battery 0..100
+//     in property <int>  solar-w     : solar production, watts (>= 0)
+//     in property <int>  grid-w      : grid power, watts — SIGNED: >0 importing
+//                                       (buying), <0 exporting (selling)
+//     in property <bool> charging    : home battery charging
+//   in property <int> conn-state : 0 ready · 1 connecting · 2 unreachable
+//     The loop sets 1 until the retained state first arrives, 0 once it has
+//     data, and 2 when the MQTT session drops / `watch/energy/avail` is
+//     "offline" / the value goes stale. Mirrors ClimateOverlay.conn-state.
 export component EnergyPage {
     in property <int> battery-pct: 0;
     in property <int> solar-w: 0;
     in property <int> grid-w: 0;
     in property <bool> charging: false;
+    in property <int> conn-state: 0;
     callback close();
 
     // Battery % colour: charging teal, low red, else soft.
@@ -40,78 +48,93 @@ export component EnergyPage {
         }
     }
 
-    // ---------------- home battery hero ----------------
-    Text {
-        x: (parent.width - self.width) / 2; y: 100px;
-        text: "HOME BATTERY"; color: Theme.dim; font-size: 15px; letter-spacing: 3px;
+    // ==================== connection states (mirror ClimateOverlay) ====================
+    if root.conn-state == 1: Text {
+        x: (parent.width - self.width) / 2; y: 230px;
+        text: "connecting\u{2026}"; color: Theme.dim; font-size: 20px; letter-spacing: 1px;
     }
-    Text {
-        x: (parent.width - self.width) / 2; y: 122px;
-        text: "\{root.battery-pct}%";
-        color: root.batt-color; font-size: 66px; font-weight: 700;
+    if root.conn-state == 2: Text {
+        x: (parent.width - self.width) / 2; y: 230px;
+        text: "HA unreachable"; color: Theme.warn; font-size: 20px; font-weight: 600;
     }
-    // Gauge
-    Rectangle {
-        x: (parent.width - 300px) / 2; y: 208px;
-        width: 300px; height: 24px; border-radius: 12px;
-        background: Theme.track;
-        Rectangle {
-            x: 0; y: 0; height: 100%;
-            width: max(8px, parent.width * clamp(root.battery-pct, 0, 100) / 100.0);
-            border-radius: 12px;
-            background: root.batt-color;
+
+    // ==================== live readout (unchanged layout) ====================
+    if root.conn-state == 0: Rectangle {
+        width: 100%; height: 100%;
+
+        // ---------------- home battery hero ----------------
+        Text {
+            x: (parent.width - self.width) / 2; y: 100px;
+            text: "HOME BATTERY"; color: Theme.dim; font-size: 15px; letter-spacing: 3px;
         }
-    }
-    Text {
-        x: (parent.width - self.width) / 2; y: 242px;
-        text: root.charging ? "CHARGING" : "DISCHARGING";
-        color: root.charging ? Theme.accent : Theme.warm;
-        font-size: 16px; letter-spacing: 2px;
-    }
+        Text {
+            x: (parent.width - self.width) / 2; y: 122px;
+            text: "\{root.battery-pct}%";
+            color: root.batt-color; font-size: 66px; font-weight: 700;
+        }
+        // Gauge
+        Rectangle {
+            x: (parent.width - 300px) / 2; y: 208px;
+            width: 300px; height: 24px; border-radius: 12px;
+            background: Theme.track;
+            Rectangle {
+                x: 0; y: 0; height: 100%;
+                width: max(8px, parent.width * clamp(root.battery-pct, 0, 100) / 100.0);
+                border-radius: 12px;
+                background: root.batt-color;
+            }
+        }
+        Text {
+            x: (parent.width - self.width) / 2; y: 242px;
+            text: root.charging ? "CHARGING" : "DISCHARGING";
+            color: root.charging ? Theme.accent : Theme.warm;
+            font-size: 16px; letter-spacing: 2px;
+        }
 
-    // ---------------- solar ----------------
-    // small sun glyph
-    Rectangle {
-        x: 40px; y: 300px; width: 26px; height: 26px; border-radius: 13px;
-        background: Theme.warm;
-    }
-    Rectangle { x: 51px; y: 290px; width: 4px; height: 8px; border-radius: 2px; background: Theme.warm; }
-    Rectangle { x: 51px; y: 328px; width: 4px; height: 8px; border-radius: 2px; background: Theme.warm; }
-    Rectangle { x: 30px; y: 311px; width: 8px; height: 4px; border-radius: 2px; background: Theme.warm; }
-    Rectangle { x: 68px; y: 311px; width: 8px; height: 4px; border-radius: 2px; background: Theme.warm; }
-    Text {
-        x: 86px; y: 302px;
-        text: "SOLAR"; color: Theme.dim; font-size: 18px; letter-spacing: 2px;
-    }
-    Text {
-        x: parent.width - self.width - 40px; y: 296px;
-        // Slint `/` is float division; round to one decimal (kW).
-        text: "\{round(root.solar-w / 100) / 10} kW";
-        color: Theme.warm; font-size: 34px; font-weight: 700;
-    }
+        // ---------------- solar ----------------
+        // small sun glyph
+        Rectangle {
+            x: 40px; y: 300px; width: 26px; height: 26px; border-radius: 13px;
+            background: Theme.warm;
+        }
+        Rectangle { x: 51px; y: 290px; width: 4px; height: 8px; border-radius: 2px; background: Theme.warm; }
+        Rectangle { x: 51px; y: 328px; width: 4px; height: 8px; border-radius: 2px; background: Theme.warm; }
+        Rectangle { x: 30px; y: 311px; width: 8px; height: 4px; border-radius: 2px; background: Theme.warm; }
+        Rectangle { x: 68px; y: 311px; width: 8px; height: 4px; border-radius: 2px; background: Theme.warm; }
+        Text {
+            x: 86px; y: 302px;
+            text: "SOLAR"; color: Theme.dim; font-size: 18px; letter-spacing: 2px;
+        }
+        Text {
+            x: parent.width - self.width - 40px; y: 296px;
+            // Slint `/` is float division; round to one decimal (kW).
+            text: "\{round(root.solar-w / 100) / 10} kW";
+            color: Theme.warm; font-size: 34px; font-weight: 700;
+        }
 
-    // ---------------- grid ----------------
-    Text {
-        x: 40px; y: 372px;
-        text: "GRID"; color: Theme.dim; font-size: 18px; letter-spacing: 2px;
-    }
-    Text {
-        x: 40px; y: 398px;
-        text: root.importing ? "IMPORT" : (root.exporting ? "EXPORT" : "IDLE");
-        color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.dim);
-        font-size: 14px; letter-spacing: 2px;
-    }
-    Text {
-        x: parent.width - self.width - 40px; y: 366px;
-        text: "\{round(abs(root.grid-w) / 100) / 10} kW";
-        color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.soft);
-        font-size: 34px; font-weight: 700;
-    }
+        // ---------------- grid ----------------
+        Text {
+            x: 40px; y: 372px;
+            text: "GRID"; color: Theme.dim; font-size: 18px; letter-spacing: 2px;
+        }
+        Text {
+            x: 40px; y: 398px;
+            text: root.importing ? "IMPORT" : (root.exporting ? "EXPORT" : "IDLE");
+            color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.dim);
+            font-size: 14px; letter-spacing: 2px;
+        }
+        Text {
+            x: parent.width - self.width - 40px; y: 366px;
+            text: "\{round(abs(root.grid-w) / 100) / 10} kW";
+            color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.soft);
+            font-size: 34px; font-weight: 700;
+        }
 
-    // caption
-    Text {
-        x: (parent.width - self.width) / 2; y: 452px;
-        text: "home \u{00b7} via Home Assistant";
-        color: Theme.faint; font-size: 13px; letter-spacing: 1px;
+        // caption
+        Text {
+            x: (parent.width - self.width) / 2; y: 452px;
+            text: "home \u{00b7} via Home Assistant";
+            color: Theme.faint; font-size: 13px; letter-spacing: 1px;
+        }
     }
 }

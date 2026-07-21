@@ -69,3 +69,70 @@ them up automatically. Recommended path — **LocalTuya** (local control, no clo
 Either way the result is 2 more `climate.*` entities → 2 more cards on the watch, zero
 firmware/bridge change. I'll walk the tinytuya wizard with you when you're ready (it needs
 your Tuya account) — that's the one Layer-A step I can't do without your credentials.
+
+---
+
+# Watch ← HA Energy Bridge (`energy-bridge.flow.json`)
+
+Read-only companion to the climate bridge: publishes your **home** energy (battery %,
+solar, grid) to a single retained topic the watch's Energy screen mirrors. The watch only
+subscribes — there are no energy commands back to HA. Same broker as climate; its own
+client id so the two flows coexist.
+
+## Topic contract
+
+| Direction | Topic | Payload |
+|---|---|---|
+| HA → watch (state) | `watch/energy/state` (**retained**) | `{"batt":78,"solar":3400,"grid":-1200,"chg":true}` |
+| bridge → all (availability, LWT) | `watch/energy/avail` (**retained**) | `online` \| `offline` |
+
+One aggregate JSON object (compact); any field may be `null` until first seen:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `batt` | int 0..100 | home battery state-of-charge, % |
+| `solar` | int ≥ 0 | solar production, **watts** (kW sensors auto-scaled) |
+| `grid` | int, **signed** | grid power, watts — **> 0 importing** (buying), **< 0 exporting** (selling) |
+| `chg` | bool | home battery charging |
+
+Maps 1:1 onto `EnergyPage` (`ui/slint/energy.slint`): `batt → battery-pct`,
+`solar → solar-w`, `grid → grid-w`, `chg → charging`.
+
+**Availability / `conn-state`.** The screen shows *connecting…* until the retained
+`watch/energy/state` first arrives, the live readout once it has data, and *HA unreachable*
+when the MQTT session drops, `watch/energy/avail` is `offline` (the bridge's Last-Will), or
+the value goes stale. Because state is **retained**, a freshly-subscribed watch gets current
+values immediately.
+
+## Configure (before deploy)
+
+Two edit points, kept in lock-step (like the climate flow):
+
+1. **`energy sensors changed`** node → its *Entity* list — set to your HA entity_ids.
+2. **`route + build energy state`** function → the `ROLES` map at the top — map each of
+   those same entity_ids to a role: `batt` · `solar` · `grid` · `chg`.
+
+Grid can be **one signed sensor** (`grid`, + import / − export) **or two positive sensors** —
+drop `grid` and map `grid_import` + `grid_export` instead (the function computes
+`grid = import − export`). Power roles auto-scale `kW → W` from each sensor's
+`unit_of_measurement`.
+
+## Import steps
+
+1. Node-RED → menu → Import → paste `energy-bridge.flow.json`.
+2. **Broker config** (`watch-mqtt … energy`): confirm host `10.0.6.11:1883`, set the mosquitto
+   username/password under *Security*. This flow uses its own broker/client id
+   (`nodered-watch-energy-bridge`), so it coexists with the climate bridge.
+3. **HA server node** (`energy sensors changed`): re-select your Home Assistant server in the
+   *Server* dropdown (the `ha_server_ref` placeholder won't resolve on import — normal).
+4. Set the entity list + `ROLES` map (see *Configure* above).
+5. Deploy. The state node has *output on connect* on, so it seeds `watch/energy/state` from
+   current values at startup.
+
+## Test
+
+- `mosquitto_sub -h 10.0.6.11 -u jp -P … -t 'watch/energy/#' -v` → within a few seconds of
+  deploy you should see a retained `watch/energy/state {...}` line plus `watch/energy/avail online`.
+- Move a mapped sensor in HA (or wait for solar to change) → the retained `state` payload updates.
+- Stop the flow / Node-RED → `watch/energy/avail` flips to `offline` (the LWT) → the watch's
+  Energy screen shows *HA unreachable*.
