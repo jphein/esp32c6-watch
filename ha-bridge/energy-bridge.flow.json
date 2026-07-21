@@ -1,0 +1,96 @@
+[
+  {
+    "id": "energy_bridge_tab",
+    "type": "tab",
+    "label": "Watch Energy Bridge",
+    "disabled": false,
+    "info": "Bridges the esp32c6-watch <- HA home-energy sensors over MQTT (read-only).\nWatch subscribes: watch/energy/state (retained, compact JSON)\n  {\"battery_pct\":pct, \"solar_w\":W, \"grid_w\":W(signed +import/-export), \"charging\":bool}\nAvailability (LWT): watch/energy/avail = online|offline (retained).\nEdit the ROLES map in 'route+build energy state' AND the entity list in\n'energy sensors changed' to your HA entity_ids. See ha-bridge/README.md."
+  },
+  {
+    "id": "mqtt_broker_watch_energy",
+    "type": "mqtt-broker",
+    "name": "watch-mqtt (HA mosquitto) — energy",
+    "broker": "10.0.6.11",
+    "port": "1883",
+    "clientid": "nodered-watch-energy-bridge",
+    "autoConnect": true,
+    "keepalive": "60",
+    "cleansession": true,
+    "birthTopic": "watch/energy/avail",
+    "birthQos": "0",
+    "birthRetain": "true",
+    "birthPayload": "online",
+    "closeTopic": "watch/energy/avail",
+    "closeQos": "0",
+    "closeRetain": "true",
+    "closePayload": "offline",
+    "willTopic": "watch/energy/avail",
+    "willQos": "0",
+    "willRetain": "true",
+    "willPayload": "offline"
+  },
+  {
+    "id": "ha_server_ref",
+    "type": "server",
+    "name": "Home Assistant",
+    "comment": "PLACEHOLDER — on import, open the HA state node and re-select your existing Home Assistant server config."
+  },
+
+  {
+    "id": "state_changed_energy",
+    "type": "server-state-changed",
+    "z": "energy_bridge_tab",
+    "name": "energy sensors changed",
+    "server": "ha_server_ref",
+    "version": 4,
+    "exposeAsEntityConfig": "",
+    "entityId": [
+      "sensor.home_battery_soc",
+      "sensor.solar_power",
+      "sensor.grid_power",
+      "binary_sensor.home_battery_charging"
+    ],
+    "entityIdType": "list",
+    "outputInitially": true,
+    "stateType": "str",
+    "ifState": "",
+    "ifStateType": "str",
+    "outputOnlyOnStateChange": false,
+    "for": "0",
+    "forType": "num",
+    "forUnits": "minutes",
+    "x": 200,
+    "y": 120,
+    "wires": [["fn_build_energy"]]
+  },
+  {
+    "id": "fn_build_energy",
+    "type": "function",
+    "z": "energy_bridge_tab",
+    "name": "route + build energy state",
+    "func": "// Aggregate several HA home-energy sensors into ONE retained topic the\n// watch subscribes to: watch/energy/state.\n//\n// EDIT this ROLES map to your entity_ids (keep in lock-step with the\n// entity list on the 'energy sensors changed' node). Every listed entity\n// must appear here, or it's ignored.\nconst ROLES = {\n  'sensor.home_battery_soc':        'batt',   // home battery %, 0..100\n  'sensor.solar_power':             'solar',  // solar production, W (kW auto-scaled)\n  'sensor.grid_power':              'grid',   // grid power, W SIGNED: + import / - export\n  'binary_sensor.home_battery_charging': 'chg' // 'on' => charging\n  // --- If your grid is split into two positive sensors, DROP 'grid' above\n  //     and use these two instead (grid = import - export):\n  // , 'sensor.grid_import': 'grid_import'   // W >= 0\n  // , 'sensor.grid_export': 'grid_export'   // W >= 0\n};\n\nconst s = (msg.data && msg.data.new_state) ? msg.data.new_state\n        : (msg.payload && msg.payload.entity_id) ? msg.payload : null;\nif (!s || !s.entity_id) return null;\nconst role = ROLES[s.entity_id];\nif (!role) return null;\n\nconst numOf = (st) => { const n = Number(st.state); return isFinite(n) ? n : null; };\n// numeric power in WATTS, auto-scaling kW -> W from the unit attribute.\nconst wattsOf = (st) => {\n  let n = numOf(st); if (n === null) return null;\n  const u = ((st.attributes && st.attributes.unit_of_measurement) || '').toLowerCase();\n  if (u === 'kw') n *= 1000;\n  return Math.round(n);\n};\n\nconst store = flow.get('energy') || {};\nswitch (role) {\n  case 'batt': {\n    const n = numOf(s);\n    store.batt = (n === null) ? null : Math.max(0, Math.min(100, Math.round(n)));\n    break;\n  }\n  case 'solar':       store.solar = wattsOf(s); break;\n  case 'grid':        store.grid  = wattsOf(s); break;\n  case 'grid_import': store.gimp  = wattsOf(s); break;\n  case 'grid_export': store.gexp  = wattsOf(s); break;\n  case 'chg': {\n    const v = (typeof s.state === 'string') ? s.state.toLowerCase() : s.state;\n    store.chg = (v === 'on' || v === true || v === 'charging' || v === 'true');\n    break;\n  }\n}\nflow.set('energy', store);\n\n// Signed grid: prefer the single signed sensor; else derive from split ones.\nlet grid = store.grid;\nif (grid === undefined || grid === null) {\n  if (store.gimp !== undefined || store.gexp !== undefined) {\n    grid = (store.gimp || 0) - (store.gexp || 0);\n  }\n}\n\nconst out = {\n  battery_pct: (store.batt  != null ? store.batt  : null),\n  solar_w:     (store.solar != null ? store.solar : null),\n  grid_w:      (grid        != null ? grid        : null),\n  charging:    (store.chg === true)\n};\n\nreturn { topic: 'watch/energy/state', payload: JSON.stringify(out), qos: 0, retain: true };\n",
+    "outputs": 1,
+    "noerr": 0,
+    "x": 500,
+    "y": 120,
+    "wires": [["mqtt_out_energy"]]
+  },
+  {
+    "id": "mqtt_out_energy",
+    "type": "mqtt out",
+    "z": "energy_bridge_tab",
+    "name": "-> watch/energy/state (retained)",
+    "topic": "",
+    "qos": "0",
+    "retain": "true",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "mqtt_broker_watch_energy",
+    "x": 850,
+    "y": 120,
+    "wires": []
+  }
+]
