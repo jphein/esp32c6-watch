@@ -419,8 +419,10 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Speaker amp enable (GPIO6). CRITICAL: keep LOW before the ES8311 is
     // initialized and muted below — a floating I2S line through an enabled
-    // amp produces loud white noise. Raised only for the duration of a beep.
-    let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    // amp produces loud white noise. For the mic-capture verify build the beep
+    // is disabled, so this stays LOW for the whole session (SAFE — never blasts).
+    // Bound (not `_`) so the Output guard holds the pin LOW for the program life.
+    let _amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
 
     // === I2C bus (AXP2101 + FT3168 + PCF85063 + QMI8658) ===
     let i2c = I2c::new(
@@ -526,46 +528,50 @@ async fn main(_spawner: Spawner) -> ! {
     // demand at playback time.
     let _ = audio_codec.shutdown();
 
-    // === I2S TX for beep playback (16kHz stereo 16-bit) ===
-    // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DAC data=GPIO21.
-    // DMA_CH1 — the display QSPI owns DMA_CH0.
-    println!("[AUDIO] Init I2S...");
+    // === I2S FULL-DUPLEX (shared clock) — beep playback + mic capture ===
+    // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DSDIN(DAC in)=GPIO23,
+    // ASDOUT(ADC/mic out)=GPIO21. DMA_CH1 — the display QSPI owns DMA_CH0.
+    // signal_loopback=true is the vendor topology via esp-hal's native API: TX and RX
+    // share ONE WS/BCK internally — TX stays master and drives the pins, RX slaves to
+    // TX's clock (ES8311 = external slave). This is what makes the ES8311 ADC actually
+    // clock data onto ASDOUT (a plain RX-master did not; vendor firmware proved the HW
+    // is fine — the topology was the gap).
+    println!("[AUDIO] Init I2S (full-duplex, shared clock)...");
     let i2s_config = I2sConfig::default()
         .with_sample_rate(Rate::from_hz(16000))
-        .with_data_format(DataFormat::Data16Channel16);
+        .with_data_format(DataFormat::Data16Channel16)
+        .with_signal_loopback(true);
     let i2s_periph = I2s::new(peripherals.I2S0, peripherals.DMA_CH1, i2s_config)
         .expect("I2S failed")
         .with_mclk(peripherals.GPIO19);
-    static I2S_TX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
-    // BCLK/WS are driven from the RX side below (RX-master): on esp-hal 1.1.1 the C6 I2S
-    // RX is its own master with its own clock signals I2SI_BCK/I2SI_WS. The mic RX runs
-    // continuously from boot, keeping the ES8311 clocked; TX (beep) shares those physical
-    // pins and its DAC latches DOUT on them. TX keeps only its data-out line here.
+    // TX is the I2S MASTER: it drives the shared BCLK(GPIO20)/WS(GPIO22) + MCLK. A
+    // continuous SILENT circular TX (below) keeps them free-running so the ES8311 ADC
+    // clocks data onto ASDOUT; the RX slaves to this clock via signal_loopback (internal).
+    // A circular TX needs EXACTLY descriptor_count() descriptors for its silence buffer.
+    const TX_SILENCE_LEN: usize = 3 * mic_capture::STEREO_CHUNK; // 3072 bytes → 3 descriptors
+    const TX_CIRC_DESCS: usize =
+        esp_hal::dma::descriptor_count(TX_SILENCE_LEN, esp_hal::dma::CHUNK_SIZE, true);
+    static I2S_TX_DESC: StaticCell<[DmaDescriptor; TX_CIRC_DESCS]> = StaticCell::new();
     let mut i2s_tx = i2s_periph
         .i2s_tx
+        .with_bclk(peripherals.GPIO20) // TX-master BCLK → codec (shared w/ RX via loopback)
+        .with_ws(peripherals.GPIO22)   // TX-master WS/LRCK → codec
         .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
-        .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
-    // === I2S RX for mic capture — the SINGLE shared owner (#42 voice + #28 meter) ===
-    // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx).
-    // ROOT-CAUSE FIX (mic read floor / zero usable PCM): the C6 I2S RX is master
-    // with its OWN clock signals I2SI_BCK / I2SI_WS (esp-hal 1.1.1 master.rs:
-    // bclk_rx_signal=I2SI_BCK @2231, ws_rx_signal=I2SI_WS @2241) — NOT the TX
-    // signals (I2SO_BCK/I2SO_WS) routed above — and set_rx_clock (@2029) enables a
-    // separate rx clock module. So RX must drive BCLK/WS itself; otherwise the
-    // ES8311 is unclocked whenever TX (beep) is idle → its ADC never shifts data
-    // out → the RX DMA ring only ever sees a static line → the meter floors. We
-    // therefore route BCLK (GPIO20) + WS (GPIO22) + DIN (GPIO23) on the RX builder.
+        .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; TX_CIRC_DESCS]));
+    // === I2S RX for mic capture (#42 voice + #28 meter) — SLAVE via signal_loopback ===
+    // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx). With
+    // signal_loopback=true the RX shares the TX-master WS/BCK internally (configure()
+    // sets rx_slave_mod + sig_loopback from the Config flag) and just reads DIN(GPIO21)=
+    // ASDOUT — NO with_bclk/with_ws, NO GPIO-matrix hack. This is the ONLY place
+    // I2S0/DMA_CH1 is claimed; voice PTT + the SoundLevel meter subscribe to MIC_CH.
     // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
-    // mic_capture_task drives it via read_dma_circular + poll. This is the ONLY
-    // place I2S0/DMA_CH1 is claimed — both the voice PTT stream and the SoundLevel
-    // meter subscribe to MIC_CH, never re-owning I2S.
+    // mic_capture_task drives it via read_dma_circular + poll.
     //
     // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
-    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds
-    // its walk from chain.last() expecting last.next → first; a padded array (we had
-    // 8, copied from the one-shot TX side) leaves trailing EMPTY descriptors whose
-    // next=null, so the first available() poll derefs null. descriptor_count() gives
-    // the exact count (3 for an 8KB ring @ CHUNK_SIZE=4092) → last is the real wrap.
+    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds its
+    // walk from chain.last() expecting last.next → first; a padded array leaves trailing
+    // EMPTY descriptors whose next=null, so the first available() poll derefs null.
+    // descriptor_count() gives the exact count (3 for the ring @ CHUNK_SIZE=4092).
     const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
         mic_capture::MIC_RING_LEN,
         esp_hal::dma::CHUNK_SIZE,
@@ -574,9 +580,7 @@ async fn main(_spawner: Spawner) -> ! {
     static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
     let i2s_rx = i2s_periph
         .i2s_rx
-        .with_bclk(peripherals.GPIO20) // RX master → ES8311 BCLK
-        .with_ws(peripherals.GPIO22)   // RX master → ES8311 WS/LRCK
-        .with_din(peripherals.GPIO21)  // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
+        .with_din(peripherals.GPIO21) // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
         .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
     // Mic PCM channel (capture task → consumers) + the DMA capture ring.
     // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.
@@ -587,14 +591,44 @@ async fn main(_spawner: Spawner) -> ! {
         mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
             .expect("mic_capture_task token"),
     );
-    println!("[AUDIO] I2S RX (mic) ready on GPIO23");
+    println!("[AUDIO] I2S RX (mic) ready on GPIO21 (DIN <- ES8311 ASDOUT)");
+
+    // === Continuous SILENT full-duplex TX — the clock generator ===
+    // The ES8311 ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
+    // I2S MASTER, our TX must free-run those shared clocks continuously; RX slaves to
+    // them (signal_loopback). We stream a ring of ZEROS forever: the shared BCLK/WS keep
+    // toggling, the ADC keeps clocking real mic data into the RX DMA, and NOTHING audible
+    // ever reaches the amp (amp GPIO6 is held LOW; the data is silence anyway). This is
+    // the SAFE clock source — no tone, no risk of blasting.
+    static TX_SILENCE: StaticCell<[u8; TX_SILENCE_LEN]> = StaticCell::new();
+    let tx_silence: &'static [u8] = TX_SILENCE.init([0u8; TX_SILENCE_LEN]);
+    // Held for the rest of main() (named binding, not `_`): dropping it would stop the
+    // DMA and starve the codec clock. i2s_tx is mutably borrowed here for the duration.
+    let _tx_silence_xfer = i2s_tx
+        .write_dma_circular(&tx_silence)
+        .expect("silent full-duplex TX (shared clock) failed to start");
+    println!("[AUDIO] I2S TX silent clock free-running (full-duplex master)");
+
+    // === MIC-CAPTURE VERIFY (temporary) ===
+    // Power the ES8311 record path up at boot and open the meter so the capture task
+    // streams immediately and prints [MICHEX]/[MICDBG] without needing the Sound screen.
+    // Remove both before merge to v0.6.1 (the Sound screen owns enable_adc/METER there).
+    match audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN) {
+        Ok(()) => println!("[AUDIO] ADC (mic) record path enabled for verify"),
+        Err(_) => println!("[AUDIO] ADC enable FAILED"),
+    }
+    mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
     let beep_storage = BEEP_BUF.init([0u8; 4000]);
     let beep_len = fill_beep_buffer(beep_storage, 800, 16000, 50);
-    let beep_buf: &'static [u8] = &beep_storage[..beep_len];
-    println!("[AUDIO] I2S OK ({} bytes beep)", beep_len);
+    // Beep buffer kept generated (harmless static) but unused in this verify build —
+    // i2s_tx is consumed by the continuous silent full-duplex TX above, so the snake
+    // "food eaten" beep is disabled here (see below). Restore beeps via the shared TX
+    // stream in v0.6.1.
+    let _beep_buf: &'static [u8] = &beep_storage[..beep_len];
+    println!("[AUDIO] I2S OK ({} bytes beep buf, playback disabled for mic verify)", beep_len);
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
     let mut boot_button = Input::new(
@@ -2313,7 +2347,8 @@ async fn main(_spawner: Spawner) -> ! {
                     app_state = AppState::Watchface;
                     continue;
                 };
-                let prev_score = snake_game.score();
+                // Beep gate retired for the mic-capture verify build (see below).
+                // let prev_score = snake_game.score();
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -2326,19 +2361,11 @@ async fn main(_spawner: Spawner) -> ! {
                         if snake_game.stepped() {
                             snake_game.render(fb_ref);
                             fb_ref.flush(&mut display);
-                            // Beep when food eaten via I2S DMA
-                            if snake_game.score() > prev_score {
-                                // Unmute codec, then raise the amp, then play
-                                let _ = audio_codec.unmute();
-                                delay.delay_millis(2); // let codec stabilize before enabling amp
-                                amp_en.set_high();
-                                if let Ok(transfer) = i2s_tx.write_dma(&beep_buf) {
-                                    let _ = transfer.wait();
-                                }
-                                // Lower amp FIRST, then mute codec to avoid pop
-                                amp_en.set_low();
-                                let _ = audio_codec.mute();
-                            }
+                            // Beep DISABLED for the mic-capture verify build: i2s_tx is
+                            // now the continuous SILENT full-duplex TX (it drives the
+                            // shared BCLK/WS the ES8311 ADC needs), so it can't also do
+                            // one-shot beeps here. SAFE: amp GPIO6 stays LOW, TX = silence,
+                            // no tone. TODO(v0.6.1): route beeps through the shared stream.
                         }
                     }
                     AppResult::Exit => {
