@@ -1,5 +1,6 @@
 fn main() {
     linker_be_nice();
+    stamp_sigil();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 
@@ -9,6 +10,51 @@ fn main() {
         .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer);
     slint_build::compile_with_config("ui/slint/shell.slint", slint_config)
         .expect("failed to compile ui/slint/shell.slint");
+}
+
+/// Bake the git short-SHA + build date into env vars for the Diag sigil
+/// (`env!("GIT_SHA")` / `env!("BUILD_DATE")` in the firmware). Resolution order,
+/// most-authoritative first, so it Just Works across environments:
+///   1. `GIT_SHA` / `BUILD_DATE` env (explicit override / release pipeline)
+///   2. `GITHUB_SHA` (GitHub Actions — the CI/OTA builds that ship to glass)
+///   3. local `git` (developer checkout with a `.git`)
+///   4. `"dev"` / `"unknown"` fallback
+/// NB: `fambuild` rsyncs the worktree WITHOUT `.git`, so step 3 fails there and
+/// dev builds read "dev" — that's fine; the shipped/CI sigil (step 2) is real.
+fn stamp_sigil() {
+    let sha = std::env::var("GIT_SHA")
+        .ok()
+        .or_else(|| {
+            std::env::var("GITHUB_SHA")
+                .ok()
+                .map(|s| s.chars().take(7).collect())
+        })
+        .or_else(|| git(&["rev-parse", "--short", "HEAD"]))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "dev".to_string());
+
+    let date = std::env::var("BUILD_DATE")
+        .ok()
+        .or_else(|| git(&["log", "-1", "--format=%cd", "--date=short"]))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    println!("cargo:rustc-env=GIT_SHA={sha}");
+    println!("cargo:rustc-env=BUILD_DATE={date}");
+    // Re-stamp when HEAD moves or an override changes (best-effort — the path
+    // may not exist under fambuild's git-less rsync, which cargo tolerates).
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-env-changed=GIT_SHA");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=BUILD_DATE");
+}
+
+/// Run a git command, returning trimmed stdout on success, else `None`.
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn linker_be_nice() {

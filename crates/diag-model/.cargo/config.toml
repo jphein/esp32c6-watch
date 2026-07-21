@@ -1,0 +1,6 @@
+# Intentionally minimal — sets no build target, so this pure crate builds/tests
+# for the HOST. The workspace-root .cargo/config.toml (gitignored) forces
+# riscv + build-std for the firmware; fambuild injects that into any crate that
+# LACKS a .cargo/config.toml. This file makes fambuild SKIP the injection, so
+# `cd crates/diag-model && fambuild test` builds standalone for the host (x86_64)
+# where the libtest harness exists. (Same pattern as crates/mqtt-codec.)

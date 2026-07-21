@@ -1,0 +1,173 @@
+import { Theme, PageTitle } from "theme.slint";
+
+// On-watch Diagnostics screen (#61) — standalone overlay like Energy / Voice /
+// Wled: pure presentation, the loop (main.rs) fills these each tick from
+// `diag_model::DiagMetrics` + a `diag_model::Sigil`. This file touches no
+// hardware / network. NOT wired into WatchShell/main.rs yet — that's the
+// coordinated wiring step (after voice), per nebula's design note.
+//
+// Sections: version sigil (git SHA + build date + inline realm words) ·
+// capability dots · FPS hero · htop-like live I/O rows (heap/stack/cpu/temp/
+// uptime/rssi/batt). Corner-safe: content within ~26..384 x / ~56..446 y.
+//
+// === Contract (shell → here) ===
+//   Sigil:   fw-version "v0.5.1" · git-sha "2a375e9" · build-date "2026-07-21"
+//            · realm-words "astral warden"  (from diag_model::Sigil)
+//   Caps:    10 bools, set from live subsystem state (like wifi-on/ble-on).
+//   fps:     float, computed in the render loop (diag_model::Fps).
+//   I/O:     pre-formatted strings (shell uses slint::format! as elsewhere).
+//   close(): back chevron; Right-swipe also closes (handled in ShellUi).
+
+// One capability dot + short label (accent when on, off-dot when off).
+component CapDot inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    width: 68px;
+    height: 42px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+        Rectangle {
+            height: 12px;
+            width: 12px;
+            x: (parent.width - self.width) / 2;
+            border-radius: 6px;
+            background: root.on ? Theme.accent : Theme.off-dot;
+        }
+        Text {
+            text: root.label;
+            horizontal-alignment: center;
+            color: root.on ? Theme.soft : Theme.dim;
+            font-size: 11px;
+            letter-spacing: 1px;
+        }
+    }
+}
+
+// One htop-style row: key left, value right.
+component IoRow inherits Rectangle {
+    in property <string> key;
+    in property <string> val;
+    in property <color> val-color: Theme.ink;
+    height: 18px;
+    Text {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        text: root.key;
+        color: Theme.dim;
+        font-size: 14px;
+        letter-spacing: 1px;
+    }
+    Text {
+        x: parent.width - self.width;
+        y: (parent.height - self.height) / 2;
+        text: root.val;
+        color: root.val-color;
+        font-size: 14px;
+        font-weight: 600;
+    }
+}
+
+export component DiagPage {
+    // --- sigil ---
+    in property <string> fw-version: "v?";
+    in property <string> git-sha: "";
+    in property <string> build-date: "";
+    in property <string> realm-words: "";
+    // --- capabilities ---
+    in property <bool> cap-wifi;
+    in property <bool> cap-ble;
+    in property <bool> cap-mesh;
+    in property <bool> cap-mic;
+    in property <bool> cap-imu;
+    in property <bool> cap-rtc;
+    in property <bool> cap-touch;
+    in property <bool> cap-lp;
+    in property <bool> cap-display;
+    in property <bool> cap-radio;
+    // --- fps ---
+    in property <float> fps: 0;
+    // --- htop I/O (pre-formatted) ---
+    in property <string> heap-main: "--";
+    in property <string> heap-recl: "--";
+    in property <string> stack-gap: "--";
+    in property <string> cpu: "--";
+    in property <string> die-temp: "--";
+    in property <string> uptime: "--";
+    in property <string> rssi: "--";
+    in property <string> batt: "--";
+    callback close();
+
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
+    PageTitle { title: "DIAG"; }
+
+    // Back chevron (top-left, clear of the corner arc); Right-swipe also closes.
+    back := TouchArea {
+        x: 14px; y: 8px; width: 78px; height: 64px;
+        clicked => { root.close(); }
+        Text {
+            x: 8px; y: (parent.height - self.height) / 2;
+            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
+        }
+    }
+
+    // ---------------- version sigil ----------------
+    Text {
+        x: (parent.width - self.width) / 2; y: 88px;
+        text: root.realm-words == "" ? "\u{2014}" : root.realm-words;
+        color: Theme.accent; font-size: 19px; font-weight: 700; letter-spacing: 2px;
+    }
+    Text {
+        x: (parent.width - self.width) / 2; y: 112px;
+        text: root.fw-version + (root.git-sha == "" ? "" : "  \u{00b7}  " + root.git-sha);
+        color: Theme.soft; font-size: 15px; letter-spacing: 1px;
+    }
+    Text {
+        x: (parent.width - self.width) / 2; y: 132px;
+        text: root.build-date;
+        color: Theme.dim; font-size: 13px; letter-spacing: 1px;
+    }
+
+    // ---------------- capabilities (2 rows of 5 dots) ----------------
+    HorizontalLayout {
+        x: 0; y: 158px; width: 100%; alignment: center; spacing: 4px;
+        CapDot { label: "WIFI";  on: root.cap-wifi; }
+        CapDot { label: "BLE";   on: root.cap-ble; }
+        CapDot { label: "MESH";  on: root.cap-mesh; }
+        CapDot { label: "MIC";   on: root.cap-mic; }
+        CapDot { label: "IMU";   on: root.cap-imu; }
+    }
+    HorizontalLayout {
+        x: 0; y: 202px; width: 100%; alignment: center; spacing: 4px;
+        CapDot { label: "RTC";   on: root.cap-rtc; }
+        CapDot { label: "TOUCH"; on: root.cap-touch; }
+        CapDot { label: "LP";    on: root.cap-lp; }
+        CapDot { label: "DISP";  on: root.cap-display; }
+        CapDot { label: "RADIO"; on: root.cap-radio; }
+    }
+
+    // ---------------- FPS hero ----------------
+    Text {
+        x: (parent.width - self.width) / 2; y: 250px;
+        text: "\{round(root.fps * 10) / 10} FPS";
+        color: Theme.ink; font-size: 40px; font-weight: 700;
+    }
+
+    // ---------------- htop-like live I/O ----------------
+    Rectangle {
+        x: 26px; y: 302px; width: parent.width - 52px; height: 146px;
+        VerticalLayout {
+            spacing: 0px;
+            IoRow { key: "heap main"; val: root.heap-main; }
+            IoRow { key: "heap recl"; val: root.heap-recl; }
+            // stack gap is the #59 watched metric — tint it warm to draw the eye.
+            IoRow { key: "stack gap"; val: root.stack-gap; val-color: Theme.warm; }
+            IoRow { key: "cpu";       val: root.cpu; }
+            IoRow { key: "die temp";  val: root.die-temp; }
+            IoRow { key: "uptime";    val: root.uptime; }
+            IoRow { key: "rssi";      val: root.rssi; }
+            IoRow { key: "battery";   val: root.batt; }
+        }
+    }
+}

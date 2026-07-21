@@ -1,0 +1,19 @@
+# Diag screen pure model — metrics struct + capability bitmask + FPS smoother +
+# inline realm-words sigil. STANDALONE crate (host-testable): the firmware's deps
+# (esp-hal/esp-radio/slint) don't build for the host, so this pure logic lives
+# here to be `cargo test`-ed on the host. The firmware reads the live values
+# (heap/stack-gap/tsens/uptime/rssi/batt) + env!(GIT_SHA/BUILD_DATE) and fills
+# these each tick; the Diag wiring pulls it in via `diag-model = { path = ... }`.
+[package]
+name = "diag-model"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "diag_model"
+path = "src/lib.rs"
+
+# Pure core — no deps (no alloc, no heapless): numeric fields + &'static str words.
+[dependencies]
