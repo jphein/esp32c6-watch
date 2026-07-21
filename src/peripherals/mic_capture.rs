@@ -109,63 +109,82 @@ pub async fn mic_capture_task(
     ring: &'static mut [u8; MIC_RING_LEN],
     sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, MicChunk, MIC_CHANNEL_DEPTH>,
 ) {
-    let mut xfer = match i2s_rx.read_dma_circular(ring) {
-        Ok(x) => x,
-        Err(_) => return, // RX DMA failed to start; nothing to do
-    };
+    // Circular RX with OVERRUN RECOVERY. esp-hal's DmaTransferRxCircular deadlocks
+    // if the ring ever laps the read pointer: once every descriptor is CPU-owned,
+    // both `available()` and `pop()` return `Err(Late)` *permanently*, and since
+    // `pop()` is the only thing that re-arms descriptors (owner → DMA), a single
+    // startup overrun strands capture forever. That was the "avail stuck at 0" bug:
+    // the ring filled once, all 3 descriptors went CPU-owned, the DMA parked
+    // (in_dscr_empty), and the old `available().unwrap_or(0)` silently swallowed the
+    // `Late`. Fix: on any `available()`/`pop()` error, drop the transfer and re-arm
+    // via a fresh `read_dma_circular`. The idle-drain below keeps the ring empty so
+    // overruns don't recur in steady state (16 kHz stereo = 64 KB/s, trivially kept up).
+    //
+    // WriteBuffer requires a `&'static mut`, so re-materialise one from the (truly
+    // 'static) ring via raw pointer on each restart; the previous transfer is always
+    // dropped first, so there is never an aliasing `&mut`.
+    let ring_ptr: *mut [u8; MIC_RING_LEN] = ring;
     let mut stereo = [0u8; STEREO_CHUNK];
     let mut dbg_ctr: u32 = 0; // #28 tuning debug throttle (THROWAWAY — remove before v0.6.0 tag)
     let mut raw_ctr: u32 = 0; // raw-DMA fill probe throttle (THROWAWAY — remove before v0.6.0 tag)
-    loop {
-        let avail = xfer.available().unwrap_or(0);
-        // ===== raw RX-DMA fill probe — THROWAWAY, REMOVE BEFORE v0.6.0 TAG =====
-        // Unconditional (NOT gated on METER/RECORDING): proves whether the I2S RX
-        // circular DMA is delivering bytes at all. With the bclk/ws RX-routing fix
-        // this should climb to >= STEREO_CHUNK (2048) within a tick; a persistent
-        // avail=0 means the RX still isn't clocking (look past pin routing).
-        raw_ctr = raw_ctr.wrapping_add(1);
-        if raw_ctr % 256 == 0 {
-            esp_println::println!("[MICRAW] avail={} B", avail);
-        }
-        // ===== end throwaway probe =====
-        if avail < STEREO_CHUNK {
-            Timer::after(Duration::from_millis(4)).await;
-            continue;
-        }
-        if xfer.pop(&mut stereo).is_err() {
-            Timer::after(Duration::from_millis(4)).await;
-            continue;
-        }
-        if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
-            continue; // idle: discard (keeps the circular ring drained)
-        }
-        // ===== #28 mic L/R tuning debug — THROWAWAY, REMOVE BEFORE v0.6.0 TAG =====
-        // While the SoundLevel meter is open, log BOTH I2S-slot RMS every ~32 chunks
-        // (~0.5s) so the JP-hands session reads which slot carries the mic in ONE
-        // flash (the louder channel = the mic → set MIC_RIGHT_CHANNEL accordingly).
-        if METER.load(Ordering::Relaxed) {
-            dbg_ctr = dbg_ctr.wrapping_add(1);
-            if dbg_ctr % 32 == 0 {
-                let frames = (STEREO_CHUNK / 4).min(MONO_CHUNK / 2);
-                let mut l = [0i16; MONO_CHUNK / 2];
-                let mut r = [0i16; MONO_CHUNK / 2];
-                for i in 0..frames {
-                    l[i] = i16::from_le_bytes([stereo[4 * i], stereo[4 * i + 1]]);
-                    r[i] = i16::from_le_bytes([stereo[4 * i + 2], stereo[4 * i + 3]]);
+    'restart: loop {
+        let ring_ref: &'static mut [u8; MIC_RING_LEN] = unsafe { &mut *ring_ptr };
+        let mut xfer = match i2s_rx.read_dma_circular(ring_ref) {
+            Ok(x) => x,
+            Err(_) => {
+                Timer::after(Duration::from_millis(50)).await;
+                continue 'restart; // RX DMA failed to start; retry
+            }
+        };
+        loop {
+            let avail = match xfer.available() {
+                Ok(n) => n,
+                // Late/overrun (ring lapped) → drop xfer & re-arm the descriptor chain.
+                Err(_) => break,
+            };
+            raw_ctr = raw_ctr.wrapping_add(1);
+            if raw_ctr % 256 == 0 {
+                esp_println::println!("[MICRAW] avail={} B", avail); // THROWAWAY — remove before tag
+            }
+            if avail < STEREO_CHUNK {
+                Timer::after(Duration::from_millis(4)).await;
+                continue;
+            }
+            if xfer.pop(&mut stereo).is_err() {
+                break; // pop error (Late) → drop xfer & re-arm
+            }
+            if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
+                continue; // idle: discard (keeps the circular ring drained)
+            }
+            // ===== #28 mic L/R tuning debug — THROWAWAY, REMOVE BEFORE v0.6.0 TAG =====
+            // While the SoundLevel meter is open, log BOTH I2S-slot RMS every ~32 chunks
+            // (~0.5s) so the JP-hands session reads which slot carries the mic in ONE
+            // flash (the louder channel = the mic → set MIC_RIGHT_CHANNEL accordingly).
+            if METER.load(Ordering::Relaxed) {
+                dbg_ctr = dbg_ctr.wrapping_add(1);
+                if dbg_ctr % 32 == 0 {
+                    let frames = (STEREO_CHUNK / 4).min(MONO_CHUNK / 2);
+                    let mut l = [0i16; MONO_CHUNK / 2];
+                    let mut r = [0i16; MONO_CHUNK / 2];
+                    for i in 0..frames {
+                        l[i] = i16::from_le_bytes([stereo[4 * i], stereo[4 * i + 1]]);
+                        r[i] = i16::from_le_bytes([stereo[4 * i + 2], stereo[4 * i + 3]]);
+                    }
+                    esp_println::println!(
+                        "[MICDBG] L={} R={} dBFS  (louder slot = mic -> MIC_RIGHT_CHANNEL)",
+                        mic_dsp::rms_dbfs(&l[..frames]) as i32,
+                        mic_dsp::rms_dbfs(&r[..frames]) as i32,
+                    );
                 }
-                esp_println::println!(
-                    "[MICDBG] L={} R={} dBFS  (louder slot = mic -> MIC_RIGHT_CHANNEL)",
-                    mic_dsp::rms_dbfs(&l[..frames]) as i32,
-                    mic_dsp::rms_dbfs(&r[..frames]) as i32,
-                );
+            }
+            // ===== end throwaway debug =====
+            // One STEREO_CHUNK pop -> exactly MONO_CHUNK mono bytes.
+            let mut mono_buf = [0u8; MONO_CHUNK];
+            let m = voice_stt::stereo_to_mono_le(&stereo, &mut mono_buf, MIC_RIGHT_CHANNEL);
+            if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
+                let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
             }
         }
-        // ===== end throwaway debug =====
-        // One STEREO_CHUNK pop -> exactly MONO_CHUNK mono bytes.
-        let mut mono_buf = [0u8; MONO_CHUNK];
-        let m = voice_stt::stereo_to_mono_le(&stereo, &mut mono_buf, MIC_RIGHT_CHANNEL);
-        if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
-            let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
-        }
+        // xfer dropped here → outer loop re-arms the transfer (recover from overrun)
     }
 }
