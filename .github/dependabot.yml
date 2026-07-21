@@ -1,0 +1,74 @@
+# Dependabot — automated dependency currency for esp32c6-watch.
+#
+# Policy: keep the SAFE leaf deps current automatically; upgrade the esp-rs
+# ecosystem as a deliberate, coordinated, hardware-gated migration — never a
+# piecemeal dependabot bump.
+#
+# ┌─ CRITICAL: the esp-* matched set is IGNORED here ON PURPOSE ────────────────┐
+# │ esp-hal (~1.1.0) / esp-radio (0.18) / esp-rtos (0.3) / esp-alloc /           │
+# │ esp-println / esp-backtrace  — plus smoltcp (esp-radio links it) and the     │
+# │ embassy-* + slint + trouble-host/bt-hci crates coupled to them — are an      │
+# │ INTENTIONALLY version-matched set. esp-radio/esp-rtos call esp-hal INTERNAL  │
+# │ APIs whose signatures change between releases, so a naive single-crate bump  │
+# │ FAILS to compile even when Cargo's semver check passes. The firmware is also │
+# │ calibrated against this exact combo (stack geometry / DMA descriptors /      │
+# │ WiFi-mesh radio sharing / the esp-hal stack guard — see memory:              │
+# │ c6-stack-geometry-and-esp-hal-guard). Upgrading the whole set is a separate  │
+# │ HW-gated migration project (evaluated via a spike branch), NOT a weekly PR.  │
+# │ Dependabot must never auto-PR these, so they are in the `ignore` list below. │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+version: 2
+updates:
+  # ---- Rust / Cargo — firmware workspace (root + crates/*) ----------------
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One consolidated PR per week for compatible bumps of the safe leaves.
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # esp-rs matched set — do NOT auto-bump; breaks the firmware build.
+      - dependency-name: "esp-*"
+      - dependency-name: "smoltcp"
+      # embassy stack — moves in lockstep with esp-hal-embassy; coordinate with
+      # the esp-* migration, not piecemeal.
+      - dependency-name: "embassy-*"
+      # UI toolkit — slint + slint-build are pinned together (1.17.x); a mixed
+      # bump splits the generated-code / runtime versions and breaks the build.
+      - dependency-name: "slint"
+      - dependency-name: "slint-build"
+      # BLE stack — trouble-host/bt-hci are pinned to esp-radio's Transport impl
+      # + the embassy-sync 0.7 line; bump with the esp-* set.
+      - dependency-name: "trouble-host"
+      - dependency-name: "bt-hci"
+
+  # ---- GitHub Actions (.github/workflows) ---------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      github-actions-all:
+        applies-to: version-updates
+        patterns:
+          - "*"
