@@ -213,6 +213,20 @@ fn page_scr_name(page: i32) -> &'static str {
     }
 }
 
+/// Optimistic-setpoint tracking for the Climate detail (oracle-t9 C4/C5/E2).
+/// Holds the user's pending absolute target so the UI can reflect a ±tap
+/// instantly (C4), the MQTT publish can be debounced ~400ms after the last tap
+/// (C5), and the optimistic value can revert to authoritative state if HA does
+/// not confirm within 5s (E2). Lives as a main-loop stack local — no .bss, so
+/// it does not move the stack-floor guardrail.
+struct ClimatePending {
+    id: i32,
+    temp: f32,
+    last_tap: Instant,
+    /// Set once the debounced SetTemp is published; also starts the 5s revert.
+    sent_at: Option<Instant>,
+}
+
 /// Log per-region free heap at boot / app-enter. The framebuffer must come from
 /// ONE region, so total-free (HEAP.free()) can read fine while the main region
 /// alone is short. region_stats[0] = main (240KB pool), [1] = reclaimed (56KB).
@@ -356,6 +370,39 @@ async fn main(_spawner: Spawner) -> ! {
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+
+    // --- Stack-floor guardrail: regression tripwire for #59 ------------------
+    // INVARIANT: on esp-hal the stack is the leftover gap under RAM top — it
+    // grows DOWN from `_stack_start` to `_stack_end` (== `_bss_end`). Growing
+    // `.bss` (a StaticCell, a spawned task's future, a bigger `heap_allocator!`)
+    // raises `_bss_end` and SILENTLY steals stack; it's invisible to heap stats
+    // and only surfaces as a WiFi-RX corruption crash at connect (ppRecycleRxPkt,
+    // mtval=0x4). v0.5.0's climate statics shrank it 46.5 -> 39.6 KB (#59). This
+    // reads the linker symbols (never writes the stack, so it won't trip esp-hal's
+    // guard canary) and fails LOUD at boot if the gap drops below the floor.
+    {
+        unsafe extern "C" {
+            static _stack_start: u8; // RAM-top side (fixed): stack grows down from here
+            static _stack_end: u8; // == _bss_end: stack floor = end of main .bss
+        }
+        let top = unsafe { core::ptr::addr_of!(_stack_start) as usize };
+        let bottom = unsafe { core::ptr::addr_of!(_stack_end) as usize };
+        let gap = top.saturating_sub(bottom);
+        // Floor 46 KB: just under v0.4.0's glass-proven-good 46.5 KB, well above
+        // the 39.6 KB crash. The v0.5.0 fix boots at 51.6 KB (~5.6 KB headroom).
+        // Any future .bss creep that drops the gap into the untested (39.6, 46.5]
+        // band trips this at boot instead of corrupting WPA state at WiFi-connect.
+        const STACK_FLOOR: usize = 46 * 1024;
+        println!("[STACK] gap = {} B ({} KB)", gap, gap / 1024);
+        assert!(
+            gap >= STACK_FLOOR,
+            "stack gap {} B < {} B floor — new .bss ate the stack (see #59); trim \
+             the MAIN heap_allocator! (main pool, below the stack) or shrink a \
+             StaticCell / spawned-task future",
+            gap,
+            STACK_FLOOR
+        );
+    }
 
     println!("=== smol watch v2 (C6 AMOLED, Embassy) ===");
     let delay = Delay::new();
@@ -749,6 +796,8 @@ async fn main(_spawner: Spawner) -> ! {
     // drop WiFi promptly → mesh re-pins ch6, WITHOUT clobbering a manual WiFi-on.
     let mut session_holds_wifi = false;
     let mut climate_running = false;
+    // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
+    let mut climate_pending: Option<ClimatePending> = None;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -1646,17 +1695,19 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 // Climate screen: route setpoint/mode commands + push the roster.
                 if app_state == AppState::Climate {
+                    // C4/C5/E2: a ±tap sends an absolute clamped target. Hold it as
+                    // `climate_pending` and display it immediately (optimistic);
+                    // publish ONCE ~400ms after the last tap (debounce); revert to
+                    // authoritative state if HA does not confirm within 5s.
                     if let Some((id, temp)) = shell.req.climate_set_temp.take() {
-                        let obj = {
-                            let st = climate_state.lock().await;
-                            st.entities.get(id as usize).map(|(o, _)| o.clone())
-                        };
-                        if let Some(obj) = obj {
-                            let _ = climate_cmds
-                                .sender()
-                                .try_send(crate::net::mqtt_climate::ClimateCmd::SetTemp { obj, temp });
-                        }
+                        climate_pending = Some(ClimatePending {
+                            id,
+                            temp,
+                            last_tap: Instant::now(),
+                            sent_at: None,
+                        });
                     }
+                    // Mode changes publish immediately (no debounce specced for mode).
                     if let Some((id, mode)) = shell.req.climate_set_mode.take() {
                         let obj = {
                             let st = climate_state.lock().await;
@@ -1671,8 +1722,51 @@ async fn main(_spawner: Spawner) -> ! {
                             );
                         }
                     }
-                    // conn-state: 0 ready · 1 connecting · 2 unreachable.
+
                     let st = climate_state.lock().await;
+                    // C5 debounce: publish the pending setpoint once, ~400ms after
+                    // the last tap settles, so a multi-tap sweep emits one command.
+                    if let Some(p) = climate_pending.as_mut() {
+                        if p.sent_at.is_none()
+                            && Instant::now().duration_since(p.last_tap)
+                                >= Duration::from_millis(400)
+                        {
+                            if let Some(obj) =
+                                st.entities.get(p.id as usize).map(|(o, _)| o.clone())
+                            {
+                                let _ = climate_cmds.sender().try_send(
+                                    crate::net::mqtt_climate::ClimateCmd::SetTemp {
+                                        obj,
+                                        temp: p.temp,
+                                    },
+                                );
+                            }
+                            p.sent_at = Some(Instant::now());
+                        }
+                    }
+                    // E2: drop the optimistic value when HA confirms it OR after a
+                    // 5s no-confirm timeout (then the display reverts to authority).
+                    let clear_pending = if let Some(p) = climate_pending.as_ref() {
+                        let confirmed = st
+                            .entities
+                            .get(p.id as usize)
+                            .and_then(|(_, e)| e.set)
+                            .map(|s| (s - p.temp).abs() < 0.05)
+                            .unwrap_or(false);
+                        let timed_out = p
+                            .sent_at
+                            .map(|t| {
+                                Instant::now().duration_since(t) >= Duration::from_secs(5)
+                            })
+                            .unwrap_or(false);
+                        confirmed || timed_out
+                    } else {
+                        false
+                    };
+                    if clear_pending {
+                        climate_pending = None;
+                    }
+                    // conn-state: 0 ready · 1 connecting · 2 unreachable.
                     let conn = if !st.entities.is_empty() {
                         0
                     } else if climate_session_want {
@@ -1680,7 +1774,20 @@ async fn main(_spawner: Spawner) -> ! {
                     } else {
                         2
                     };
-                    shell.set_climate(&st, conn);
+                    // C4 optimistic: override the pending entity's setpoint in the
+                    // pushed roster so the UI reflects the tap instantly. The UI
+                    // reads its stepper base from this model, so the next ±tap
+                    // accumulates from the optimistic value rather than the stale
+                    // authoritative one.
+                    if let Some(p) = climate_pending.as_ref() {
+                        let mut opt = st.clone();
+                        if let Some((_, e)) = opt.entities.get_mut(p.id as usize) {
+                            e.set = Some(p.temp);
+                        }
+                        shell.set_climate(&opt, conn);
+                    } else {
+                        shell.set_climate(&st, conn);
+                    }
                 } else {
                     let _ = shell.req.climate_set_temp.take();
                     let _ = shell.req.climate_set_mode.take();
@@ -1693,6 +1800,11 @@ async fn main(_spawner: Spawner) -> ! {
                         1
                     } else if !es.online {
                         2
+                    } else if !es.has_data() {
+                        // Session up + LWT online, but no EnergyState frame yet:
+                        // stay "connecting" so the UI shows that instead of the
+                        // -1% sentinel that battery_pct=None maps to below (luna #1).
+                        1
                     } else {
                         0
                     };
