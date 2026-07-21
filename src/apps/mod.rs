@@ -59,4 +59,8 @@ pub enum AppState {
     /// Home energy screen (house battery/solar/grid) — a display-only Slint
     /// overlay. Placeholder data until the HA/ESP-NOW energy feed lands.
     Energy,
+    /// HA climate control (#58) — a Slint overlay holding an open MQTT session
+    /// (WiFi held while the screen is up, released on close) to view + command
+    /// Nest / minisplit setpoints & modes via the Node-RED bridge.
+    Climate,
 }

@@ -105,6 +105,14 @@ component AppIcon {
         Rectangle { x: 20px; y: 13px; width: 6px;  height: 12px; border-radius: 1px; background: Theme.warm; }
         Rectangle { x: 15px; y: 21px; width: 6px;  height: 12px; border-radius: 1px; background: Theme.warm; }
     }
+    // 12 — Climate: a thermometer (stem outline + bulb + mercury column + ticks).
+    if root.id == 12: Rectangle {
+        Rectangle { x: 18px; y: 3px;  width: 11px; height: 30px; border-radius: 5.5px; border-width: 3px; border-color: root.tint; }
+        Rectangle { x: 14px; y: 26px; width: 19px; height: 19px; border-radius: 9.5px; background: root.tint; }
+        Rectangle { x: 21px; y: 16px; width: 5px;  height: 18px; border-radius: 2.5px; background: root.tint; }
+        Rectangle { x: 31px; y: 11px; width: 6px;  height: 2px;  border-radius: 1px; background: root.tint; }
+        Rectangle { x: 31px; y: 19px; width: 6px;  height: 2px;  border-radius: 1px; background: root.tint; }
+    }
 }
 
 // One big app tile: icon over label. Carries its launch idx.
@@ -198,8 +206,8 @@ export component LauncherOverlay {
             }
             HorizontalLayout {
                 spacing: 12px;
-                AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9; launch(i) => { root.launch-app(i); } }
-                Rectangle { }  // spacer keeps the lone tile half-width
+                AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9;  launch(i) => { root.launch-app(i); } }
+                AppTile { name: "Climate";     accent: #ff9d5c; icon-id: 12; idx: 10; launch(i) => { root.launch-app(i); } }
             }
         }
     }

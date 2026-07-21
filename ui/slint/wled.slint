@@ -46,7 +46,7 @@ export component WledRemote {
     // Back chevron (top-left, clear of the corner arc). Also closable by a
     // Right-swipe (handled in slint_shell::handle_touch, like the launcher).
     back := TouchArea {
-        x: 14px; y: 8px; width: 60px; height: 46px;
+        x: 14px; y: 8px; width: 78px; height: 64px;  // 78x64 finger hit-area (P2-B, uniform w/ climate)
         clicked => { root.close(); }
         Text {
             x: 8px; y: (parent.height - self.height) / 2;
