@@ -407,3 +407,33 @@ fn state_modes_mask_delegates_to_entity() {
     assert_eq!(st.modes_mask("lr"), 0b11);
     assert_eq!(st.modes_mask("missing"), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Golden-vector gaps (wisp validation vs the real climate-bridge.flow.json):
+// the bridge emits `set: target_temperature ?? null`, and heat pumps expose
+// `heat_cool` (not `auto`). Both must parse correctly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn null_set_is_none_like_null_cur() {
+    // A device with no target temp: bridge publishes set:null → must be None
+    // (not 0), with the rest intact. "fan" action → Idle.
+    let json = br#"{"name":"Fan","cur":72.0,"set":null,"mode":"fan_only","action":"fan","min":60,"max":86,"step":1.0,"modes":["off","fan_only"]}"#;
+    let e = parse_state(json).expect("null set still valid");
+    assert_eq!(e.set, None);
+    assert_eq!(e.cur, Some(72.0));
+    assert_eq!(e.mode, HvacMode::FanOnly);
+    assert_eq!(e.action, HvacAction::Idle);
+}
+
+#[test]
+fn heat_cool_only_device_sets_auto_bit() {
+    // Heat pump exposing "heat_cool" (not "auto") must fold to Auto and set the
+    // Auto bit so the UI shows the segment (ingest side of the auto/heat_cool
+    // asymmetry; the command side is the bridge's capability-aware remap).
+    let json = br#"{"name":"HP","cur":70.0,"set":71.0,"mode":"heat_cool","action":"idle","min":50,"max":90,"step":1.0,"modes":["off","heat","cool","heat_cool"]}"#;
+    let e = parse_state(json).expect("heat_cool-only valid");
+    assert_eq!(e.mode, HvacMode::Auto);
+    assert!(e.modes.contains(&HvacMode::Auto));
+    assert_eq!(e.modes_mask(), 0b0000_1111); // off|heat|cool|auto = 15
+}
