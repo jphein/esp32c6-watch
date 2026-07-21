@@ -59,4 +59,9 @@ pub enum AppState {
     /// Home energy screen (house battery/solar/grid) — a display-only Slint
     /// overlay. Placeholder data until the HA/ESP-NOW energy feed lands.
     Energy,
+    /// Voice-to-text (push-to-talk) — a Slint overlay: hold streams mic PCM over
+    /// HTTP to the LAN STT bridge, release shows the transcript. Scene-resident
+    /// (no framebuffer); capture runs in `mic_capture_task`, streamed by
+    /// `voice_stt::stream_utterance` while the button is held.
+    Voice,
 }

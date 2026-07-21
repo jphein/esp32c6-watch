@@ -49,7 +49,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 10] = [
+pub const LAUNCHER_APPS: [AppState; 11] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -60,6 +60,7 @@ pub const LAUNCHER_APPS: [AppState; 10] = [
     AppState::Wled,   // idx 7 — SYSTEM-section WLED tile (icon-id 9)
     AppState::Hunt,   // idx 8 — GAMES-section HUNT tile (icon-id 10)
     AppState::Energy, // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
+    AppState::Voice,  // idx 10 — SYSTEM-section VOICE tile (icon-id 7)
 ];
 
 #[derive(Default)]
@@ -81,6 +82,12 @@ pub struct ShellRequests {
     pub hunt_close: Cell<bool>,
     /// Energy overlay back/Right-swipe.
     pub energy_close: Cell<bool>,
+    /// Voice PTT: `pressed` is the finger-down that starts capture (drained by
+    /// the loop when app_state == Voice). `released` is advisory — the loop's
+    /// release watcher keys off the physical touch INT pin, since the Slint
+    /// release callback can't fire while the loop is parked streaming.
+    pub voice_ptt_pressed: Cell<bool>,
+    pub voice_ptt_released: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -246,6 +253,15 @@ impl ShellUi {
             if ui.get_energy_open() {
                 if direction == SwipeDirection::Right {
                     ui.set_energy_open(false);
+                }
+                return;
+            }
+            // Voice overlay: same contract — swallow nav swipes, Right closes.
+            // (No back-chevron; Right-swipe is the only close. A swipe only lands
+            // here when the button isn't held — the loop is parked during a hold.)
+            if ui.get_voice_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_voice_open(false);
                 }
                 return;
             }
@@ -546,6 +562,43 @@ impl ShellUi {
         self.ui.as_ref().is_some_and(|ui| ui.get_energy_open())
     }
 
+    pub fn set_voice_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_open(open);
+    }
+
+    pub fn voice_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_voice_open())
+    }
+
+    /// Voice UI state: 0 idle · 1 listening · 2 sending · 3 result · 4 error.
+    pub fn set_voice_state(&self, state: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_state(state);
+    }
+
+    /// Input level 0..1 (drives the listening pulse; optional live meter).
+    /// Unused today: the loop is parked in the stream `.await` for the whole
+    /// hold, so there's no frame to push a live level to (see the PTT flow in
+    /// main.rs). Kept as the hook for the MC6 level-meter polish.
+    #[allow(dead_code)]
+    pub fn set_voice_level(&self, level: f32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_level(level);
+    }
+
+    /// The recognised transcript (shown in state 3).
+    pub fn set_voice_transcript(&self, text: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_transcript(SharedString::from(text));
+    }
+
+    /// Error message (shown in state 4; "" → the page's default "No speech").
+    pub fn set_voice_error(&self, text: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_error(SharedString::from(text));
+    }
+
     /// Home energy figures (grid_w is SIGNED: >0 importing, <0 exporting).
     pub fn set_energy(&self, batt_pct: i32, solar_w: i32, grid_w: i32, charging: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -704,6 +757,12 @@ fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> W
 
         let r = req.clone();
         ui.on_energy_close(move || r.energy_close.set(true));
+
+        let r = req.clone();
+        ui.on_voice_ptt_pressed(move || r.voice_ptt_pressed.set(true));
+
+        let r = req.clone();
+        ui.on_voice_ptt_released(move || r.voice_ptt_released.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     // Firmware version is a compile-time constant; set it once so the system

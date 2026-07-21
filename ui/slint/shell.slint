@@ -8,6 +8,7 @@ import { LauncherOverlay } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
+import { VoicePage } from "voice.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -101,6 +102,14 @@ export component WatchShell inherits Window {
     in property <int> energy-solar-w: 0;
     in property <int> energy-grid-w: 0;
     in property <bool> energy-charging: false;
+    // Voice-to-text overlay (push-to-talk). State/level/transcript pushed from
+    // the Rust loop; the PTT button emits pressed/released, driven by physical
+    // touch (release detected off the INT pin while the loop streams).
+    in-out property <bool> voice-open: false;
+    in property <int> voice-state: 0;   // 0 idle 1 listening 2 sending 3 result 4 error
+    in property <float> voice-level: 0.0;
+    in property <string> voice-transcript;
+    in property <string> voice-error;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -118,6 +127,8 @@ export component WatchShell inherits Window {
     callback hunt-next();     // cycle to the next roster target
     callback hunt-close();
     callback energy-close();
+    callback voice-ptt-pressed();  // finger down on the PTT button → start capture
+    callback voice-ptt-released();  // finger up → stop (advisory; loop keys off INT pin)
 
     in-out property <float> brightness: 0.8;
 
@@ -345,6 +356,17 @@ export component WatchShell inherits Window {
         grid-w: root.energy-grid-w;
         charging: root.energy-charging;
         close => { root.energy-close(); }
+    }
+
+    // ==================== Voice overlay ====================
+    if root.voice-open: VoicePage {
+        width: 100%; height: 100%;
+        voice-state: root.voice-state;
+        level: root.voice-level;
+        transcript: root.voice-transcript;
+        error-text: root.voice-error;
+        ptt-pressed => { root.voice-ptt-pressed(); }
+        ptt-released => { root.voice-ptt-released(); }
     }
 
     // ==================== AOD overlay ====================
