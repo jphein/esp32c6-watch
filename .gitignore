@@ -1,3 +1,7 @@
 target/
 .cargo/config.toml
 .claude/
+
+# Python bytecode (HA component)
+__pycache__/
+*.pyc
