@@ -51,6 +51,43 @@ the 2 Tuya minisplits (Layer A below) light up once integrated.
   → the entity's setpoint changes in HA. Then `{"mode":"cool"}` → mode changes.
 - Then the watch's Climate screen mirrors it (once Layer B firmware ships).
 
+## Bench testing — `mock-climate-publisher.py` (NO live HA)
+
+Validate the watch's Climate screen against **fake** devices, so you never touch
+JP's live HA/Node-RED. The mock only speaks MQTT on `watch/climate/#` (it never
+calls HA); it fakes the HA→watch side and logs the watch→HA commands.
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate && pip install 'paho-mqtt>=2.0'
+export MQTT_PASS=$(bw get password mosquitto)     # creds via env, never hardcoded
+python3 mock-climate-publisher.py                  # publish 3 fakes + drift + log commands
+```
+Then flash the watch, open the Climate screen: three cards appear (Hall Nest,
+Office/Bedroom Mini-Split), `cur`/`action` move live, and every setpoint/mode
+tap is logged here (`CMD OK …`) and — unless `--no-echo` — reflected back into
+`/state` so the optimistic-update → reconcile loop is exercised.
+
+- `--dry-run` prints the payloads without a broker or paho (offline contract check).
+- `--once` seeds retained state once and exits. `--no-echo` logs commands only.
+- **`--clear` wipes the retained fake topics** — run it when done so the fakes
+  don't linger on the shared broker.
+
+Env: `MQTT_HOST` (10.0.6.11) · `MQTT_PORT` (1883) · `MQTT_USER` (jp) · `MQTT_PASS`.
+
+⚠️ **Wire-format note:** the mock publishes `mode`/`action`/`modes` as **strings**
+(`"heat"`, `"heating"`, `["off","heat",…]`) to match the firmware parser
+(`crates/climate-model` / `climate_model_stub.rs` `from_ha`) and the design-spec
+JSON example. The "Encodings" int table in §Topic contract above is **stale** and
+should be corrected to strings (or the firmware switched to ints — but the parser
+is strings today).
+
+⚠️ **Shared-broker caution:** object_ids (`nest_hall`, `split_office`,
+`split_bed`) are chosen to not match real HA entities, and the mock never calls
+HA. But if the real Node-RED climate flow is *also* deployed and subscribed to
+`watch/climate/+/set`, a command for a fake id would reach it (→ a no-op HA
+`climate.set_*` on a nonexistent entity). Run the mock when that flow is **not**
+deployed, or point `MQTT_HOST` at a scratch broker.
+
 ## Layer A — integrate the 2 Tuya minisplits (so they appear on the watch)
 
 They're **Tuya-compatible**, so once they're `climate.*` entities in HA the bridge picks
