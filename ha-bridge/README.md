@@ -94,8 +94,8 @@ Validate the watch's **Energy** screen (home battery / solar / grid) against a
 **fake** feed. Only touches `watch/energy/#` (never calls HA); mirrors the real
 `energy-bridge.flow.json` contract:
 
-- `watch/energy/state` **(retained)** = `{"batt":78,"solar":3400,"grid":-1200,"chg":true}`
-  (`batt` 0-100 · `solar` W≥0 · `grid` W signed, **+import / −export** · `chg` bool)
+- `watch/energy/state` **(retained)** = `{"battery_pct":78,"solar_w":3400,"grid_w":-1200,"charging":true}`
+  (`battery_pct` 0-100 · `solar_w` W≥0 · `grid_w` W signed, **+import / −export** · `charging` bool)
 - `watch/energy/avail` **(retained)** = `online` | `offline` (`offline` is the LWT)
 
 ```bash

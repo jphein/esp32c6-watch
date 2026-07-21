@@ -10,11 +10,11 @@ movement and every colour branch is exercised, plus a RETAINED
 
 Wire contract (from luna's energy contract + the real `energy-bridge.flow.json`,
 which aggregates HA sensors into these exact keys):
-  watch/energy/state  (retained) = {"batt":78,"solar":3400,"grid":-1200,"chg":true}
-      batt  : home battery %, 0..100        (int)
-      solar : solar production, W, >= 0      (int)
-      grid  : grid power, W, SIGNED — >0 IMPORT (buying), <0 EXPORT (selling)
-      chg   : home battery charging          (bool)
+  watch/energy/state  (retained) = {"battery_pct":78,"solar_w":3400,"grid_w":-1200,"charging":true}
+      battery_pct : home battery %, 0..100   (int)
+      solar_w     : solar production, W, >= 0 (int)
+      grid_w      : grid power, W, SIGNED — >0 IMPORT (buying), <0 EXPORT (selling)
+      charging    : home battery charging     (bool)
   watch/energy/avail  (retained) = "online" | "offline"   (offline = LWT)
 
 Screen branches this drives (ui/slint/energy.slint):
@@ -100,10 +100,10 @@ class Sim:
 
     def state(self):
         return {
-            "batt": int(round(self.batt)),
-            "solar": int(round(self.solar)),
-            "grid": int(round(self.grid)),
-            "chg": bool(self.chg),
+            "battery_pct": int(round(self.batt)),
+            "solar_w": int(round(self.solar)),
+            "grid_w": int(round(self.grid)),
+            "charging": bool(self.chg),
         }
 
 
@@ -113,9 +113,9 @@ def log(msg):
 
 def label(st):
     """Human tag for the log so you can eyeball which colour branch is active."""
-    g = st["grid"]
+    g = st["grid_w"]
     gtag = "IMPORT" if g > 50 else ("EXPORT" if g < -50 else "IDLE")
-    btag = "chg" if st["chg"] else ("LOW" if st["batt"] < 20 else "dischg")
+    btag = "chg" if st["charging"] else ("LOW" if st["battery_pct"] < 20 else "dischg")
     return f"[{gtag} {btag}]"
 
 
