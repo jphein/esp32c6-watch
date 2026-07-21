@@ -338,7 +338,7 @@ async fn main(_spawner: Spawner) -> ! {
     // the game-launch OOM in EVERY radio state (#35), replacing the 264KB
     // interim.
     esp_alloc::heap_allocator!(size: 240 * 1024);
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 56 * 1024);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 48 * 1024); // DEBUG #59 F1: -8KB reclaimed heap → +8KB stack (discriminator/fix)
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
