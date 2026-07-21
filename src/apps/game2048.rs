@@ -10,6 +10,7 @@ use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::SwipeDirection;
 
 const GRID: usize = 4;
@@ -175,7 +176,7 @@ impl App for Game2048 {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(410, 502))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::new(4, 8, 4)))
             .draw(d);

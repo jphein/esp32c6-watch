@@ -60,7 +60,7 @@ use crate::apps::settings::SettingsApp;
 use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
-use crate::apps::{App, AppInput, AppResult, AppState};
+use crate::apps::{App, AppInput, AppResult, AppState, Sfx};
 use crate::drivers::co5300::Co5300Display;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
@@ -2349,7 +2349,6 @@ async fn main(_spawner: Spawner) -> ! {
                     app_state = AppState::Watchface;
                     continue;
                 };
-                let prev_score = snake_game.score();
                 let input = AppInput {
                     touch: None,
                     swipe: swipe_event,
@@ -2357,31 +2356,24 @@ async fn main(_spawner: Spawner) -> ! {
                     accel,
                     dt_ms: dt_ms.max(1),
                 };
-                match snake_game.update(&input) {
-                    AppResult::Continue => {
-                        if snake_game.stepped() {
-                            snake_game.render(fb_ref);
-                            fb_ref.flush(&mut display);
-                            // Beep when food eaten via I2S DMA
-                            if snake_game.score() > prev_score {
-                                // Unmute codec, then raise the amp, then play
-                                let _ = audio_codec.unmute();
-                                delay.delay_millis(2); // let codec stabilize before enabling amp
-                                amp_en.set_high();
-                                if let Ok(transfer) = i2s_tx.write_dma(&beep_buf) {
-                                    let _ = transfer.wait();
-                                }
-                                // Lower amp FIRST, then mute codec to avoid pop
-                                amp_en.set_low();
-                                let _ = audio_codec.mute();
-                            }
-                        }
+                let (exit, sfx) =
+                    run_fb_app(&mut snake_game, &input, fb_ref, &mut display, now, &mut next_flush);
+                if let Some(Sfx::Beep) = sfx {
+                    // Beep on food-eat via I2S DMA. Unmute codec, raise amp, play,
+                    // then lower amp FIRST and mute to avoid a pop.
+                    let _ = audio_codec.unmute();
+                    delay.delay_millis(2); // let codec stabilize before enabling amp
+                    amp_en.set_high();
+                    if let Ok(transfer) = i2s_tx.write_dma(&beep_buf) {
+                        let _ = transfer.wait();
                     }
-                    AppResult::Exit => {
-                        app_state = AppState::Watchface;
-                        fb = None;
-                        println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    }
+                    amp_en.set_low();
+                    let _ = audio_codec.mute();
+                }
+                if exit {
+                    app_state = AppState::Watchface;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Watchface;
@@ -2517,11 +2509,12 @@ async fn main(_spawner: Spawner) -> ! {
                     accel,
                     dt_ms: dt_ms.max(1),
                 };
-                maze_game.update(&input);
-                if now >= next_flush {
-                    maze_game.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
+                let (exit, _sfx) =
+                    run_fb_app(&mut maze_game, &input, fb_ref, &mut display, now, &mut next_flush);
+                if exit {
+                    app_state = AppState::Launcher;
+                    fb = None;
+                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
                 }
                 if boot_button.is_low() {
                     app_state = AppState::Launcher;
@@ -2604,6 +2597,36 @@ async fn main(_spawner: Spawner) -> ! {
         // pre-dispatch snapshot, not the (possibly mutated) current app_state.
         prev_app_state = dispatched;
     }
+}
+
+/// Generic per-frame driver for a framebuffer app, dispatched through `&mut dyn
+/// App` (object-safe since `App::render` is monomorphized to `Framebuffer`).
+/// Runs `update` → drains any queued [`Sfx`] → renders + flushes when the app is
+/// `dirty` and its `min_flush_ms` cadence has elapsed.
+///
+/// Returns `(exit, sfx)`: `exit` is true when the app's own `update` signalled
+/// `AppResult::Exit` (the boot-button exit stays in the caller's arm — it needs
+/// `.await`); `sfx` is any one-shot effect for the caller to play on the shared
+/// I2S path. This one body replaces the per-game render/flush arms.
+fn run_fb_app(
+    app: &mut dyn App,
+    input: &AppInput,
+    fb: &mut Framebuffer,
+    display: &mut Co5300Display,
+    now: Instant,
+    next_flush: &mut Instant,
+) -> (bool, Option<Sfx>) {
+    let result = app.update(input);
+    let sfx = app.take_sfx();
+    if let AppResult::Exit = result {
+        return (true, sfx);
+    }
+    if app.dirty() && now >= *next_flush {
+        app.render(fb);
+        fb.flush(display);
+        *next_flush = now + Duration::from_millis(app.min_flush_ms() as u64);
+    }
+    (false, sfx)
 }
 
 /// Map a WLED page action id (see ui/slint/wled.slint) to a WiZmote button.

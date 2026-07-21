@@ -9,6 +9,7 @@ use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 
 const W: i32 = 410;
 const H: i32 = 502;
@@ -116,7 +117,7 @@ impl App for FlappyGame {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    fn render(&self, d: &mut Framebuffer) {
         // Sky
         let _ = Rectangle::new(EgPoint::new(0, 0), Size::new(W as u32, (H - GROUND_H) as u32))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::new(1, 4, 10))).draw(d);

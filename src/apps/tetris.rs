@@ -12,6 +12,7 @@ use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::SwipeDirection;
 
 const GW: usize = 12;
@@ -221,7 +222,7 @@ impl App for TetrisGame {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(SCREEN_W as u32, SCREEN_H as u32))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK)).draw(d);
 
