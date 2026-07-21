@@ -53,7 +53,7 @@
 //! ```
 
 // Real crate on integration: `use climate_model;` (see module docs / stub).
-use crate::net::climate_model_stub as climate_model;
+use climate_model;
 use crate::net::mqtt_ha::{
     build_connect, parse_broker, publish, push, push_remaining_len, push_str, read_exact,
     write_all, BROKER, PKT_CAP,

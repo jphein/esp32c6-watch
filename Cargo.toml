@@ -98,6 +98,9 @@ u8g2-fonts = "0.8.0"
 wled-wizmote = { path = "crates/wled-wizmote" }
 rssi = { path = "crates/rssi" }
 hunt = { path = "crates/hunt" }
+# #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —
+# replaces src/net/climate_model_stub.rs.
+climate-model = { path = "crates/climate-model" }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

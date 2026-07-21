@@ -86,10 +86,9 @@ async fn net_task(
     runner.run().await
 }
 
-// #58 climate: alias the model source so the stub→real-crate swap stays localized
-// (same one-line pattern as mqtt_climate.rs / slint_shell.rs). Provides
-// HvacMode / ClimateState. Swap = change this line + the two peers.
-use crate::net::climate_model_stub as climate_model;
+// #58 climate: the real `climate-model` crate (oracle-t9 CONFIRMED-CLEAN @5c0d04c;
+// stub swapped out). Provides HvacMode / ClimateState.
+use climate_model;
 
 /// Map the UI's hvac-mode int (0..5, from the ClimateOverlay segmented control)
 /// back to the model enum for a `SetMode` command.
@@ -114,6 +113,7 @@ fn hvac_from_ui(m: i32) -> climate_model::HvacMode {
 async fn climate_task(
     stack: embassy_net::Stack<'static>,
     state: &'static crate::net::mqtt_climate::ClimateStateMutex,
+    energy: &'static crate::net::mqtt_climate::EnergyStateMutex,
     cmd_rx: crate::net::mqtt_climate::ClimateCmdReceiver,
     open: &'static crate::net::mqtt_climate::CloseSignal,
     close: &'static crate::net::mqtt_climate::CloseSignal,
@@ -121,8 +121,9 @@ async fn climate_task(
 ) {
     loop {
         open.wait().await;
+        // One session feeds BOTH the Climate + Energy screens (shared CONNECT).
         if let Err(e) =
-            crate::net::mqtt_climate::run_climate_session(stack, state, cmd_rx, close).await
+            crate::net::mqtt_climate::run_climate_session(stack, state, energy, cmd_rx, close).await
         {
             println!("[CLIM] session ended: {e}");
         }
@@ -592,6 +593,7 @@ async fn main(_spawner: Spawner) -> ! {
     // releases the WiFi hold on `done` (both Ok + Err arms — see climate_task).
     static CLIMATE_STATE: StaticCell<crate::net::mqtt_climate::ClimateStateMutex> =
         StaticCell::new();
+    static ENERGY_STATE: StaticCell<crate::net::mqtt_climate::EnergyStateMutex> = StaticCell::new();
     static CLIMATE_CMDS: StaticCell<crate::net::mqtt_climate::ClimateCmdChannel> = StaticCell::new();
     static CLIMATE_OPEN: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
     static CLIMATE_CLOSE: StaticCell<crate::net::mqtt_climate::CloseSignal> = StaticCell::new();
@@ -600,6 +602,9 @@ async fn main(_spawner: Spawner) -> ! {
     // the main loop hold them (Signal/Channel/Mutex methods take &self).
     let climate_state: &'static crate::net::mqtt_climate::ClimateStateMutex =
         CLIMATE_STATE.init(embassy_sync::mutex::Mutex::new(climate_model::ClimateState::new()));
+    let climate_energy: &'static crate::net::mqtt_climate::EnergyStateMutex = ENERGY_STATE.init(
+        embassy_sync::mutex::Mutex::new(crate::net::mqtt_climate::EnergyState::default()),
+    );
     let climate_cmds: &'static crate::net::mqtt_climate::ClimateCmdChannel =
         CLIMATE_CMDS.init(embassy_sync::channel::Channel::new());
     let climate_open: &'static crate::net::mqtt_climate::CloseSignal =
@@ -612,6 +617,7 @@ async fn main(_spawner: Spawner) -> ! {
         climate_task(
             stack,
             climate_state,
+            climate_energy,
             climate_cmds.receiver(),
             climate_open,
             climate_close,
@@ -723,6 +729,7 @@ async fn main(_spawner: Spawner) -> ! {
     // is open (cleared on session return); climate_running gates the one-shot
     // open-signal so the session spawns once per screen visit.
     let mut climate_active = false;
+    let mut energy_active = false;
     let mut climate_running = false;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
@@ -1571,47 +1578,44 @@ async fn main(_spawner: Spawner) -> ! {
 
                 // Energy overlay is display-only; back-chevron / Right-swipe closes.
                 if shell.req.energy_close.take() {
+                    energy_active = false; // stop wanting the shared session
                     shell.set_energy_open(false);
                     app_state = AppState::Watchface;
                 }
 
-                // === #58: Climate session lifecycle ===
-                // Session return (climate_task signals `done` after the session
-                // ends on BOTH the Ok and Err paths): release the WiFi hold +
-                // dismiss the overlay UNCONDITIONALLY — oracle-t10 invariant b, an
-                // error return must never leave WiFi held.
+                // === #58: shared HA MQTT session (feeds Climate + Energy screens) ===
+                // climate_task holds ONE CONNECT while EITHER screen is open; each
+                // screen reads its shared state (ClimateState / EnergyState). Reset
+                // `running` on session return (done fires on Ok AND Err); it
+                // restarts below if a screen is still open (error resilience).
                 if climate_done.try_take().is_some() {
                     climate_running = false;
+                }
+                // Climate back-chevron / right-swipe → dismiss + stop wanting it.
+                if shell.req.climate_closed.take() {
                     climate_active = false;
                     shell.set_climate_open(false);
                     if app_state == AppState::Climate {
                         app_state = AppState::Watchface;
                     }
                 }
-                // Back-chevron / right-swipe / detail-back → end the session; the
-                // done-poll above then restores mesh once it returns.
-                if shell.req.climate_closed.take() {
-                    climate_active = false; // stop holding WiFi
-                    if climate_running {
-                        climate_close.signal(());
-                    } else {
-                        // Never started (WiFi never came up) — close immediately.
-                        shell.set_climate_open(false);
-                        if app_state == AppState::Climate {
-                            app_state = AppState::Watchface;
-                        }
-                    }
-                }
-                if app_state == AppState::Climate {
-                    // Hold WiFi up while the screen is open.
-                    climate_active = true;
+                // WiFi hold + session start/stop, keyed on "either screen open".
+                // When both close, releasing the hold returns the watch to mesh —
+                // the unconditional restore (oracle-t10 inv b): however the session
+                // ended (Ok close or Err), closing the screen(s) frees WiFi, so it
+                // can never be stranded held.
+                let climate_session_want = climate_active || energy_active;
+                if climate_session_want {
                     wifi_on_request = true;
-                    // Start the session once WiFi is associated (one-shot per visit).
                     if wifi_connected && !climate_running {
                         climate_open.signal(());
                         climate_running = true;
                     }
-                    // Route queued UI commands → session (card idx → ObjId lookup).
+                } else if climate_running {
+                    climate_close.signal(());
+                }
+                // Climate screen: route setpoint/mode commands + push the roster.
+                if app_state == AppState::Climate {
                     if let Some((id, temp)) = shell.req.climate_set_temp.take() {
                         let obj = {
                             let st = climate_state.lock().await;
@@ -1637,18 +1641,38 @@ async fn main(_spawner: Spawner) -> ! {
                             );
                         }
                     }
-                    // Push the roster + connection banner (0 off · 1 connecting · 2 live).
+                    // conn-state: 0 ready · 1 connecting · 2 unreachable.
                     let st = climate_state.lock().await;
-                    let conn = if !climate_running || st.entities.is_empty() {
+                    let conn = if !st.entities.is_empty() {
+                        0
+                    } else if climate_session_want {
                         1
                     } else {
                         2
                     };
                     shell.set_climate(&st, conn);
                 } else {
-                    // Off the Climate screen — drop stale queued taps.
                     let _ = shell.req.climate_set_temp.take();
                     let _ = shell.req.climate_set_mode.take();
+                }
+                // Energy screen: push the live EnergyState from the shared session.
+                // conn-state: 0 ready · 1 connecting · 2 unreachable (HA LWT offline).
+                if app_state == AppState::Energy {
+                    let es = climate_energy.lock().await;
+                    let conn = if !climate_running {
+                        1
+                    } else if !es.online {
+                        2
+                    } else {
+                        0
+                    };
+                    shell.set_energy(
+                        es.battery_pct.map_or(-1, |v| v as i32),
+                        es.solar_w.unwrap_or(0),
+                        es.grid_w.unwrap_or(0),
+                        es.charging,
+                    );
+                    shell.set_energy_conn(conn);
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1797,11 +1821,13 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_hunt_open(true);
                         app_state = AppState::Hunt;
                     } else if target == AppState::Energy {
-                        // Home energy: display-only Slint overlay. Placeholder data
-                        // (a plausible sunny-afternoon snapshot) until the HA/ESP-NOW
-                        // energy feed lands — a deferred net task. grid_w<0 = export.
-                        shell.set_energy(72, 3400, -1200, true);
+                        // #58: home energy is LIVE off the shared HA MQTT session.
+                        // Raise the overlay + hold WiFi; the session (climate_task)
+                        // comes up for either screen; the live feed is in the shared
+                        // session block below.
                         shell.set_energy_open(true);
+                        energy_active = true;
+                        wifi_on_request = true;
                         app_state = AppState::Energy;
                     } else if target == AppState::Climate {
                         // #58: raise the Climate overlay + hold WiFi up. The MQTT

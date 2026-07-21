@@ -9,7 +9,6 @@ pub mod familiar;
 // feat/climate-model). Delete on integration — see the module docs. Silence
 // dead-code until the bidirectional climate session is wired from main.rs.
 #[allow(dead_code)]
-pub mod climate_model_stub;
 pub mod mqtt_ha;
 // Bidirectional MQTT climate session. Unwired until main.rs spawns it for the
 // Climate screen (integrator's serial step); silence dead-code until then, same

@@ -15,9 +15,9 @@ use slint::{ModelRc, SharedString, VecModel};
 use crate::apps::AppState;
 use crate::drivers::co5300::Co5300Display;
 use crate::net::names;
-// #58 climate: alias the model source so the stub→real-crate swap is one line
-// here (mirrors mqtt_climate.rs). Provides ClimateState/ClimateEntity/HvacMode.
-use crate::net::climate_model_stub as climate_model;
+// #58 climate: the real `climate-model` crate (oracle-t9 CONFIRMED-CLEAN @5c0d04c;
+// stub swapped out). Provides ClimateState / ClimateEntity / HvacMode.
+use climate_model;
 use crate::net::smol_mesh::PeerView;
 use crate::peripherals::rtc::DateTime;
 use crate::peripherals::touch::{SwipeDirection, TouchPoint};
@@ -573,6 +573,12 @@ impl ShellUi {
         ui.set_energy_solar_w(solar_w);
         ui.set_energy_grid_w(grid_w);
         ui.set_energy_charging(charging);
+    }
+
+    /// Energy connection banner: 0 ready · 1 connecting · 2 HA unreachable (#58).
+    pub fn set_energy_conn(&self, conn: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_energy_conn(conn);
     }
 
     pub fn set_climate_open(&self, open: bool) {

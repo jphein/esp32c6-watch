@@ -102,6 +102,7 @@ export component WatchShell inherits Window {
     in property <int> energy-solar-w: 0;
     in property <int> energy-grid-w: 0;
     in property <bool> energy-charging: false;
+    in property <int> energy-conn: 0; // 0 ready · 1 connecting · 2 HA unreachable
     // Climate overlay (#58): cards + connection banner; selected-index is UI-owned.
     in-out property <bool> climate-open: false;
     in property <[ClimateCard]> climate-cards;
@@ -353,6 +354,7 @@ export component WatchShell inherits Window {
         solar-w: root.energy-solar-w;
         grid-w: root.energy-grid-w;
         charging: root.energy-charging;
+        conn-state: root.energy-conn;
         close => { root.energy-close(); }
     }
 
