@@ -217,7 +217,10 @@ export component ClimateOverlay {
 
         // setpoint stepper: −  [ NN° ]  +
         minus := Rectangle {
-            x: 40px; y: 262px; width: 64px; height: 64px; border-radius: 32px;
+            // 72x72 finger target (grows symmetrically around the same centre as
+            // the old 64x64, so the setpoint stays aligned) — meets the enlarged
+            // tap-target bar set for the WIFI/BLE/MESH dots (glass, not pixels).
+            x: 40px; y: 258px; width: 72px; height: 72px; border-radius: 36px;
             background: mta.pressed ? Theme.line : Theme.panel;
             border-width: 1px; border-color: mta.pressed ? Theme.accent : Theme.line;
             animate background, border-color { duration: 120ms; easing: ease-out; }
@@ -235,7 +238,8 @@ export component ClimateOverlay {
             color: Theme.accent; font-size: 46px; font-weight: 700;
         }
         plus := Rectangle {
-            x: parent.width - self.width - 40px; y: 262px; width: 64px; height: 64px; border-radius: 32px;
+            // 72x72 finger target (matches `minus`) — meets the enlarged tap bar.
+            x: parent.width - self.width - 40px; y: 258px; width: 72px; height: 72px; border-radius: 36px;
             background: pta.pressed ? Theme.line : Theme.panel;
             border-width: 1px; border-color: pta.pressed ? Theme.accent : Theme.line;
             animate background, border-color { duration: 120ms; easing: ease-out; }
