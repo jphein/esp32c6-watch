@@ -525,6 +525,9 @@ async fn main(_spawner: Spawner) -> ! {
     // only zeroes the volume register. `unmute()` brings them back on
     // demand at playback time.
     let _ = audio_codec.shutdown();
+    // THROWAWAY (mic debug): force ADC on at boot so DIN carries real ES8311 data for
+    // headless [MICDBG] probing (no touch to open the Sound screen). Remove before tag.
+    let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
 
     // === I2S TX for beep playback (16kHz stereo 16-bit) ===
     // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DAC data=GPIO21.
@@ -591,6 +594,9 @@ async fn main(_spawner: Spawner) -> ! {
             .expect("mic_capture_task token"),
     );
     println!("[AUDIO] I2S RX (mic) ready on GPIO23");
+    // THROWAWAY (mic debug): force METER on at boot so the capture task processes
+    // chunks and [MICDBG] prints live dBFS headlessly. Remove before tag.
+    mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
