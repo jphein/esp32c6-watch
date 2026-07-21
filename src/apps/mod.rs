@@ -59,4 +59,8 @@ pub enum AppState {
     /// Home energy screen (house battery/solar/grid) — a display-only Slint
     /// overlay. Placeholder data until the HA/ESP-NOW energy feed lands.
     Energy,
+    /// Passive 802.15.4 (Zigbee/Thread) radio scan — a Slint overlay that
+    /// switches the shared 2.4GHz radio from WiFi to a promiscuous 154 sniffer
+    /// (#23). Consent-gated (WiFi/mesh go off), restores on exit.
+    RadioScan,
 }

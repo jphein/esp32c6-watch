@@ -22,22 +22,9 @@ mod ui;
 mod apps;
 mod vendor; // #23 Option-A: vendored esp-radio 0.18 IEEE 802.15.4 driver
 
-// #23 link-test (spike-only): a `#[used]` fn-pointer static forces the vendored
-// 802.15.4 driver's init+RX path to be emitted and LINKED (not dead-code-
-// eliminated), so the linker must resolve the blob symbols (`bt_bb_v2_init_cmplx`
-// et al.) that esp-wifi-sys-esp32c6 links via the wifi build. If this links, the
-// single-image wifi + vendored-154 coexistence is proven at link, not just by nm.
-// NEVER CALLED at runtime — only its address is taken. Removed when RS3 wires the
-// real runtime radio-switch.
-#[used]
-static _RS_VENDOR_LINK_TEST: fn(esp_hal::peripherals::IEEE802154<'static>) = rs_vendor_link_test;
-fn rs_vendor_link_test(radio: esp_hal::peripherals::IEEE802154<'static>) {
-    let mut r = vendor::ieee802154::Ieee802154::new(radio);
-    r.set_config(vendor::ieee802154::Config::default());
-    r.start_receive();
-    let _ = r.raw_received();
-    core::mem::forget(r);
-}
+// (The spike-only `#[used]` link-test is retired now that RS5's RadioScan START
+// → radio_scan_request → RS3 `Ieee802154::new` is a real reachable path — the
+// linker resolves the blob symbols via genuine use, not a forced reference.)
 
 /// RS3: which radio the shared 2.4GHz PHY is currently driving. WiFi/ESP-NOW and
 /// the vendored 802.15.4 sniffer can't drive the baseband at once (coex stripped),
@@ -684,8 +671,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut radio_scan_request = false;
     // RS4: aggregate parsed 802.15.4 frames (per-channel/PAN/device) for RS5's
     // RadioScan screen. `#[allow(unused)]` until RS5 reads it for display.
-    #[allow(unused)]
     let mut scan_state = scan_model::ScanState::new();
+    // RS5: RadioScan overlay flow. scan_started_at times the sweep footer;
+    // scan_exiting bridges the Scanning → Restoring → closed transition (waits
+    // for RS3 to bring the radio back before dismissing the overlay).
+    let mut scan_started_at: Option<Instant> = None;
+    let mut scan_exiting = false;
     // Default 802.15.4 channel (Zigbee/Thread commonly 11..=26); RS5 makes it
     // selectable. 15 is a common Thread channel.
     const SCAN_CHANNEL: u8 = 15;
@@ -738,12 +729,13 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Launcher
                 | AppState::Wled
                 | AppState::Hunt
-                | AppState::Energy => {
+                | AppState::Energy
+                | AppState::RadioScan => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
-                    if app_state == AppState::Hunt {
-                        // Warmer/colder wants a responsive feel; the RSSI EWMA +
-                        // 1.5s trend lag keep 4 Hz from flickering.
+                    if app_state == AppState::Hunt || app_state == AppState::RadioScan {
+                        // Warmer/colder + the live scan strip want a responsive
+                        // feel; the RSSI EWMA + trend lag keep 4 Hz from flickering.
                         Duration::from_millis(250)
                     } else if shell.has_active_animations() {
                         Duration::from_millis(33)
@@ -1456,7 +1448,8 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Launcher
             | AppState::Wled
             | AppState::Hunt
-            | AppState::Energy => {
+            | AppState::Energy
+            | AppState::RadioScan => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1467,6 +1460,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Wled
                         | AppState::Hunt
                         | AppState::Energy
+                        | AppState::RadioScan
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1509,6 +1503,7 @@ async fn main(_spawner: Spawner) -> ! {
                 shell.set_wled_open(app_state == AppState::Wled);
                 shell.set_hunt_open(app_state == AppState::Hunt);
                 shell.set_energy_open(app_state == AppState::Energy);
+                shell.set_scan_open(app_state == AppState::RadioScan);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
                 app_state = if shell.launcher_open() {
                     AppState::Launcher
@@ -1518,6 +1513,8 @@ async fn main(_spawner: Spawner) -> ! {
                     AppState::Hunt
                 } else if shell.energy_open() {
                     AppState::Energy
+                } else if shell.scan_open() {
+                    AppState::RadioScan
                 } else {
                     AppState::Watchface
                 };
@@ -1583,6 +1580,49 @@ async fn main(_spawner: Spawner) -> ! {
                 if shell.req.energy_close.take() {
                     shell.set_energy_open(false);
                     app_state = AppState::Watchface;
+                }
+
+                // === RS5: RadioScan overlay phase flow (Warn→Scanning→Restoring) ===
+                // REBOOT (Error phase): last resort if the radio can't be restored.
+                if shell.req.scan_reboot.take() {
+                    println!("[SCAN] user reboot");
+                    esp_hal::system::software_reset();
+                }
+                // START (Warn): arm the WiFi→154 switch (RS3 enters next tick) + flip
+                // the view to Scanning + start a fresh sweep.
+                if shell.req.scan_confirm.take() && app_state == AppState::RadioScan {
+                    radio_scan_request = true;
+                    scan_started_at = Some(now);
+                    scan_state = scan_model::ScanState::new();
+                    shell.set_scan_phase(1);
+                    println!("[SCAN] START confirmed");
+                }
+                // CANCEL / back: from Warn → close immediately; from Scanning →
+                // request RS3 exit and show Restoring until the radio is back.
+                if shell.req.scan_exit.take() && app_state == AppState::RadioScan {
+                    if radio_mode == RadioMode::Scanning || radio_scan_request {
+                        radio_scan_request = false; // RS3 exits next tick
+                        scan_exiting = true;
+                        shell.set_scan_phase(2); // Restoring
+                    } else {
+                        shell.set_scan_open(false);
+                        app_state = AppState::Watchface;
+                    }
+                }
+                // Live tick: while actually scanning, push the aggregated ScanState
+                // to the energy strip + PAN list (elapsed sweep in the footer).
+                if app_state == AppState::RadioScan && radio_mode == RadioMode::Scanning {
+                    let sweep = scan_started_at.map_or(0, |t| (now - t).as_secs() as i32);
+                    shell.set_scan(&scan_state, sweep);
+                }
+                // Restore complete: RS3 brought WiFi/mesh back → dismiss the overlay.
+                if scan_exiting && radio_mode == RadioMode::Wifi {
+                    scan_exiting = false;
+                    scan_started_at = None;
+                    shell.set_scan_open(false);
+                    if app_state == AppState::RadioScan {
+                        app_state = AppState::Watchface;
+                    }
                 }
 
                 // Refresh per-page data immediately on a page switch, then pace it.
@@ -1737,6 +1777,14 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_energy(72, 3400, -1200, true);
                         shell.set_energy_open(true);
                         app_state = AppState::Energy;
+                    } else if target == AppState::RadioScan {
+                        // #23 RS5: open at the consent gate (phase Warn). Radios stay
+                        // UP — the actual WiFi→802.15.4 switch fires on START
+                        // (scan_confirm), not on tile launch.
+                        shell.set_scan_phase(0);
+                        shell.set_scan_open(true);
+                        scan_exiting = false;
+                        app_state = AppState::RadioScan;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -1826,6 +1874,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Wled
                         | AppState::Hunt
                         | AppState::Energy
+                        | AppState::RadioScan
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);

@@ -49,7 +49,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 10] = [
+pub const LAUNCHER_APPS: [AppState; 11] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -59,7 +59,8 @@ pub const LAUNCHER_APPS: [AppState; 10] = [
     AppState::Settings,
     AppState::Wled,   // idx 7 — SYSTEM-section WLED tile (icon-id 9)
     AppState::Hunt,   // idx 8 — GAMES-section HUNT tile (icon-id 10)
-    AppState::Energy, // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
+    AppState::Energy,    // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
+    AppState::RadioScan, // idx 10 — SYSTEM-section RADIO SCAN tile (icon-id 8)
 ];
 
 #[derive(Default)]
@@ -81,6 +82,10 @@ pub struct ShellRequests {
     pub hunt_close: Cell<bool>,
     /// Energy overlay back/Right-swipe.
     pub energy_close: Cell<bool>,
+    /// Radio Scan (#23 RS5): consent-gate START, CANCEL/back, and error REBOOT.
+    pub scan_confirm: Cell<bool>,
+    pub scan_exit: Cell<bool>,
+    pub scan_reboot: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -96,6 +101,10 @@ pub struct ShellUi {
     /// Long-lived roster model: set_mesh_rows swaps its contents in place
     /// instead of allocating a fresh ModelRc per push.
     mesh_model: Rc<VecModel<PeerRow>>,
+    /// Radio Scan (#23 RS5) models: 16-channel energy strip + discovered PANs,
+    /// swapped in place by set_scan (same long-lived pattern as mesh_model).
+    scan_ch_model: Rc<VecModel<ScanChannel>>,
+    scan_pan_model: Rc<VecModel<ScanRow>>,
     line_buf: Vec<Rgb565Pixel>,
     scratch: Vec<u16>,
     touch_down: bool,
@@ -112,13 +121,17 @@ impl ShellUi {
         let window = init_platform();
         let req = Rc::new(ShellRequests::default());
         let mesh_model: Rc<VecModel<PeerRow>> = Rc::new(VecModel::default());
-        let ui = build_scene(&req, &mesh_model);
+        let scan_ch_model: Rc<VecModel<ScanChannel>> = Rc::new(VecModel::default());
+        let scan_pan_model: Rc<VecModel<ScanRow>> = Rc::new(VecModel::default());
+        let ui = build_scene(&req, &mesh_model, &scan_ch_model, &scan_pan_model);
 
         Self {
             window,
             ui: Some(ui),
             req,
             mesh_model,
+            scan_ch_model,
+            scan_pan_model,
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
             touch_down: false,
@@ -147,7 +160,12 @@ impl ShellUi {
         if self.ui.is_some() {
             return;
         }
-        let ui = build_scene(&self.req, &self.mesh_model);
+        let ui = build_scene(
+            &self.req,
+            &self.mesh_model,
+            &self.scan_ch_model,
+            &self.scan_pan_model,
+        );
         ui.set_current_page(self.saved_page);
         self.ui = Some(ui);
         // Fresh scene = time_text is back at its "--:--" default; clear the
@@ -247,6 +265,12 @@ impl ShellUi {
                 if direction == SwipeDirection::Right {
                     ui.set_energy_open(false);
                 }
+                return;
+            }
+            // Radio Scan overlay: swallow all nav swipes (it owns its own
+            // START/CANCEL/REBOOT buttons + phase flow); exit is the CANCEL
+            // button / main.rs phase logic, not a stray swipe.
+            if ui.get_scan_open() {
                 return;
             }
             // Launcher overlay next: it swallows nav swipes wherever they
@@ -555,6 +579,56 @@ impl ShellUi {
         ui.set_energy_charging(charging);
     }
 
+    pub fn set_scan_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_scan_open(open);
+    }
+
+    pub fn scan_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_scan_open())
+    }
+
+    /// RadioScan view phase: 0 Warn · 1 Scanning · 2 Restoring · 3 Error
+    /// (matches scan.slint's `scan-phase`).
+    pub fn set_scan_phase(&self, phase: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_scan_phase(phase);
+    }
+
+    /// Push one scan tick: map `scan_model::ScanState` → the 16-channel energy
+    /// strip + the discovered-PAN rows + footers. Mapping lives here in the UI
+    /// layer (main.rs owns only the radio + the ScanState). `sweep_secs` is the
+    /// elapsed sweep time the caller tracks.
+    pub fn set_scan(&self, st: &scan_model::ScanState, sweep_secs: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        // Energy strip: frames → 0..1 bar (soft-capped at 64/tick), peak RSSI →
+        // 0..1 (dBm -90..-35, i8::MIN = nothing heard → 0.0).
+        let chans: alloc::vec::Vec<ScanChannel> = st
+            .channels
+            .iter()
+            .map(|c| ScanChannel {
+                level: (c.frames as f32 / 64.0).min(1.0),
+                peak: ((c.peak_rssi.max(-90) as f32 + 90.0) / 55.0).clamp(0.0, 1.0),
+            })
+            .collect();
+        self.scan_ch_model.set_vec(chans);
+        // Discovered PANs (mesh-row style): PANID · channel · smoothed RSSI · devices.
+        let pans: alloc::vec::Vec<ScanRow> = st
+            .pans
+            .iter()
+            .map(|p| ScanRow {
+                pan: slint::format!("0x{:04X}", p.pan_id),
+                channel: slint::format!("ch {}", p.channel),
+                rssi: slint::format!("{} dBm", p.rssi_ewma),
+                devices: slint::format!("{} dev", p.devices.len()),
+            })
+            .collect();
+        self.scan_pan_model.set_vec(pans);
+        let total_frames: u32 = st.channels.iter().map(|c| c.frames).sum();
+        ui.set_scan_frames(total_frames as i32);
+        ui.set_scan_sweep(sweep_secs);
+    }
+
     pub fn page(&self) -> i32 {
         // While suspended, report the page we'll restore on resume.
         self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
@@ -652,7 +726,12 @@ impl ShellUi {
 /// model, stamp the firmware version, and show it on the (shared) window.
 /// Used by `ShellUi::new` and by `resume_scene` after a suspend, so callback
 /// registration lives in one place.
-fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> WatchShell {
+fn build_scene(
+    req: &Rc<ShellRequests>,
+    mesh_model: &Rc<VecModel<PeerRow>>,
+    scan_ch_model: &Rc<VecModel<ScanChannel>>,
+    scan_pan_model: &Rc<VecModel<ScanRow>>,
+) -> WatchShell {
     let ui = WatchShell::new().expect("failed to create WatchShell");
     {
         let r = req.clone();
@@ -704,8 +783,19 @@ fn build_scene(req: &Rc<ShellRequests>, mesh_model: &Rc<VecModel<PeerRow>>) -> W
 
         let r = req.clone();
         ui.on_energy_close(move || r.energy_close.set(true));
+
+        let r = req.clone();
+        ui.on_scan_confirm(move || r.scan_confirm.set(true));
+
+        let r = req.clone();
+        ui.on_scan_exit(move || r.scan_exit.set(true));
+
+        let r = req.clone();
+        ui.on_scan_reboot(move || r.scan_reboot.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
+    ui.set_scan_channels(ModelRc::from(scan_ch_model.clone()));
+    ui.set_scan_pans(ModelRc::from(scan_pan_model.clone()));
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));

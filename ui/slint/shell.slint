@@ -1,4 +1,4 @@
-import { Theme, RadioDot, PeerRow } from "theme.slint";
+import { Theme, RadioDot, PeerRow, ScanRow, ScanChannel } from "theme.slint";
 import { ClockPage } from "clock.slint";
 import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
@@ -8,10 +8,12 @@ import { LauncherOverlay } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
+import { RadioScanOverlay } from "scan.slint";
 
-// Re-export so the generated Rust module keeps exposing `PeerRow`
-// (slint_shell.rs constructs it) now that the struct lives in theme.slint.
-export { PeerRow }
+// Re-export so the generated Rust module keeps exposing `PeerRow` /
+// `ScanRow` / `ScanChannel` (slint_shell.rs constructs them) now that the
+// structs live in theme.slint.
+export { PeerRow, ScanRow, ScanChannel }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -101,6 +103,13 @@ export component WatchShell inherits Window {
     in property <int> energy-solar-w: 0;
     in property <int> energy-grid-w: 0;
     in property <bool> energy-charging: false;
+    // Radio Scan overlay (#23 RS5): phase 0 Warn / 1 Scanning / 2 Restoring / 3 Error.
+    in-out property <bool> scan-open: false;
+    in property <int> scan-phase: 0;
+    in property <[ScanChannel]> scan-channels;
+    in property <[ScanRow]> scan-pans;
+    in property <int> scan-frames: 0;
+    in property <int> scan-sweep: 0;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -118,6 +127,9 @@ export component WatchShell inherits Window {
     callback hunt-next();     // cycle to the next roster target
     callback hunt-close();
     callback energy-close();
+    callback scan-confirm();  // RadioScan consent-gate START
+    callback scan-exit();     // RadioScan CANCEL / back
+    callback scan-reboot();   // RadioScan restore-failed REBOOT
 
     in-out property <float> brightness: 0.8;
 
@@ -345,6 +357,19 @@ export component WatchShell inherits Window {
         grid-w: root.energy-grid-w;
         charging: root.energy-charging;
         close => { root.energy-close(); }
+    }
+
+    // ==================== Radio Scan overlay ====================
+    if root.scan-open: RadioScanOverlay {
+        width: 100%; height: 100%;
+        scan-phase: root.scan-phase;
+        scan-channels: root.scan-channels;
+        scan-pans: root.scan-pans;
+        scan-frames: root.scan-frames;
+        scan-sweep: root.scan-sweep;
+        scan-confirm => { root.scan-confirm(); }
+        scan-exit => { root.scan-exit(); }
+        scan-reboot => { root.scan-reboot(); }
     }
 
     // ==================== AOD overlay ====================

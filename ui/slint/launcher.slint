@@ -198,8 +198,8 @@ export component LauncherOverlay {
             }
             HorizontalLayout {
                 spacing: 12px;
-                AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9; launch(i) => { root.launch-app(i); } }
-                Rectangle { }  // spacer keeps the lone tile half-width
+                AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9;  launch(i) => { root.launch-app(i); } }
+                AppTile { name: "Radio Scan";  accent: #b088ff; icon-id: 8;  idx: 10; launch(i) => { root.launch-app(i); } }
             }
         }
     }
