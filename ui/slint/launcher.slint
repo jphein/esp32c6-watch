@@ -173,10 +173,20 @@ export component LauncherOverlay {
         x: 22px; y: 96px;
         width: parent.width - 44px;
         height: parent.height - 112px;
-        // Content = GAMES header + 4 tile rows + SYSTEM header + 2 tile rows + gaps.
-        viewport-height: 840px;
+        // Content = AUDIO header + 1 row + GAMES header + 4 rows + SYSTEM header
+        // + 2 rows + gaps. (AUDIO on top so Voice/Sound need no scroll.)
+        viewport-height: 900px;
         VerticalLayout {
             spacing: 12px;
+            // AUDIO first so Voice/Sound are reachable the instant the launcher
+            // opens — no scroll (on-glass the Flickable scroll is flaky and JP
+            // couldn't reach the bottom SYSTEM row). idx unchanged (11/12).
+            SectionHeader { title: "AUDIO"; }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Voice";       accent: #a78bfa; icon-id: 7; idx: 11; launch(i) => { root.launch-app(i); } }
+                AppTile { name: "Sound";       accent: #4fd6ff; icon-id: 8; idx: 12; launch(i) => { root.launch-app(i); } }
+            }
             SectionHeader { title: "GAMES"; }
             HorizontalLayout {
                 spacing: 12px;
@@ -208,11 +218,6 @@ export component LauncherOverlay {
                 spacing: 12px;
                 AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9;  launch(i) => { root.launch-app(i); } }
                 AppTile { name: "Climate";     accent: #ff9d5c; icon-id: 12; idx: 10; launch(i) => { root.launch-app(i); } }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Voice";       accent: #a78bfa; icon-id: 7; idx: 11; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "Sound";       accent: #4fd6ff; icon-id: 8; idx: 12; launch(i) => { root.launch-app(i); } }
             }
         }
     }
