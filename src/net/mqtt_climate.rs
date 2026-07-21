@@ -29,9 +29,9 @@
 //! panics or over-reads.
 //!
 //! ## Dependency on `climate-model` (spec §B′)
-//! Parsing/encoding is delegated to the pure `climate-model` crate. Until it
-//! merges, [`crate::net::climate_model_stub`] stands in via the alias below.
-//! The exact surface this module calls:
+//! Parsing/encoding is delegated to the pure `climate-model` crate (now merged;
+//! the earlier `climate_model_stub` stand-in has been removed). The exact
+//! surface this module calls:
 //!   - `parse_state(&[u8]) -> Option<ClimateEntity>`
 //!   - `ClimateState::upsert(&mut self, obj: &str, entity: ClimateEntity)`
 //!   - `encode_set_temp(f32) -> heapless::String<_>`
