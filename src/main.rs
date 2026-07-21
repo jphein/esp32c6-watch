@@ -1701,9 +1701,14 @@ async fn main(_spawner: Spawner) -> ! {
                 // ended (Ok close or Err), closing the screen(s) frees WiFi, so it
                 // can never be stranded held.
                 let climate_session_want = climate_active || energy_active;
-                if climate_session_want {
+                // Voice also needs WiFi (STT upload) but NOT the MQTT session, so it
+                // widens the WiFi HOLD without touching the session start/stop. Keyed
+                // on app_state==Voice: leaving the screen drops it out of wifi_want →
+                // the release arm below frees WiFi + re-pins mesh (never stranded).
+                let wifi_want = climate_session_want || app_state == AppState::Voice;
+                if wifi_want {
                     wifi_on_request = true;
-                    if wifi_connected && !climate_running {
+                    if climate_session_want && wifi_connected && !climate_running {
                         climate_open.signal(());
                         climate_running = true;
                     }
@@ -2083,13 +2088,22 @@ async fn main(_spawner: Spawner) -> ! {
                         // Voice-to-text (#42): a Slint overlay (scene-resident, no
                         // fb). Open in idle; the PTT flow below drives capture +
                         // transcript. Reset to idle each open so a prior transcript
-                        // or error doesn't linger. STT needs WiFi — relies on the
-                        // default wifi_on_request (WiFi-on when creds exist); see the
-                        // voice-WiFi-hold follow-up if mesh-mode voice is wanted.
+                        // or error doesn't linger.
                         shell.set_voice_state(0);
                         shell.set_voice_transcript("");
                         shell.set_voice_error("");
                         shell.set_voice_open(true);
+                        // STT is WiFi-dependent (HTTP to the LAN bridge). Hold WiFi
+                        // up like climate/energy: raise it here, release + restore
+                        // mesh on close. The hold is keyed on app_state==Voice in the
+                        // WiFi-want block below, so leaving the screen (right-swipe →
+                        // reconcile → app_state=Watchface) deterministically frees it
+                        // → never strands the mesh. session_holds_wifi guards a manual
+                        // WiFi-on (toggle then Voice) so we don't drop it on close.
+                        if !wifi_on_request {
+                            session_holds_wifi = true; // we're raising the hold
+                        }
+                        wifi_on_request = true;
                         app_state = AppState::Voice;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
