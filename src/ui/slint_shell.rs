@@ -52,7 +52,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 11] = [
+pub const LAUNCHER_APPS: [AppState; 12] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -64,6 +64,7 @@ pub const LAUNCHER_APPS: [AppState; 11] = [
     AppState::Hunt,   // idx 8 — GAMES-section HUNT tile (icon-id 10)
     AppState::Energy,  // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
     AppState::Climate, // idx 10 — SYSTEM-section CLIMATE tile (icon-id 12)
+    AppState::Voice,   // idx 11 — SYSTEM-section VOICE tile (icon-id 7)
 ];
 
 #[derive(Default)]
@@ -90,6 +91,12 @@ pub struct ShellRequests {
     pub climate_set_temp: Cell<Option<(i32, f32)>>,
     pub climate_set_mode: Cell<Option<(i32, i32)>>,
     pub climate_closed: Cell<bool>,
+    /// Voice PTT (#42): `pressed` is the finger-down that starts capture (drained
+    /// by the loop when app_state == Voice). `released` is advisory — the loop's
+    /// release watcher keys off the physical touch INT pin, since the Slint
+    /// release callback can't fire while the loop is parked streaming the hold.
+    pub voice_ptt_pressed: Cell<bool>,
+    pub voice_ptt_released: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -272,6 +279,15 @@ impl ShellUi {
             if ui.get_climate_open() {
                 if direction == SwipeDirection::Right {
                     self.req.climate_closed.set(true);
+                }
+                return;
+            }
+            // Voice overlay: same contract — swallow nav swipes, Right closes.
+            // (No back-chevron; Right-swipe is the only close. A swipe only lands
+            // here when the button isn't held — the loop is parked during a hold.)
+            if ui.get_voice_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_voice_open(false);
                 }
                 return;
             }
@@ -628,6 +644,42 @@ impl ShellUi {
         ui.set_climate_conn(conn);
     }
 
+    pub fn set_voice_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_open(open);
+    }
+
+    pub fn voice_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_voice_open())
+    }
+
+    /// Voice UI state: 0 idle · 1 listening · 2 sending · 3 result · 4 error.
+    pub fn set_voice_state(&self, state: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_state(state);
+    }
+
+    /// Input level 0..1 (drives the listening pulse). Unused today: the loop is
+    /// parked in the stream `.await` for the whole hold, so there's no frame to
+    /// push a live level to — kept as the hook for the MC6 level-meter polish.
+    #[allow(dead_code)]
+    pub fn set_voice_level(&self, level: f32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_level(level);
+    }
+
+    /// The recognised transcript (shown in state 3).
+    pub fn set_voice_transcript(&self, text: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_transcript(SharedString::from(text));
+    }
+
+    /// Error message (shown in state 4; "" → the page's default "No speech").
+    pub fn set_voice_error(&self, text: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_voice_error(SharedString::from(text));
+    }
+
     pub fn page(&self) -> i32 {
         // While suspended, report the page we'll restore on resume.
         self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
@@ -790,6 +842,12 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_climate_closed(move || r.climate_closed.set(true));
+
+        let r = req.clone();
+        ui.on_voice_ptt_pressed(move || r.voice_ptt_pressed.set(true));
+
+        let r = req.clone();
+        ui.on_voice_ptt_released(move || r.voice_ptt_released.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));

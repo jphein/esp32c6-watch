@@ -209,6 +209,11 @@ export component LauncherOverlay {
                 AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9;  launch(i) => { root.launch-app(i); } }
                 AppTile { name: "Climate";     accent: #ff9d5c; icon-id: 12; idx: 10; launch(i) => { root.launch-app(i); } }
             }
+            HorizontalLayout {
+                spacing: 12px;
+                AppTile { name: "Voice";       accent: #a78bfa; icon-id: 7; idx: 11; launch(i) => { root.launch-app(i); } }
+                Rectangle { }  // spacer — Phase 2 replaces with Sound (idx 12)
+            }
         }
     }
 }
