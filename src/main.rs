@@ -537,19 +537,28 @@ async fn main(_spawner: Spawner) -> ! {
         .expect("I2S failed")
         .with_mclk(peripherals.GPIO19);
     static I2S_TX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
+    // BCLK/WS are driven from the RX side below (RX-master): on esp-hal 1.1.1 the C6 I2S
+    // RX is its own master with its own clock signals I2SI_BCK/I2SI_WS. The mic RX runs
+    // continuously from boot, keeping the ES8311 clocked; TX (beep) shares those physical
+    // pins and its DAC latches DOUT on them. TX keeps only its data-out line here.
     let mut i2s_tx = i2s_periph
         .i2s_tx
-        .with_bclk(peripherals.GPIO20)
-        .with_ws(peripherals.GPIO22)
-        .with_dout(peripherals.GPIO21)
+        .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
         .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
     // === I2S RX for mic capture — the SINGLE shared owner (#42 voice + #28 meter) ===
     // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx).
-    // BCLK/WS/MCLK are configured once on the TX side above (full-duplex shares
-    // the peripheral clock); RX only needs its data-in pin (GPIO23) + its own DMA
-    // descriptors. Stays Blocking: mic_capture_task drives it via read_dma_circular
-    // + poll. This is the ONLY place I2S0/DMA_CH1 is claimed — both the voice PTT
-    // stream and the SoundLevel meter subscribe to MIC_CH, never re-owning I2S.
+    // ROOT-CAUSE FIX (mic read floor / zero usable PCM): the C6 I2S RX is master
+    // with its OWN clock signals I2SI_BCK / I2SI_WS (esp-hal 1.1.1 master.rs:
+    // bclk_rx_signal=I2SI_BCK @2231, ws_rx_signal=I2SI_WS @2241) — NOT the TX
+    // signals (I2SO_BCK/I2SO_WS) routed above — and set_rx_clock (@2029) enables a
+    // separate rx clock module. So RX must drive BCLK/WS itself; otherwise the
+    // ES8311 is unclocked whenever TX (beep) is idle → its ADC never shifts data
+    // out → the RX DMA ring only ever sees a static line → the meter floors. We
+    // therefore route BCLK (GPIO20) + WS (GPIO22) + DIN (GPIO23) on the RX builder.
+    // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
+    // mic_capture_task drives it via read_dma_circular + poll. This is the ONLY
+    // place I2S0/DMA_CH1 is claimed — both the voice PTT stream and the SoundLevel
+    // meter subscribe to MIC_CH, never re-owning I2S.
     //
     // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
     // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds
@@ -565,7 +574,9 @@ async fn main(_spawner: Spawner) -> ! {
     static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
     let i2s_rx = i2s_periph
         .i2s_rx
-        .with_din(peripherals.GPIO23)
+        .with_bclk(peripherals.GPIO20) // RX master → ES8311 BCLK
+        .with_ws(peripherals.GPIO22)   // RX master → ES8311 WS/LRCK
+        .with_din(peripherals.GPIO21)  // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
         .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
     // Mic PCM channel (capture task → consumers) + the DMA capture ring.
     // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.

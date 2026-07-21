@@ -134,19 +134,25 @@ impl<I: I2c> Es8311<I> {
     /// on-glass tuning surface — MC6 picks the mic L/R slot + final gain so a
     /// normal room sits mid-scale without railing.
     pub fn enable_adc(&mut self, pga_gain: u8) -> Result<(), I::Error> {
-        // Re-power the analog bias + PGA/modulator that shutdown() turns off
-        // (same writes as unmute()'s analog re-enable).
-        self.write_reg(0x0D, 0x01)?; // Power up analog bias
-        self.write_reg(0x0E, 0x02)?; // Enable analog PGA + ADC modulator (PDN_PGA=0)
-        // Analog mic input: bit6=0 selects the analog mic (not DMIC);
-        // bits[3:0] = PGA gain. (0x10 keeps the datasheet default high bits.)
+        // Mirror the vendor ES8311 record path exactly (esp-bsp es8311.c: the analog
+        // power-up from es8311_init + es8311_microphone_config + microphone_gain_set).
+        // Re-power the analog blocks that shutdown() cut, then set the mic registers.
+        self.write_reg(0x0D, 0x01)?; // power up analog bias
+        self.write_reg(0x0E, 0x02)?; // enable analog PGA + ADC modulator (PDN_PGA=0)
+        self.write_reg(0x0A, 0x0C)?; // ADC serial port = 16-bit I2S (re-assert; init sets it)
+        self.write_reg(0x1C, 0x6A)?; // ADC EQ bypass + digital DC-offset cancel
+        self.write_reg(0x17, 0xC8)?; // ADC digital volume (vendor es8311_microphone_config)
+        // Analog mic input: bit6=0 = analog mic (not DMIC); bits[3:0] = PGA gain.
+        // 0x10 | 0x0A = 0x1A — the vendor's "enable analog MIC + max PGA gain".
         self.write_reg(0x14, 0x10 | (pga_gain & 0x0F))?;
-        // ADC serial port = 16-bit I2S and EQ-bypass/DC-cancel: init() already
-        // sets these, re-asserted here so enable_adc() is self-contained.
-        self.write_reg(0x0A, 0x0C)?; // ADC SDP 16-bit
-        self.write_reg(0x15, 0x00)?; // ADC ramp default; ADC un-muted
-        self.write_reg(0x1C, 0x6A)?; // ADC EQ bypass + DC-offset cancel
-        self.write_reg(0x17, 0xBF)?; // ADC digital volume ~0 dB (confirm code in MC6)
+        // ADC gain SCALE — this write was MISSING, and it is the fix for the meter
+        // pinned at the −60 dBFS floor / "no audio response": without it the mic's AC
+        // signal sits below mic_dsp's −60 floor and reads as flat silence (rms_dbfs
+        // mean-subtracts, so it is not a DC issue — it's ~30 dB of missing gain).
+        // 0x06 = +30 dB (es8311_mic_gain_t code 6), the level esp_codec_dev opens at.
+        self.write_reg(0x16, 0x06)?;
+        // NB: deliberately do NOT write reg 0x15 (ADC ramp / dmic-sense). The vendor
+        // record path never touches it; leave 0x15 at its reset default.
         Ok(())
     }
 
