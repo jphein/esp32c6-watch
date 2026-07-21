@@ -34,8 +34,7 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf},
-    dma_buffers,
+    dma::DmaDescriptor,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent},
     i2c::master::{Config as I2cConfig, I2c},
     i2s::master::{Config as I2sConfig, DataFormat, I2s},
@@ -442,9 +441,9 @@ async fn main(_spawner: Spawner) -> ! {
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(80))
         .with_mode(SpiMode::_0);
-    let (rx_buf, rx_desc, tx_buf, tx_desc) = dma_buffers!(8000);
-    let dma_rx = DmaRxBuf::new(rx_desc, rx_buf).unwrap();
-    let dma_tx = DmaTxBuf::new(tx_desc, tx_buf).unwrap();
+    // Raw SpiDma (no SpiDmaBus wrapper): QspiBus owns a single TX DmaTxBuf and
+    // drives non-blocking DMA flushes itself (see drivers/qspi_bus.rs). No RX
+    // buffer is needed — the panel is write-only.
     let spi = Spi::new(peripherals.SPI2, spi_config)
         .expect("SPI failed")
         .with_sck(peripherals.GPIO0)
@@ -452,8 +451,7 @@ async fn main(_spawner: Spawner) -> ! {
         .with_sio1(peripherals.GPIO2)
         .with_sio2(peripherals.GPIO3)
         .with_sio3(peripherals.GPIO4)
-        .with_dma(peripherals.DMA_CH0)
-        .with_buffers(dma_rx, dma_tx);
+        .with_dma(peripherals.DMA_CH0);
     let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
     let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
     let mut display = Co5300Display::new(QspiBus::new(spi, cs), reset);
