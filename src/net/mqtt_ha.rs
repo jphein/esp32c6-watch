@@ -17,7 +17,9 @@ use esp_println::println;
 use heapless::Vec;
 
 /// Broker as "ip:port". Set MQTT_BROKER at build time to override.
-const BROKER: &str = match option_env!("MQTT_BROKER") {
+/// `pub(crate)` so the bidirectional climate session ([`crate::net::mqtt_climate`])
+/// reuses the same broker address.
+pub(crate) const BROKER: &str = match option_env!("MQTT_BROKER") {
     Some(s) => s,
     None => "192.168.1.10:1883",
 };
@@ -41,7 +43,8 @@ const BATTERY_TOPIC: &str = "smolwatch/battery";
 const UPTIME_TOPIC: &str = "smolwatch/uptime";
 
 /// Largest single packet we build (discovery config is ~330 bytes).
-const PKT_CAP: usize = 512;
+/// `pub(crate)` so the climate session reuses the shared packet builders.
+pub(crate) const PKT_CAP: usize = 512;
 
 /// Publish the HA discovery config, battery percent, and uptime to the
 /// broker. Never fails the caller: logs `[MQTT] published` or
@@ -69,7 +72,7 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
 
     // CONNECT -> CONNACK
     let mut pkt: Vec<u8, PKT_CAP> = Vec::new();
-    build_connect(&mut pkt)?;
+    build_connect(&mut pkt, CLIENT_ID)?;
     write_all(&mut socket, &pkt).await?;
 
     let mut ack = [0u8; 4];
@@ -100,13 +103,19 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
 }
 
 /// Build the MQTT 3.1.1 CONNECT packet (clean session, optional user/pass).
-fn build_connect(pkt: &mut Vec<u8, PKT_CAP>) -> Result<(), &'static str> {
+/// `client_id` is a parameter so the bidirectional climate session can connect
+/// under a distinct id (same broker, avoids evicting the telemetry client).
+/// `pub(crate)` — reused by [`crate::net::mqtt_climate`].
+pub(crate) fn build_connect(
+    pkt: &mut Vec<u8, PKT_CAP>,
+    client_id: &str,
+) -> Result<(), &'static str> {
     // Password without a username is invalid in MQTT 3.1.1; ignore it.
     let user = USER;
     let pass = if user.is_some() { PASS } else { None };
 
     let mut flags: u8 = 0x02; // clean session
-    let mut remaining = 10 + 2 + CLIENT_ID.len();
+    let mut remaining = 10 + 2 + client_id.len();
     if let Some(u) = user {
         flags |= 0x80;
         remaining += 2 + u.len();
@@ -121,7 +130,7 @@ fn build_connect(pkt: &mut Vec<u8, PKT_CAP>) -> Result<(), &'static str> {
     // Protocol name "MQTT", level 4, flags, keepalive.
     push(pkt, &[0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, flags])?;
     push(pkt, &KEEPALIVE_SECS.to_be_bytes())?;
-    push_str(pkt, CLIENT_ID)?;
+    push_str(pkt, client_id)?;
     if let Some(u) = user {
         push_str(pkt, u)?;
     }
@@ -131,8 +140,9 @@ fn build_connect(pkt: &mut Vec<u8, PKT_CAP>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Send one QoS-0 PUBLISH.
-async fn publish(
+/// Send one QoS-0 PUBLISH. `pub(crate)` — reused by the climate session for
+/// command publishes.
+pub(crate) async fn publish(
     socket: &mut TcpSocket<'_>,
     topic: &str,
     payload: &[u8],
@@ -147,7 +157,11 @@ async fn publish(
 }
 
 /// MQTT variable-length "remaining length": 7 bits per byte, MSB = more.
-fn push_remaining_len(pkt: &mut Vec<u8, PKT_CAP>, mut len: usize) -> Result<(), &'static str> {
+/// `pub(crate)` — shared framing primitive reused by the climate session.
+pub(crate) fn push_remaining_len(
+    pkt: &mut Vec<u8, PKT_CAP>,
+    mut len: usize,
+) -> Result<(), &'static str> {
     loop {
         let mut byte = (len & 0x7F) as u8;
         len >>= 7;
@@ -162,16 +176,22 @@ fn push_remaining_len(pkt: &mut Vec<u8, PKT_CAP>, mut len: usize) -> Result<(), 
 }
 
 /// UTF-8 string field: u16 big-endian length prefix + bytes.
-fn push_str(pkt: &mut Vec<u8, PKT_CAP>, s: &str) -> Result<(), &'static str> {
+/// `pub(crate)` — shared framing primitive reused by the climate session.
+pub(crate) fn push_str(pkt: &mut Vec<u8, PKT_CAP>, s: &str) -> Result<(), &'static str> {
     push(pkt, &(s.len() as u16).to_be_bytes())?;
     push(pkt, s.as_bytes())
 }
 
-fn push(pkt: &mut Vec<u8, PKT_CAP>, bytes: &[u8]) -> Result<(), &'static str> {
+/// `pub(crate)` — shared framing primitive reused by the climate session.
+pub(crate) fn push(pkt: &mut Vec<u8, PKT_CAP>, bytes: &[u8]) -> Result<(), &'static str> {
     pkt.extend_from_slice(bytes).map_err(|_| "packet too large")
 }
 
-async fn write_all(socket: &mut TcpSocket<'_>, mut buf: &[u8]) -> Result<(), &'static str> {
+/// `pub(crate)` — shared socket helper reused by the climate session.
+pub(crate) async fn write_all(
+    socket: &mut TcpSocket<'_>,
+    mut buf: &[u8],
+) -> Result<(), &'static str> {
     while !buf.is_empty() {
         match socket.write(buf).await {
             Ok(0) => return Err("tcp write: connection closed"),
@@ -182,7 +202,11 @@ async fn write_all(socket: &mut TcpSocket<'_>, mut buf: &[u8]) -> Result<(), &'s
     Ok(())
 }
 
-async fn read_exact(socket: &mut TcpSocket<'_>, buf: &mut [u8]) -> Result<(), &'static str> {
+/// `pub(crate)` — shared socket helper reused by the climate session.
+pub(crate) async fn read_exact(
+    socket: &mut TcpSocket<'_>,
+    buf: &mut [u8],
+) -> Result<(), &'static str> {
     let mut filled = 0;
     while filled < buf.len() {
         match socket.read(&mut buf[filled..]).await {
@@ -194,8 +218,8 @@ async fn read_exact(socket: &mut TcpSocket<'_>, buf: &mut [u8]) -> Result<(), &'
     Ok(())
 }
 
-/// Parse "a.b.c.d:port".
-fn parse_broker(s: &str) -> Option<(Ipv4Address, u16)> {
+/// Parse "a.b.c.d:port". `pub(crate)` — reused by the climate session.
+pub(crate) fn parse_broker(s: &str) -> Option<(Ipv4Address, u16)> {
     let (ip_str, port_str) = s.split_once(':')?;
     let port: u16 = port_str.parse().ok()?;
     let mut octets = [0u8; 4];
