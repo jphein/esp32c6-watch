@@ -114,6 +114,7 @@ pub async fn mic_capture_task(
         Err(_) => return, // RX DMA failed to start; nothing to do
     };
     let mut stereo = [0u8; STEREO_CHUNK];
+    let mut dbg_ctr: u32 = 0; // #28 tuning debug throttle (THROWAWAY — remove before v0.6.0 tag)
     loop {
         let avail = xfer.available().unwrap_or(0);
         if avail < STEREO_CHUNK {
@@ -127,6 +128,28 @@ pub async fn mic_capture_task(
         if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
             continue; // idle: discard (keeps the circular ring drained)
         }
+        // ===== #28 mic L/R tuning debug — THROWAWAY, REMOVE BEFORE v0.6.0 TAG =====
+        // While the SoundLevel meter is open, log BOTH I2S-slot RMS every ~32 chunks
+        // (~0.5s) so the JP-hands session reads which slot carries the mic in ONE
+        // flash (the louder channel = the mic → set MIC_RIGHT_CHANNEL accordingly).
+        if METER.load(Ordering::Relaxed) {
+            dbg_ctr = dbg_ctr.wrapping_add(1);
+            if dbg_ctr % 32 == 0 {
+                let frames = (STEREO_CHUNK / 4).min(MONO_CHUNK / 2);
+                let mut l = [0i16; MONO_CHUNK / 2];
+                let mut r = [0i16; MONO_CHUNK / 2];
+                for i in 0..frames {
+                    l[i] = i16::from_le_bytes([stereo[4 * i], stereo[4 * i + 1]]);
+                    r[i] = i16::from_le_bytes([stereo[4 * i + 2], stereo[4 * i + 3]]);
+                }
+                esp_println::println!(
+                    "[MICDBG] L={} R={} dBFS  (louder slot = mic -> MIC_RIGHT_CHANNEL)",
+                    mic_dsp::rms_dbfs(&l[..frames]) as i32,
+                    mic_dsp::rms_dbfs(&r[..frames]) as i32,
+                );
+            }
+        }
+        // ===== end throwaway debug =====
         // One STEREO_CHUNK pop -> exactly MONO_CHUNK mono bytes.
         let mut mono_buf = [0u8; MONO_CHUNK];
         let m = voice_stt::stereo_to_mono_le(&stereo, &mut mono_buf, MIC_RIGHT_CHANNEL);
