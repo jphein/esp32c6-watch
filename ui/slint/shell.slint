@@ -114,7 +114,7 @@ export component WatchShell inherits Window {
     // from the Rust loop; the PTT button emits pressed/released, driven by
     // physical touch (release detected off the INT pin while the loop streams).
     in-out property <bool> voice-open: false;
-    in property <int> voice-state: 0;   // 0 idle 1 listening 2 sending 3 result 4 error
+    in property <int> voice-state: 0;   // 0 idle 1 listening 2 sending 3 result 4 error 5 connecting
     in property <float> voice-level: 0.0;
     in property <string> voice-transcript;
     in property <string> voice-error;

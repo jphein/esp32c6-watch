@@ -7,7 +7,7 @@ import { Theme, PageTitle } from "theme.slint";
 // drop-in once main.rs frees up.
 //
 // Interface (for the wiring layer):
-//   in property <int>    voice-state : 0 idle · 1 listening · 2 sending · 3 result · 4 error
+//   in property <int>    voice-state : 0 idle · 1 listening · 2 sending · 3 result · 4 error · 5 connecting
 //   in property <float>  level       : input level 0..1 (drives the listening pulse)
 //   in property <string> transcript  : recognised text (shown in state 3)
 //   in property <string> error-text  : message shown in state 4
@@ -38,6 +38,18 @@ export component VoicePage {
         y: 200px;
         text: "Hold to talk";
         color: Theme.soft;
+        font-size: 22px;
+        letter-spacing: 1px;
+    }
+
+    // connecting — WiFi is coming up (radio is time-shared with the mesh); the
+    // button is not actionable yet. Flips to idle ("Hold to talk") once the link
+    // + DHCP land, driven from the Rust loop.
+    if root.voice-state == 5: Text {
+        x: (parent.width - self.width) / 2;
+        y: 200px;
+        text: "Connecting\u{2026}";
+        color: Theme.dim;
         font-size: 22px;
         letter-spacing: 1px;
     }
@@ -122,9 +134,9 @@ export component VoicePage {
         border-radius: self.width / 2;
         border-width: 3px;
         background: root.voice-state == 1 ? Theme.accent
-            : (root.voice-state == 2 ? Theme.track : Theme.panel);
+            : ((root.voice-state == 2 || root.voice-state == 5) ? Theme.track : Theme.panel);
         border-color: root.voice-state == 4 ? Theme.warn
-            : (root.voice-state == 2 ? Theme.dim : Theme.accent);
+            : ((root.voice-state == 2 || root.voice-state == 5) ? Theme.dim : Theme.accent);
 
         // Minimal mic glyph (head capsule + stand + base), coloured per state.
         mic-head := Rectangle {
@@ -135,7 +147,7 @@ export component VoicePage {
             border-radius: 13px;
             background: root.voice-state == 1 ? Theme.on-accent
                 : (root.voice-state == 4 ? Theme.warn
-                : (root.voice-state == 2 ? Theme.dim : Theme.accent));
+                : ((root.voice-state == 2 || root.voice-state == 5) ? Theme.dim : Theme.accent));
         }
         Rectangle { // stand
             x: (parent.width - self.width) / 2;
@@ -165,8 +177,9 @@ export component VoicePage {
         y: 452px;
         text: root.voice-state == 1 ? "release to send"
             : (root.voice-state == 2 ? ""
+            : (root.voice-state == 5 ? "waiting for Wi-Fi"
             : (root.voice-state == 3 ? "hold to talk again"
-            : (root.voice-state == 4 ? "hold to retry" : "press \u{0026} hold")));
+            : (root.voice-state == 4 ? "hold to retry" : "press \u{0026} hold"))));
         color: Theme.dim;
         font-size: 14px;
         letter-spacing: 1px;

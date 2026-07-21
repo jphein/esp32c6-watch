@@ -662,7 +662,7 @@ impl ShellUi {
         self.ui.as_ref().is_some_and(|ui| ui.get_voice_open())
     }
 
-    /// Voice UI state: 0 idle · 1 listening · 2 sending · 3 result · 4 error.
+    /// Voice UI state: 0 idle · 1 listening · 2 sending · 3 result · 4 error · 5 connecting.
     pub fn set_voice_state(&self, state: i32) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_voice_state(state);

@@ -835,6 +835,11 @@ async fn main(_spawner: Spawner) -> ! {
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
     let mut meter_peak = mic_dsp::DBFS_FLOOR;
+    // Voice PTT network-readiness latch: set true when a PTT press arrives before
+    // WiFi+DHCP are up (we show "Connecting…" state 5 instead of a doomed connect),
+    // cleared back to idle ("Hold to talk", state 0) the moment the link comes up.
+    // Only ever gates the Voice-page idle↔connecting display; never holds WiFi.
+    let mut voice_wait_ready = false;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -1909,7 +1914,37 @@ async fn main(_spawner: Spawner) -> ! {
                 // would cancel that mid-flush and drop the transcript.
                 let voice_pressed = shell.req.voice_ptt_pressed.take();
                 let _ = shell.req.voice_ptt_released.take();
-                if app_state == AppState::Voice && voice_pressed {
+                // Network readiness for STT: WiFi associated AND DHCP landed (an IPv4
+                // config exists) — the exact precondition `socket.connect()` needs.
+                // Same snapshot the NTP burst gates on (line ~1261); both reads are
+                // non-blocking, so consulting them here NEVER parks the loop.
+                //
+                // This is the deadlock-safe seam: WiFi bring-up is driven by the loop's
+                // WiFi state machine (line ~1162), but `stream_utterance` is join-parked
+                // from INSIDE this loop for the entire PTT hold. If we awaited "WiFi up"
+                // inside the stream, the loop that raises WiFi could never run → wedge.
+                // So the link MUST be confirmed up BEFORE we enter the stream await.
+                let voice_net_ready = wifi_connected && stack.config_v4().is_some();
+                // Waiting-to-talk latch: flip "Connecting…" → "Hold to talk" the instant
+                // the link lands so the user knows they can now talk. Only ever touches
+                // the idle(0)/connecting(5) band — never a live listening/result/error.
+                if app_state == AppState::Voice && voice_wait_ready && voice_net_ready {
+                    shell.set_voice_state(0); // idle: "Hold to talk"
+                    voice_wait_ready = false;
+                    shell.request_redraw();
+                }
+                // PTT pressed before the link is up: a connect() here is the reported
+                // "connect failed" bug. Don't attempt — show "Connecting…" and latch.
+                // WiFi bring-up keeps running in the loop (we did NOT park in a stream),
+                // so a beat later the latch above flips to "Hold to talk" and the next
+                // press streams. No WiFi hold is added here → mesh-restore invariant
+                // (oracle-t10 inv-b) is untouched; the wifi_want block still owns it.
+                if app_state == AppState::Voice && voice_pressed && !voice_net_ready {
+                    shell.set_voice_state(5); // connecting (waiting for WiFi/DHCP)
+                    voice_wait_ready = true;
+                    shell.request_redraw();
+                }
+                if app_state == AppState::Voice && voice_pressed && voice_net_ready {
                     use core::sync::atomic::Ordering;
                     // Power the analog mic/ADC path, then arm the capture gate.
                     let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
@@ -2168,6 +2203,7 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_voice_state(0);
                         shell.set_voice_transcript("");
                         shell.set_voice_error("");
+                        voice_wait_ready = false; // drop any stale "Connecting…" latch
                         shell.set_voice_open(true);
                         // STT is WiFi-dependent (HTTP to the LAN bridge). Hold WiFi
                         // up like climate/energy: raise it here, release + restore
