@@ -87,22 +87,23 @@ export component ClockPage {
         letter-spacing: 2px;
     }
 
-    // Interactive chips row: CPU · GYRO · APPS
+    // Chips row: CPU clock (static label) · GYRO · APPS (tappable).
     HorizontalLayout {
         x: (parent.width - 330px) / 2;
         y: 408px;
         width: 330px;
         height: 36px;
         spacing: 10px;
+        // CPU clock — STATIC label, not a button: the C6 runs a fixed
+        // CpuClock::max, so the old tap did nothing (#25). Borderless/bg-less so
+        // it reads as info next to the real GYRO/APPS buttons. The cpu-tap
+        // callback is now unused (integrator removes the main.rs handler).
         Rectangle {
-            border-radius: 18px; border-width: 1px; border-color: Theme.line;
-            background: Theme.panel;
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                text: root.cpu-text; color: Theme.soft; font-size: 15px;
+                text: root.cpu-text; color: Theme.dim; font-size: 15px;
             }
-            TouchArea { clicked => { root.cpu-tap(); } }
         }
         Rectangle {
             border-radius: 18px; border-width: 1px; border-color: Theme.line;
