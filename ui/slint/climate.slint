@@ -93,9 +93,9 @@ export component ClimateOverlay {
 
     // Back chevron: in detail → back to list; in list → close (return to mesh).
     Rectangle {
-        x: 8px; y: 6px; width: 60px; height: 46px;
+        x: 8px; y: 6px; width: 78px; height: 64px;  // big finger hit-area (#40 discipline)
         Text {
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            x: 8px; y: (parent.height - self.height) / 2;
             text: "\u{2039}"; color: Theme.soft; font-size: 34px;
         }
         TouchArea {
@@ -148,7 +148,7 @@ export component ClimateOverlay {
                 }
                 // name
                 Text {
-                    x: 20px; y: 16px; width: parent.width - 130px; overflow: elide;
+                    x: 20px; y: 16px; width: parent.width - 190px; overflow: elide;
                     text: card.name; color: Theme.soft; font-size: 17px; font-weight: 600;
                 }
                 // setpoint (small)
@@ -191,9 +191,12 @@ export component ClimateOverlay {
         // opacity-gated to invisible in detail mode, so nothing bleeds through —
         // and (crucially) the always-on CLIMATE title + back-chevron, declared
         // above these layers, stay visible on top instead of being occluded.
-        // device name
+        // device name — bounded + elided so long names never overflow the panel.
         Text {
             x: (parent.width - self.width) / 2; y: 100px;
+            width: parent.width - 96px;
+            horizontal-alignment: center;
+            overflow: elide;
             text: root.cards[root.di].name;
             color: Theme.soft; font-size: 20px; letter-spacing: 1px;
         }
@@ -249,7 +252,7 @@ export component ClimateOverlay {
         // `if selected>=0` so the segments don't exist (and can't catch taps) in
         // list mode while the detail layer is faded out beneath... over the list.
         if root.selected-index >= 0: HorizontalLayout {
-            x: 30px; y: 366px; width: parent.width - 60px; height: 44px; spacing: 6px;
+            x: 30px; y: 366px; width: parent.width - 60px; height: 62px; spacing: 6px;
             if root.bit-set(root.cards[root.di].modes-mask, 1): ModeSeg {
                 label: "OFF"; active: root.cards[root.di].mode == 0;
                 tapped => { root.set-mode(root.cards[root.di].id, 0); } }
