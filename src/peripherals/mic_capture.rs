@@ -53,6 +53,13 @@ type MicReceiver = Receiver<'static, CriticalSectionRawMutex, MicChunk, MIC_CHAN
 /// and [`MicPcmSource`] ends the utterance the instant it clears.
 pub static RECORDING: AtomicBool = AtomicBool::new(false);
 
+/// Meter gate (#28). Set while the SoundLevel screen is open; the capture task
+/// pushes chunks whenever EITHER this OR [`RECORDING`] is set, so the shared
+/// mic feeds the level meter (drained by the main loop → `mic_dsp::rms_dbfs`)
+/// as well as voice PTT. Voice + meter are mutually-exclusive screens, so a
+/// single [`MIC_CHANNEL`] with one active consumer at a time suffices.
+pub static METER: AtomicBool = AtomicBool::new(false);
+
 /// [`PcmSource`] backed by [`MIC_CHANNEL`]. Hand `voice_stt::stream_utterance`
 /// a `&mut MicPcmSource` while the button is held.
 pub struct MicPcmSource {
@@ -117,7 +124,7 @@ pub async fn mic_capture_task(
             Timer::after(Duration::from_millis(4)).await;
             continue;
         }
-        if !RECORDING.load(Ordering::Relaxed) {
+        if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
             continue; // idle: discard (keeps the circular ring drained)
         }
         // One STEREO_CHUNK pop -> exactly MONO_CHUNK mono bytes.

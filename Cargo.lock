@@ -2068,6 +2068,7 @@ dependencies = [
  "heapless 0.9.3",
  "hunt",
  "log",
+ "mic-dsp",
  "rssi",
  "slint",
  "slint-build",

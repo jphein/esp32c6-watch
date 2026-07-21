@@ -52,7 +52,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 /// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
 /// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 12] = [
+pub const LAUNCHER_APPS: [AppState; 13] = [
     AppState::Snake,
     AppState::WorldSnake,
     AppState::Game2048,
@@ -65,6 +65,7 @@ pub const LAUNCHER_APPS: [AppState; 12] = [
     AppState::Energy,  // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
     AppState::Climate, // idx 10 — SYSTEM-section CLIMATE tile (icon-id 12)
     AppState::Voice,   // idx 11 — SYSTEM-section VOICE tile (icon-id 7)
+    AppState::Sound,   // idx 12 — SYSTEM-section SOUND-meter tile (icon-id 8)
 ];
 
 #[derive(Default)]
@@ -288,6 +289,14 @@ impl ShellUi {
             if ui.get_voice_open() {
                 if direction == SwipeDirection::Right {
                     ui.set_voice_open(false);
+                }
+                return;
+            }
+            // SoundLevel meter: display-only overlay, Right closes (main.rs then
+            // clears the METER gate + powers the ADC off).
+            if ui.get_mic_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_mic_open(false);
                 }
                 return;
             }
@@ -678,6 +687,22 @@ impl ShellUi {
     pub fn set_voice_error(&self, text: &str) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_voice_error(SharedString::from(text));
+    }
+
+    pub fn set_mic_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_mic_open(open);
+    }
+
+    pub fn mic_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_mic_open())
+    }
+
+    /// SoundLevel meter (#28): current dBFS + peak-hold, both in [-60, 0].
+    pub fn set_mic_level(&self, dbfs: f32, peak: f32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_mic_dbfs(dbfs);
+        ui.set_mic_peak(peak);
     }
 
     pub fn page(&self) -> i32 {

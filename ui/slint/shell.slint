@@ -10,6 +10,7 @@ import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { VoicePage } from "voice.slint";
+import { SoundLevel } from "soundlevel.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -117,6 +118,11 @@ export component WatchShell inherits Window {
     in property <float> voice-level: 0.0;
     in property <string> voice-transcript;
     in property <string> voice-error;
+    // SoundLevel meter overlay (#28): live dBFS + peak-hold, both in [-60, 0],
+    // pushed from the Rust loop draining the shared mic capture through rms_dbfs.
+    in-out property <bool> mic-open: false;
+    in property <float> mic-dbfs: -60;
+    in property <float> mic-peak: -60;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -389,6 +395,13 @@ export component WatchShell inherits Window {
         error-text: root.voice-error;
         ptt-pressed => { root.voice-ptt-pressed(); }
         ptt-released => { root.voice-ptt-released(); }
+    }
+
+    // ==================== SoundLevel meter overlay ====================
+    if root.mic-open: SoundLevel {
+        width: 100%; height: 100%;
+        mic-dbfs: root.mic-dbfs;
+        mic-peak: root.mic-peak;
     }
 
     // ==================== AOD overlay ====================

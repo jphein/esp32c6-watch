@@ -821,6 +821,10 @@ async fn main(_spawner: Spawner) -> ! {
     let mut climate_running = false;
     // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
     let mut climate_pending: Option<ClimatePending> = None;
+    // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
+    // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
+    let mut meter_on = false;
+    let mut meter_peak = mic_dsp::DBFS_FLOOR;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -877,7 +881,8 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Hunt
                 | AppState::Energy
                 | AppState::Climate
-                | AppState::Voice => {
+                | AppState::Voice
+                | AppState::Sound => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -1541,7 +1546,8 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Hunt
             | AppState::Energy
             | AppState::Climate
-            | AppState::Voice => {
+            | AppState::Voice
+            | AppState::Sound => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1554,6 +1560,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Energy
                         | AppState::Climate
                         | AppState::Voice
+                        | AppState::Sound
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1598,6 +1605,7 @@ async fn main(_spawner: Spawner) -> ! {
                 shell.set_energy_open(app_state == AppState::Energy);
                 shell.set_climate_open(app_state == AppState::Climate);
                 shell.set_voice_open(app_state == AppState::Voice);
+                shell.set_mic_open(app_state == AppState::Sound);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
                 app_state = if shell.launcher_open() {
                     AppState::Launcher
@@ -1611,6 +1619,8 @@ async fn main(_spawner: Spawner) -> ! {
                     AppState::Climate
                 } else if shell.voice_open() {
                     AppState::Voice
+                } else if shell.mic_open() {
+                    AppState::Sound
                 } else {
                     AppState::Watchface
                 };
@@ -1916,6 +1926,40 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.request_redraw(); // paint the transcript/error promptly
                 }
 
+                // #28 sound-level meter: drain the SHARED capture → dBFS + peak-hold
+                // on SoundLevel. Non-blocking (unlike the PTT flow, which parks the
+                // loop): update once per tick so the screen stays responsive. Arms
+                // the ADC + METER gate on entry, tears them down on close so the
+                // codec draws ~0mA when the meter isn't open.
+                if app_state == AppState::Sound {
+                    if !meter_on {
+                        let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
+                        mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
+                        meter_peak = mic_dsp::DBFS_FLOOR;
+                        meter_on = true;
+                    }
+                    // Drain all buffered chunks; rms the newest for a live meter.
+                    let rx = MIC_CH.receiver();
+                    let mut latest: Option<f32> = None;
+                    while let Ok(chunk) = rx.try_receive() {
+                        let n = chunk.len() / 2;
+                        let mut samples = [0i16; mic_capture::MONO_CHUNK / 2];
+                        for i in 0..n {
+                            samples[i] = i16::from_le_bytes([chunk[2 * i], chunk[2 * i + 1]]);
+                        }
+                        latest = Some(mic_dsp::rms_dbfs(&samples[..n]));
+                    }
+                    if let Some(dbfs) = latest {
+                        // Peak-hold with slow decay so it tracks down after a transient.
+                        meter_peak = (meter_peak - 0.5).max(dbfs).max(mic_dsp::DBFS_FLOOR);
+                        shell.set_mic_level(dbfs, meter_peak);
+                    }
+                } else if meter_on {
+                    mic_capture::METER.store(false, core::sync::atomic::Ordering::Relaxed);
+                    let _ = audio_codec.disable_adc();
+                    meter_on = false;
+                }
+
                 // Refresh per-page data immediately on a page switch, then pace it.
                 let page = shell.page();
                 if page != prev_page {
@@ -2105,6 +2149,13 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         wifi_on_request = true;
                         app_state = AppState::Voice;
+                    } else if target == AppState::Sound {
+                        // Sound-level meter (#28): a Slint overlay (scene-resident,
+                        // no fb). NO WiFi — rms_dbfs is local. The per-tick meter
+                        // block below arms the ADC + METER gate on entry and drains
+                        // MIC_CH → rms_dbfs → dBFS/peak; tears them down on close.
+                        shell.set_mic_open(true);
+                        app_state = AppState::Sound;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -2196,6 +2247,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Energy
                         | AppState::Climate
                         | AppState::Voice
+                        | AppState::Sound
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);

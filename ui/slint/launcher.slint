@@ -212,7 +212,7 @@ export component LauncherOverlay {
             HorizontalLayout {
                 spacing: 12px;
                 AppTile { name: "Voice";       accent: #a78bfa; icon-id: 7; idx: 11; launch(i) => { root.launch-app(i); } }
-                Rectangle { }  // spacer — Phase 2 replaces with Sound (idx 12)
+                AppTile { name: "Sound";       accent: #4fd6ff; icon-id: 8; idx: 12; launch(i) => { root.launch-app(i); } }
             }
         }
     }
