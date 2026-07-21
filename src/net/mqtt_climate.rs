@@ -100,8 +100,12 @@ pub type CloseSignal = Signal<CriticalSectionRawMutex, ()>;
 /// Small, `Copy`, behind the same [`Mutex`] pattern as [`ClimateState`]. Numeric
 /// fields are `Option` so the UI can distinguish "no data yet" from a real 0.
 ///
-/// **PROVISIONAL contract** — field names/units pending confirmation from
-/// luna-website (owner of the `watch/energy/state` JSON). See [`parse_energy`].
+/// Contract confirmed against luna-website's `feat/energy-live @ 05a8be1`:
+/// keys `battery_pct` / `solar_w` / `grid_w` / `charging`, full retained state
+/// per frame (not deltas → wholesale replace), `grid_w` >0 import / <0 export.
+/// `online` is driven by the separate retained LWT `watch/energy/avail`
+/// (`online`|`offline`) and is **preserved across state-frame replaces** — the
+/// UI uses `!online` to show "HA unreachable" (conn-state = 2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnergyState {
     /// Home battery state of charge, 0..=100 %.
@@ -112,6 +116,9 @@ pub struct EnergyState {
     pub grid_w: Option<i32>,
     /// Battery is charging.
     pub charging: bool,
+    /// HA/bridge reachable per the `watch/energy/avail` LWT. `false` → the UI
+    /// shows "HA unreachable" (conn-state = 2) over the last-known values.
+    pub online: bool,
 }
 
 impl EnergyState {
@@ -121,6 +128,7 @@ impl EnergyState {
             solar_w: None,
             grid_w: None,
             charging: false,
+            online: false,
         }
     }
 
@@ -196,6 +204,9 @@ const ROSTER_TOPIC: &str = "watch/climate/roster";
 /// Retained energy snapshot published by luna-website's HA energy bridge
 /// (v0.4.1). Consume-only (no watch→HA energy commands).
 const ENERGY_TOPIC: &str = "watch/energy/state";
+/// Retained LWT availability for the energy bridge: `online` | `offline`.
+/// Drives [`EnergyState::online`] → UI "HA unreachable" (conn-state = 2).
+const ENERGY_AVAIL_TOPIC: &str = "watch/energy/avail";
 const STATE_PREFIX: &str = "watch/climate/";
 const STATE_SUFFIX: &str = "/state";
 const SET_PREFIX: &str = "watch/climate/";
@@ -339,7 +350,7 @@ pub async fn run_climate_session(
 // --- SUBSCRIBE + SUBACK -----------------------------------------------------
 
 async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
-    let topics = [STATE_WILDCARD, ROSTER_TOPIC, ENERGY_TOPIC];
+    let topics = [STATE_WILDCARD, ROSTER_TOPIC, ENERGY_TOPIC, ENERGY_AVAIL_TOPIC];
 
     // remaining length = 2 (packet id) + sum(2-byte len + topic + 1-byte QoS)
     let mut remaining = 2usize;
@@ -414,10 +425,21 @@ async fn handle_publish(
             // parse_state == None (malformed / empty retained-clear) -> skip.
         }
         Some(TopicKind::Energy) => {
-            if let Some(next) = parse_energy(payload) {
-                *energy.lock().await = next;
+            if let Some(mut next) = parse_energy(payload) {
+                let mut guard = energy.lock().await;
+                // Availability is owned by the LWT topic, not the state frame —
+                // carry it across the wholesale replace so a fresh state frame
+                // can't spuriously clear "HA unreachable".
+                next.online = guard.online;
+                *guard = next;
             }
             // parse_energy == None (malformed / empty) -> keep last-known state.
+        }
+        Some(TopicKind::EnergyAvail) => {
+            if let Some(online) = parse_avail(payload) {
+                energy.lock().await.online = online;
+            }
+            // Unrecognized avail payload -> leave the flag unchanged.
         }
         Some(TopicKind::Roster) => {
             // Belt-and-suspenders per spec §A: the wildcard state subscription
@@ -432,6 +454,7 @@ async fn handle_publish(
 enum TopicKind<'a> {
     State(&'a str),
     Energy,
+    EnergyAvail,
     Roster,
 }
 
@@ -443,6 +466,9 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
     }
     if t == ENERGY_TOPIC {
         return Some(TopicKind::Energy);
+    }
+    if t == ENERGY_AVAIL_TOPIC {
+        return Some(TopicKind::EnergyAvail);
     }
     let mid = t.strip_prefix(STATE_PREFIX)?.strip_suffix(STATE_SUFFIX)?;
     if mid.is_empty() || mid.contains('/') {
@@ -525,12 +551,16 @@ async fn read_remaining_len(socket: &mut TcpSocket<'_>) -> Result<usize, Error> 
 /// Same untrusted-input discipline as the climate parse: bounded, panic-free,
 /// checked slicing only. Returns `None` on empty / non-UTF-8 / no recognizable
 /// numeric field (caller keeps the last-known state). Number parsing is
-/// float-tolerant (`87` or `87.0`); unknown extra fields are ignored.
+/// float-tolerant (`87` or `87.0` — luna publishes `battery_pct` as int, but a
+/// future `86.7` template sensor is handled) and **JSON `null`-tolerant**: a key
+/// emitted as explicit `null` before its sensor's first reading parses to `None`
+/// (never a panic). Unknown extra fields are ignored.
 ///
-/// **PROVISIONAL** — keys `battery_pct` / `solar_w` / `grid_w` / `charging` and
-/// the `grid_w` +import/−export sign convention are the scaffold contract,
-/// pending luna-website's confirmation. Adjust the four `json_*` keys / casts
-/// below to match; the rest of the pipeline is contract-agnostic.
+/// Contract (confirmed, luna-website `feat/energy-live @ 05a8be1`): keys
+/// `battery_pct` / `solar_w` / `grid_w` / `charging`; `grid_w` >0 import /
+/// <0 export; full retained state per frame. `online` is NOT in this payload —
+/// it comes from the `watch/energy/avail` LWT and is merged by the caller, so
+/// it is set to `false` here and overwritten with the preserved flag on upsert.
 pub fn parse_energy(bytes: &[u8]) -> Option<EnergyState> {
     if bytes.is_empty() {
         return None;
@@ -542,8 +572,8 @@ pub fn parse_energy(bytes: &[u8]) -> Option<EnergyState> {
     let grid_w = json_num(s, "grid_w").map(|v| v as i32);
     let charging = json_bool(s, "charging").unwrap_or(false);
 
-    // Require at least one numeric field so a stray/empty object doesn't wipe
-    // a good last-known snapshot.
+    // Require at least one numeric field so a stray/empty/all-null object doesn't
+    // wipe a good last-known snapshot.
     if battery_pct.is_none() && solar_w.is_none() && grid_w.is_none() {
         return None;
     }
@@ -553,7 +583,18 @@ pub fn parse_energy(bytes: &[u8]) -> Option<EnergyState> {
         solar_w,
         grid_w,
         charging,
+        online: false, // caller preserves the real value from the avail LWT
     })
+}
+
+/// Parse the `watch/energy/avail` LWT payload → `Some(true)` for `online`,
+/// `Some(false)` for `offline`, `None` for anything else. Bounded, panic-free.
+fn parse_avail(payload: &[u8]) -> Option<bool> {
+    match core::str::from_utf8(payload).ok()?.trim() {
+        "online" => Some(true),
+        "offline" => Some(false),
+        _ => None,
+    }
 }
 
 /// Slice starting just after `"<key>":` (whitespace-trimmed). Bounded key buffer.
@@ -568,16 +609,22 @@ fn json_value_after<'a>(s: &'a str, key: &str) -> Option<&'a str> {
     Some(after_key[colon + 1..].trim_start())
 }
 
-/// Extract a numeric value for `"<key>":<number>` (accepts int/float, signed).
+/// Extract a numeric value for `"<key>":<number>` (accepts int/float, signed,
+/// exponent). Explicit JSON `null` → `None` (contract: null === absent). Bounded,
+/// panic-free: the value slice is scanned only over numeric chars, so a `null`
+/// (or any non-numeric) value yields an empty slice that parses to `None`.
 fn json_num(s: &str, key: &str) -> Option<f32> {
     let after = json_value_after(s, key)?;
+    if after.starts_with("null") {
+        return None;
+    }
     let end = after
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E'))
         .unwrap_or(after.len());
     after[..end].parse::<f32>().ok()
 }
 
-/// Extract a boolean value for `"<key>":true|false`.
+/// Extract a boolean value for `"<key>":true|false`. `null`/anything else → `None`.
 fn json_bool(s: &str, key: &str) -> Option<bool> {
     let after = json_value_after(s, key)?;
     if after.starts_with("true") {
