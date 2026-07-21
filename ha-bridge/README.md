@@ -16,10 +16,16 @@ MQTT to mosquitto (`10.0.6.11:1883`), and this Node-RED flow translates.
 
 `<object_id>` = the entity_id minus `climate.` (e.g. `climate.living_room` → `living_room`).
 
-**Encodings** (must match `crates/climate-model` + the Slint `ClimateCard`):
-- `mode`: `0 off · 1 heat · 2 cool · 3 auto · 4 fan_only · 5 dry` (HA `heat_cool` → `3`)
-- `action`: `0 idle/off/fan · 1 heating/preheating · 2 cooling/drying/defrosting`
-- `modes`: array of the supported mode ints (the watch turns this into its bitmask)
+**Encodings** — the wire carries **HA's native strings**. The watch's `crates/climate-model`
+parses these strings (`HvacMode::from_ha`) and maps them to its internal enum/int for the
+Slint UI — the int encoding lives *inside the firmware*, never on the wire:
+- `mode`: HA hvac_mode string — `"off" "heat" "cool" "auto" "heat_cool" "dry" "fan_only"`
+- `action`: HA hvac_action string — `"idle" "heating" "cooling" "drying" "fan" "off"`
+- `modes`: array of the device's supported hvac_mode strings, e.g. `["off","heat","cool","heat_cool"]`
+
+(FYI, the firmware's *internal* UI mapping, not on the wire: mode `off=0 heat=1 cool=2 auto=3
+fan_only=4 dry=5` with `heat_cool→3`; action `idle=0 heating=1 cooling=2` with
+`drying/defrosting→2`. The Node-RED command node translates `auto↔heat_cool` per device.)
 
 Because state is **retained**, a freshly-subscribed watch gets current values immediately,
 and **any new `climate.*` entity auto-appears on the watch** — no firmware change. That's how
