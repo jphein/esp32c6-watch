@@ -42,7 +42,7 @@
     "outputOnlyOnStateChange": false,
     "x": 170,
     "y": 100,
-    "wires": [["fn_build_state"]]
+    "wires": [["fn_build_state", "fn_build_roster"]]
   },
   {
     "id": "fn_build_state",
@@ -66,6 +66,31 @@
     "broker": "mqtt_broker_watch",
     "x": 850,
     "y": 100,
+    "wires": []
+  },
+
+  {
+    "id": "fn_build_roster",
+    "type": "function",
+    "z": "climate_bridge_tab",
+    "name": "build climate roster -> topic+payload (retained)",
+    "func": "// oracle-t9 A4: publish the SET of climate object_ids as ONE retained roster the\n// watch can read without waiting on every per-entity state topic. Informational\n// in v1 (the watch/climate/+/state wildcard stays authoritative for rendering).\n// Fed off the same state-change stream; outputInitially seeds it at deploy.\nconst s = (msg.data && msg.data.new_state) ? msg.data.new_state\n        : (msg.payload && msg.payload.entity_id) ? msg.payload : null;\nif (!s || !s.entity_id || s.entity_id.indexOf('climate.') !== 0) return null;\nconst set = flow.get('roster') || {};\nset[s.entity_id.slice('climate.'.length)] = true;\nflow.set('roster', set);\n// Kept bounded (<=10 ids) — the watch treats a >~200 B roster as a protocol\n// error, and state topics remain authoritative, so truncation is harmless.\nconst bounded = Object.keys(set).sort().slice(0, 10);\nreturn { topic: 'watch/climate/roster', payload: JSON.stringify(bounded), qos: 0, retain: true };\n",
+    "outputs": 1,
+    "x": 480,
+    "y": 172,
+    "wires": [["mqtt_out_roster"]]
+  },
+  {
+    "id": "mqtt_out_roster",
+    "type": "mqtt out",
+    "z": "climate_bridge_tab",
+    "name": "-> watch/climate/roster (retained)",
+    "topic": "",
+    "qos": "0",
+    "retain": "true",
+    "broker": "mqtt_broker_watch",
+    "x": 850,
+    "y": 172,
     "wires": []
   },
 
