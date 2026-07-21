@@ -1,0 +1,26 @@
+# climate-model — HA climate-control correctness core (spec §B′, 2026-07-20).
+#
+# Deliberately a STANDALONE crate (not a module in the firmware crate): the
+# firmware package's deps (esp-hal/esp-radio/slint/…) don't build for the host,
+# so a `src/net/climate_model.rs` module could never be `cargo test`-ed on the
+# host. Isolating the pure logic here keeps it host-testable (only `heapless`)
+# and fully no_std for the on-target build. `mqtt_climate.rs` pulls it in via
+# `climate-model = { path = "crates/climate-model" }`.
+#
+# Parses UNTRUSTED MQTT payloads from the LAN broker — every parse path is
+# bounded and panic-free (same discipline as crates/rssi::clip and
+# crates/scan-model's adversarial MHR parser).
+[package]
+name = "climate-model"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Pure no_std HA-climate model: bounded JSON state parse, command encode, and step/clamp setpoint logic for the watch Climate screen. Untrusted-input hardened; host-testable. Spec §B′."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "climate_model"
+path = "src/lib.rs"
+
+[dependencies]
+heapless = "0.9"

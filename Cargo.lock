@@ -661,6 +661,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "climate-model"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
