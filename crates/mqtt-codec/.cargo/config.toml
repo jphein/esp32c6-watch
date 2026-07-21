@@ -1,0 +1,10 @@
+# Intentionally minimal — sets no build target.
+#
+# This pure, host-testable crate is built/tested for the HOST, not the riscv
+# firmware target. The workspace-root .cargo/config.toml (gitignored) forces
+# `target = riscv32imac-...` + build-std for the firmware; fambuild injects that
+# canonical config into any worktree/crate that LACKS a .cargo/config.toml.
+# Having this (empty) file here makes fambuild SKIP that injection, so
+# `cd crates/mqtt-codec && fambuild test` builds standalone for the host
+# (x86_64) where the libtest harness is available. Matches the host-testable-
+# crates pattern (pure logic crate, no esp-hal, no bare-metal deps).

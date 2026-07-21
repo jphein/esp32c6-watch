@@ -1,0 +1,9 @@
+[package]
+name = "mqtt-codec"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std MQTT 3.1.1 codec: encode CONNECT/PUBLISH/SUBSCRIBE(QoS0/1)/PUBACK/DISCONNECT + parse_packet -> Incoming{ConnAck,SubAck,Publish{topic,payload,packet_id},Other}. No sockets/alloc/deps. Host-testable. Lifted from smol clock/src/net/mqtt.rs; carries the #101 command-path safety (QoS1 subscribe + PUBACK + packet_id capture)."
+license = "MIT OR Apache-2.0"
+
+# Pure byte-buffer codec: core + slices only, no dependencies.
+[dependencies]
