@@ -239,6 +239,28 @@ fn oversized_multibyte_name_truncates_on_char_boundary() {
 }
 
 #[test]
+fn backslash_before_multibyte_char_does_not_panic() {
+    // Regression (oracle-t9-spec): `\` followed by a multibyte codepoint used to
+    // step the byte cursor mid-'é' and panic on the next slice. Must parse cleanly.
+    // b"{\"name\":\"\\\xc3\xa9\"}"  ==  {"name":"\é"}
+    let input = b"{\"name\":\"\\\xc3\xa9\"}";
+    let e = parse_state(input).expect("backslash+multibyte must not panic");
+    assert_eq!(e.name, "\u{e9}"); // unknown escape → the char emitted literally
+
+    // A few more adversarial escape/boundary shapes — all must return Some, no panic.
+    assert!(parse_state(b"{\"name\":\"\\\xe2\x82\xac\"}").is_some()); // \ + '€' (3-byte)
+    assert!(parse_state("{\"name\":\"\\🔥\"}".as_bytes()).is_some()); // \ + 4-byte emoji
+    // `\"` escapes the closing quote → string is unterminated → None (not a panic).
+    assert!(parse_state(b"{\"name\":\"abc\\\"}").is_none());
+    assert!(parse_state(b"{\"name\":\"\\u00e9\"}").is_some()); // valid \u escape → 'é'
+    assert!(parse_state(b"{\"name\":\"\\u12\"}").is_some()); // truncated \u escape
+    assert_eq!(
+        parse_state(b"{\"name\":\"\\u00e9\"}").unwrap().name,
+        "\u{e9}"
+    );
+}
+
+#[test]
 fn json_escapes_in_name_are_decoded() {
     let json = br#"{"name":"A\"B\\C\/D","set":70,"mode":"heat","action":"idle","min":50,"max":90,"step":1,"modes":["heat"]}"#;
     let e = parse_state(json).expect("escaped name parses");

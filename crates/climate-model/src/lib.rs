@@ -566,49 +566,53 @@ fn string_content(raw: &[u8]) -> Option<&[u8]> {
 /// `String`, translating standard escapes. Overflowing chars are **dropped**
 /// (heapless `push` writes a whole char or nothing), so the result never exceeds
 /// `N` bytes and is always valid UTF-8 — truncation lands on a char boundary.
+///
+/// Iterates by **char**, never by byte index: an untrusted `name` may put a
+/// multibyte codepoint right after a backslash (e.g. `\é`), and any fixed `+2`
+/// byte step would land mid-codepoint and panic on the next slice. Char-aware
+/// iteration is structurally immune to that (regression: oracle-t9-spec, the
+/// `rssi::clip` char-boundary class).
 fn decode_str_into<const N: usize>(dst: &mut String<N>, content: &[u8]) {
-    let valid = str_prefix(content);
-    let bytes = valid.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\\' {
-            if i + 1 >= bytes.len() {
-                break; // dangling backslash
-            }
-            match bytes[i + 1] {
-                b'"' => push_char(dst, '"'),
-                b'\\' => push_char(dst, '\\'),
-                b'/' => push_char(dst, '/'),
-                b'n' => push_char(dst, '\n'),
-                b't' => push_char(dst, '\t'),
-                b'r' => push_char(dst, '\r'),
-                b'b' => push_char(dst, '\u{08}'),
-                b'f' => push_char(dst, '\u{0c}'),
-                b'u' => {
-                    if i + 6 <= bytes.len() {
-                        if let Some(cp) = parse_hex4(&bytes[i + 2..i + 6]) {
-                            if let Some(ch) = char::from_u32(cp as u32) {
-                                push_char(dst, ch);
-                            }
+    let mut chars = str_prefix(content).chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            push_char(dst, c);
+            continue;
+        }
+        match chars.next() {
+            None => break, // dangling backslash
+            Some('"') => push_char(dst, '"'),
+            Some('\\') => push_char(dst, '\\'),
+            Some('/') => push_char(dst, '/'),
+            Some('n') => push_char(dst, '\n'),
+            Some('t') => push_char(dst, '\t'),
+            Some('r') => push_char(dst, '\r'),
+            Some('b') => push_char(dst, '\u{08}'),
+            Some('f') => push_char(dst, '\u{0c}'),
+            Some('u') => {
+                // Consume up to 4 hex digits; a complete \uXXXX becomes its char
+                // (lone surrogates / incomplete escapes are dropped, never panic).
+                let mut cp: u32 = 0;
+                let mut n = 0;
+                while n < 4 {
+                    match chars.peek() {
+                        Some(&h) if h.is_ascii_hexdigit() => {
+                            cp = (cp << 4) | h.to_digit(16).unwrap_or(0);
+                            chars.next();
+                            n += 1;
                         }
-                        i += 6;
-                        continue;
+                        _ => break,
                     }
-                    // truncated \u — drop the marker and stop
-                    break;
                 }
-                other => push_char(dst, other as char),
+                if n == 4 {
+                    if let Some(ch) = char::from_u32(cp) {
+                        push_char(dst, ch);
+                    }
+                }
             }
-            i += 2;
-        } else {
-            // copy one whole UTF-8 char (i is on a boundary: escapes are all ASCII)
-            if let Some(ch) = valid[i..].chars().next() {
-                push_char(dst, ch);
-                i += ch.len_utf8();
-            } else {
-                break;
-            }
+            // Unknown escape (incl. `\` followed by a multibyte char): emit the
+            // following char literally. Lenient but panic-free.
+            Some(other) => push_char(dst, other),
         }
     }
 }
@@ -616,26 +620,6 @@ fn decode_str_into<const N: usize>(dst: &mut String<N>, content: &[u8]) {
 /// Push a char, silently dropping it if the target is full (bounded truncation).
 fn push_char<const N: usize>(dst: &mut String<N>, ch: char) {
     let _ = dst.push(ch);
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn parse_hex4(b: &[u8]) -> Option<u16> {
-    if b.len() < 4 {
-        return None;
-    }
-    let mut v: u16 = 0;
-    for &d in &b[..4] {
-        v = (v << 4) | hex_val(d)? as u16;
-    }
-    Some(v)
 }
 
 /// Parse a JSON number token → `f32`. Handles sign, fraction, and exponent (the
