@@ -173,9 +173,11 @@ export component LauncherOverlay {
         x: 22px; y: 96px;
         width: parent.width - 44px;
         height: parent.height - 112px;
-        // Content = AUDIO header + 1 row + GAMES header + 4 rows + SYSTEM header
-        // + 2 rows + gaps. (AUDIO on top so Voice/Sound need no scroll.)
-        viewport-height: 900px;
+        // Content height = 3 section headers (30px) + 7 tile rows (116px) + 9
+        // inter-item gaps (12px) = 1010px. The old 900px clipped the last
+        // (SYSTEM Energy/Climate) row ~110px below the scroll range, so it was
+        // unreachable. +20px bottom margin so the last row isn't flush.
+        viewport-height: 1030px;
         VerticalLayout {
             spacing: 12px;
             // AUDIO first so Voice/Sound are reachable the instant the launcher
