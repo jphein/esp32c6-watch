@@ -132,10 +132,14 @@ pub async fn mic_capture_task(
     // WriteBuffer needs a `&'static mut`, so re-materialise one from the (truly
     // 'static) ring by raw pointer on each restart; the previous transfer is always
     // dropped first, so there is never an aliasing `&mut`.
+    // NOTE (mic HARDWARE-blocked): this RX capture pipeline is correct and proven
+    // end-to-end (DMA delivery + frame flow verified on-hardware). The ES8311 ADC serial
+    // output ASDOUT→GPIO21 is dead at the HARDWARE level (see scratch/mic-debug/lucid.md),
+    // so captured audio is silent until the board is fixed — no firmware change here alters
+    // that. Playback (shared codec/clock) works. Kept intact so the mic "just works" once
+    // the HW is repaired.
     let ring_ptr: *mut [u8; MIC_RING_LEN] = ring;
     let mut popbuf = [0u8; MIC_RING_LEN]; // holds a full ring's worth (max available)
-    let mut raw_ctr: u32 = 0; // THROWAWAY delivery-probe throttle — remove before v0.6.0 tag
-    let mut dbg_ctr: u32 = 0; // THROWAWAY L/R-slot probe throttle — remove before v0.6.0 tag
     'restart: loop {
         let ring_ref: &'static mut [u8; MIC_RING_LEN] = unsafe { &mut *ring_ptr };
         let mut xfer = match i2s_rx.read_dma_circular(ring_ref) {
@@ -160,36 +164,12 @@ pub async fn mic_capture_task(
                 Ok(n) => n,
                 Err(_) => break, // BufferTooSmall can't happen (popbuf = ring); a Late → re-arm
             };
-            // THROWAWAY delivery probe: `popped` = bytes actually handed to the consumer.
-            raw_ctr = raw_ctr.wrapping_add(1);
-            if raw_ctr % 64 == 0 {
-                esp_println::println!("[MICRAW] avail={} popped={} B", avail, n);
-            }
             if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
                 continue; // idle: popped = drained + re-armed; just discard
             }
             let mut off = 0;
             while off + STEREO_CHUNK <= n {
                 let window = &popbuf[off..off + STEREO_CHUNK];
-                // ===== THROWAWAY #28 L/R-slot dBFS probe — remove before v0.6.0 tag =====
-                if METER.load(Ordering::Relaxed) && off == 0 {
-                    dbg_ctr = dbg_ctr.wrapping_add(1);
-                    if dbg_ctr % 16 == 0 {
-                        let frames = STEREO_CHUNK / 4;
-                        let mut l = [0i16; STEREO_CHUNK / 4];
-                        let mut r = [0i16; STEREO_CHUNK / 4];
-                        for i in 0..frames {
-                            l[i] = i16::from_le_bytes([window[4 * i], window[4 * i + 1]]);
-                            r[i] = i16::from_le_bytes([window[4 * i + 2], window[4 * i + 3]]);
-                        }
-                        esp_println::println!(
-                            "[MICDBG] L={} R={} dBFS  (louder slot = mic -> MIC_RIGHT_CHANNEL)",
-                            mic_dsp::rms_dbfs(&l[..frames]) as i32,
-                            mic_dsp::rms_dbfs(&r[..frames]) as i32,
-                        );
-                    }
-                }
-                // ===== end throwaway probe =====
                 let mut mono_buf = [0u8; MONO_CHUNK];
                 let m = voice_stt::stereo_to_mono_le(window, &mut mono_buf, MIC_RIGHT_CHANNEL);
                 if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {

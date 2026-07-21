@@ -525,9 +525,6 @@ async fn main(_spawner: Spawner) -> ! {
     // only zeroes the volume register. `unmute()` brings them back on
     // demand at playback time.
     let _ = audio_codec.shutdown();
-    // THROWAWAY (mic debug): force ADC on at boot so DIN carries real ES8311 data for
-    // headless [MICDBG] probing (no touch to open the Sound screen). Remove before tag.
-    let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
 
     // === I2S TX for beep playback (16kHz stereo 16-bit) ===
     // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DAC data=GPIO21.
@@ -540,16 +537,13 @@ async fn main(_spawner: Spawner) -> ! {
         .expect("I2S failed")
         .with_mclk(peripherals.GPIO19);
     static I2S_TX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
-    // NOTE (mic root-cause fix): BCLK/WS are driven from the RX side below, NOT
-    // here. On esp-hal 1.1.1 the C6 I2S RX is its OWN master (I2s::new →
-    // set_master clears rx_slave_mod) with its own clock signals I2SI_BCK/I2SI_WS,
-    // physically distinct from TX's I2SO_BCK/I2SO_WS. The mic RX runs continuously
-    // from boot, so letting RX own BCLK/WS keeps the ES8311 clocked at all times;
-    // TX (beep) shares those same physical pins and its DAC latches DOUT on them.
-    // TX keeps only its data-out line here.
+    // BCLK/WS are driven from the RX side below (RX-master): on esp-hal 1.1.1 the C6 I2S
+    // RX is its own master with its own clock signals I2SI_BCK/I2SI_WS. The mic RX runs
+    // continuously from boot, keeping the ES8311 clocked; TX (beep) shares those physical
+    // pins and its DAC latches DOUT on them. TX keeps only its data-out line here.
     let mut i2s_tx = i2s_periph
         .i2s_tx
-        .with_dout(peripherals.GPIO21)
+        .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
         .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
     // === I2S RX for mic capture — the SINGLE shared owner (#42 voice + #28 meter) ===
     // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx).
@@ -580,9 +574,9 @@ async fn main(_spawner: Spawner) -> ! {
     static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
     let i2s_rx = i2s_periph
         .i2s_rx
-        .with_bclk(peripherals.GPIO20) // RX master → ES8311 BCLK (see canonical esp-hal RX example)
-        .with_ws(peripherals.GPIO22)   // RX master → ES8311 WS/LRCK (required; not just DIN)
-        .with_din(peripherals.GPIO23)
+        .with_bclk(peripherals.GPIO20) // RX master → ES8311 BCLK
+        .with_ws(peripherals.GPIO22)   // RX master → ES8311 WS/LRCK
+        .with_din(peripherals.GPIO21)  // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
         .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
     // Mic PCM channel (capture task → consumers) + the DMA capture ring.
     // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.
@@ -594,9 +588,6 @@ async fn main(_spawner: Spawner) -> ! {
             .expect("mic_capture_task token"),
     );
     println!("[AUDIO] I2S RX (mic) ready on GPIO23");
-    // THROWAWAY (mic debug): force METER on at boot so the capture task processes
-    // chunks and [MICDBG] prints live dBFS headlessly. Remove before tag.
-    mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();

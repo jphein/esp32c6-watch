@@ -21,5 +21,10 @@ pub const IMU_I2C_ADDR: u8 = 0x6B;
 pub const RTC_I2C_ADDR: u8 = 0x51;
 
 // === Audio (ES8311 codec over I2S) ===
-// MCLK=GPIO19, SCLK=GPIO20, LRCK=GPIO22, DAC in=GPIO21, ADC out=GPIO23,
+// MCLK=GPIO19, SCLK=GPIO20, LRCK=GPIO22,
+// ES8311 ASDOUT (ADC/mic data out, codec→SoC) = GPIO21  → SoC I2S RX DIN
+// ES8311 DSDIN  (DAC data in,  SoC→codec)      = GPIO23  → SoC I2S TX DOUT
+// (Per the V1.0 schematic page-1 pin table: I2S_ASDOUT=GPIO21, I2S_DSDIN=GPIO23.
+// The old "DAC in=21/ADC out=23" was SWAPPED — reading GPIO23 for the mic got the
+// playback line, hence exact-zero capture.)
 // speaker amp enable=GPIO6 (keep LOW unless playing audio).
