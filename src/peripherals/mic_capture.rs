@@ -115,8 +115,19 @@ pub async fn mic_capture_task(
     };
     let mut stereo = [0u8; STEREO_CHUNK];
     let mut dbg_ctr: u32 = 0; // #28 tuning debug throttle (THROWAWAY — remove before v0.6.0 tag)
+    let mut raw_ctr: u32 = 0; // raw-DMA fill probe throttle (THROWAWAY — remove before v0.6.0 tag)
     loop {
         let avail = xfer.available().unwrap_or(0);
+        // ===== raw RX-DMA fill probe — THROWAWAY, REMOVE BEFORE v0.6.0 TAG =====
+        // Unconditional (NOT gated on METER/RECORDING): proves whether the I2S RX
+        // circular DMA is delivering bytes at all. With the bclk/ws RX-routing fix
+        // this should climb to >= STEREO_CHUNK (2048) within a tick; a persistent
+        // avail=0 means the RX still isn't clocking (look past pin routing).
+        raw_ctr = raw_ctr.wrapping_add(1);
+        if raw_ctr % 256 == 0 {
+            esp_println::println!("[MICRAW] avail={} B", avail);
+        }
+        // ===== end throwaway probe =====
         if avail < STEREO_CHUNK {
             Timer::after(Duration::from_millis(4)).await;
             continue;
