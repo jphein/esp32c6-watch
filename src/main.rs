@@ -326,18 +326,30 @@ async fn main(_spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // RGB332 framebuffer (~201KB) + app allocations live here. The main heap
-    // sits in regular DRAM; the small ROM-reclaimed region (~64KB) is added
-    // as a second pool so nothing goes to waste.
-    // Main DRAM region, back at the original 240KB. The framebuffer is now
-    // HALF-RES (~51KB, see framebuffer.rs) instead of ~201KB, so it fits here
-    // alongside the Slint scene + WiFi + BLE + mesh with ~80KB to spare — no
-    // heap bump needed, and the full ~47KB stack is preserved (a bigger heap
-    // eats the stack, since esp-hal's `.stack` is the leftover gap under RAM
-    // top; 280KB boot-looped on the scene build). This is the durable fix for
-    // the game-launch OOM in EVERY radio state (#35), replacing the 264KB
-    // interim.
-    esp_alloc::heap_allocator!(size: 240 * 1024);
+    // Heap / stack layout (esp32c6 memory.x). The RAM region is
+    // 0x40800000..0x4086E610 (~441.5KB); the stack grows DOWN from 0x4086E610
+    // (RAM top) and its floor is _bss_end, so `stack = 0x4086E610 - _bss_end`.
+    // The main pool below is a static array in THIS region's .bss, so its size
+    // sets _bss_end and therefore the stack ceiling. The half-res framebuffer
+    // (~51KB, framebuffer.rs) + Slint scene + WiFi + BLE + mesh all draw from
+    // this pool; it's the durable #35 game-launch-OOM fix (was 264KB interim).
+    //
+    // #58 crash fix (lucid root-cause, mechanism corrected by Morpheus): v0.5.0
+    // added ~6.8KB of .bss (the fat climate_task future in its static TaskPool +
+    // climate statics), pushing _bss_end up and dropping the gap-stack
+    // 46.5KB→39.7KB. The WiFi-connect/WPA burst peaks in (39.7,46.5]KB, so it
+    // overflowed into the WPA/MAC-RX statics above the stack → ppRecycleRxPkt
+    // near-null store. Fix: trim the MAIN pool 240KB→228KB — that lowers
+    // _bss_end ~12KB → stack ~51.6KB, ~5KB above v0.4.0's glass-proven 46.5KB,
+    // clearing the whole overflow band. (Trimming the RECLAIMED pool CANNOT help:
+    // it lives in dram2_seg at 0x4086E610.., ABOVE the stack ceiling, so its size
+    // never moves _bss_end — measured: a 56→48KB trim dropped total .bss 8KB in
+    // `size` but left _stack_end frozen.) Follow-up v0.5.1: box the session's
+    // socket buffers so the future leaves .bss and the main pool can be restored.
+    esp_alloc::heap_allocator!(size: 228 * 1024);
+    // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
+    // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
+    // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 56 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -535,8 +547,10 @@ async fn main(_spawner: Spawner) -> ! {
     // === Radio: WiFi STA + BLE, both OFF at boot (see the S3 power notes) ===
     // In esp-radio 0.18 `set_config` is what starts the controller, so we
     // build the station config here but only apply it on the first toggle.
+    log_heap("pre-wifi"); // per-region heap right before the WiFi stack inits
     let (mut wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("WiFi init failed");
+    log_heap("post-wifi"); // confirms the RX-pool carve isn't starving a region
     let ble_connector =
         BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
     // trouble-host GATT server: wrap the HCI transport and hand it to the
