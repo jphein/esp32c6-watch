@@ -552,11 +552,23 @@ async fn main(_spawner: Spawner) -> ! {
     // descriptors. Stays Blocking: mic_capture_task drives it via read_dma_circular
     // + poll. This is the ONLY place I2S0/DMA_CH1 is claimed — both the voice PTT
     // stream and the SoundLevel meter subscribe to MIC_CH, never re-owning I2S.
-    static I2S_RX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
+    //
+    // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
+    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds
+    // its walk from chain.last() expecting last.next → first; a padded array (we had
+    // 8, copied from the one-shot TX side) leaves trailing EMPTY descriptors whose
+    // next=null, so the first available() poll derefs null. descriptor_count() gives
+    // the exact count (3 for an 8KB ring @ CHUNK_SIZE=4092) → last is the real wrap.
+    const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
+        mic_capture::MIC_RING_LEN,
+        esp_hal::dma::CHUNK_SIZE,
+        true, // circular
+    );
+    static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
     let i2s_rx = i2s_periph
         .i2s_rx
         .with_din(peripherals.GPIO23)
-        .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; 8]));
+        .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
     // Mic PCM channel (capture task → consumers) + the DMA capture ring.
     // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.
     static MIC_CH: mic_capture::MicChannel = mic_capture::MicChannel::new();
