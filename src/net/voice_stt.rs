@@ -1,7 +1,7 @@
 //! Voice-to-text upload: stream mic PCM to the LAN STT bridge, get a transcript.
 //!
 //! Companion to [`crate::net::ota_http`] but in the UPLOAD direction. Opens a
-//! plain-HTTP `TcpSocket` to the STT bridge (`watch_bridge.py` on familiar),
+//! plain-HTTP `TcpSocket` to the STT bridge (`watch_bridge.py` on ubox0),
 //! `POST /stt` with `Transfer-Encoding: chunked`, streams the raw **mono
 //! 16 kHz 16-bit-LE PCM** body as it is captured (push-to-talk), then reads the
 //! `200 {"text":"..."}` reply and returns the transcript.
@@ -21,10 +21,14 @@ use embassy_net::{tcp::TcpSocket, Ipv4Address, Stack};
 use embassy_time::{with_timeout, Duration};
 use heapless::String;
 
-/// STT bridge default address (familiar's LAN IP) — dotted-quad, no DNS.
-/// MC5 can pass a different address to [`stream_utterance_to`] (e.g. from config).
+/// STT bridge default address — dotted-quad, no DNS.
+/// ubox0's vlan11 (roam) IP: the watch associates to SSID `roam` (vlan11,
+/// 10.0.11.0/24), which is firewalled off the server LAN (vlan6, 10.0.6.x).
+/// ubox0 carries vlan11 on `br11` at 10.0.11.11, so the watch reaches the bridge
+/// same-subnet (no inter-VLAN routing). MC5 can pass a different address to
+/// [`stream_utterance_to`] (e.g. from config).
 pub fn default_bridge_ip() -> Ipv4Address {
-    Ipv4Address::new(10, 0, 6, 107)
+    Ipv4Address::new(10, 0, 11, 11)
 }
 /// STT bridge port (matches `watch_bridge.py` default / systemd `BRIDGE_PORT`).
 pub const BRIDGE_PORT: u16 = 8090;
