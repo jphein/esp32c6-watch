@@ -256,17 +256,23 @@ impl ShellUi {
                 }
                 return;
             }
-            // Energy overlay: same contract — swallow nav swipes, Right closes.
+            // Energy overlay: swallow nav swipes; Right routes through the close
+            // CELL (not a direct set_energy_open) so main.rs clears energy_active +
+            // releases the WiFi hold. A direct set would strand WiFi (luna-uifix's
+            // finding on the oracle-t10 finding-b bug — the cell drain never fires).
             if ui.get_energy_open() {
                 if direction == SwipeDirection::Right {
-                    ui.set_energy_open(false);
+                    self.req.energy_close.set(true);
                 }
                 return;
             }
-            // Climate overlay: swallow nav swipes (it owns its list/detail nav +
-            // back-chevron); Right-swipe fires the `closed` callback path via the
-            // UI, so just prevent paging behind it here.
+            // Climate overlay: swallow nav swipes; Right fires the close cell (a
+            // swipe never reaches the chevron TouchArea, so a bare return would
+            // strand WiFi). main.rs clears climate_active + releases the hold.
             if ui.get_climate_open() {
+                if direction == SwipeDirection::Right {
+                    self.req.climate_closed.set(true);
+                }
                 return;
             }
             // Launcher overlay next: it swallows nav swipes wherever they
