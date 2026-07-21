@@ -1,0 +1,279 @@
+import { Theme, PageTitle } from "theme.slint";
+
+// HA Climate control screen (design spec §C). Standalone overlay — renders
+// through the resident scene like WLED/Energy (no framebuffer). Two views:
+// a dynamic card LIST, and a DETAIL with setpoint steppers + a mode selector.
+// Pure presentation: the climate-model + MQTT/Node-RED bridge live in the loop;
+// this emits set-temp / set-mode and reflects the pushed `cards` model.
+// NOT wired into WatchShell yet (integrator adds AppState::Climate + tile).
+//
+// === Rust↔Slint contract (match this in the wiring) ===
+//   struct ClimateCard { id, name, cur, setpoint, mode, action, min, max, step,
+//                        modes-mask, unit } — see below.
+//   in  property <[ClimateCard]> cards        // VecModel, one per entity (0..N)
+//   in  property <int>  conn-state            // 0 ready · 1 connecting · 2 unreachable
+//   in-out property <int> selected-index      // -1 = list · >=0 = detail on that card
+//   callback set-temp(int, float)             // (id, new-setpoint) — clamped in UI
+//   callback set-mode(int, int)               // (id, hvac-mode 0..5)
+//   callback closed()                         // list back-chevron / right-swipe → mesh
+// mode ids: 0 off · 1 heat · 2 cool · 3 auto · 4 fan · 5 dry
+// action ids: 0 idle · 1 heating · 2 cooling   modes-mask: bit m set = mode m supported
+
+export struct ClimateCard {
+    id: int,
+    name: string,
+    cur: string,        // Rust-formatted current temp, e.g. "72" ("--" if unknown)
+    setpoint: float,    // numeric setpoint (stepper + display)
+    mode: int,          // current hvac mode 0..5
+    action: int,        // hvac action 0 idle / 1 heating / 2 cooling
+    min: float,
+    max: float,
+    step: float,
+    modes-mask: int,    // supported modes bitmask (bit m = mode m)
+    unit: string,       // "°F" (passthrough, no conversion)
+}
+
+// One selectable mode chip in the detail segmented control.
+component ModeSeg {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    callback tapped();
+    Rectangle {
+        border-radius: 10px;
+        background: root.active ? Theme.accent : (ta.pressed ? Theme.line : Theme.track);
+        border-width: 1px;
+        border-color: root.active ? Theme.accent : Theme.line;
+        // Highlight + press cross-fade for a premium feel on mode change.
+        animate background { duration: 160ms; easing: ease-out; }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.label;
+            color: root.active ? #05100a : Theme.soft;
+            animate color { duration: 160ms; easing: ease-out; }
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+        ta := TouchArea { enabled: root.enabled; clicked => { root.tapped(); } }
+    }
+}
+
+export component ClimateOverlay {
+    in property <[ClimateCard]> cards;
+    in property <int> conn-state: 0;
+    in-out property <int> selected-index: -1;
+    callback set-temp(int, float);
+    callback set-mode(int, int);
+    callback closed();
+
+    // hvac-action → accent (heating amber, cooling blue, idle neutral).
+    pure function action-color(a: int) -> color {
+        a == 1 ? Theme.warm : (a == 2 ? Theme.accent2 : Theme.dim)
+    }
+    pure function action-label(a: int) -> string {
+        a == 1 ? "HEATING" : (a == 2 ? "COOLING" : "IDLE")
+    }
+    pure function mode-label(m: int) -> string {
+        m == 0 ? "OFF" : (m == 1 ? "HEAT" : (m == 2 ? "COOL"
+            : (m == 3 ? "AUTO" : (m == 4 ? "FAN" : "DRY"))))
+    }
+    // Slint has no bitwise ops → arithmetic bit test: bit for divisor 2^m set?
+    pure function bit-set(mask: int, div: int) -> bool {
+        mod(floor(mask / div), 2) == 1
+    }
+    // Safe index for the always-present (opacity-gated) detail layer — never OOB
+    // even when selected-index is -1 (list mode); the layer is just invisible then.
+    property <int> di: clamp(root.selected-index, 0, max(0, root.cards.length - 1));
+
+    Rectangle { width: 100%; height: 100%; background: #000000; }
+
+    PageTitle { title: "CLIMATE"; }
+
+    // Back chevron: in detail → back to list; in list → close (return to mesh).
+    Rectangle {
+        x: 8px; y: 6px; width: 60px; height: 46px;
+        Text {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
+        }
+        TouchArea {
+            clicked => {
+                if (root.selected-index >= 0) { root.selected-index = -1; }
+                else { root.closed(); }
+            }
+        }
+    }
+
+    // ==================== states ====================
+    if root.conn-state == 1: Text {
+        x: (parent.width - self.width) / 2; y: 230px;
+        text: "connecting\u{2026}"; color: Theme.dim; font-size: 20px; letter-spacing: 1px;
+    }
+    if root.conn-state == 2: Text {
+        x: (parent.width - self.width) / 2; y: 230px;
+        text: "HA unreachable"; color: Theme.warn; font-size: 20px; font-weight: 600;
+    }
+    if root.conn-state == 0 && root.cards.length == 0: Text {
+        x: (parent.width - self.width) / 2; y: 230px;
+        text: "no climate devices"; color: Theme.dim; font-size: 18px; letter-spacing: 1px;
+    }
+
+    // ==================== LIST view ====================
+    // LIST layer — present when ready+non-empty; fades/slides under the detail
+    // on selection (crossfade). Card taps disabled while the detail is up.
+    if root.conn-state == 0 && root.cards.length > 0: Flickable {
+        x: root.selected-index < 0 ? 22px : 4px;
+        y: 96px;
+        width: parent.width - 44px;
+        height: parent.height - 112px;
+        opacity: root.selected-index < 0 ? 1.0 : 0.0;
+        animate x, opacity { duration: 200ms; easing: ease-out; }
+        viewport-height: root.cards.length * 104px;
+        VerticalLayout {
+            spacing: 12px;
+            for card[idx] in root.cards: Rectangle {
+                height: 92px;
+                border-radius: 16px;
+                background: Theme.panel;
+                border-width: 1px;
+                border-color: Theme.line;
+                // action accent bar (left)
+                Rectangle {
+                    x: 0; y: 10px; width: 5px; height: parent.height - 20px;
+                    border-radius: 2.5px;
+                    background: root.action-color(card.action);
+                    animate background { duration: 250ms; easing: ease-out; }
+                }
+                // name
+                Text {
+                    x: 20px; y: 16px; width: parent.width - 130px; overflow: elide;
+                    text: card.name; color: Theme.soft; font-size: 17px; font-weight: 600;
+                }
+                // setpoint (small)
+                Text {
+                    x: 20px; y: 52px;
+                    text: "set \{round(card.setpoint)}\{card.unit}";
+                    color: Theme.dim; font-size: 14px;
+                }
+                // big current temp (right)
+                Text {
+                    x: parent.width - self.width - 74px; y: (parent.height - self.height) / 2;
+                    text: card.cur + card.unit;
+                    color: Theme.ink; font-size: 38px; font-weight: 700;
+                }
+                // mode chip (top-right)
+                Rectangle {
+                    x: parent.width - self.width - 16px; y: 14px;
+                    width: 56px; height: 24px; border-radius: 12px;
+                    background: Theme.track;
+                    Text {
+                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                        text: root.mode-label(card.mode);
+                        color: root.action-color(card.action) == Theme.dim ? Theme.soft : root.action-color(card.action);
+                        font-size: 12px; font-weight: 600;
+                    }
+                }
+                TouchArea { enabled: root.selected-index < 0; clicked => { root.selected-index = idx; } }
+            }
+        }
+    }
+
+    // ==================== DETAIL view ====================
+    // DETAIL layer — present when cards exist; own black bg occludes the list;
+    // fades + slides in on selection (crossfade with the list).
+    if root.cards.length > 0: Rectangle {
+        opacity: root.selected-index >= 0 ? 1.0 : 0.0;
+        x: root.selected-index >= 0 ? 0 : 18px;
+        animate x, opacity { duration: 200ms; easing: ease-out; }
+        // No own bg: the root black bg is the backdrop and the list layer is
+        // opacity-gated to invisible in detail mode, so nothing bleeds through —
+        // and (crucially) the always-on CLIMATE title + back-chevron, declared
+        // above these layers, stay visible on top instead of being occluded.
+        // device name
+        Text {
+            x: (parent.width - self.width) / 2; y: 100px;
+            text: root.cards[root.di].name;
+            color: Theme.soft; font-size: 20px; letter-spacing: 1px;
+        }
+        // hero current temp + action
+        Text {
+            x: (parent.width - self.width) / 2; y: 132px;
+            text: root.cards[root.di].cur + root.cards[root.di].unit;
+            color: Theme.ink; font-size: 76px; font-weight: 700;
+        }
+        Text {
+            x: (parent.width - self.width) / 2; y: 224px;
+            text: root.action-label(root.cards[root.di].action);
+            color: root.action-color(root.cards[root.di].action) == Theme.dim
+                ? Theme.dim : root.action-color(root.cards[root.di].action);
+            animate color { duration: 250ms; easing: ease-out; }
+            font-size: 15px; letter-spacing: 2px;
+        }
+
+        // setpoint stepper: −  [ NN° ]  +
+        minus := Rectangle {
+            x: 40px; y: 262px; width: 64px; height: 64px; border-radius: 32px;
+            background: mta.pressed ? Theme.line : Theme.panel;
+            border-width: 1px; border-color: mta.pressed ? Theme.accent : Theme.line;
+            animate background, border-color { duration: 120ms; easing: ease-out; }
+            Text { x: (parent.width - self.width)/2; y: (parent.height - self.height)/2 - 2px;
+                   text: "\u{2212}"; color: Theme.accent; font-size: 40px; font-weight: 700; }
+            mta := TouchArea { enabled: root.selected-index >= 0; clicked => {
+                root.set-temp(root.cards[root.di].id,
+                    clamp(root.cards[root.di].setpoint - root.cards[root.di].step,
+                          root.cards[root.di].min, root.cards[root.di].max));
+            } }
+        }
+        Text {
+            x: (parent.width - self.width) / 2; y: 268px;
+            text: "\{round(root.cards[root.di].setpoint * 10) / 10}\{root.cards[root.di].unit}";
+            color: Theme.accent; font-size: 46px; font-weight: 700;
+        }
+        plus := Rectangle {
+            x: parent.width - self.width - 40px; y: 262px; width: 64px; height: 64px; border-radius: 32px;
+            background: pta.pressed ? Theme.line : Theme.panel;
+            border-width: 1px; border-color: pta.pressed ? Theme.accent : Theme.line;
+            animate background, border-color { duration: 120ms; easing: ease-out; }
+            Text { x: (parent.width - self.width)/2; y: (parent.height - self.height)/2 - 2px;
+                   text: "+"; color: Theme.accent; font-size: 40px; font-weight: 700; }
+            pta := TouchArea { enabled: root.selected-index >= 0; clicked => {
+                root.set-temp(root.cards[root.di].id,
+                    clamp(root.cards[root.di].setpoint + root.cards[root.di].step,
+                          root.cards[root.di].min, root.cards[root.di].max));
+            } }
+        }
+
+        // mode segmented control — only the device's supported modes. Wrapped in
+        // `if selected>=0` so the segments don't exist (and can't catch taps) in
+        // list mode while the detail layer is faded out beneath... over the list.
+        if root.selected-index >= 0: HorizontalLayout {
+            x: 30px; y: 366px; width: parent.width - 60px; height: 44px; spacing: 6px;
+            if root.bit-set(root.cards[root.di].modes-mask, 1): ModeSeg {
+                label: "OFF"; active: root.cards[root.di].mode == 0;
+                tapped => { root.set-mode(root.cards[root.di].id, 0); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 2): ModeSeg {
+                label: "HEAT"; active: root.cards[root.di].mode == 1;
+                tapped => { root.set-mode(root.cards[root.di].id, 1); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 4): ModeSeg {
+                label: "COOL"; active: root.cards[root.di].mode == 2;
+                tapped => { root.set-mode(root.cards[root.di].id, 2); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 8): ModeSeg {
+                label: "AUTO"; active: root.cards[root.di].mode == 3;
+                tapped => { root.set-mode(root.cards[root.di].id, 3); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 16): ModeSeg {
+                label: "FAN"; active: root.cards[root.di].mode == 4;
+                tapped => { root.set-mode(root.cards[root.di].id, 4); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 32): ModeSeg {
+                label: "DRY"; active: root.cards[root.di].mode == 5;
+                tapped => { root.set-mode(root.cards[root.di].id, 5); } }
+        }
+        // caption
+        Text {
+            x: (parent.width - self.width) / 2; y: 442px;
+            text: "tap \u{2039} to go back \u{00b7} via Home Assistant";
+            color: Theme.faint; font-size: 13px;
+        }
+    }
+}
