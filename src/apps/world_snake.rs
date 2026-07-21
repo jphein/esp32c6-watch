@@ -1110,6 +1110,12 @@ impl App for WorldSnakeApp {
         AppResult::Continue
     }
 
+    // Remote peers dead-reckon between our steps, so repaint on a steady 30fps
+    // cadence rather than only on local steps (matches the old arm's next_flush).
+    fn min_flush_ms(&self) -> u32 {
+        33
+    }
+
     fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(SCREEN_W as u32, SCREEN_H as u32))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))

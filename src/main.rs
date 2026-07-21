@@ -2344,23 +2344,112 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
 
-            AppState::Snake => {
+            // === Framebuffer apps (games + Settings) ===
+            // ONE generic arm for every app whose registry `kind` is Framebuffer.
+            // The per-game arms collapsed into `run_fb_app` (update -> drain sfx ->
+            // render+flush on the app's own `dirty`/`min_flush_ms`). Peripheral
+            // service that can't live behind the trait stays keyed on the state
+            // (Flappy's INT-touch, Settings' cred-save); WorldSnake's ESP-NOW feed
+            // already runs in the per-tick net section above.
+            s if crate::apps::registry::is_framebuffer(s) => {
                 let Some(fb_ref) = fb.as_mut() else {
                     app_state = AppState::Watchface;
                     continue;
                 };
+
+                // Settings: CONNECT persists creds to flash + (re)starts WiFi.
+                // Kept keyed on the state (flash + radio service), at the same
+                // point as the old Settings arm — behavior-preserving.
+                if s == AppState::Settings {
+                    use crate::peripherals::wifi::WifiState;
+                    if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending
+                    {
+                        let ssid = settings_app.wifi_config.ssid_str();
+                        if ssid.is_empty() {
+                            settings_app.wifi_state = WifiState::Error;
+                        } else {
+                            watch_cfg.ssid.clear();
+                            let _ = watch_cfg.ssid.push_str(ssid);
+                            watch_cfg.pass.clear();
+                            let pw = core::str::from_utf8(
+                                &settings_app.wifi_config.password
+                                    [..settings_app.wifi_config.pass_len],
+                            )
+                            .unwrap_or("");
+                            let _ = watch_cfg.pass.push_str(pw);
+                            match config_offset
+                                .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                            {
+                                Some(Ok(())) => println!("[CFG] credentials saved to flash"),
+                                _ => println!("[CFG] save failed"),
+                            }
+                            station_config = esp_radio::wifi::Config::Station(
+                                StationConfig::default()
+                                    .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
+                                    .with_password(watch_cfg.pass.as_str().into()),
+                            );
+                            wifi_has_creds = true;
+                            radio_started = false;
+                            wifi_connected = false;
+                            ntp_synced = false;
+                            wifi_on_request = true;
+                            settings_connect_pending = true;
+                        }
+                    }
+                }
+
+                // Per-app input shaping: Flappy reads the touch INT for a reliable
+                // held-to-flap signal; Settings taps use the last-known coords (the
+                // tap frame's point may already be None on lift); games ignore touch.
+                let touch = match s {
+                    AppState::Flappy => {
+                        if touch_int.is_low() {
+                            Some(crate::peripherals::touch::TouchPoint {
+                                x: 200,
+                                y: 250,
+                                fingers: 1,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    AppState::Settings => Some(crate::peripherals::touch::TouchPoint {
+                        x: last_touch_x,
+                        y: last_touch_y,
+                        fingers: 1,
+                    }),
+                    _ => None,
+                };
                 let input = AppInput {
-                    touch: None,
+                    touch,
                     swipe: swipe_event,
                     tap: tap_event,
                     accel,
                     dt_ms: dt_ms.max(1),
                 };
+
+                // The one instance-wiring match: state -> concrete app as dyn App.
+                let app: &mut dyn App = match s {
+                    AppState::Snake => &mut snake_game,
+                    AppState::WorldSnake => &mut world_snake,
+                    AppState::Game2048 => &mut game_2048,
+                    AppState::Tetris => &mut tetris_game,
+                    AppState::Flappy => &mut flappy_game,
+                    AppState::Maze => &mut maze_game,
+                    AppState::Settings => &mut settings_app,
+                    // is_framebuffer(s) already gated this arm; anything else is a
+                    // registry/enum mismatch — bail to the watchface.
+                    _ => {
+                        app_state = AppState::Watchface;
+                        fb = None;
+                        continue;
+                    }
+                };
                 let (exit, sfx) =
-                    run_fb_app(&mut snake_game, &input, fb_ref, &mut display, now, &mut next_flush);
+                    run_fb_app(app, &input, fb_ref, &mut display, now, &mut next_flush);
                 if let Some(Sfx::Beep) = sfx {
-                    // Beep on food-eat via I2S DMA. Unmute codec, raise amp, play,
-                    // then lower amp FIRST and mute to avoid a pop.
+                    // Snake food-eat beep via I2S DMA. Unmute codec, raise amp,
+                    // play, then lower amp FIRST and mute to avoid a pop.
                     let _ = audio_codec.unmute();
                     delay.delay_millis(2); // let codec stabilize before enabling amp
                     amp_en.set_high();
@@ -2370,219 +2459,17 @@ async fn main(_spawner: Spawner) -> ! {
                     amp_en.set_low();
                     let _ = audio_codec.mute();
                 }
-                if exit {
-                    app_state = AppState::Watchface;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Watchface;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::WorldSnake => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                world_snake.update(&input);
-                // Remote peers dead-reckon between our steps, so repaint on a
-                // steady cadence rather than only on local steps.
-                if now >= next_flush {
-                    world_snake.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
+                // Exit (app-signalled or boot-button) returns to the launcher.
+                // Normalized: Snake used to drop to the watchface (P3 fix — every
+                // game now exits consistently to the launcher).
+                let boot = boot_button.is_low();
+                if exit || boot {
                     app_state = AppState::Launcher;
                     fb = None;
                     println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Game2048 => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                game_2048.update(&input);
-                if swipe_event.is_some() {
-                    game_2048.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Tetris => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                tetris_game.update(&input);
-                if tetris_game.stepped() || swipe_event.is_some() || tap_event {
-                    tetris_game.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Flappy => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let touch_down = touch_int.is_low();
-                let fake_touch = if touch_down {
-                    Some(crate::peripherals::touch::TouchPoint {
-                        x: 200,
-                        y: 250,
-                        fingers: 1,
-                    })
-                } else {
-                    None
-                };
-                let input = AppInput {
-                    touch: fake_touch,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                flappy_game.update(&input);
-                flappy_game.render(fb_ref);
-                if now >= next_flush {
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Maze => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                let (exit, _sfx) =
-                    run_fb_app(&mut maze_game, &input, fb_ref, &mut display, now, &mut next_flush);
-                if exit {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Settings => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                // CONNECT pressed in Settings: persist creds to flash and
-                // (re)start WiFi with them.
-                use crate::peripherals::wifi::WifiState;
-                if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending {
-                    let ssid = settings_app.wifi_config.ssid_str();
-                    if ssid.is_empty() {
-                        settings_app.wifi_state = WifiState::Error;
-                    } else {
-                        watch_cfg.ssid.clear();
-                        let _ = watch_cfg.ssid.push_str(ssid);
-                        watch_cfg.pass.clear();
-                        let pw = core::str::from_utf8(
-                            &settings_app.wifi_config.password
-                                [..settings_app.wifi_config.pass_len],
-                        )
-                        .unwrap_or("");
-                        let _ = watch_cfg.pass.push_str(pw);
-                        match config_offset
-                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                        {
-                            Some(Ok(())) => println!("[CFG] credentials saved to flash"),
-                            _ => println!("[CFG] save failed"),
-                        }
-                        station_config = esp_radio::wifi::Config::Station(
-                            StationConfig::default()
-                                .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
-                                .with_password(watch_cfg.pass.as_str().into()),
-                        );
-                        wifi_has_creds = true;
-                        radio_started = false;
-                        wifi_connected = false;
-                        ntp_synced = false;
-                        wifi_on_request = true;
-                        settings_connect_pending = true;
+                    if boot {
+                        Timer::after(Duration::from_millis(200)).await;
                     }
-                }
-                settings_app.update(dt_ms.max(1));
-                if tap_event {
-                    settings_app.handle_tap(last_touch_x, last_touch_y);
-                }
-                if let Ok((Some(tp), _)) = touch.poll() {
-                    last_touch_x = tp.x;
-                    last_touch_y = tp.y;
-                }
-                settings_app.render(fb_ref);
-                if now >= next_flush {
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(50);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
                 }
             }
 

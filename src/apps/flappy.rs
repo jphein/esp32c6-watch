@@ -117,6 +117,12 @@ impl App for FlappyGame {
         AppResult::Continue
     }
 
+    // Continuous physics; repaint on a 30fps cadence (matches the old arm's
+    // next_flush + 33ms gate). `dirty` stays the default `true`.
+    fn min_flush_ms(&self) -> u32 {
+        33
+    }
+
     fn render(&self, d: &mut Framebuffer) {
         // Sky
         let _ = Rectangle::new(EgPoint::new(0, 0), Size::new(W as u32, (H - GROUND_H) as u32))
