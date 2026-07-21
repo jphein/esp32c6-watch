@@ -1,4 +1,4 @@
-import { Theme, PageTitle } from "theme.slint";
+import { Theme, PageTitle, BackChevron } from "theme.slint";
 
 // Home energy screen — shows YOUR HOUSE's battery / solar / grid (not the
 // watch's own battery, which lives in the chrome pill). Standalone overlay-style
@@ -38,15 +38,10 @@ export component EnergyPage {
 
     PageTitle { title: "ENERGY"; }
 
-    // Back chevron (top-left, clear of the corner arc); Right-swipe also closes.
-    back := TouchArea {
-        x: 14px; y: 8px; width: 78px; height: 64px;  // 78x64 finger hit-area (P2-B, uniform w/ climate)
-        clicked => { root.close(); }
-        Text {
-            x: 8px; y: (parent.height - self.height) / 2;
-            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
-        }
-    }
+    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // 78x64 placement so overlays never drift. Right-swipe also closes
+    // (slint_shell::handle_touch).
+    BackChevron { clicked => { root.close(); } }
 
     // ==================== connection states (mirror ClimateOverlay) ====================
     if root.conn-state == 1: Text {

@@ -1,4 +1,4 @@
-import { Theme, PageTitle } from "theme.slint";
+import { Theme, PageTitle, BackChevron } from "theme.slint";
 
 // Treasure-hunt (#60) page — RSSI warmer/colder. Rust (ShellUi) pushes values
 // derived from `hunt::HuntView` each tick; the "NEXT" area taps `next-target`
@@ -29,16 +29,10 @@ export component HuntPage {
 
     PageTitle { title: "HUNT"; }
 
-    // Back chevron (top-left, clear of the corner arc). Right-swipe also closes
+    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // 78x64 placement so overlays never drift. Right-swipe also closes
     // (slint_shell::handle_touch), matching the launcher / WLED overlays.
-    back := TouchArea {
-        x: 14px; y: 8px; width: 78px; height: 64px;  // 78x64 finger hit-area (P2-B, uniform w/ climate)
-        clicked => { root.close(); }
-        Text {
-            x: 8px; y: (parent.height - self.height) / 2;
-            text: "\u{2039}"; color: Theme.soft; font-size: 34px;
-        }
-    }
+    BackChevron { clicked => { root.close(); } }
 
     // Target being sought.
     Text {

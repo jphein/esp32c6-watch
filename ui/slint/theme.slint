@@ -127,3 +127,29 @@ export component PageTitle {
         letter-spacing: 5px;
     }
 }
+
+// Shared back-chevron for overlay pages (climate / energy / wled / hunt). One
+// canonical 78x64 finger target, top-left, glyph left-anchored + vertically
+// centred — the single source of truth for chevron placement so overlays can't
+// drift (was climate x8/y6 vs the others x14/y8; luna-website P3 audit). It is
+// SELF-POSITIONED: drop `BackChevron { clicked => {...} }` into an overlay and it
+// lands identically every time — the caller sets no geometry. Each overlay wires
+// `clicked` to its own intent (energy/wled/hunt: close(); climate: detail->list
+// then closed()). Corner-safe: the glyph sits at abs (~22, ~23), inside the
+// ~48px rounded-corner arc. Same 78x64 hit-area discipline as RadioDot (#40).
+export component BackChevron {
+    x: 14px;
+    y: 8px;
+    width: 78px;
+    height: 64px;
+    callback clicked();
+
+    TouchArea { clicked => { root.clicked(); } }
+    Text {
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+        text: "\u{2039}";
+        color: Theme.soft;
+        font-size: 34px;
+    }
+}
