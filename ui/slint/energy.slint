@@ -27,9 +27,12 @@ export component EnergyPage {
     in property <int> conn-state: 0;
     callback close();
 
-    // Battery % colour: charging teal, low red, else soft.
-    property <color> batt-color: root.charging ? Theme.accent
-        : (root.battery-pct < 20 ? Theme.warn : Theme.soft);
+    // Battery % colour: no-data (-1 sentinel) neutral dim, charging teal, low
+    // red, else soft. The <0 guard keeps the "--" placeholder from reading as a
+    // critical-low (red) reading.
+    property <color> batt-color: root.battery-pct < 0 ? Theme.dim
+        : (root.charging ? Theme.accent
+        : (root.battery-pct < 20 ? Theme.warn : Theme.soft));
     // Grid direction (± deadband): import = buying (warn), export = selling (accent).
     property <bool> importing: root.grid-w > 50;
     property <bool> exporting: root.grid-w < -50;
@@ -69,7 +72,9 @@ export component EnergyPage {
         }
         Text {
             x: (parent.width - self.width) / 2; y: 122px;
-            text: "\{root.battery-pct}%";
+            // Guard the -1 "no data yet" sentinel (main.rs map_or(-1)) so a
+            // ready-but-stateless frame shows "--", never a red "-1%".
+            text: root.battery-pct < 0 ? "--" : "\{root.battery-pct}%";
             color: root.batt-color; font-size: 66px; font-weight: 700;
         }
         // Gauge
