@@ -192,6 +192,13 @@ export component LauncherOverlay {
     // Rows built from the app REGISTRY in Rust (build_scene). Section display
     // order + two-per-row chunking are done there; this just lays them out.
     in property <[LauncherRow]> rows;
+    // Total scroll-content height, computed in Rust from the same rows (see
+    // `launcher_content_height` in slint_shell.rs) and pushed straight to the
+    // Flickable's viewport. It is NOT read from the layout's `preferred-height`:
+    // a VerticalLayout whose only child is a `for` repeater under-reports it, so
+    // the viewport collapsed shorter than its content and the bottom SYSTEM rows
+    // were unreachable — the v0.7.0 scroll regression this restores.
+    in property <length> content-height;
 
     // Scrim (watchface faintly behind).
     Rectangle { width: 100%; height: 100%; background: #05080aF2; }
@@ -205,11 +212,10 @@ export component LauncherOverlay {
         x: 22px; y: 96px;
         width: parent.width - 44px;
         height: parent.height - 112px;
-        // Viewport auto-sizes to the content (headers 30px + tile rows 116px +
-        // 12px gaps), so the last SYSTEM row is always reachable regardless of
-        // how many apps the registry defines. +20px bottom margin.
-        viewport-height: content-col.preferred-height + 20px;
-        content-col := VerticalLayout {
+        // Viewport height is pushed from Rust (content-height), sized to the exact
+        // header/tile/gap total so every SYSTEM row is reachable for any app count.
+        viewport-height: root.content-height;
+        VerticalLayout {
             spacing: 12px;
             // AUDIO section is emitted first by Rust so Voice/Sound are reachable
             // the instant the launcher opens (on-glass the Flickable scroll is

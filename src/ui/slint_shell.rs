@@ -941,7 +941,13 @@ fn build_scene(
     ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
     // Launcher tiles are built once from the app registry (single source of
     // truth) — static per boot, so a plain VecModel the scene owns is enough.
-    ui.set_launcher_rows(ModelRc::from(Rc::new(VecModel::from(build_launcher_rows()))));
+    let launcher_rows = build_launcher_rows();
+    // Push the exact scroll-content height too: the Flickable can't derive it
+    // from `preferred-height` (a repeater-only VerticalLayout under-reports it),
+    // so we compute it from the same rows. Without this the viewport collapses
+    // and the bottom SYSTEM rows are unreachable — the v0.7.0 scroll regression.
+    ui.set_launcher_content_height(launcher_content_height(&launcher_rows));
+    ui.set_launcher_rows(ModelRc::from(Rc::new(VecModel::from(launcher_rows))));
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -992,6 +998,29 @@ fn build_launcher_rows() -> Vec<LauncherRow> {
 /// 0xRRGGBB -> Slint opaque color.
 fn color_from_rgb(rgb: u32) -> slint::Color {
     slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// Total launcher scroll-content height in logical px, matching the layout in
+/// `ui/slint/launcher.slint`: a header row is 30px, a tile row 116px, rows are
+/// separated by 12px of `VerticalLayout` spacing, plus a 20px bottom margin so
+/// the last row isn't flush against the scroll end. Pushed to the Flickable's
+/// `viewport-height` (via `LauncherOverlay.content-height`) because the layout's
+/// own `preferred-height` under-reports a repeater-only column.
+fn launcher_content_height(rows: &[LauncherRow]) -> f32 {
+    // Keep in sync with launcher.slint (SectionHeader.height / AppTile.height /
+    // VerticalLayout spacing / the +20px bottom margin).
+    const HEADER_H: f32 = 30.0;
+    const TILE_ROW_H: f32 = 116.0;
+    const SPACING: f32 = 12.0;
+    const BOTTOM_MARGIN: f32 = 20.0;
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let sum: f32 = rows
+        .iter()
+        .map(|r| if r.is_header { HEADER_H } else { TILE_ROW_H })
+        .sum();
+    sum + SPACING * (rows.len() as f32 - 1.0) + BOTTOM_MARGIN
 }
 
 fn weather_label(code: u8) -> &'static str {

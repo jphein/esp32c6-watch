@@ -89,6 +89,8 @@ export component WatchShell inherits Window {
     in-out property <bool> launcher-open: false;
     // Launcher tiles, built from the app registry in slint_shell.rs (build_scene).
     in property <[LauncherRow]> launcher-rows: [];
+    // Launcher scroll-content height (px), computed in Rust from the same rows.
+    in property <length> launcher-content-height;
     // WLED remote overlay (a launcher app that lives in the scene, not the fb).
     in-out property <bool> wled-open: false;
     in property <string> wled-status: "";
@@ -357,6 +359,7 @@ export component WatchShell inherits Window {
     if root.launcher-open: LauncherOverlay {
         width: 100%; height: 100%;
         rows: root.launcher-rows;
+        content-height: root.launcher-content-height;
         launch-app(idx) => { root.launch-app(idx); }
     }
 
