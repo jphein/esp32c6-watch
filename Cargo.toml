@@ -16,6 +16,14 @@ path = "./src/main.rs"
 name = "slint-demo"
 path = "./src/bin/slint_demo.rs"
 
+[features]
+# `debug-console` is ON by default for now (our builds include the UI test
+# automator); drop it from `default` for a release cut later. It reads text
+# commands from the USB-Serial-JTAG RX to drive + measure the UI over serial —
+# see src/debug_console.rs and tools/ui_test.py.
+default = ["debug-console"]
+debug-console = ["dep:embedded-io-async"]
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [
     "esp32c6",
@@ -51,6 +59,10 @@ embassy-net = { version = "0.9.1", features = [
     "log",
 ] }
 embedded-io = "0.7"
+# debug-console only: async `Read` for esp-hal's UsbSerialJtag<Async>. The 0.7
+# line unifies with esp-hal's own `embedded-io-async-07` (enabled by its
+# `unstable` feature), so the trait we import is the one the HAL impls.
+embedded-io-async = { version = "0.7", optional = true }
 esp-storage = { version = "0.9.0", features = ["esp32c6"] }
 embedded-storage = "0.3"
 
