@@ -603,12 +603,36 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
         <p>A passive 802.15.4 monitor using the C6's native radio — sniff nearby Zigbee/Thread PAN IDs, channels, and RSSI. A dedicated scan mode that tears the mesh down first, because all three radios share one PHY. Scoped, not yet built.</p>
       </article>
 
-      <!-- Mic capture UPCOMING -->
-      <article class="feat soon reveal">
-        <span class="kbadge">upcoming</span>
+      <!-- Voice push-to-talk SHIPPED -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.6.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6"/></svg></div>
+        <h3>Voice push-to-talk</h3>
+        <p>A new <b>AUDIO</b> launcher section (Voice / Sound). Hold to talk and the watch streams the capture over WiFi to a LAN speech-to-text gateway — the stream only starts once WiFi + DHCP are ready, so it can't deadlock. Speaker playback (beep) is audible too.</p>
+      </article>
+
+      <!-- Multi-theme system IN PROGRESS -->
+      <article class="feat wip reveal">
+        <span class="kbadge">in progress</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z"/></svg></div>
+        <h3>Multi-theme system</h3>
+        <p>Four colour schemes — Midnight, Paper, Amber, Violet — with a runtime picker, so the whole Slint shell re-tints live. A <a href="theme-preview.html">preview is already live here</a>; the on-device picker is landing on <span class="mono">feat/theme-system</span>.</p>
+      </article>
+
+      <!-- Plugin / app registry IN PROGRESS -->
+      <article class="feat wip reveal">
+        <span class="kbadge">in progress</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg></div>
+        <h3>Plugin / app registry</h3>
+        <p>A <span class="mono">no_std</span> app registry that collapses each launcher app down to a <b>single registration</b> — one source of truth for name, icon, accent and dispatch instead of edits scattered across five places. In review as a stacked PR.</p>
+      </article>
+
+      <!-- Mic capture IN PROGRESS -->
+      <article class="feat wip reveal">
+        <span class="kbadge">in progress</span>
         <div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6"/></svg></div>
         <h3>Mic capture · dB meter</h3>
-        <p>Audio input from the onboard ES8311 codec over I²S RX — sampling the ADC to drive a live sound-level (dB) meter on the watch. Scoped, not yet built.</p>
+        <p>Live mic capture for the Sound app's dB meter and voice input. The two MEMS mics feed a dedicated <b>ES7210</b> 4-channel ADC (I²C <span class="mono">0x40</span>) — its SDOUT1 reaches the SoC on GPIO21 over I²S RX. The ES7210 driver is being written (the ADC needs its own init); the ES8311 handles playback only.</p>
       </article>
     </div>
   </div>
@@ -666,7 +690,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
             <div class="rows" style="gap:1.5cqw">
               <div class="srow"><span class="k">CHIP</span><span class="v">ESP32-C6 · RISC-V</span></div>
               <div class="srow"><span class="k">DISPLAY</span><span class="v">410x502 AMOLED</span></div>
-              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.2.0</span></div>
+              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.6.0</span></div>
               <div class="srow"><span class="k">HEAP</span><span class="v acc">123k free</span></div>
               <div class="srow"><span class="k">UPTIME</span><span class="v">02:41:07</span></div>
               <div class="srow"><span class="k">BATTERY</span><span class="v">78% · 4012 mV</span></div>
@@ -760,7 +784,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
           <tr><td>Display</td><td>CO5300 AMOLED · 410×502 · QSPI with DMA</td></tr>
           <tr><td>Touch</td><td>FT3168 capacitive controller (I²C)</td></tr>
           <tr><td>IMU</td><td>QMI8658 6-axis accel + gyro, hardware pedometer engine</td></tr>
-          <tr><td>Audio</td><td>I²S</td></tr>
+          <tr><td>Audio</td><td>ES8311 speaker codec (0x18) + ES7210 4-channel mic ADC (0x40) · shared I²S</td></tr>
           <tr><td>Radios</td><td>WiFi 6 (2.4 GHz) · Bluetooth&nbsp;5 LE · native 802.15.4 (Zigbee/Thread)</td></tr>
           <tr><td>Flash</td><td>16 MB · A/B OTA partition layout</td></tr>
           <tr><td>Power</td><td>battery-backed RTC · live current estimation · CPU clock scaling</td></tr>

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hardware — ESP32-C6-Touch-AMOLED-2.06 · specs, features & BOM</title>
-<meta name="description" content="Full hardware specification, feature list, and bill of materials for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch dev board: CO5300 AMOLED, FT3168 touch, ES8311 audio, QMI8658 IMU, PCF85063 RTC, AXP2101 PMIC.">
+<meta name="description" content="Full hardware specification, feature list, and bill of materials for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch dev board: CO5300 AMOLED, FT3168 touch, ES8311 speaker codec, ES7210 4-channel mic ADC, QMI8658 IMU, PCF85063 RTC, AXP2101 PMIC.">
 <meta name="theme-color" content="#000000">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/fonts.css">
@@ -104,13 +104,13 @@ footer a{color:var(--soft)}
 <header class="hero"><div class="wrap">
   <div class="eyebrow">Hardware reference</div>
   <h1>Waveshare ESP32-C6-Touch-AMOLED-2.06</h1>
-  <p>2.06″ AMOLED touch smartwatch development board — 410×502 QSPI display, WiFi 6 + BT 5 RISC-V SoC, 6-axis IMU, RTC, ES8311 audio with a dual-mic array, and Li-Po power management. Full spec, features and bill of materials below.</p>
+  <p>2.06″ AMOLED touch smartwatch development board — 410×502 QSPI display, WiFi 6 + BT 5 RISC-V SoC, 6-axis IMU, RTC, an ES8311 speaker codec plus a dedicated ES7210 4-channel mic ADC, and Li-Po power management. Full spec, features and bill of materials below.</p>
   <div class="chips">
     <span class="chip"><b>ESP32-C6</b> RISC-V · WiFi 6 · BT 5</span>
     <span class="chip"><b>2.06″</b> AMOLED 410×502</span>
     <span class="chip"><b>Touch</b> capacitive</span>
     <span class="chip"><b>6-axis</b> IMU</span>
-    <span class="chip"><b>Audio</b> codec + dual mic</span>
+    <span class="chip"><b>Audio</b> ES8311 out · ES7210 mic</span>
     <span class="chip"><b>Li-Po</b> + USB-C</span>
   </div>
 </div></header>
@@ -127,7 +127,7 @@ footer a{color:var(--soft)}
     <div class="card"><div class="k">Display</div><div class="v">2.06″ AMOLED</div><div class="d">410 × 502 px · RGB565 · CO5300 driver · QSPI</div></div>
     <div class="card"><div class="k">Touch</div><div class="v">Capacitive</div><div class="d">FT3168 controller over I²C (addr 0x38)</div></div>
     <div class="card"><div class="k">Motion</div><div class="v">6-axis IMU</div><div class="d">QMI8658 accel + gyro over I²C (addr 0x6B) · hardware pedometer</div></div>
-    <div class="card"><div class="k">Audio</div><div class="v">ES8311 codec</div><div class="d">I²S · mono speaker PA + dual-microphone array input</div></div>
+    <div class="card"><div class="k">Audio</div><div class="v">ES8311 + ES7210</div><div class="d">Shared I²S · ES8311 mono speaker DAC/PA (0x18) · ES7210 4-channel mic ADC (0x40)</div></div>
     <div class="card"><div class="k">Power</div><div class="v">AXP2101 PMIC</div><div class="d">Li-Po charger + rails + fuel gauge · USB-C</div></div>
   </div>
 </div></section>
@@ -144,7 +144,7 @@ footer a{color:var(--soft)}
     <li><b>6-axis motion</b> — QMI8658 accelerometer + gyroscope, on-chip step counter</li>
     <li><b>Real-time clock</b> — PCF85063 with independent timekeeping</li>
     <li><b>Audio out</b> — ES8311 codec → class-D speaker amplifier (enable-gated)</li>
-    <li><b>Voice in</b> — dual-microphone array into the ES8311 ADC (with AEC front-end)</li>
+    <li><b>Voice in</b> — dual MEMS mic array → dedicated ES7210 4-channel ADC → I²S (a separate chip from the ES8311)</li>
     <li><b>Battery + charging</b> — Li-Po connector managed by the AXP2101 PMIC</li>
     <li><b>USB-C</b> — native USB-Serial-JTAG (flash, log & debug over one cable)</li>
     <li><b>Expansion pads</b> — VBUS, 3V3, BAT, UART (TX/RX) and spare GPIO</li>
@@ -168,14 +168,15 @@ footer a{color:var(--soft)}
       <tr><td>Touch</td><td><span class="pn">FT3168</span></td><td>Capacitive touch controller</td><td><span class="bus">I²C 0x38 · INT15 RST10</span></td></tr>
       <tr><td>IMU</td><td><span class="pn">QMI8658</span></td><td>6-axis accelerometer + gyroscope, step counter</td><td><span class="bus">I²C 0x6B</span></td></tr>
       <tr><td>RTC</td><td><span class="pn">PCF85063</span></td><td>Real-time clock / calendar</td><td><span class="bus">I²C 0x51</span></td></tr>
-      <tr><td>Audio codec</td><td><span class="pn">ES8311</span></td><td>Mono audio codec — DAC (speaker) + ADC (mic)</td><td><span class="bus">I²C 0x18 · I²S</span></td></tr>
+      <tr><td>Speaker codec</td><td><span class="pn">ES8311 <span class="muted">(U1)</span></span></td><td>Mono speaker / playback codec — DAC + serial audio in (DSDIN). Playback path only; its ADC is not wired to the SoC</td><td><span class="bus">I²C 0x18 · I²S</span></td></tr>
+      <tr><td>Mic ADC</td><td><span class="pn">ES7210 <span class="muted">(U8)</span></span></td><td>4-channel microphone ADC (TDM / I²S) — the actual audio-in path; MIC1 + MIC2 wired on-board, MIC3/MIC4 on pads. SDOUT1 → SoC</td><td><span class="bus">I²C 0x40 · I²S</span></td></tr>
       <tr><td>Speaker amp</td><td><span class="pn">Class-D PA</span></td><td>Speaker power amplifier, enable-gated on GPIO6</td><td><span class="bus">GPIO6 · SPK ±</span></td></tr>
-      <tr><td>Microphones</td><td><span class="pn">Dual MEMS (MIC1/MIC2)</span></td><td>Microphone array → ES8311 analog ADC input</td><td><span class="bus">analog → ES8311</span></td></tr>
+      <tr><td>Microphones</td><td><span class="pn">Dual MEMS (MIC1/MIC2)</span></td><td>Analog microphone array → ES7210 differential inputs</td><td><span class="bus">analog → ES7210</span></td></tr>
       <tr><td>USB</td><td><span class="pn">USB-C</span></td><td>Native USB-Serial-JTAG: flash, console, debug</td><td><span class="bus">D+ / D-</span></td></tr>
       <tr><td>Battery</td><td><span class="pn">Li-Po (J1)</span></td><td>Rechargeable cell, charged via AXP2101</td><td><span class="bus">BAT ±</span></td></tr>
     </tbody>
   </table></div>
-  <div class="note"><b>Audio subsystem (the current work):</b> the two MEMS microphones feed the <span class="mono">ES8311</span> codec's analog ADC (there is no separate digital-mic ADC on the board). Capture is ES8311 ADC → I²S RX → DMA. The speaker path is I²S TX → ES8311 DAC → class-D amp, gated by the GPIO6 enable line.</div>
+  <div class="note"><b>Audio subsystem:</b> playback and capture are <b>two different chips</b> sharing one I²S clock domain. The two MEMS microphones feed a dedicated <span class="mono">ES7210</span> 4-channel ADC (U8, I²C <span class="mono">0x40</span>), whose <span class="mono">SDOUT1</span> drives the SoC on <span class="mono">GPIO21</span> (via <span class="mono">R47</span>) — this is the audio-in path. The <span class="mono">ES8311</span> (U1, I²C <span class="mono">0x18</span>) is the speaker / playback codec only; its own ADC is <b>not</b> wired to the SoC. Playback: I²S TX (<span class="mono">GPIO23</span> → ES8311 DSDIN) → DAC → class-D amp, gated by the <span class="mono">GPIO6</span> enable line. Speaker playback works; live mic capture from the ES7210 is <b>in progress</b> (the ADC needs its own I²C init). <span class="muted">Wiring verified against the V1.0 schematic, the Waveshare <span class="mono">xiaozhi</span> vendor sources, and the vendor firmware image.</span></div>
 </div></section>
 
 <!-- PIN MAP -->
@@ -195,18 +196,18 @@ footer a{color:var(--soft)}
       </tbody>
     </table></div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>Audio (I²S / ES8311)</th><th>Pins</th></tr></thead>
+      <thead><tr><th>Audio (I²S · ES8311 + ES7210)</th><th>Pins</th></tr></thead>
       <tbody>
-        <tr><td>MCLK</td><td class="bus">GPIO19</td></tr>
-        <tr><td>BCLK / SCLK</td><td class="bus">GPIO20</td></tr>
-        <tr><td>LRCK / WS</td><td class="bus">GPIO22</td></tr>
-        <tr><td>DAC data out (→ codec)</td><td class="bus">GPIO21</td></tr>
-        <tr><td>ADC data in (← codec / mic)</td><td class="bus">GPIO23</td></tr>
+        <tr><td>MCLK <span class="muted">(shared)</span></td><td class="bus">GPIO19</td></tr>
+        <tr><td>BCLK / SCLK <span class="muted">(shared)</span></td><td class="bus">GPIO20</td></tr>
+        <tr><td>LRCK / WS <span class="muted">(shared)</span></td><td class="bus">GPIO22</td></tr>
+        <tr><td>DSDIN — speaker data (→ ES8311 DAC)</td><td class="bus">GPIO23</td></tr>
+        <tr><td>SDOUT1 — mic data (← ES7210 ADC, via R47)</td><td class="bus">GPIO21</td></tr>
         <tr><td>Speaker-amp enable</td><td class="bus">GPIO6</td></tr>
       </tbody>
     </table></div>
   </div>
-  <div class="note">The I²C bus (SDA=GPIO8, SCL=GPIO7) is shared by the touch controller, IMU, RTC, audio codec and PMIC — five devices at distinct addresses on one 400 kHz bus.</div>
+  <div class="note">The I²C bus (SDA=GPIO8, SCL=GPIO7) is shared by the touch controller, IMU, RTC, ES8311 speaker codec, ES7210 mic ADC and PMIC — six devices at distinct addresses on one 400 kHz bus.</div>
 </div></section>
 
 <footer><div class="wrap">
