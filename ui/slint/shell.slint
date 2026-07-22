@@ -125,6 +125,8 @@ export component WatchShell inherits Window {
     in property <float> mic-peak: -60;
     // Scrolling waveform: one amplitude per 16 ms window, [0,1], oldest first.
     in property <[float]> mic-waveform: [];
+    // Mic digital-gain (0..+18 dB) shown on the Sound app; stepped by its buttons.
+    in property <int> mic-gain-db: 0;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -147,6 +149,8 @@ export component WatchShell inherits Window {
     callback climate-closed();             // back-chevron / right-swipe → mesh
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
+    callback mic-gain-down();      // Sound app − : lower digital mic gain
+    callback mic-gain-up();        // Sound app + : raise digital mic gain
 
     in-out property <float> brightness: 0.8;
 
@@ -405,6 +409,9 @@ export component WatchShell inherits Window {
         mic-dbfs: root.mic-dbfs;
         mic-peak: root.mic-peak;
         mic-waveform: root.mic-waveform;
+        gain-db: root.mic-gain-db;
+        gain-down => { root.mic-gain-down(); }
+        gain-up => { root.mic-gain-up(); }
     }
 
     // ==================== AOD overlay ====================

@@ -616,6 +616,10 @@ async fn main(_spawner: Spawner) -> ! {
     // The mics are wired to the ES7210 (SDOUT1 -> GPIO21), NOT the ES8311. It MUST be
     // I2C-inited or our RX DIN stays idle → exact zeros. Init AFTER the silent clock is
     // live so the ES7210 (I2S slave) locks to the SoC's MCLK/BCLK/WS.
+    // Power the mic rail FIRST (AXP2101 ALDO1 @3.3V) — otherwise the mic bias rides on
+    // residual vendor state and a battery-dead cold boot silences the mic. Rail settles
+    // during the 150ms clock delay below.
+    let _ = power.enable_mic_rail();
     Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
     let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
     match mic_adc.init() {
@@ -889,6 +893,17 @@ async fn main(_spawner: Spawner) -> ! {
     // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
+    // Digital mic-gain index into mic_capture::GAIN_STEPS_* (Sound-app −/+ stepper).
+    // Default 0 dB: the ES7210 analog PGA (36 dB) + the now-explicit ALDO1 mic rail
+    // already give a strong, clean level; digital gain adds NO SNR (it amplifies noise
+    // equally) and was turning residual hiss into audible static. Bump on the Sound app
+    // only if a specific room needs it. (Runtime-only until config reconciliation.)
+    let mut gain_idx: usize = 0;
+    mic_capture::MIC_GAIN_Q8.store(
+        mic_capture::GAIN_STEPS_Q8[gain_idx],
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
     let mut meter_peak = mic_dsp::DBFS_FLOOR;
     // Bar envelope (dBFS): fast attack (jumps to the level instantly), slow
     // release — so brief speech syllables visibly fill/hold the bar instead of
@@ -954,7 +969,10 @@ async fn main(_spawner: Spawner) -> ! {
                 // explicitly. (In the grouped arm below, a Sound overlay would
                 // otherwise inherit the underlying page's cadence — often 1 Hz —
                 // so the meter sampled one 16 ms window/sec and read silence.)
-                AppState::Sound => Duration::from_millis(33),
+                // 66ms (15Hz): still smooth for a meter/waveform, but halves the
+                // scene-render load that was blocking the executor and starving the
+                // capture DMA (→ gap "spikes" in the waveform + laggy feel at 30Hz).
+                AppState::Sound => Duration::from_millis(66),
                 AppState::Watchface
                 | AppState::Launcher
                 | AppState::Wled
@@ -2006,33 +2024,36 @@ async fn main(_spawner: Spawner) -> ! {
                     mic_capture::RECORDING.store(true, Ordering::Relaxed);
                     shell.set_voice_state(1); // listening
                     shell.set_voice_level(0.0);
+                    shell.render(&mut display); // paint LISTENING ONCE (no repaint during the hold)
                     let mut src = mic_capture::MicPcmSource::new(rx);
 
-                    // ONE monitor future owns all live work during the hold (the loop is
-                    // parked in the join, so nothing else renders or polls touch):
-                    //  (a) drive the LISTENING level bar + pulse from MIC_LEVEL and REPAINT
-                    //      so the user SEES the mic responding (was frozen/dead before), and
-                    //  (b) detect release from the AUTHORITATIVE I2C finger count — NOT the
-                    //      INT pin. The INT is a data-ready PULSE that goes high the moment a
-                    //      still finger stops generating reports, so the old `touch_int
-                    //      .is_high()` fired ~20ms into a hold → 0.3s truncated, near-silent
-                    //      captures → empty transcripts. REG_FINGER_NUM reflects real contact.
-                    // Debounced (3 no-finger reads ≈ 180ms) against transient I2C misreads;
-                    // a ~20s tick cap backstops a stuck finger / I2C error. `touch`/`shell`/
-                    // `display` are borrowed ONLY here; the stream uses `stack`/`src` → no aliasing.
-                    let floor = mic_dsp::DBFS_FLOOR as i32;
+                    // ONE monitor future runs alongside the stream during the hold. It does
+                    // NOT render (see below) — its only jobs are release-detection + peak-track:
+                    //  detect release from the AUTHORITATIVE I2C finger count — NOT the INT pin.
+                    //  The INT is a data-ready PULSE that goes high the moment a still finger
+                    //  stops generating reports, so the old `touch_int.is_high()` fired ~20ms
+                    //  into a hold → 0.3s truncated captures. REG_FINGER_NUM reflects real
+                    //  contact. Debounced (3 no-finger reads ≈ 180ms) vs transient I2C misreads;
+                    //  a ~20s tick cap backstops a stuck finger / I2C error.
+                    // `touch`/`shell`/`display` are borrowed ONLY here; the stream uses
+                    // `stack`/`src` → no aliasing.
                     let monitor = async {
                         let mut up = 0u8;
                         let mut peak_dbfs = i32::MIN;
                         let mut ticks: u32 = 0;
                         loop {
+                            // Track the loudest window (for the "too quiet" heuristic).
+                            // CRITICAL: do NOT render here. Painting the Slint scene blocks
+                            // the single-threaded executor for ~tens of ms, starving the
+                            // audio-capture DMA → ring overruns → the recording came back
+                            // truncated with static/glitch "peaks". LISTENING is painted
+                            // ONCE before the join; the live level bar is sacrificed so the
+                            // capture stays clean and full-length. (A live bar can return
+                            // later once capture runs in its own task, not parked here.)
                             let dbfs = mic_capture::MIC_LEVEL.load(Ordering::Relaxed);
                             if dbfs > peak_dbfs {
                                 peak_dbfs = dbfs;
                             }
-                            let lvl = ((dbfs - floor) as f32 / (-floor) as f32).clamp(0.0, 1.0);
-                            shell.set_voice_level(lvl);
-                            shell.render(&mut display);
                             // Authoritative finger-present via I2C (fingers == 0 ⇒ up).
                             let finger_down = matches!(touch.read(), Ok(Some(_)));
                             if finger_down {
@@ -2051,7 +2072,7 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         mic_capture::RECORDING.store(false, Ordering::Relaxed);
                         shell.set_voice_state(2); // transcribing (STT round-trip in flight)
-                        shell.render(&mut display);
+                        shell.render(&mut display); // one render AFTER release (capture done → safe)
                         peak_dbfs
                     };
 
@@ -2207,6 +2228,24 @@ async fn main(_spawner: Spawner) -> ! {
                 if let Some(raw) = shell.req.brightness.take() {
                     brightness = raw;
                     display.set_brightness(raw);
+                }
+                // Sound-app mic-gain stepper: bump the digital-gain index, apply it
+                // live (the capture task reads MIC_GAIN_Q8), refresh the readout.
+                // Read each cell exactly once (take() also clears it).
+                let gain_up = shell.req.mic_gain_up.take();
+                let gain_down = shell.req.mic_gain_down.take();
+                if gain_up || gain_down {
+                    if gain_up {
+                        gain_idx = (gain_idx + 1).min(mic_capture::GAIN_STEPS_Q8.len() - 1);
+                    } else {
+                        gain_idx = gain_idx.saturating_sub(1);
+                    }
+                    mic_capture::MIC_GAIN_Q8.store(
+                        mic_capture::GAIN_STEPS_Q8[gain_idx],
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
+                    shell.request_redraw();
                 }
                 if shell.req.wifi_toggle.take() {
                     wifi_toggle_request = true;

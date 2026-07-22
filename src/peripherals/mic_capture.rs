@@ -13,7 +13,7 @@
 //! snippet). TX (beep) stays blocking-mode and untouched — RX uses the blocking
 //! circular API polled from the task, so no I2S mode change is needed.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, Ordering};
 
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -70,6 +70,18 @@ pub static METER: AtomicBool = AtomicBool::new(false);
 /// "LISTENING" level bar + pulse in real time (see the PTT `monitor` future in
 /// main.rs). Resets to [`mic_dsp::DBFS_FLOOR`] at the start of each utterance.
 pub static MIC_LEVEL: AtomicI32 = AtomicI32::new(-60);
+
+/// User-adjustable **digital** capture gain, Q8 fixed-point (256 = 1.0×), applied
+/// in [`mic_capture_task`] to the mono PCM before it feeds the meter + STT stream.
+/// The ES7210 analog PGA is near its ceiling (+36 dB), so this is the headroom the
+/// Sound-app gain stepper drives to lift quiet speech past Azure's energy floor.
+/// Set from [`GAIN_STEPS_Q8`] indexed by the UI. Note: digital gain lifts signal
+/// AND noise equally (SNR unchanged) — it helps level, not intelligibility.
+pub static MIC_GAIN_Q8: AtomicU16 = AtomicU16::new(256);
+/// Digital-gain ladder the Sound-app stepper walks: 0..+18 dB in 3 dB steps.
+/// Q8 factor = round(256 · 10^(dB/20)). Index into both tables in lock-step.
+pub const GAIN_STEPS_Q8: [u16; 7] = [256, 362, 511, 722, 1020, 1439, 2032];
+pub const GAIN_STEPS_DB: [u8; 7] = [0, 3, 6, 9, 12, 15, 18];
 
 /// Re-arm flags. AOD light sleep (`Rtc::sleep_light`) clock-gates the I2S
 /// peripheral, which permanently stalls the continuous silent-TX DMA (the shared
@@ -231,6 +243,19 @@ pub async fn mic_capture_task(
                 }
                 let mut mono_buf = [0u8; MONO_CHUNK];
                 let m = voice_stt::stereo_to_mono_le(window, &mut mono_buf, MIC_RIGHT_CHANNEL);
+                // Apply user digital gain (Q8) IN-PLACE so both the meter and the STT
+                // stream see the boost; clamp to i16 so a hot setting saturates cleanly.
+                let g = MIC_GAIN_Q8.load(Ordering::Relaxed) as i32;
+                if g != 256 {
+                    let mut k = 0;
+                    while k + 1 < m {
+                        let s = i16::from_le_bytes([mono_buf[k], mono_buf[k + 1]]) as i32;
+                        let b = (((s * g) >> 8).clamp(-32768, 32767) as i16).to_le_bytes();
+                        mono_buf[k] = b[0];
+                        mono_buf[k + 1] = b[1];
+                        k += 2;
+                    }
+                }
                 // Live input level (dBFS) of this window → drives the PTT LISTENING bar.
                 let samp_n = m / 2;
                 let mut lvl_buf = [0i16; MONO_CHUNK / 2];

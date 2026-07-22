@@ -98,6 +98,8 @@ pub struct ShellRequests {
     /// release callback can't fire while the loop is parked streaming the hold.
     pub voice_ptt_pressed: Cell<bool>,
     pub voice_ptt_released: Cell<bool>,
+    pub mic_gain_up: Cell<bool>,
+    pub mic_gain_down: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -710,6 +712,12 @@ impl ShellUi {
         ui.set_mic_peak(peak);
     }
 
+    /// Sound-app mic gain readout (digital boost, dB). Set on boot + each step.
+    pub fn set_mic_gain_db(&self, db: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_mic_gain_db(db);
+    }
+
     /// SoundLevel scrolling waveform (#28): per-16 ms-window amplitudes in [0,1],
     /// oldest first. Swaps the model contents in place (no per-frame ModelRc
     /// alloc). Only meaningful while the Sound overlay is open.
@@ -889,6 +897,12 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_voice_ptt_released(move || r.voice_ptt_released.set(true));
+
+        let r = req.clone();
+        ui.on_mic_gain_up(move || r.mic_gain_up.set(true));
+
+        let r = req.clone();
+        ui.on_mic_gain_down(move || r.mic_gain_down.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
