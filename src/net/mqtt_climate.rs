@@ -179,8 +179,15 @@ const PING_INTERVAL: Duration = Duration::from_secs(15);
 /// If nothing is received (incl. PINGRESP) within this window, declare the
 /// broker dead and end the session (caller shows "reconnecting…", keeps mesh).
 const DEAD_TIMEOUT: Duration = Duration::from_secs(35);
-/// Idle timeout for the connect + CONNACK + SUBSCRIBE + SUBACK handshake.
+/// Idle timeout for the CONNACK + SUBSCRIBE + SUBACK handshake (post-connect).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// TCP-connect timeout, bounded tighter than the handshake. If the broker is on a
+/// subnet the watch can't reach (roam VLAN firewalled off the broker's VLAN), the
+/// SYN is silently dropped, so `connect` would otherwise block for the full
+/// handshake window on the single-threaded executor every retry — a tight
+/// reconnect storm that thrashes the radio. Fast-fail so the caller's backoff paces
+/// retries and frees the radio for the mesh in between.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Once a frame's type byte arrives, its remainder must land within this — a
 /// broker that dribbles half a frame can't stall the session.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
@@ -249,7 +256,12 @@ pub async fn run_climate_session(
     // Bound the whole handshake; cleared before the idle loop (see below).
     socket.set_timeout(Some(HANDSHAKE_TIMEOUT));
 
-    socket.connect((ip, port)).await.map_err(|_| "tcp connect")?;
+    // Fast-fail the connect (CONNECT_TIMEOUT < HANDSHAKE_TIMEOUT) so an unreachable
+    // broker aborts in ~2s instead of blocking the executor for the full handshake.
+    match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, port))).await {
+        Ok(Ok(())) => {}
+        _ => return Err("tcp connect"),
+    }
 
     // CONNECT (clean session, keepalive 30s) -> CONNACK. Reuses mqtt_ha's
     // builder with a climate-specific client id.

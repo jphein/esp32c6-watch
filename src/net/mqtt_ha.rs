@@ -63,7 +63,13 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
     let mut rx_buf = [0u8; 256];
     let mut tx_buf = [0u8; 1024];
     let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-    socket.set_timeout(Some(Duration::from_secs(4)));
+    // 2s (was 4s): the telemetry broker (MQTT_BROKER) may be on a subnet the watch
+    // can't reach from its roam VLAN (the SYN is silently dropped, not RST'd), so
+    // this timeout governs how long `connect` below blocks the single-threaded
+    // executor on a doomed connect. Fail fast so an unreachable broker doesn't
+    // freeze the UI/PTT loop for 4s during the boot NTP burst. A reachable broker
+    // completes the handshake well inside 2s.
+    socket.set_timeout(Some(Duration::from_secs(2)));
 
     socket
         .connect((ip, port))
