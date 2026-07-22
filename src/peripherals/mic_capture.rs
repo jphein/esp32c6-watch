@@ -191,12 +191,6 @@ pub async fn mic_capture_task(
     // + frame flow) was already proven end-to-end and is unchanged.
     let ring_ptr: *mut [u8; MIC_RING_LEN] = ring;
     let mut popbuf = [0u8; MIC_RING_LEN]; // holds a full ring's worth (max available)
-    // === MIC-CAPTURE VERIFY probe (temporary; remove before v0.6.1 merge) ===
-    // Confirms the ADC serial-out is now LIVE under the native full-duplex clock: prints
-    // the running peak |sample| + the first raw i16 frames as hex, throttled so serial is
-    // not flooded. A non-zero peak that rises when JP speaks = MIC FIXED.
-    let mut probe_ctr: u32 = 0;
-    let mut probe_peak: i16 = 0;
     'restart: loop {
         let ring_ref: &'static mut [u8; MIC_RING_LEN] = unsafe { &mut *ring_ptr };
         let mut xfer = match i2s_rx.read_dma_circular(ring_ref) {
@@ -232,15 +226,6 @@ pub async fn mic_capture_task(
             let mut off = 0;
             while off + STEREO_CHUNK <= n {
                 let window = &popbuf[off..off + STEREO_CHUNK];
-                // [VERIFY] running peak |sample| across the raw stereo window.
-                let mut i = 0;
-                while i + 1 < window.len() {
-                    let a = i16::from_le_bytes([window[i], window[i + 1]]).saturating_abs();
-                    if a > probe_peak {
-                        probe_peak = a;
-                    }
-                    i += 2;
-                }
                 let mut mono_buf = [0u8; MONO_CHUNK];
                 let m = voice_stt::stereo_to_mono_le(window, &mut mono_buf, MIC_RIGHT_CHANNEL);
                 // Apply user digital gain (Q8) IN-PLACE so both the meter and the STT
@@ -269,19 +254,6 @@ pub async fn mic_capture_task(
                     let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
                 }
                 off += STEREO_CHUNK;
-            }
-            // [VERIFY] throttled report (~every 16 pops). Remove before v0.6.1 merge.
-            probe_ctr = probe_ctr.wrapping_add(1);
-            if probe_ctr % 16 == 0 {
-                let s0 = u16::from_le_bytes([popbuf[0], popbuf[1]]);
-                let s1 = u16::from_le_bytes([popbuf[2], popbuf[3]]);
-                let s2 = u16::from_le_bytes([popbuf[4], popbuf[5]]);
-                let s3 = u16::from_le_bytes([popbuf[6], popbuf[7]]);
-                esp_println::println!(
-                    "[MICHEX] n={} peak={} raw=[{:04x} {:04x} {:04x} {:04x}]",
-                    n, probe_peak, s0, s1, s2, s3
-                );
-                probe_peak = 0;
             }
         }
         // xfer dropped here → outer loop re-arms the transfer (recover from overrun)

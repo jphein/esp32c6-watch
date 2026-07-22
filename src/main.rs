@@ -630,9 +630,6 @@ async fn main(_spawner: Spawner) -> ! {
         Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
     }
 
-    // Boot METER on so [MICHEX] streams for self-verify (TEMP — strip pre-v0.6.1).
-    mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
-
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
     let beep_storage = BEEP_BUF.init([0u8; 4000]);
