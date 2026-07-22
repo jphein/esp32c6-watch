@@ -129,6 +129,15 @@ async fn climate_task(
             crate::net::mqtt_climate::run_climate_session(stack, state, energy, cmd_rx, close).await
         {
             println!("[CLIM] session ended: {e}");
+            // Reconnect backoff. main.rs re-signals `open` as soon as `done` clears
+            // `climate_running` (session_want && wifi_connected && !running). With a
+            // broker the watch can't reach (e.g. VLAN-6 mosquitto firewalled off the
+            // roam VLAN-11), the session now fails `tcp connect` in ~2s — so without
+            // a pause here `open` would re-fire every ~2s: a tight reconnect storm
+            // that keeps WiFi held (mesh starved) and pins the radio. Hold `done`
+            // back so retries pace at ~10s and the radio is free for the mesh in
+            // between. Only on the Err path — a clean close signals `done` at once.
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(10)).await;
         }
         done.signal(()); // fires on Ok AND Err → main restores mesh unconditionally
     }
@@ -2464,7 +2473,11 @@ async fn main(_spawner: Spawner) -> ! {
                 // Repaint if the scene is dirty (full-frame, line-streamed).
                 // Skip when a launch just switched us into an app this iteration:
                 // that app already painted its first frame (e.g. Game2048) and the
-                // trailing shell repaint would clobber it.
+                // trailing shell repaint would clobber it. Every scene-resident
+                // overlay must be listed here — Theme included: it paints through
+                // the scene (no framebuffer first-frame), so omitting it left the
+                // picker unpainted on the open-tick and it only appeared once some
+                // later event forced a render (the "Theme slow to load" bug).
                 if matches!(
                     app_state,
                     AppState::Watchface
@@ -2475,6 +2488,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Climate
                         | AppState::Voice
                         | AppState::Sound
+                        | AppState::Theme
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);

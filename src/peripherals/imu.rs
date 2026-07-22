@@ -97,12 +97,22 @@ impl<I: I2c> Qmi8658Imu<I> {
             return Ok(false);
         }
 
-        // Reset: CTRL1 bit 6 = soft reset (auto-clear)
+        // CTRL1: address auto-increment (bit 6), little-endian output (bit 5 = 0).
+        //
+        // Root-cause fix (steps stuck / IMU reads corrupt): the old value here was
+        // 0x60 = ADDR_AI (bit 6) | BE (bit 5, SPI_BIG_ENDIAN). Bit 5 = 1 puts the
+        // chip in BIG-endian output mode, but every read in this driver is
+        // little-endian (`i16::from_le_bytes` for accel/gyro/temp; `L | M<<8 | H<<16`
+        // for the 24-bit step counter), so all multi-byte reads were byte-swapped —
+        // including STEP_CNT, so the pedometer value never read correctly. SensorLib
+        // and tinygo's qmi8658c driver both use 0x40 (ADDR_AI only, little-endian).
+        //
+        // NOTE: the previous 0x40 write labelled "soft reset" was a misconception —
+        // CTRL1 bit 6 is ADDR_AI, not reset. The QMI8658 soft reset is the dedicated
+        // RESET register (0x60) written with 0xB0 (polled via RST_RESULT). We skip
+        // reset (no delay provider in this sync init); a cold boot starts from
+        // defaults and every field below is written explicitly.
         self.write_reg(REG_CTRL1, 0x40)?;
-        // Wait for reset (no delay available here, just write next configs)
-
-        // CTRL1: address auto-increment enabled
-        self.write_reg(REG_CTRL1, 0x60)?;
 
         // CTRL2: Accelerometer ODR=62.5Hz, Full scale=±8g
         // ODR[3:0]=0b0111 (62.5Hz), FS[6:4]=0b010 (±8g)
