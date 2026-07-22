@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>esp32c6-watch — 100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch</title>
-<meta name="description" content="A 100% Rust, no_std firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch — Slint UI, ESP-NOW mesh, a migrating Mesh Familiar, games, BLE, WiFi, OTA, and a hardware pedometer, all on a RISC-V microcontroller.">
+<meta name="description" content="A 100% Rust, no_std firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch — Slint UI with a four-scheme theme system, ESP-NOW mesh, a migrating Mesh Familiar, push-to-talk voice, games, BLE, WiFi, OTA, and a hardware pedometer, all on a RISC-V microcontroller.">
 <meta name="theme-color" content="#000000">
-<meta property="og:title" content="esp32c6-watch">
-<meta property="og:description" content="100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch — Slint UI, ESP-NOW mesh, a migrating Familiar creature, games, and more.">
+<meta property="og:title" content="esp32c6-watch — v0.7.0">
+<meta property="og:description" content="100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch — Slint UI, four themes, ESP-NOW mesh, a migrating Familiar creature, push-to-talk voice, games, and more.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/fonts.css">
@@ -423,7 +423,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
       <div class="eyebrow">100% Rust · no_std · RISC-V</div>
       <h1><span>esp32</span><span class="c6">c6</span><span>-watch</span></h1>
       <p class="tag">A whole smartwatch OS on a bare-metal microcontroller.</p>
-      <p class="desc">Open-source firmware for the Waveshare&nbsp;ESP32-C6-Touch-AMOLED-2.06 — a Slint&nbsp;UI, an ESP-NOW mesh, a creature that hops between boards, seven games, and a hardware pedometer. No RTOS beyond an async executor. No PSRAM. No cloud.</p>
+      <p class="desc">Open-source firmware for the Waveshare&nbsp;ESP32-C6-Touch-AMOLED-2.06 — a Slint&nbsp;UI with four themes, an ESP-NOW mesh, a creature that hops between boards, push-to-talk voice, seven games, and a hardware pedometer. No RTOS beyond an async executor. No PSRAM. No cloud.</p>
       <div class="cta">
         <a class="btn btn-primary" href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12a11.5 11.5 0 0 0 7.9 10.9c.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5A11.5 11.5 0 0 0 23.5 12C23.5 5.7 18.3.5 12 .5Z"/></svg>
@@ -475,7 +475,9 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
     <span class="pill b"><i></i>trouble-host BLE GATT</span>
     <span class="pill w"><i></i>A/B OTA</span>
     <span class="pill"><i></i>MQTT → Home Assistant</span>
-    <span class="pill b"><i></i>embedded-graphics games</span>
+    <span class="pill w"><i></i>Push-to-talk voice → STT</span>
+    <span class="pill b"><i></i>4-scheme theme system</span>
+    <span class="pill"><i></i>embedded-graphics games</span>
   </div>
 </div>
 
@@ -493,7 +495,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
       <div class="stat"><div class="num">410<small>×502</small></div><div class="lab">AMOLED pixels</div></div>
       <div class="stat"><div class="num">3<small> radios</small></div><div class="lab">WiFi · BLE · 802.15.4</div></div>
       <div class="stat"><div class="num">1.6<small> KB</small></div><div class="lab">Slint line-flush, no framebuffer</div></div>
-      <div class="stat"><div class="num">7<small> apps</small></div><div class="lab">games + settings</div></div>
+      <div class="stat"><div class="num">13<small> apps</small></div><div class="lab">AUDIO · GAMES · SYSTEM launcher</div></div>
     </div>
   </div>
 </section>
@@ -533,8 +535,8 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
       <!-- Launcher / games -->
       <article class="feat reveal">
         <div class="ic"><svg viewBox="0 0 24 24"><rect x="2.5" y="7" width="19" height="10" rx="4"/><path d="M7 10v4M5 12h4"/><circle cx="16" cy="11" r="1"/><circle cx="18.5" cy="13.5" r="1"/></svg></div>
-        <h3>Launcher + 7 apps</h3>
-        <p>Snake, World Snake, 2048, Tetris, Flappy Bird, a tilt-controlled Maze, and Settings — full-frame <span class="mono">embedded-graphics</span> apps that take the panel over from the shell.</p>
+        <h3>Sectioned app launcher</h3>
+        <p>An <b>AUDIO · GAMES · SYSTEM</b> launcher. Seven games and Settings run full-frame in <span class="mono">embedded-graphics</span>; Voice, Sound, WLED, Energy, Climate and the theme picker render as Slint overlays on the live shell. Every tile is one row in the app registry.</p>
       </article>
 
       <!-- Pedometer -->
@@ -569,7 +571,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
       <article class="feat reveal">
         <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 21v-8.5L12 5l9 7.5V21"/><path d="M9.5 21v-5h5v5"/></svg></div>
         <h3>MQTT → Home Assistant</h3>
-        <p>Publishes typed entities into Home Assistant over MQTT, using the same discovery conventions the smol fleet does — one device, many sensors.</p>
+        <p>Publishes typed entities into Home Assistant over MQTT — the primary telemetry and climate transport — using the same discovery conventions the smol fleet does. One device, many sensors, plus two-way climate setpoint control.</p>
       </article>
 
       <!-- OTA -->
@@ -595,44 +597,52 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
         <p>Feature-gated <span class="mono">defmt</span> logging over an RTT channel (probe-rs) — wire-speed structured logs with no serial monitor. Opt-in at build time, off by default.</p>
       </article>
 
+      <!-- Voice push-to-talk SHIPPED v0.7.0 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.7.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4V5Z"/><path d="M8 9.5h8M8 12.5h5"/></svg></div>
+        <h3>Voice push-to-talk → live transcript</h3>
+        <p>Hold the <b>Voice</b> tile and the watch streams 16&nbsp;kHz mono PCM over WiFi to a LAN bridge → Azure Speech-to-Text, then paints the returned transcript back on the glass — verified end-to-end on-device. The stream only starts once WiFi + DHCP are up, so it can't deadlock.</p>
+      </article>
+
+      <!-- Mic capture SHIPPED v0.7.0 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.7.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6"/></svg></div>
+        <h3>Mic capture · Sound app</h3>
+        <p>Live capture for the <b>Sound</b> app's level meter and for voice input. The two MEMS mics feed a dedicated <b>ES7210</b> 4-channel ADC (I²C <span class="mono">0x40</span>) — SDOUT1 reaches the SoC on GPIO21 over I²S RX, powered from the AXP2101 <span class="mono">ALDO1</span> mic rail. An on-glass mic-gain stepper trims the input level. (The ES8311 handles playback only.)</p>
+      </article>
+
+      <!-- Four-scheme theme system SHIPPED v0.7.0 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.7.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z"/></svg></div>
+        <h3>Four-scheme theme system</h3>
+        <p>Midnight, Paper, Amber and Violet — one <span class="mono">Theme.scheme</span> selector routes 18 palette tokens through every screen. Pick it on-glass from a live-swatch picker; the choice persists to flash and re-applies at boot. <a href="theme-preview.html">See all four faces →</a></p>
+      </article>
+
+      <!-- Plugin / app registry SHIPPED v0.7.0 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.7.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg></div>
+        <h3>Plugin / app registry</h3>
+        <p>A <span class="mono">no_std</span> app registry collapses each launcher app to a <b>single row</b> — one source of truth for name, icon, accent, section and dispatch (framebuffer vs. Slint overlay) instead of edits scattered across five files. The launcher, games and overlays are all data-driven from it.</p>
+      </article>
+
+      <!-- HA companion component + speaker SHIPPED v0.7.0 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.7.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg></div>
+        <h3>Home Assistant companion</h3>
+        <p>A native HA integration (<span class="mono">esp32c6_watch</span>) adds an HTTP surface for climate + energy control and a <b>media_player</b> speaker entity — so <span class="mono">tts.speak</span> and HA automations can announce straight to the watch, which pulls the transcoded PCM over HTTP. Additive to the primary MQTT transport.</p>
+      </article>
+
       <!-- Radio scan UPCOMING -->
       <article class="feat soon reveal">
         <span class="kbadge">upcoming</span>
         <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"/></svg></div>
         <h3>Radio Scan · Zigbee/Thread</h3>
         <p>A passive 802.15.4 monitor using the C6's native radio — sniff nearby Zigbee/Thread PAN IDs, channels, and RSSI. A dedicated scan mode that tears the mesh down first, because all three radios share one PHY. Scoped, not yet built.</p>
-      </article>
-
-      <!-- Voice push-to-talk SHIPPED -->
-      <article class="feat done reveal">
-        <span class="kbadge">shipped · v0.6.0</span>
-        <div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6"/></svg></div>
-        <h3>Voice push-to-talk</h3>
-        <p>A new <b>AUDIO</b> launcher section (Voice / Sound). Hold to talk and the watch streams the capture over WiFi to a LAN speech-to-text gateway — the stream only starts once WiFi + DHCP are ready, so it can't deadlock. Speaker playback (beep) is audible too.</p>
-      </article>
-
-      <!-- Multi-theme system IN PROGRESS -->
-      <article class="feat wip reveal">
-        <span class="kbadge">in progress</span>
-        <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z"/></svg></div>
-        <h3>Multi-theme system</h3>
-        <p>Four colour schemes — Midnight, Paper, Amber, Violet — with a runtime picker, so the whole Slint shell re-tints live. A <a href="theme-preview.html">preview is already live here</a>; the on-device picker is landing on <span class="mono">feat/theme-system</span>.</p>
-      </article>
-
-      <!-- Plugin / app registry IN PROGRESS -->
-      <article class="feat wip reveal">
-        <span class="kbadge">in progress</span>
-        <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg></div>
-        <h3>Plugin / app registry</h3>
-        <p>A <span class="mono">no_std</span> app registry that collapses each launcher app down to a <b>single registration</b> — one source of truth for name, icon, accent and dispatch instead of edits scattered across five places. In review as a stacked PR.</p>
-      </article>
-
-      <!-- Mic capture IN PROGRESS -->
-      <article class="feat wip reveal">
-        <span class="kbadge">in progress</span>
-        <div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6"/></svg></div>
-        <h3>Mic capture · dB meter</h3>
-        <p>Live mic capture for the Sound app's dB meter and voice input. The two MEMS mics feed a dedicated <b>ES7210</b> 4-channel ADC (I²C <span class="mono">0x40</span>) — its SDOUT1 reaches the SoC on GPIO21 over I²S RX. The ES7210 driver is being written (the ADC needs its own init); the ES8311 handles playback only.</p>
       </article>
     </div>
   </div>
@@ -690,7 +700,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
             <div class="rows" style="gap:1.5cqw">
               <div class="srow"><span class="k">CHIP</span><span class="v">ESP32-C6 · RISC-V</span></div>
               <div class="srow"><span class="k">DISPLAY</span><span class="v">410x502 AMOLED</span></div>
-              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.6.0</span></div>
+              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.7.0</span></div>
               <div class="srow"><span class="k">HEAP</span><span class="v acc">123k free</span></div>
               <div class="srow"><span class="k">UPTIME</span><span class="v">02:41:07</span></div>
               <div class="srow"><span class="k">BATTERY</span><span class="v">78% · 4012 mV</span></div>
@@ -748,20 +758,25 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
       <figure class="gcard" style="margin:0">
         <div class="device"><span class="crown"></span><div class="screen">
           <div class="pg">
-            <div class="pg-title">APPS</div>
-            <div class="lgrid">
+            <div class="pg-title" style="margin-top:9%">APPS</div>
+            <div class="lgrid" style="margin-top:6%; gap:2cqw 2.6cqw">
+              <div style="grid-column:1/-1; font-size:6.5px; letter-spacing:.26em; color:var(--d-dim); font-weight:600; margin-top:.5cqw">AUDIO</div>
+              <div class="ltile" style="color:#a78bfa">Voice</div>
+              <div class="ltile" style="color:#4fd6ff">Sound</div>
+              <div style="grid-column:1/-1; font-size:6.5px; letter-spacing:.26em; color:var(--d-dim); font-weight:600; margin-top:1cqw">GAMES</div>
               <div class="ltile" style="color:#00e000">Snake</div>
               <div class="ltile" style="color:#00ff80">World Snake</div>
               <div class="ltile" style="color:#f0d000">2048</div>
               <div class="ltile" style="color:#00d0f0">Tetris</div>
-              <div class="ltile" style="color:#ffffff">Flappy Bird</div>
-              <div class="ltile" style="color:#8090ff">Maze (Tilt)</div>
+              <div style="grid-column:1/-1; font-size:6.5px; letter-spacing:.26em; color:var(--d-dim); font-weight:600; margin-top:1cqw">SYSTEM</div>
+              <div class="ltile" style="color:#ffd166">WLED</div>
+              <div class="ltile" style="color:#35e0b0">Energy</div>
+              <div class="ltile" style="color:#ff9d5c">Climate</div>
               <div class="ltile" style="color:#c0ffc0">Settings</div>
-              <div class="ltile" style="color:var(--d-dim)">— · —</div>
             </div>
           </div>
         </div></div>
-        <figcaption class="cap"><b>Launcher</b>overlay from Clock</figcaption>
+        <figcaption class="cap"><b>Launcher</b>AUDIO · GAMES · SYSTEM</figcaption>
       </figure>
     </div>
   </div>
@@ -827,10 +842,10 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
     <div class="two" style="align-items:start">
       <div class="reveal">
         <div class="layers">
-          <div class="layer"><span class="lname">apps</span><div class="lmods"><code>snake</code><code>world_snake</code><code>game2048</code><code>tetris</code><code>flappy</code><code>maze</code><code>settings</code></div></div>
-          <div class="layer"><span class="lname">ui</span><div class="lmods"><code>slint_shell</code><code>slint_platform</code><code>watchface</code><code>launcher</code><code>power_page</code><code>t9_keyboard</code></div></div>
-          <div class="layer"><span class="lname">net</span><div class="lmods"><code>smol_mesh</code><code>familiar</code><code>weather</code><code>mqtt_ha</code><code>ota_http</code><code>names</code></div></div>
-          <div class="layer"><span class="lname">peripherals</span><div class="lmods"><code>wifi</code><code>ble</code><code>imu</code><code>touch</code><code>rtc</code><code>power</code><code>power_stats</code><code>audio</code><code>cpu_clock</code></div></div>
+          <div class="layer"><span class="lname">apps</span><div class="lmods"><code>registry</code><code>snake</code><code>world_snake</code><code>game2048</code><code>tetris</code><code>flappy</code><code>maze</code><code>settings</code></div></div>
+          <div class="layer"><span class="lname">ui</span><div class="lmods"><code>slint_shell</code><code>slint_platform</code><code>watchface</code><code>launcher</code><code>theme</code><code>voice</code><code>sound</code><code>power_page</code><code>t9_keyboard</code></div></div>
+          <div class="layer"><span class="lname">net</span><div class="lmods"><code>smol_mesh</code><code>familiar</code><code>weather</code><code>mqtt_ha</code><code>mqtt_climate</code><code>voice_stt</code><code>ota_http</code><code>names</code></div></div>
+          <div class="layer"><span class="lname">peripherals</span><div class="lmods"><code>wifi</code><code>ble</code><code>imu</code><code>touch</code><code>rtc</code><code>power</code><code>power_stats</code><code>audio</code><code>mic_capture</code><code>die_temp</code><code>cpu_clock</code></div></div>
           <div class="layer"><span class="lname">drivers</span><div class="lmods"><code>co5300</code><code>qspi_bus</code><code>framebuffer</code></div></div>
         </div>
       </div>
@@ -988,7 +1003,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
       <div>
         <h4>Project</h4>
         <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">Repository</a>
-        <a href="https://github.com/jphein/esp32c6-watch/tree/feat/slint-shell" target="_blank" rel="noopener">feat/slint-shell branch</a>
+        <a href="https://github.com/jphein/esp32c6-watch/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
         <a href="https://github.com/jphein/esp32c6-watch/blob/main/README.md" target="_blank" rel="noopener">README</a>
         <a href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">Issues</a>
       </div>
