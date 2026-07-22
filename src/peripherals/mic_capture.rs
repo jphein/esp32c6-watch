@@ -13,7 +13,7 @@
 //! snippet). TX (beep) stays blocking-mode and untouched — RX uses the blocking
 //! circular API polled from the task, so no I2S mode change is needed.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -63,6 +63,13 @@ pub static RECORDING: AtomicBool = AtomicBool::new(false);
 /// as well as voice PTT. Voice + meter are mutually-exclusive screens, so a
 /// single [`MIC_CHANNEL`] with one active consumer at a time suffices.
 pub static METER: AtomicBool = AtomicBool::new(false);
+
+/// Live capture level in **dBFS** (integer) of the most recent window — written by
+/// [`mic_capture_task`] whenever RECORDING/METER is set. The Voice PTT flow parks
+/// the main loop for the whole hold, so it reads this atomic to drive the
+/// "LISTENING" level bar + pulse in real time (see the PTT `monitor` future in
+/// main.rs). Resets to [`mic_dsp::DBFS_FLOOR`] at the start of each utterance.
+pub static MIC_LEVEL: AtomicI32 = AtomicI32::new(-60);
 
 /// Re-arm flags. AOD light sleep (`Rtc::sleep_light`) clock-gates the I2S
 /// peripheral, which permanently stalls the continuous silent-TX DMA (the shared
@@ -224,6 +231,15 @@ pub async fn mic_capture_task(
                 }
                 let mut mono_buf = [0u8; MONO_CHUNK];
                 let m = voice_stt::stereo_to_mono_le(window, &mut mono_buf, MIC_RIGHT_CHANNEL);
+                // Live input level (dBFS) of this window → drives the PTT LISTENING bar.
+                let samp_n = m / 2;
+                let mut lvl_buf = [0i16; MONO_CHUNK / 2];
+                for k in 0..samp_n {
+                    lvl_buf[k] = i16::from_le_bytes([mono_buf[2 * k], mono_buf[2 * k + 1]]);
+                }
+                if samp_n > 0 {
+                    MIC_LEVEL.store(mic_dsp::rms_dbfs(&lvl_buf[..samp_n]) as i32, Ordering::Relaxed);
+                }
                 if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
                     let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
                 }

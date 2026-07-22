@@ -435,20 +435,6 @@ async fn main(_spawner: Spawner) -> ! {
     .with_scl(peripherals.GPIO7);
     let i2c_ref = RefCell::new(i2c);
 
-    // [I2CSCAN] TEMP: probe the bus (non-destructive 1-byte reads) to confirm the
-    // ES7210 mic-ADC address (strap-selectable 0x40-0x43) alongside ES8311 (0x18),
-    // AXP2101 (0x34), FT3168, PCF85063 (0x51), QMI8658 (0x6b). Strip pre-v0.6.1.
-    {
-        use embedded_hal::i2c::I2c as _;
-        for addr in 0x08u8..=0x77 {
-            let mut b = [0u8; 1];
-            if RefCellDevice::new(&i2c_ref).read(addr, &mut b).is_ok() {
-                println!("[I2CSCAN] ACK 0x{:02x}", addr);
-            }
-        }
-        println!("[I2CSCAN] done");
-    }
-
     // === Power (read-mostly: rails left as the bootloader configured them) ===
     let mut power = Axp2101Power::new(RefCellDevice::new(&i2c_ref));
     let _ = power.enable_adc();
@@ -637,7 +623,7 @@ async fn main(_spawner: Spawner) -> ! {
             let g = mic_adc.read_reg(0x43).unwrap_or(0xEE);
             println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1a)", g);
         }
-        Err(_) => println!("[ES7210] init FAILED (I2C) — check [I2CSCAN] for addr 0x40"),
+        Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
     }
 
     // Boot METER on so [MICHEX] streams for self-verify (TEMP — strip pre-v0.6.1).
@@ -914,7 +900,6 @@ async fn main(_spawner: Spawner) -> ! {
     const WAVE_BARS: usize = 48;
     let mut wave_ring = [0.0f32; WAVE_BARS];
     let mut wave_ref = 0.0f32;
-    let mut micdbg_ctr: u32 = 0;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -2002,37 +1987,79 @@ async fn main(_spawner: Spawner) -> ! {
                 // would cancel that mid-flush and drop the transcript.
                 let voice_pressed = shell.req.voice_ptt_pressed.take();
                 let _ = shell.req.voice_ptt_released.take();
-                if app_state == AppState::Voice && voice_pressed {
+                // STT needs WiFi associated AND DHCP landed. Pressing before that is up
+                // is the "connect failed" bug — show "Connecting…" and DON'T attempt;
+                // WiFi bring-up keeps running in the loop, so a beat later the next press
+                // streams. (dream/mic-fix predates morpheus's gate; add it here.)
+                let voice_net_ready = wifi_connected && stack.config_v4().is_some();
+                if app_state == AppState::Voice && voice_pressed && !voice_net_ready {
+                    shell.set_voice_state(5); // connecting (waiting for WiFi/DHCP)
+                    shell.request_redraw();
+                }
+                if app_state == AppState::Voice && voice_pressed && voice_net_ready {
                     use core::sync::atomic::Ordering;
-                    // Power the analog mic/ADC path, then arm the capture gate.
-                    let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
-                    // Flush any chunks left buffered by a prior utterance so stale
-                    // audio can't be prepended to this one, then arm + source.
+                    // Mic is the ES7210 (inited at boot + kept alive); just arm the gate.
+                    // Flush stale chunks + reset the live level so the meter starts low.
                     let rx = MIC_CH.receiver();
                     while rx.try_receive().is_ok() {}
+                    mic_capture::MIC_LEVEL.store(mic_dsp::DBFS_FLOOR as i32, Ordering::Relaxed);
                     mic_capture::RECORDING.store(true, Ordering::Relaxed);
                     shell.set_voice_state(1); // listening
+                    shell.set_voice_level(0.0);
                     let mut src = mic_capture::MicPcmSource::new(rx);
 
-                    // Release watcher: poll the INT pin (HIGH = no touch = finger up),
-                    // then clear RECORDING (ends the source) and flip to "sending".
-                    let watch_release = async {
+                    // ONE monitor future owns all live work during the hold (the loop is
+                    // parked in the join, so nothing else renders or polls touch):
+                    //  (a) drive the LISTENING level bar + pulse from MIC_LEVEL and REPAINT
+                    //      so the user SEES the mic responding (was frozen/dead before), and
+                    //  (b) detect release from the AUTHORITATIVE I2C finger count — NOT the
+                    //      INT pin. The INT is a data-ready PULSE that goes high the moment a
+                    //      still finger stops generating reports, so the old `touch_int
+                    //      .is_high()` fired ~20ms into a hold → 0.3s truncated, near-silent
+                    //      captures → empty transcripts. REG_FINGER_NUM reflects real contact.
+                    // Debounced (3 no-finger reads ≈ 180ms) against transient I2C misreads;
+                    // a ~20s tick cap backstops a stuck finger / I2C error. `touch`/`shell`/
+                    // `display` are borrowed ONLY here; the stream uses `stack`/`src` → no aliasing.
+                    let floor = mic_dsp::DBFS_FLOOR as i32;
+                    let monitor = async {
+                        let mut up = 0u8;
+                        let mut peak_dbfs = i32::MIN;
+                        let mut ticks: u32 = 0;
                         loop {
-                            if touch_int.is_high() {
-                                break;
+                            let dbfs = mic_capture::MIC_LEVEL.load(Ordering::Relaxed);
+                            if dbfs > peak_dbfs {
+                                peak_dbfs = dbfs;
                             }
-                            Timer::after(Duration::from_millis(20)).await;
+                            let lvl = ((dbfs - floor) as f32 / (-floor) as f32).clamp(0.0, 1.0);
+                            shell.set_voice_level(lvl);
+                            shell.render(&mut display);
+                            // Authoritative finger-present via I2C (fingers == 0 ⇒ up).
+                            let finger_down = matches!(touch.read(), Ok(Some(_)));
+                            if finger_down {
+                                up = 0;
+                            } else {
+                                up += 1;
+                                if up >= 3 {
+                                    break; // released
+                                }
+                            }
+                            ticks += 1;
+                            if ticks > 330 {
+                                break; // ~20s max-duration cap
+                            }
+                            Timer::after(Duration::from_millis(60)).await;
                         }
                         mic_capture::RECORDING.store(false, Ordering::Relaxed);
-                        shell.set_voice_state(2); // sending (STT round-trip in flight)
+                        shell.set_voice_state(2); // transcribing (STT round-trip in flight)
+                        shell.render(&mut display);
+                        peak_dbfs
                     };
 
-                    let (result, ()) =
-                        join(voice_stt::stream_utterance(stack, &mut src), watch_release).await;
+                    let (result, peak_dbfs) =
+                        join(voice_stt::stream_utterance(stack, &mut src), monitor).await;
 
-                    // Ensure the gate is down (belt-and-suspenders), then power the mic off.
+                    // Ensure the gate is down (belt-and-suspenders).
                     mic_capture::RECORDING.store(false, Ordering::Relaxed);
-                    let _ = audio_codec.disable_adc();
 
                     match result {
                         Ok(t) if !t.is_empty() => {
@@ -2040,7 +2067,14 @@ async fn main(_spawner: Spawner) -> ! {
                             shell.set_voice_state(3); // result
                         }
                         Ok(_) => {
-                            shell.set_voice_error(""); // → page's "No speech heard"
+                            // 200 + empty text: tell the user WHY so they can act. A low
+                            // peak ⇒ the mic barely heard them (speak up / closer); a
+                            // healthy peak ⇒ audio was fine, Azure just found no words.
+                            if peak_dbfs < -40 {
+                                shell.set_voice_error("Too quiet — speak up");
+                            } else {
+                                shell.set_voice_error(""); // page shows "No speech heard"
+                            }
                             shell.set_voice_state(4);
                         }
                         Err(e) => {
@@ -2051,17 +2085,12 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.request_redraw(); // paint the transcript/error promptly
                 }
 
-                // #28 sound-level meter: drain the SHARED capture → dBFS + peak-hold
-                // on SoundLevel. Non-blocking (unlike the PTT flow, which parks the
-                // loop): update once per tick so the screen stays responsive. Arms
-                // the ADC + METER gate on entry, tears them down on close so the
-                // codec draws ~0mA when the meter isn't open.
+                // #28 sound-level meter: drain the SHARED ES7210 capture → dBFS bar +
+                // peak-hold + scrolling waveform on SoundLevel. Non-blocking (unlike the
+                // PTT flow, which parks the loop): update once per 33 ms tick. Opens the
+                // METER gate on entry (mic is the ES7210, inited at boot), closes on exit.
                 if app_state == AppState::Sound {
                     if !meter_on {
-                        match audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN) {
-                            Ok(()) => println!("[MICDIAG] app enable_adc Ok"),
-                            Err(_) => println!("[MICDIAG] app enable_adc ERR (I2C write failed)"),
-                        }
                         mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
                         meter_peak = mic_dsp::DBFS_FLOOR;
                         meter_env = mic_dsp::DBFS_FLOOR;
@@ -2070,15 +2099,13 @@ async fn main(_spawner: Spawner) -> ! {
                         meter_on = true;
                     }
                     // Drain ALL buffered chunks each 33 ms tick. For each 16 ms window
-                    // compute both rms (dBFS, for the meter) and DC-removed peak (for
-                    // the scrolling waveform); scroll one auto-scaled bar per window.
+                    // compute rms (dBFS, for the meter) and a DC-removed peak (for the
+                    // scrolling waveform); scroll one auto-scaled bar per window.
                     let rx = MIC_CH.receiver();
                     let mut latest_dbfs: Option<f32> = None;
-                    let mut latest_peak: u16 = 0;
                     let mut got = false;
-                    // Full-scale reference for a quiet room; loud events expand it, and
-                    // it decays back so quiet speech re-fills the waveform. Tune from
-                    // [MICDBG] peak_raw if normal speech under/over-drives the bars.
+                    // Full-scale reference for a quiet room; loud events expand it and
+                    // it decays back so quiet speech re-fills the waveform.
                     const WAVE_MIN_REF: f32 = 800.0;
                     while let Ok(chunk) = rx.try_receive() {
                         got = true;
@@ -2090,7 +2117,6 @@ async fn main(_spawner: Spawner) -> ! {
                         let dbfs = mic_dsp::rms_dbfs(&samples[..n]);
                         let peak = mic_dsp::peak_abs(&samples[..n]) as f32;
                         latest_dbfs = Some(dbfs);
-                        latest_peak = peak as u16;
                         // Auto-scale + scroll the waveform ring (oldest drops off left).
                         wave_ref = (wave_ref * 0.90).max(peak).max(WAVE_MIN_REF);
                         let norm = (peak / wave_ref).clamp(0.0, 1.0);
@@ -2108,24 +2134,10 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     if got {
                         shell.push_mic_waveform(&wave_ring);
-                        // [MICDBG] — TEMP: what the METER path actually computes on
-                        // JP's speech (vs [MICHEX] raw at the capture layer). Throttled
-                        // ~2 Hz. Strip with the other verify scaffolding before v0.6.1.
-                        micdbg_ctr = micdbg_ctr.wrapping_add(1);
-                        if micdbg_ctr % 15 == 0 {
-                            println!(
-                                "[MICDBG] dbfs={} env={} peak_raw={} meter_peak={} wref={}",
-                                latest_dbfs.unwrap_or(mic_dsp::DBFS_FLOOR) as i32,
-                                meter_env as i32,
-                                latest_peak,
-                                meter_peak as i32,
-                                wave_ref as u32,
-                            );
-                        }
                     }
                 } else if meter_on {
+                    // Close the meter gate (ES7210 stays inited; RX idles + discards).
                     mic_capture::METER.store(false, core::sync::atomic::Ordering::Relaxed);
-                    let _ = audio_codec.disable_adc();
                     meter_on = false;
                 }
 
