@@ -10,7 +10,7 @@ use core::cell::Cell;
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, Rgb565Pixel};
 use slint::platform::{PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::apps::AppState;
 use crate::drivers::co5300::Co5300Display;
@@ -98,6 +98,10 @@ pub struct ShellRequests {
     /// release callback can't fire while the loop is parked streaming the hold.
     pub voice_ptt_pressed: Cell<bool>,
     pub voice_ptt_released: Cell<bool>,
+    /// Theme picker: new scheme index (0..3) chosen from the swatch grid. The
+    /// tile sets `Theme.scheme` directly for instant preview; this cell is
+    /// drained by the loop to persist the choice to flash (config.rs v3).
+    pub theme: Cell<Option<i32>>,
 }
 
 pub struct ShellUi {
@@ -124,6 +128,10 @@ pub struct ShellUi {
     /// Current page, preserved across a suspend so the recreated scene returns
     /// to where the user was rather than snapping back to the clock.
     saved_page: i32,
+    /// Active theme scheme (0 Midnight · 1 Paper · 2 Amber · 3 Violet). Stored
+    /// here so a scene rebuild (game suspend/resume) re-applies it — a fresh
+    /// WatchShell resets the Theme global to scheme 0 otherwise.
+    scheme: i32,
 }
 
 impl ShellUi {
@@ -147,6 +155,7 @@ impl ShellUi {
             last_pos: slint::LogicalPosition::new(0.0, 0.0),
             last_second: 0xFF,
             saved_page: PAGE_CLOCK,
+            scheme: 0,
         }
     }
 
@@ -171,6 +180,9 @@ impl ShellUi {
         }
         let ui = build_scene(&self.req, &self.mesh_model, &self.climate_cards);
         ui.set_current_page(self.saved_page);
+        // A fresh scene resets the Theme global to scheme 0; restore the active
+        // scheme so a game exit doesn't snap the watch back to Midnight.
+        ui.global::<Theme>().set_scheme(self.scheme);
         self.ui = Some(ui);
         // Fresh scene = time_text is back at its "--:--" default; clear the
         // 1Hz gate so the caller's next set_time repaints the clock even if the
@@ -297,6 +309,13 @@ impl ShellUi {
             if ui.get_mic_open() {
                 if direction == SwipeDirection::Right {
                     ui.set_mic_open(false);
+                }
+                return;
+            }
+            // Theme picker overlay: swallow nav swipes, Right closes.
+            if ui.get_theme_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_theme_open(false);
                 }
                 return;
             }
@@ -698,6 +717,31 @@ impl ShellUi {
         self.ui.as_ref().is_some_and(|ui| ui.get_mic_open())
     }
 
+    /// Apply a theme scheme (0 Midnight · 1 Paper · 2 Amber · 3 Violet) to the
+    /// Slint Theme global — every screen repaints. Clamped to the valid range and
+    /// stored so a scene rebuild (suspend/resume) re-applies it. Called at boot
+    /// with the persisted choice and when the picker's choice is drained.
+    pub fn set_scheme(&mut self, scheme: i32) {
+        let scheme = scheme.clamp(0, 3);
+        self.scheme = scheme;
+        if let Some(ui) = self.ui.as_ref() {
+            ui.global::<Theme>().set_scheme(scheme);
+        }
+    }
+
+    /// Raise/lower the Theme picker overlay. Wired by the launcher (plugin
+    /// registry) when the "Theme" tile is tapped.
+    #[allow(dead_code)]
+    pub fn set_theme_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_theme_open(open);
+    }
+
+    #[allow(dead_code)]
+    pub fn theme_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_theme_open())
+    }
+
     /// SoundLevel meter (#28): current dBFS + peak-hold, both in [-60, 0].
     pub fn set_mic_level(&self, dbfs: f32, peak: f32) {
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -873,6 +917,12 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_voice_ptt_released(move || r.voice_ptt_released.set(true));
+    }
+    {
+        // Theme picker: the tile already set Theme.scheme (instant preview); this
+        // hands the chosen index to the loop for flash persistence.
+        let r = req.clone();
+        ui.on_theme_changed(move |n| r.theme.set(Some(n)));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));

@@ -11,15 +11,18 @@ import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel } from "soundlevel.slint";
+import { ThemeOverlay } from "theme_overlay.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
-export { PeerRow, ClimateCard }
+// `Theme` is re-exported too so Rust can drive the scheme selector via
+// `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
+export { PeerRow, ClimateCard, Theme }
 
 export component WatchShell inherits Window {
     width: 410px;
     height: 502px;
-    background: #000000;
+    background: Theme.bg;
 
     // --- clock ---
     in property <string> time-text: "--:--";
@@ -123,6 +126,11 @@ export component WatchShell inherits Window {
     in-out property <bool> mic-open: false;
     in property <float> mic-dbfs: -60;
     in property <float> mic-peak: -60;
+    // Theme picker overlay: scheme swatches. Opened by the launcher (plugin
+    // registry); `theme-changed(int)` carries the new scheme index to Rust for
+    // flash persistence (the tile also sets Theme.scheme directly for instant
+    // preview). Right-swipe / chevron closes.
+    in-out property <bool> theme-open: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -145,16 +153,18 @@ export component WatchShell inherits Window {
     callback climate-closed();             // back-chevron / right-swipe → mesh
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
+    callback theme-changed(int);   // Theme picker → new scheme index (Rust persists)
 
     in-out property <float> brightness: 0.8;
 
-    // True-black AMOLED background. A dark diagonal gradient across near-blacks
-    // bands badly on this panel's software renderer (RGB565, no dithering), so
-    // the field is solid #000000 — crisp, self-emissive-black, battery-optimal.
-    // The teal brand accent lives in the content, not the backdrop.
+    // Page backdrop. On the dark schemes (Midnight/Amber/Violet) `Theme.bg` is
+    // solid #000000 — crisp, self-emissive-black, battery-optimal on this
+    // RGB565 software renderer (a near-black gradient bands badly, so no
+    // gradient). On Paper it's the warm off-white. The brand accent lives in the
+    // content, not the backdrop.
     Rectangle {
         width: 100%; height: 100%;
-        background: #000000;
+        background: Theme.bg;
     }
 
     pages := Rectangle {
@@ -402,6 +412,13 @@ export component WatchShell inherits Window {
         width: 100%; height: 100%;
         mic-dbfs: root.mic-dbfs;
         mic-peak: root.mic-peak;
+    }
+
+    // ==================== Theme picker overlay ====================
+    if root.theme-open: ThemeOverlay {
+        width: 100%; height: 100%;
+        changed(n) => { root.theme-changed(n); }
+        close => { root.theme-open = false; }
     }
 
     // ==================== AOD overlay ====================

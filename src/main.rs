@@ -749,6 +749,9 @@ async fn main(_spawner: Spawner) -> ! {
     // clock; apply default_page so the watch boots where the user left it. Until
     // now this value was written to flash but never read back at boot.
     shell.set_page(watch_cfg.default_page as i32);
+    // Apply the persisted theme scheme (config.rs v3). Records saved before the
+    // theme byte existed default to 0 (Midnight), preserving the shipped look.
+    shell.set_scheme(watch_cfg.theme as i32);
     // LP (low-power RISC-V) core status on the power page. No offload yet
     // (task #24 got a RED verdict), so this is a static availability indicator:
     // the LP core is idle at its ~20MHz clock (HP core runs 160MHz). One-shot.
@@ -2104,6 +2107,21 @@ async fn main(_spawner: Spawner) -> ! {
                 if let Some(raw) = shell.req.brightness.take() {
                     brightness = raw;
                     display.set_brightness(raw);
+                }
+                if let Some(scheme) = shell.req.theme.take() {
+                    // The picker already set Theme.scheme for instant preview;
+                    // sync our stored scheme (so a scene resume restores it) and
+                    // persist to flash, edge-triggered like the page/units saves.
+                    shell.set_scheme(scheme);
+                    if watch_cfg.theme != scheme as u8 {
+                        watch_cfg.theme = scheme as u8;
+                        if let Some(off) = config_offset {
+                            match peripherals::config::save(&mut flash, off, &watch_cfg) {
+                                Ok(()) => println!("[CFG] theme {} saved to flash", scheme),
+                                Err(()) => println!("[CFG] theme save failed"),
+                            }
+                        }
+                    }
                 }
                 if shell.req.wifi_toggle.take() {
                     wifi_toggle_request = true;

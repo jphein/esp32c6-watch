@@ -137,7 +137,7 @@ export component ClockPage {
         width: 60px;
         height: 94px;
         border-radius: 16px;
-        background: root.fam-holding ? #0e1c15 : Theme.panel;
+        background: root.fam-holding ? Theme.accent-bg : Theme.panel;
         border-width: 1px;
         border-color: root.fam-holding ? Theme.accent : Theme.line;
 
@@ -148,9 +148,9 @@ export component ClockPage {
             width: root.fam-holding ? (22px + root.fam-stage * 6px) : 18px;
             height: self.width;
             border-radius: self.width / 2;
-            background: !root.fam-holding ? #16281c
+            background: !root.fam-holding ? Theme.track  // away — muted disc
                 : root.fam-mood == 1 ? Theme.warm      // happy — gold
-                : root.fam-mood == 2 ? #e08a3a         // hungry — orange
+                : root.fam-mood == 2 ? #e08a3a         // hungry — orange (vivid on every scheme)
                 : root.fam-mood == 3 ? Theme.accent2   // sleeping — blue
                 : Theme.accent;                        // idle — teal
             border-width: root.fam-holding ? 0px : 2px;
