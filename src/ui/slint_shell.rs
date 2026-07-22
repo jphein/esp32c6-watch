@@ -98,6 +98,8 @@ pub struct ShellRequests {
     /// release callback can't fire while the loop is parked streaming the hold.
     pub voice_ptt_pressed: Cell<bool>,
     pub voice_ptt_released: Cell<bool>,
+    pub mic_gain_up: Cell<bool>,
+    pub mic_gain_down: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -116,6 +118,9 @@ pub struct ShellUi {
     /// Climate (#58) card model: one ClimateCard per HA climate entity, swapped
     /// in place by set_climate (same long-lived pattern as mesh_model).
     climate_cards: Rc<VecModel<ClimateCard>>,
+    /// Sound meter (#28) scrolling waveform: one f32 per 16 ms window, in [0,1],
+    /// swapped in place by push_mic_waveform (same long-lived pattern).
+    waveform_model: Rc<VecModel<f32>>,
     line_buf: Vec<Rgb565Pixel>,
     scratch: Vec<u16>,
     touch_down: bool,
@@ -133,7 +138,8 @@ impl ShellUi {
         let req = Rc::new(ShellRequests::default());
         let mesh_model: Rc<VecModel<PeerRow>> = Rc::new(VecModel::default());
         let climate_cards: Rc<VecModel<ClimateCard>> = Rc::new(VecModel::default());
-        let ui = build_scene(&req, &mesh_model, &climate_cards);
+        let waveform_model: Rc<VecModel<f32>> = Rc::new(VecModel::default());
+        let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model);
 
         Self {
             window,
@@ -141,6 +147,7 @@ impl ShellUi {
             req,
             mesh_model,
             climate_cards,
+            waveform_model,
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
             touch_down: false,
@@ -169,7 +176,7 @@ impl ShellUi {
         if self.ui.is_some() {
             return;
         }
-        let ui = build_scene(&self.req, &self.mesh_model, &self.climate_cards);
+        let ui = build_scene(&self.req, &self.mesh_model, &self.climate_cards, &self.waveform_model);
         ui.set_current_page(self.saved_page);
         self.ui = Some(ui);
         // Fresh scene = time_text is back at its "--:--" default; clear the
@@ -705,6 +712,22 @@ impl ShellUi {
         ui.set_mic_peak(peak);
     }
 
+    /// Sound-app mic gain readout (digital boost, dB). Set on boot + each step.
+    pub fn set_mic_gain_db(&self, db: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_mic_gain_db(db);
+    }
+
+    /// SoundLevel scrolling waveform (#28): per-16 ms-window amplitudes in [0,1],
+    /// oldest first. Swaps the model contents in place (no per-frame ModelRc
+    /// alloc). Only meaningful while the Sound overlay is open.
+    pub fn push_mic_waveform(&self, bars: &[f32]) {
+        if self.ui.is_none() {
+            return;
+        }
+        self.waveform_model.set_vec(bars.to_vec());
+    }
+
     pub fn page(&self) -> i32 {
         // While suspended, report the page we'll restore on resume.
         self.ui.as_ref().map_or(self.saved_page, |ui| ui.get_current_page())
@@ -806,6 +829,7 @@ fn build_scene(
     req: &Rc<ShellRequests>,
     mesh_model: &Rc<VecModel<PeerRow>>,
     climate_cards: &Rc<VecModel<ClimateCard>>,
+    waveform_model: &Rc<VecModel<f32>>,
 ) -> WatchShell {
     let ui = WatchShell::new().expect("failed to create WatchShell");
     {
@@ -873,9 +897,16 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_voice_ptt_released(move || r.voice_ptt_released.set(true));
+
+        let r = req.clone();
+        ui.on_mic_gain_up(move || r.mic_gain_up.set(true));
+
+        let r = req.clone();
+        ui.on_mic_gain_down(move || r.mic_gain_down.set(true));
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
+    ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));

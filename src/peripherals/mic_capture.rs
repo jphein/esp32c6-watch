@@ -13,13 +13,13 @@
 //! snippet). TX (beep) stays blocking-mode and untouched — RX uses the blocking
 //! circular API polled from the task, so no I2S mode change is needed.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, Ordering};
 
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_time::{Duration, Timer};
-use esp_hal::i2s::master::I2sRx;
+use esp_hal::i2s::master::{I2sRx, I2sTx};
 use esp_hal::Blocking;
 use heapless::Vec;
 
@@ -63,6 +63,57 @@ pub static RECORDING: AtomicBool = AtomicBool::new(false);
 /// as well as voice PTT. Voice + meter are mutually-exclusive screens, so a
 /// single [`MIC_CHANNEL`] with one active consumer at a time suffices.
 pub static METER: AtomicBool = AtomicBool::new(false);
+
+/// Live capture level in **dBFS** (integer) of the most recent window — written by
+/// [`mic_capture_task`] whenever RECORDING/METER is set. The Voice PTT flow parks
+/// the main loop for the whole hold, so it reads this atomic to drive the
+/// "LISTENING" level bar + pulse in real time (see the PTT `monitor` future in
+/// main.rs). Resets to [`mic_dsp::DBFS_FLOOR`] at the start of each utterance.
+pub static MIC_LEVEL: AtomicI32 = AtomicI32::new(-60);
+
+/// User-adjustable **digital** capture gain, Q8 fixed-point (256 = 1.0×), applied
+/// in [`mic_capture_task`] to the mono PCM before it feeds the meter + STT stream.
+/// The ES7210 analog PGA is near its ceiling (+36 dB), so this is the headroom the
+/// Sound-app gain stepper drives to lift quiet speech past Azure's energy floor.
+/// Set from [`GAIN_STEPS_Q8`] indexed by the UI. Note: digital gain lifts signal
+/// AND noise equally (SNR unchanged) — it helps level, not intelligibility.
+pub static MIC_GAIN_Q8: AtomicU16 = AtomicU16::new(256);
+/// Digital-gain ladder the Sound-app stepper walks: 0..+18 dB in 3 dB steps.
+/// Q8 factor = round(256 · 10^(dB/20)). Index into both tables in lock-step.
+pub const GAIN_STEPS_Q8: [u16; 7] = [256, 362, 511, 722, 1020, 1439, 2032];
+pub const GAIN_STEPS_DB: [u8; 7] = [0, 3, 6, 9, 12, 15, 18];
+
+/// Re-arm flags. AOD light sleep (`Rtc::sleep_light`) clock-gates the I2S
+/// peripheral, which permanently stalls the continuous silent-TX DMA (the shared
+/// mic clock) and the RX capture DMA — after the first watchface AOD the mic
+/// goes dead and never recovers. The main loop sets both true after every
+/// light-sleep wake; [`silent_clock_task`] and [`mic_capture_task`] drop and
+/// re-arm their transfers so the full-duplex clock + capture come back.
+pub static CLOCK_REARM: AtomicBool = AtomicBool::new(false);
+pub static RX_REARM: AtomicBool = AtomicBool::new(false);
+
+/// Shared-clock generator: a continuous SILENT circular TX. TX is the I2S master
+/// (`signal_loopback`), so this free-runs BCLK/WS and lets the ES8311 ADC clock
+/// data onto ASDOUT while RX slaves to it. Owns `i2s_tx`; re-arms on
+/// [`CLOCK_REARM`] (see its docs) so the clock survives AOD light sleep.
+#[embassy_executor::task]
+pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, silence: &'static [u8]) {
+    loop {
+        let xfer = match i2s_tx.write_dma_circular(&silence) {
+            Ok(x) => x,
+            Err(_) => {
+                Timer::after(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        // Hold the clock running until a re-arm is requested (post light-sleep).
+        while !CLOCK_REARM.swap(false, Ordering::Relaxed) {
+            Timer::after(Duration::from_millis(100)).await;
+        }
+        drop(xfer); // stop the stalled transfer; the outer loop re-arms a fresh one
+        Timer::after(Duration::from_millis(2)).await;
+    }
+}
 
 /// [`PcmSource`] backed by [`MIC_CHANNEL`]. Hand `voice_stt::stream_utterance`
 /// a `&mut MicPcmSource` while the button is held.
@@ -132,14 +183,20 @@ pub async fn mic_capture_task(
     // WriteBuffer needs a `&'static mut`, so re-materialise one from the (truly
     // 'static) ring by raw pointer on each restart; the previous transfer is always
     // dropped first, so there is never an aliasing `&mut`.
-    // NOTE (mic HARDWARE-blocked): this RX capture pipeline is correct and proven
-    // end-to-end (DMA delivery + frame flow verified on-hardware). The ES8311 ADC serial
-    // output ASDOUT→GPIO21 is dead at the HARDWARE level (see scratch/mic-debug/lucid.md),
-    // so captured audio is silent until the board is fixed — no firmware change here alters
-    // that. Playback (shared codec/clock) works. Kept intact so the mic "just works" once
-    // the HW is repaired.
+    // NOTE (mic topology fix): the ES8311 record path is enabled in main.rs (enable_adc)
+    // and clocked by the continuous SILENT full-duplex TX — signal_loopback=true makes the
+    // SoC TX the single BCLK/WS master and this RX slaves to it. The earlier "HW-blocked"
+    // verdict was OVERTURNED: vendor firmware captured JP's voice, proving the mic HW is
+    // fine; the gap was the serial-clock topology, now fixed. This RX pipeline (DMA drain
+    // + frame flow) was already proven end-to-end and is unchanged.
     let ring_ptr: *mut [u8; MIC_RING_LEN] = ring;
     let mut popbuf = [0u8; MIC_RING_LEN]; // holds a full ring's worth (max available)
+    // === MIC-CAPTURE VERIFY probe (temporary; remove before v0.6.1 merge) ===
+    // Confirms the ADC serial-out is now LIVE under the native full-duplex clock: prints
+    // the running peak |sample| + the first raw i16 frames as hex, throttled so serial is
+    // not flooded. A non-zero peak that rises when JP speaks = MIC FIXED.
+    let mut probe_ctr: u32 = 0;
+    let mut probe_peak: i16 = 0;
     'restart: loop {
         let ring_ref: &'static mut [u8; MIC_RING_LEN] = unsafe { &mut *ring_ptr };
         let mut xfer = match i2s_rx.read_dma_circular(ring_ref) {
@@ -150,6 +207,11 @@ pub async fn mic_capture_task(
             }
         };
         loop {
+            // Re-arm after an AOD light-sleep wake gated the RX DMA (a stalled
+            // ring can sit at available()==0 forever, never hitting the Err path).
+            if RX_REARM.swap(false, Ordering::Relaxed) {
+                break; // → 'restart re-arms read_dma_circular
+            }
             let avail = match xfer.available() {
                 Ok(n) => n,
                 Err(_) => break, // Late/overrun → drop xfer & re-arm the descriptor chain
@@ -170,12 +232,56 @@ pub async fn mic_capture_task(
             let mut off = 0;
             while off + STEREO_CHUNK <= n {
                 let window = &popbuf[off..off + STEREO_CHUNK];
+                // [VERIFY] running peak |sample| across the raw stereo window.
+                let mut i = 0;
+                while i + 1 < window.len() {
+                    let a = i16::from_le_bytes([window[i], window[i + 1]]).saturating_abs();
+                    if a > probe_peak {
+                        probe_peak = a;
+                    }
+                    i += 2;
+                }
                 let mut mono_buf = [0u8; MONO_CHUNK];
                 let m = voice_stt::stereo_to_mono_le(window, &mut mono_buf, MIC_RIGHT_CHANNEL);
+                // Apply user digital gain (Q8) IN-PLACE so both the meter and the STT
+                // stream see the boost; clamp to i16 so a hot setting saturates cleanly.
+                let g = MIC_GAIN_Q8.load(Ordering::Relaxed) as i32;
+                if g != 256 {
+                    let mut k = 0;
+                    while k + 1 < m {
+                        let s = i16::from_le_bytes([mono_buf[k], mono_buf[k + 1]]) as i32;
+                        let b = (((s * g) >> 8).clamp(-32768, 32767) as i16).to_le_bytes();
+                        mono_buf[k] = b[0];
+                        mono_buf[k + 1] = b[1];
+                        k += 2;
+                    }
+                }
+                // Live input level (dBFS) of this window → drives the PTT LISTENING bar.
+                let samp_n = m / 2;
+                let mut lvl_buf = [0i16; MONO_CHUNK / 2];
+                for k in 0..samp_n {
+                    lvl_buf[k] = i16::from_le_bytes([mono_buf[2 * k], mono_buf[2 * k + 1]]);
+                }
+                if samp_n > 0 {
+                    MIC_LEVEL.store(mic_dsp::rms_dbfs(&lvl_buf[..samp_n]) as i32, Ordering::Relaxed);
+                }
                 if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
                     let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
                 }
                 off += STEREO_CHUNK;
+            }
+            // [VERIFY] throttled report (~every 16 pops). Remove before v0.6.1 merge.
+            probe_ctr = probe_ctr.wrapping_add(1);
+            if probe_ctr % 16 == 0 {
+                let s0 = u16::from_le_bytes([popbuf[0], popbuf[1]]);
+                let s1 = u16::from_le_bytes([popbuf[2], popbuf[3]]);
+                let s2 = u16::from_le_bytes([popbuf[4], popbuf[5]]);
+                let s3 = u16::from_le_bytes([popbuf[6], popbuf[7]]);
+                esp_println::println!(
+                    "[MICHEX] n={} peak={} raw=[{:04x} {:04x} {:04x} {:04x}]",
+                    n, probe_peak, s0, s1, s2, s3
+                );
+                probe_peak = 0;
             }
         }
         // xfer dropped here → outer loop re-arms the transfer (recover from overrun)
