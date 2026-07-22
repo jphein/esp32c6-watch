@@ -1,0 +1,41 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ESP32-C6 Watch",
+        "description": "Serve plain HTTP to the ESP32-C6 watch on a dedicated port (bypasses HA's HTTPS-only :8123). Defaults are pre-filled from your live entities.",
+        "data": {
+          "port": "HTTP port",
+          "token": "Shared secret token (optional)",
+          "max_queue_bytes": "Speaker queue cap (bytes)",
+          "climate_exclude": "Excluded climate object ids (comma-separated)",
+          "battery_pct_entity": "Battery percentage sensor",
+          "solar_w_entity": "Solar power sensor",
+          "grid_w_entity": "Grid power sensor (+ import / − export)",
+          "charging_entity": "Charging sensor (optional)"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Already configured. Only a single instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ESP32-C6 Watch options",
+        "description": "Change the listener port, shared secret, speaker queue cap, excluded climate entities, or the energy sensor map. Saving reloads the listener.",
+        "data": {
+          "port": "HTTP port",
+          "token": "Shared secret token (optional)",
+          "max_queue_bytes": "Speaker queue cap (bytes)",
+          "climate_exclude": "Excluded climate object ids (comma-separated)",
+          "battery_pct_entity": "Battery percentage sensor",
+          "solar_w_entity": "Solar power sensor",
+          "grid_w_entity": "Grid power sensor (+ import / − export)",
+          "charging_entity": "Charging sensor (optional)"
+        }
+      }
+    }
+  }
+}
