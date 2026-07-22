@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Theme System — esp32c6-watch</title>
+<meta name="description" content="The multi-theme system for the ESP32-C6 Rust no_std smartwatch: four schemes (Midnight, Paper, Amber, Violet) driven by one Theme.scheme selector, rendered as real watch faces.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/fonts.css">
+<style>
+/* ============================ TOKENS (shared with index) ============================ */
+:root{
+  --bg:#000000; --bg2:#05070d; --panel:#0a1120; --panel-2:#0d1626;
+  --ink:#f2f5ff; --soft:#9fb4d8; --dim:#6b7794; --faint:#39435c;
+  --accent:#35e0b0; --accent2:#3a7bd5; --warn:#ff5566; --warm:#ffd166;
+  --line:#1a2540; --line-2:#141d33;
+  --hero-grad:linear-gradient(155deg,#140b2e 0%,#000000 52%,#002733 100%);
+  --card-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 24px 48px -28px rgba(0,0,0,.9);
+  --glow:0 0 42px -8px rgba(53,224,176,.55);
+  --font-display:'Chakra Petch','Segoe UI',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  --font-body:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --maxw:1180px;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#eaeef6; --bg2:#f4f6fb; --panel:#ffffff; --panel-2:#f2f5fb;
+    --ink:#0e1524; --soft:#33436a; --dim:#5c688a; --faint:#a6b0c7;
+    --accent:#0c9b74; --accent2:#2a5cae; --warn:#d23a4c; --warm:#b9791a;
+    --line:#dde3ef; --line-2:#e7ebf5;
+    --hero-grad:linear-gradient(155deg,#e9e6fb 0%,#f4f6fb 50%,#dff1ee 100%);
+    --card-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 20px 40px -30px rgba(20,40,80,.35);
+    --glow:0 0 42px -12px rgba(12,155,116,.4);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#eaeef6; --bg2:#f4f6fb; --panel:#ffffff; --panel-2:#f2f5fb;
+  --ink:#0e1524; --soft:#33436a; --dim:#5c688a; --faint:#a6b0c7;
+  --accent:#0c9b74; --accent2:#2a5cae; --warn:#d23a4c; --warm:#b9791a;
+  --line:#dde3ef; --line-2:#e7ebf5;
+  --hero-grad:linear-gradient(155deg,#e9e6fb 0%,#f4f6fb 50%,#dff1ee 100%);
+  --card-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 20px 40px -30px rgba(20,40,80,.35);
+  --glow:0 0 42px -12px rgba(12,155,116,.4);
+}
+
+/* ============================ BASE ============================ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+body{margin:0; background:var(--bg); color:var(--ink); font-family:var(--font-body); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; overflow-x:hidden}
+h1,h2,h3,h4{font-family:var(--font-display); font-weight:600; line-height:1.06; letter-spacing:-.01em; margin:0}
+a{color:inherit; text-decoration:none}
+p{margin:0 0 1em}
+.mono{font-family:var(--font-mono)}
+::selection{background:rgba(53,224,176,.28); color:var(--ink)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px}
+img,svg{max-width:100%}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 26px}
+.eyebrow{font-family:var(--font-mono); font-size:12.5px; letter-spacing:.28em; text-transform:uppercase; color:var(--accent); font-weight:500}
+.section{padding:88px 0; position:relative}
+.section-head{max-width:760px; margin-bottom:48px}
+.section-head h2{font-size:clamp(28px,4.4vw,46px); margin:14px 0 16px}
+.section-head p{color:var(--soft); font-size:18px}
+body::before{content:""; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");}
+main{position:relative; z-index:1}
+
+/* ============================ NAV ============================ */
+header.nav{position:sticky; top:0; z-index:50; backdrop-filter:blur(14px) saturate(140%); -webkit-backdrop-filter:blur(14px) saturate(140%); background:color-mix(in srgb, var(--bg) 74%, transparent); border-bottom:1px solid var(--line)}
+.nav-in{display:flex; align-items:center; gap:24px; height:64px; max-width:var(--maxw); margin:0 auto; padding:0 26px}
+.brand{display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:700; letter-spacing:-.01em; font-size:18px}
+.brand svg{width:26px; height:26px; filter:drop-shadow(0 0 10px rgba(53,224,176,.5))}
+.brand b{color:var(--accent); font-weight:700}
+.nav-links{display:flex; gap:26px; margin-left:auto; font-size:14.5px; font-family:var(--font-mono); letter-spacing:.02em}
+.nav-links a{color:var(--soft); transition:color .18s}
+.nav-links a:hover{color:var(--ink)}
+.nav-links a.here{color:var(--accent)}
+.nav-actions{display:flex; align-items:center; gap:10px; margin-left:8px}
+.icon-btn{display:grid; place-items:center; width:38px; height:38px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--soft); cursor:pointer; transition:.18s}
+.icon-btn:hover{color:var(--ink); border-color:var(--accent); box-shadow:var(--glow)}
+.icon-btn svg{width:18px; height:18px}
+.gh-btn{display:inline-flex; align-items:center; gap:8px; height:38px; padding:0 15px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--ink); font-family:var(--font-mono); font-size:13.5px; transition:.18s; white-space:nowrap}
+.gh-btn:hover{border-color:var(--accent); box-shadow:var(--glow)}
+.gh-btn svg{width:17px;height:17px}
+@media (max-width:860px){.nav-links{display:none}}
+:root[data-theme="light"] .ic-moon,:root:not([data-theme="dark"]) .ic-moon{display:none}
+:root[data-theme="light"] .ic-sun,:root:not([data-theme="dark"]) .ic-sun{display:block}
+.ic-sun{display:none}
+@media (prefers-color-scheme: light){:root:not([data-theme]) .ic-sun{display:block}:root:not([data-theme]) .ic-moon{display:none}}
+:root[data-theme="dark"] .ic-moon{display:block}
+:root[data-theme="dark"] .ic-sun{display:none}
+
+/* ============================ HERO ============================ */
+.phero{background:var(--hero-grad); border-bottom:1px solid var(--line); position:relative; overflow:hidden}
+.phero::after{content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(120% 80% at 80% 10%, transparent 45%, var(--bg) 100%)}
+.phero-in{position:relative; z-index:1; max-width:var(--maxw); margin:0 auto; padding:74px 26px 84px}
+.phero h1{font-family:var(--font-mono); font-size:clamp(38px,6.4vw,68px); font-weight:700; letter-spacing:-.03em; margin:16px 0 0; text-wrap:balance}
+.phero h1 .g{background:linear-gradient(120deg,var(--accent2),var(--accent)); -webkit-background-clip:text; background-clip:text; color:transparent}
+.phero .desc{color:var(--soft); font-size:19px; max-width:60ch; margin:22px 0 0}
+.metarow{display:flex; flex-wrap:wrap; gap:9px; margin-top:26px}
+.mchip{font-family:var(--font-mono); font-size:12.5px; color:var(--soft); border:1px solid var(--line); border-radius:99px; padding:7px 13px; background:color-mix(in srgb,var(--panel) 60%, transparent)}
+.mchip b{color:var(--accent); font-weight:600}
+
+/* ============================ DEVICE MOCKUP (shared with index) ============================ */
+.device{--w:230px; position:relative; width:var(--w); aspect-ratio:410/502; margin:0 auto; border-radius:15% / 12.2%;
+  background:radial-gradient(130% 90% at 50% 0%, #0b1424 0%, #000 62%); padding:calc(var(--w) * .045);
+  box-shadow:0 0 0 2px #1c2436, 0 0 0 8px #05070d, 0 0 0 9px #222a3d, 0 30px 70px -24px rgba(0,0,0,.9), 0 0 60px -12px rgba(53,224,176,.22)}
+.device::after{content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none; background:linear-gradient(150deg, rgba(255,255,255,.10) 0%, transparent 34%); mix-blend-mode:screen}
+.device .crown{position:absolute; right:-5px; top:32%; width:6px; height:15%; border-radius:3px; background:linear-gradient(90deg,#2a3550,#0c1220); box-shadow:0 0 8px rgba(0,0,0,.6)}
+.screen{position:relative; width:100%; height:100%; border-radius:12.5% / 10.2%; background:var(--d-bg); overflow:hidden; color:var(--d-ink); font-family:var(--font-mono); container-type:inline-size}
+.scr-chrome{position:absolute; inset:0; pointer-events:none}
+.radio-dots{position:absolute; top:5.5%; left:8%; display:flex; gap:9px; font-size:8.5px; letter-spacing:.12em}
+.rdot{display:flex; align-items:center; gap:4px; color:var(--d-faint)}
+.rdot i{width:6px;height:6px;border-radius:50%;background:var(--d-off); display:block}
+.rdot.on{color:var(--d-soft)} .rdot.on i{background:var(--d-accent); box-shadow:0 0 6px var(--d-accent)}
+.batt{position:absolute; top:5%; right:8%; display:flex; align-items:center; gap:5px; font-size:9px; color:var(--d-soft)}
+.batt .cell{width:20px;height:11px;border:1.4px solid var(--d-line); border-radius:3px; position:relative; padding:1.4px}
+.batt .cell::after{content:"";position:absolute; right:-3px; top:3px; width:2px; height:5px; background:var(--d-line); border-radius:0 1px 1px 0}
+.batt .fill{height:100%; width:78%; background:var(--d-accent); border-radius:1px; display:block}
+.page-dots{position:absolute; bottom:5%; left:0; right:0; display:flex; justify-content:center; gap:7px}
+.page-dots i{width:6px;height:6px;border-radius:50%;background:var(--d-faint)}
+.page-dots i.a{background:var(--d-accent); box-shadow:0 0 6px var(--d-accent)}
+.pg{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center}
+.datepill{margin-top:12.5%; padding:2.5% 7%; border:1px solid var(--d-line); border-radius:99px; background:var(--d-panel); color:var(--d-soft); font-size:8.5px; letter-spacing:.18em}
+.clock-time{font-size:24.5cqw; font-weight:700; color:var(--d-ink); line-height:1; margin-top:8%; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+.clock-secs{font-size:9cqw; font-weight:600; color:var(--d-accent); margin-top:1%}
+.minbar{width:73%; height:2.2cqw; border-radius:99px; background:var(--d-track); margin-top:8%; overflow:hidden}
+.minbar i{display:block; height:100%; width:62%; border-radius:99px; background:linear-gradient(90deg,var(--d-accent2),var(--d-accent))}
+.stepline{font-size:8px; letter-spacing:.14em; color:var(--d-dim); margin-top:6%}
+.chips{display:flex; gap:5px; margin-top:6%}
+.chip{padding:3% 8%; border:1px solid var(--d-line); border-radius:99px; background:var(--d-panel); font-size:7.5px; letter-spacing:.08em; color:var(--d-soft)}
+.chip.hl{color:var(--d-accent)}
+
+/* theme picker page (inside a device) */
+.pg-title{margin-top:12.5%; font-size:8.5px; letter-spacing:.42em; color:var(--d-soft); font-weight:600}
+.themegrid{width:84%; margin-top:8%; display:grid; grid-template-columns:1fr 1fr; gap:3.4cqw}
+.swtile{border:1px solid var(--sw-line); border-radius:9px; overflow:hidden; background:var(--sw-bg)}
+.swtile.on{border-color:var(--d-accent); box-shadow:0 0 0 1.5px var(--d-accent)}
+.swtile .pv{padding:8% 9% 7%; position:relative}
+.swtile .pv .pdot{position:absolute; top:14%; right:10%; width:8cqw; height:8cqw; max-width:13px; max-height:13px; border-radius:50%; background:var(--sw-accent)}
+.swtile .t{font-size:11.5cqw; font-weight:700; color:var(--sw-ink); line-height:1; letter-spacing:-.02em}
+.swtile .bar{height:2.4cqw; border-radius:99px; margin-top:10%; width:66%; background:linear-gradient(90deg,var(--sw-accent2),var(--sw-accent))}
+.swtile .nm{display:flex; align-items:center; justify-content:space-between; padding:5% 9%; background:var(--sw-panel); border-top:1px solid var(--sw-line); font-size:7px; letter-spacing:.12em; font-weight:600; color:var(--sw-ink)}
+.swtile .nm .ck{color:var(--d-accent)}
+.pg-foot{position:absolute; bottom:8%; font-size:7.5px; letter-spacing:.14em; color:var(--d-dim); text-align:center; width:80%}
+
+/* ============================ THEME GALLERY ============================ */
+.tgallery{display:grid; grid-template-columns:repeat(auto-fit,minmax(238px,1fr)); gap:40px 30px}
+.tcard{display:flex; flex-direction:column; align-items:center; gap:22px}
+.plate{width:100%; max-width:300px}
+.plate h3{font-size:20px; display:flex; align-items:center; gap:10px; margin-bottom:4px}
+.plate h3 .sw{width:14px; height:14px; border-radius:4px; box-shadow:0 0 0 1px rgba(128,128,128,.35) inset}
+.plate .feel{color:var(--soft); font-size:14px; margin-bottom:12px}
+.plate .hexes{display:flex; flex-wrap:wrap; gap:6px}
+.plate .hex{font-family:var(--font-mono); font-size:11px; color:var(--dim); border:1px solid var(--line); border-radius:6px; padding:3px 8px 3px 22px; position:relative; background:var(--panel-2)}
+.plate .hex::before{content:""; position:absolute; left:6px; top:50%; transform:translateY(-50%); width:11px; height:11px; border-radius:3px; background:var(--c); box-shadow:0 0 0 1px rgba(128,128,128,.35) inset}
+
+/* ============================ PICKER SPLIT ============================ */
+.picker{display:grid; grid-template-columns:minmax(220px,300px) 1fr; gap:clamp(28px,5vw,56px); align-items:center}
+@media (max-width:720px){.picker{grid-template-columns:1fr}}
+.picker h3{font-size:22px; margin-bottom:12px}
+.picker p{color:var(--soft); font-size:15.5px; max-width:54ch}
+.picker ul{margin:0; padding-left:18px; color:var(--soft); font-size:15px}
+.picker li{margin-bottom:8px}
+.picker li b{color:var(--ink); font-weight:600}
+.picker code, .section code, .note code{font-family:var(--font-mono); font-size:.92em; color:var(--accent); background:var(--panel-2); padding:1px 6px; border-radius:5px}
+
+/* ============================ TOKEN MATRIX ============================ */
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:14px; background:var(--panel)}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:13.5px}
+th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--line)}
+thead th{font-family:var(--font-mono); font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:500; position:sticky; top:0; background:var(--panel-2)}
+tbody tr:last-child td{border-bottom:none}
+td.token{font-family:var(--font-mono); color:var(--ink); font-size:12.5px}
+.cell{display:flex; align-items:center; gap:9px}
+.cell .sw{width:20px; height:20px; border-radius:5px; flex:none; box-shadow:0 0 0 1px rgba(128,128,128,.3) inset}
+.cell code{font-family:var(--font-mono); font-size:11.5px; color:var(--soft); background:none; padding:0}
+tbody tr:hover td{background:color-mix(in srgb,var(--accent) 6%, transparent)}
+
+/* ============================ NOTES ============================ */
+.notes{display:grid; grid-template-columns:repeat(auto-fit,minmax(238px,1fr)); gap:16px}
+.note{border:1px solid var(--line); border-radius:14px; padding:20px 22px; background:var(--panel); box-shadow:var(--card-shadow)}
+.note h4{font-size:15px; display:flex; align-items:center; gap:9px; margin-bottom:9px}
+.note h4 .tag{font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:#04120d; background:var(--accent); padding:3px 7px; border-radius:5px}
+.note p{margin:0; color:var(--soft); font-size:14px}
+
+/* ============================ FOOTER (shared) ============================ */
+footer{border-top:1px solid var(--line); background:var(--bg2); padding:64px 0 46px; position:relative; z-index:1}
+.foot-grid{display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:36px}
+.foot-grid h4{font-family:var(--font-mono); font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--dim); font-weight:500; margin-bottom:16px}
+.foot-grid a{display:block; color:var(--soft); font-size:14.5px; padding:5px 0; transition:.15s}
+.foot-grid a:hover{color:var(--accent)}
+.foot-brand{display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:700; font-size:19px; margin-bottom:14px}
+.foot-brand svg{width:28px;height:28px}
+.foot-brand b{color:var(--accent)}
+.foot-bottom{max-width:var(--maxw); margin:44px auto 0; padding:24px 26px 0; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; font-family:var(--font-mono); font-size:12.5px; color:var(--dim)}
+.foot-bottom a{color:var(--soft)} .foot-bottom a:hover{color:var(--accent)}
+@media (max-width:760px){.foot-grid{grid-template-columns:1fr 1fr}}
+
+/* reveal on scroll */
+.reveal{opacity:0; transform:translateY(22px); transition:opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1; transform:none}
+@media (prefers-reduced-motion: reduce){.reveal{opacity:1; transform:none; transition:none}}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<header class="nav">
+  <div class="nav-in">
+    <a class="brand" href="index.html" aria-label="esp32c6-watch home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><use href="#logo"/></svg>
+      <span>esp32<b>c6</b>-watch</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="index.html#features">Features</a>
+      <a href="index.html#ui">Slint UI</a>
+      <a href="index.html#hardware">Hardware</a>
+      <a href="theme-preview.html" class="here">Themes</a>
+      <a href="index.html#build">Build</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="themeToggle" aria-label="Toggle color theme" title="Toggle theme">
+        <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+        <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>
+      </button>
+      <a class="gh-btn" href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12a11.5 11.5 0 0 0 7.9 10.9c.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5A11.5 11.5 0 0 0 23.5 12C23.5 5.7 18.3.5 12 .5Z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- HERO -->
+<section class="phero">
+  <div class="phero-in">
+    <p class="eyebrow reveal">Slint UI · v0.6.0 · feat/theme-system</p>
+    <h1 class="reveal">Four faces, <span class="g">one watch.</span></h1>
+    <p class="desc reveal">A single <code>Theme.scheme</code> selector routes 18 palette tokens through every screen. Fifteen Slint files keep saying <code>Theme.accent</code> — the value now follows the scheme, so all screens re-theme with zero per-screen edits. The choice is picked on-glass and persisted to flash.</p>
+    <div class="metarow reveal">
+      <span class="mchip"><b>4</b> schemes</span>
+      <span class="mchip"><b>18</b> tokens</span>
+      <span class="mchip"><b>15</b> screens follow automatically</span>
+      <span class="mchip">Slint <b>1.17</b> · no_std</span>
+    </div>
+  </div>
+</section>
+
+<!-- GALLERY -->
+<section class="section">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <p class="eyebrow">01 — The faces</p>
+      <h2>The four schemes</h2>
+      <p>The clock face rendered in each scheme, faithful to the on-glass layout. Three ride true-black — self-emissive and battery-optimal on the AMOLED — plus one calm light theme.</p>
+    </div>
+    <div class="tgallery reveal" id="gallery"></div>
+  </div>
+</section>
+
+<!-- PICKER -->
+<section class="section" style="background:var(--bg2); border-top:1px solid var(--line); border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <p class="eyebrow">02 — The picker</p>
+      <h2>Live swatches, not chips</h2>
+    </div>
+    <div class="picker reveal">
+      <div id="pickerDevice"></div>
+      <div>
+        <h3>Tap a tile, the whole watch changes</h3>
+        <p>Each tile is a live mini-preview painted in that scheme's own tokens — you see the theme, not a paint sample. Tapping sets <code>Theme.scheme</code> instantly for a whole-watch preview and emits <code>theme-changed</code> so Rust persists the choice.</p>
+        <ul>
+          <li>A scene-resident Slint overlay — <b>no framebuffer, no WiFi</b> — reached from a SYSTEM launcher tile, the same idiom as WLED / Energy / Climate.</li>
+          <li>Right-swipe or the back-chevron closes; the active tile carries an accent ring and check.</li>
+          <li>Restored at boot and re-applied after a game exit, so the watch never snaps back to Midnight.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MATRIX -->
+<section class="section">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <p class="eyebrow">03 — The substrate</p>
+      <h2>Token matrix</h2>
+      <p>Eighteen tokens × four schemes. <code>accent</code> and <code>warm</code> stay bright in every scheme so near-black <code>on-accent</code> detail — button text, creature eyes, icon pips — always reads on them.</p>
+    </div>
+    <div class="tablewrap reveal">
+      <table id="matrix">
+        <thead><tr><th>Token</th><th>Midnight</th><th>Paper</th><th>Amber</th><th>Violet</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- NOTES -->
+<section class="section" style="background:var(--bg2); border-top:1px solid var(--line)">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <p class="eyebrow">04 — Decisions</p>
+      <h2>Worth flagging</h2>
+    </div>
+    <div class="notes reveal">
+      <div class="note"><h4><span class="tag">AMOLED</span> Paper costs power</h4><p>Three dark schemes ride true-black <code>#000000</code> — self-emissive-black, battery-optimal. Paper lights most pixels, so it draws more. Noted under the picker; not a blocker.</p></div>
+      <div class="note"><h4><span class="tag">Contract</span> on-accent stays near-black</h4><p><code>accent</code> and <code>warm</code> stay bright in every scheme so near-black detail always reads on them — no per-call conditionals anywhere.</p></div>
+      <div class="note"><h4><span class="tag">AOD</span> always true-black</h4><p>The always-on display stays black with dim text regardless of scheme — a light AOD would defeat the power-saving point of the mode.</p></div>
+      <div class="note"><h4><span class="tag">Flash</span> config.rs v3</h4><p>A <code>SWCFG3</code> record appends one <code>theme</code> byte before the checksum. v1/v2 records still load (default Midnight); WiFi creds, page and units survive the upgrade.</p></div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand-col">
+        <div class="foot-brand"><svg viewBox="0 0 64 64"><use href="#logo"/></svg><span>esp32<b>c6</b>-watch</span></div>
+        <p style="color:var(--soft); font-size:14.5px; max-width:38ch">100% Rust <span class="mono">no_std</span> firmware for the Waveshare ESP32-C6 AMOLED smartwatch. The theme system routes one <span class="mono">Theme.scheme</span> selector through every Slint screen.</p>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <a href="index.html">Home</a>
+        <a href="hardware.html">Hardware</a>
+        <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">Repository</a>
+        <a href="https://github.com/jphein/esp32c6-watch/tree/feat/theme-system" target="_blank" rel="noopener">feat/theme-system</a>
+      </div>
+      <div>
+        <h4>UI</h4>
+        <a href="https://slint.dev" target="_blank" rel="noopener">Slint</a>
+        <a href="index.html#ui">Slint shell</a>
+        <a href="index.html#architecture">Architecture</a>
+      </div>
+    </div>
+  </div>
+  <div class="foot-bottom">
+    <span>© 2026 · dual-licensed MIT OR Apache-2.0</span>
+    <span>Built with Rust, Embassy &amp; Slint · <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">jphein/esp32c6-watch</a></span>
+  </div>
+</footer>
+
+<!-- logo symbol (shared) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="logo" viewBox="0 0 64 64">
+    <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a7bd5"/><stop offset="1" stop-color="#35e0b0"/></linearGradient></defs>
+    <rect x="14" y="6" width="36" height="52" rx="13" fill="#000"/>
+    <rect x="14" y="6" width="36" height="52" rx="13" fill="none" stroke="url(#lg)" stroke-width="2.5"/>
+    <g stroke="#35e0b0" stroke-width="1.6" opacity="0.55" stroke-linecap="round"><line x1="32" y1="32" x2="22" y2="19"/><line x1="32" y1="32" x2="43" y2="21"/><line x1="32" y1="32" x2="24" y2="45"/><line x1="32" y1="32" x2="42" y2="44"/></g>
+    <g fill="#3a7bd5"><circle cx="22" cy="19" r="2.6"/><circle cx="43" cy="21" r="2.6"/><circle cx="24" cy="45" r="2.6"/><circle cx="42" cy="44" r="2.6"/></g>
+    <circle cx="32" cy="32" r="5.4" fill="#35e0b0"/>
+    <circle cx="32" cy="32" r="9.5" fill="none" stroke="#35e0b0" stroke-width="1.4" opacity="0.6"/>
+  </symbol>
+</svg>
+
+<script>
+/* ---------- theme toggle (page chrome; shared with index) ---------- */
+(function(){
+  var root=document.documentElement, KEY='c6w-theme';
+  try{var saved=localStorage.getItem(KEY); if(saved==='light'||saved==='dark') root.setAttribute('data-theme',saved);}catch(e){}
+  document.getElementById('themeToggle').addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    if(!cur){ cur = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; }
+    var next = cur==='dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme',next);
+    try{localStorage.setItem(KEY,next);}catch(e){}
+  });
+})();
+
+/* ---------- the four watch schemes ---------- */
+var PAL = {
+  Midnight:{bg:'#000000',ink:'#f2f5ff',soft:'#9fb4d8',dim:'#6b7794',faint:'#55617a',accent:'#35e0b0',accent2:'#3a7bd5',panel:'#101728',line:'#2a3550',track:'#16202f',warn:'#ff5566',warm:'#ffd166','off-dot':'#223048',scrim:'#05080af2','warn-bg':'#200a10','warn-panel':'#1a0a0e','accent-bg':'#08201a','on-accent':'#05100a'},
+  Paper:{bg:'#eae7df',ink:'#21252e',soft:'#464e60',dim:'#6d7486',faint:'#a2a7b2',accent:'#0e9e77',accent2:'#2f6fca',panel:'#f5f3ec',line:'#d3cec1',track:'#dcd7ca',warn:'#cf3a49',warm:'#c0851c','off-dot':'#c7c2b5',scrim:'#d8d4c8ee','warn-bg':'#f7dfe1','warn-panel':'#fbe6e8','accent-bg':'#d3f0e6','on-accent':'#0a1f16'},
+  Amber:{bg:'#000000',ink:'#fdf3e3',soft:'#d8b48f',dim:'#9c7c5e',faint:'#6e5a45',accent:'#ffb454',accent2:'#ff7a3d',panel:'#1c1409',line:'#3a2c18',track:'#201810',warn:'#ff5566',warm:'#ffd166','off-dot':'#33261a',scrim:'#0a0602f2','warn-bg':'#200a10','warn-panel':'#1a0a0e','accent-bg':'#2a1b08','on-accent':'#1a0f02'},
+  Violet:{bg:'#000000',ink:'#f1eefc',soft:'#bcb2e6',dim:'#837aa8',faint:'#5f5880',accent:'#a78bfa',accent2:'#6366f1',panel:'#16121f',line:'#2e2842',track:'#1b1626',warn:'#ff5d7a',warm:'#ffd166','off-dot':'#2a2440',scrim:'#06060af2','warn-bg':'#200a14','warn-panel':'#1a0a10','accent-bg':'#1a1330','on-accent':'#0b0616'}
+};
+var FEEL = {
+  Midnight:'Current, refined — teal on true-black',
+  Paper:'Calm warm off-white · AMOLED-aware, not pure white',
+  Amber:'Cozy sunset — warm dark, true-black',
+  Violet:'Nocturne — cool indigo, true-black'
+};
+var KEYHEX = {Midnight:['accent','accent2','panel'],Paper:['bg','accent','panel'],Amber:['accent','accent2','panel'],Violet:['accent','accent2','panel']};
+var ORDER = ['bg','scrim','ink','soft','dim','faint','accent','accent2','panel','line','track','warn','warm','off-dot','warn-bg','warn-panel','accent-bg','on-accent'];
+var NAMES = ['Midnight','Paper','Amber','Violet'];
+
+/* map a palette onto the shared device --d-* tokens */
+function dvars(p){
+  return '--d-bg:'+p.bg+';--d-ink:'+p.ink+';--d-soft:'+p.soft+';--d-dim:'+p.dim+';--d-faint:'+p.faint+
+    ';--d-accent:'+p.accent+';--d-accent2:'+p.accent2+';--d-panel:'+p.panel+';--d-line:'+p.line+
+    ';--d-track:'+p.track+';--d-warn:'+p.warn+';--d-warm:'+p.warm+';--d-off:'+p['off-dot']+';';
+}
+function clockFace(){
+  return '<div class="pg">'+
+    '<div class="datepill">TUE 21 JUL 2026</div>'+
+    '<div class="clock-time">10:42</div>'+
+    '<div class="clock-secs">18</div>'+
+    '<div class="minbar"><i></i></div>'+
+    '<div class="stepline">4,280 STEPS &middot; 74&deg;F CLEAR</div>'+
+    '<div class="chips"><span class="chip">160 MHz</span><span class="chip">GYRO</span><span class="chip hl">APPS</span></div>'+
+    '</div>'+
+    '<div class="scr-chrome">'+
+    '<div class="radio-dots"><span class="rdot on"><i></i>WIFI</span><span class="rdot"><i></i>BLE</span><span class="rdot on"><i></i>MESH</span></div>'+
+    '<div class="batt"><span class="cell"><span class="fill"></span></span>82%</div>'+
+    '<div class="page-dots"><i class="a"></i><i></i><i></i><i></i><i></i></div>'+
+    '</div>';
+}
+function deviceHTML(p, w){
+  return '<div class="device" style="--w:'+w+'px;'+dvars(p)+'"><div class="crown"></div><div class="screen">'+clockFace()+'</div></div>';
+}
+
+/* gallery */
+var g = document.getElementById('gallery');
+NAMES.forEach(function(name){
+  var p = PAL[name];
+  var hex = KEYHEX[name].map(function(k){return '<span class="hex" style="--c:'+p[k]+'">'+k+' '+p[k]+'</span>';}).join('');
+  var card = document.createElement('div');
+  card.className='tcard';
+  card.innerHTML = deviceHTML(p, 226) +
+    '<div class="plate"><h3><span class="sw" style="background:'+p.accent+'"></span>'+name+'</h3>'+
+    '<div class="feel">'+FEEL[name]+'</div><div class="hexes">'+hex+'</div></div>';
+  g.appendChild(card);
+});
+
+/* picker device (drawn in Midnight = active theme) */
+function swtile(name, active){
+  var q = PAL[name];
+  var vars='--sw-bg:'+q.bg+';--sw-ink:'+q.ink+';--sw-accent:'+q.accent+';--sw-accent2:'+q.accent2+';--sw-panel:'+q.panel+';--sw-line:'+q.line+';';
+  return '<div class="swtile'+(active?' on':'')+'" style="'+vars+'">'+
+    '<div class="pv"><span class="pdot"></span><div class="t">10:42</div><div class="bar"></div></div>'+
+    '<div class="nm"><span>'+name.toUpperCase()+'</span>'+(active?'<span class="ck">&#10003;</span>':'')+'</div></div>';
+}
+function pickerFace(){
+  return '<div class="pg">'+
+    '<div class="pg-title">THEME</div>'+
+    '<div class="themegrid">'+swtile('Midnight',true)+swtile('Paper',false)+swtile('Amber',false)+swtile('Violet',false)+'</div>'+
+    '<div class="pg-foot">Dark schemes save power on AMOLED</div>'+
+    '</div>';
+}
+document.getElementById('pickerDevice').innerHTML =
+  '<div class="device" style="--w:260px;'+dvars(PAL.Midnight)+'"><div class="crown"></div><div class="screen">'+pickerFace()+'</div></div>';
+
+/* token matrix */
+var tb = document.querySelector('#matrix tbody');
+ORDER.forEach(function(tok){
+  var tr=document.createElement('tr');
+  var cells='<td class="token">'+tok+'</td>';
+  NAMES.forEach(function(n){
+    var v=PAL[n][tok];
+    cells+='<td><div class="cell"><span class="sw" style="background:'+v+'"></span><code>'+v+'</code></div></td>';
+  });
+  tr.innerHTML=cells; tb.appendChild(tr);
+});
+
+/* scroll reveal (shared with index) */
+(function(){
+  var els=document.querySelectorAll('.reveal');
+  if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in');});return;}
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target);} });
+  },{threshold:0.12, rootMargin:'0px 0px -8% 0px'});
+  els.forEach(function(e){io.observe(e);});
+})();
+</script>
+</body>
+</html>
