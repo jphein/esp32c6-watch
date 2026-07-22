@@ -621,7 +621,7 @@ async fn main(_spawner: Spawner) -> ! {
     match mic_adc.init() {
         Ok(()) => {
             let g = mic_adc.read_reg(0x43).unwrap_or(0xEE);
-            println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1a)", g);
+            println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1d)", g);
         }
         Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
     }

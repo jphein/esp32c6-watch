@@ -69,8 +69,8 @@ impl<I: I2c> Es7210<I> {
         self.w(0x43, 0x10)?; // MIC1 enable (bit4)
         self.w(0x44, 0x10)?; // MIC2 enable (bit4)
         self.w(0x12, 0x00)?; // non-TDM (2-mic stereo)
-        self.w(0x43, 0x1A)?; // MIC1 +30 dB (enable | gain 0x0A)
-        self.w(0x44, 0x1A)?; // MIC2 +30 dB
+        self.w(0x43, 0x1D)?; // MIC1 +36 dB (enable | gain 0x0D)
+        self.w(0x44, 0x1D)?; // MIC2 +36 dB
         // (B) serial format: 16-bit standard I2S (MIC1=Left, MIC2=Right) ----------
         self.w(0x11, 0x60)?;
         // (C) start / enable ------------------------------------------------------
@@ -93,9 +93,9 @@ impl<I: I2c> Es7210<I> {
         self.w(0x00, 0x41)?; // reset release
         // (D) REASSERT GAIN LAST (critical footgun) -------------------------------
         // es7210_start's mic_select above re-zeros the gain nibble; the ADC reads
-        // near-silent unless +30 dB is written AFTER all enable writes. Last word.
-        self.w(0x43, 0x1A)?; // MIC1 +30 dB (final)
-        self.w(0x44, 0x1A)?; // MIC2 +30 dB (final)
+        // near-silent unless the gain is written AFTER all enable writes. Last word.
+        self.w(0x43, 0x1D)?; // MIC1 +36 dB (final)
+        self.w(0x44, 0x1D)?; // MIC2 +36 dB (final)
         Ok(())
     }
 }
