@@ -19,7 +19,7 @@ use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_time::{Duration, Timer};
-use esp_hal::i2s::master::I2sRx;
+use esp_hal::i2s::master::{I2sRx, I2sTx};
 use esp_hal::Blocking;
 use heapless::Vec;
 
@@ -63,6 +63,38 @@ pub static RECORDING: AtomicBool = AtomicBool::new(false);
 /// as well as voice PTT. Voice + meter are mutually-exclusive screens, so a
 /// single [`MIC_CHANNEL`] with one active consumer at a time suffices.
 pub static METER: AtomicBool = AtomicBool::new(false);
+
+/// Re-arm flags. AOD light sleep (`Rtc::sleep_light`) clock-gates the I2S
+/// peripheral, which permanently stalls the continuous silent-TX DMA (the shared
+/// mic clock) and the RX capture DMA — after the first watchface AOD the mic
+/// goes dead and never recovers. The main loop sets both true after every
+/// light-sleep wake; [`silent_clock_task`] and [`mic_capture_task`] drop and
+/// re-arm their transfers so the full-duplex clock + capture come back.
+pub static CLOCK_REARM: AtomicBool = AtomicBool::new(false);
+pub static RX_REARM: AtomicBool = AtomicBool::new(false);
+
+/// Shared-clock generator: a continuous SILENT circular TX. TX is the I2S master
+/// (`signal_loopback`), so this free-runs BCLK/WS and lets the ES8311 ADC clock
+/// data onto ASDOUT while RX slaves to it. Owns `i2s_tx`; re-arms on
+/// [`CLOCK_REARM`] (see its docs) so the clock survives AOD light sleep.
+#[embassy_executor::task]
+pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, silence: &'static [u8]) {
+    loop {
+        let xfer = match i2s_tx.write_dma_circular(&silence) {
+            Ok(x) => x,
+            Err(_) => {
+                Timer::after(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        // Hold the clock running until a re-arm is requested (post light-sleep).
+        while !CLOCK_REARM.swap(false, Ordering::Relaxed) {
+            Timer::after(Duration::from_millis(100)).await;
+        }
+        drop(xfer); // stop the stalled transfer; the outer loop re-arms a fresh one
+        Timer::after(Duration::from_millis(2)).await;
+    }
+}
 
 /// [`PcmSource`] backed by [`MIC_CHANNEL`]. Hand `voice_stt::stream_utterance`
 /// a `&mut MicPcmSource` while the button is held.
@@ -156,6 +188,11 @@ pub async fn mic_capture_task(
             }
         };
         loop {
+            // Re-arm after an AOD light-sleep wake gated the RX DMA (a stalled
+            // ring can sit at available()==0 forever, never hitting the Err path).
+            if RX_REARM.swap(false, Ordering::Relaxed) {
+                break; // → 'restart re-arms read_dma_circular
+            }
             let avail = match xfer.available() {
                 Ok(n) => n,
                 Err(_) => break, // Late/overrun → drop xfer & re-arm the descriptor chain

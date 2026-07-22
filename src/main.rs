@@ -602,22 +602,19 @@ async fn main(_spawner: Spawner) -> ! {
     // the SAFE clock source — no tone, no risk of blasting.
     static TX_SILENCE: StaticCell<[u8; TX_SILENCE_LEN]> = StaticCell::new();
     let tx_silence: &'static [u8] = TX_SILENCE.init([0u8; TX_SILENCE_LEN]);
-    // Held for the rest of main() (named binding, not `_`): dropping it would stop the
-    // DMA and starve the codec clock. i2s_tx is mutably borrowed here for the duration.
-    let _tx_silence_xfer = i2s_tx
-        .write_dma_circular(&tx_silence)
-        .expect("silent full-duplex TX (shared clock) failed to start");
-    println!("[AUDIO] I2S TX silent clock free-running (full-duplex master)");
+    // Own i2s_tx in a dedicated task that re-arms the circular DMA on CLOCK_REARM.
+    // AOD light sleep clock-gates I2S, so a boot-held transfer would stall on the
+    // first watchface AOD and never recover — the task restarts it after each wake.
+    _spawner.spawn(
+        mic_capture::silent_clock_task(i2s_tx, tx_silence)
+            .expect("silent_clock_task token"),
+    );
+    println!("[AUDIO] I2S TX silent clock task spawned (full-duplex master, re-arms after sleep)");
 
-    // === MIC-CAPTURE VERIFY (temporary) ===
-    // Power the ES8311 record path up at boot and open the meter so the capture task
-    // streams immediately and prints [MICHEX]/[MICDBG] without needing the Sound screen.
-    // Remove both before merge to v0.6.1 (the Sound screen owns enable_adc/METER there).
-    match audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN) {
-        Ok(()) => println!("[AUDIO] ADC (mic) record path enabled for verify"),
-        Err(_) => println!("[AUDIO] ADC enable FAILED"),
-    }
-    mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
+    // The Sound screen (app_state == Sound) and Voice PTT own enable_adc + the
+    // METER/RECORDING gates — no boot-time mic power-up here, so the codec draws
+    // ~0 mA until a mic consumer opens. The silent full-duplex TX above keeps the
+    // shared clock free-running regardless.
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
@@ -880,6 +877,17 @@ async fn main(_spawner: Spawner) -> ! {
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
     let mut meter_peak = mic_dsp::DBFS_FLOOR;
+    // Bar envelope (dBFS): fast attack (jumps to the level instantly), slow
+    // release — so brief speech syllables visibly fill/hold the bar instead of
+    // the raw instantaneous RMS collapsing to -inf between words.
+    let mut meter_env = mic_dsp::DBFS_FLOOR;
+    // Scrolling waveform ring (per-16 ms-window peak, auto-scaled to [0,1]) and a
+    // slowly-decaying reference so quiet speech still fills it while loud events
+    // expand the scale. WAVE_BARS bars ≈ WAVE_BARS×16 ms of history.
+    const WAVE_BARS: usize = 48;
+    let mut wave_ring = [0.0f32; WAVE_BARS];
+    let mut wave_ref = 0.0f32;
+    let mut micdbg_ctr: u32 = 0;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -930,14 +938,18 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(5)
         } else {
             match app_state {
+                // Sound meter + waveform are a live 30 Hz display; pace them
+                // explicitly. (In the grouped arm below, a Sound overlay would
+                // otherwise inherit the underlying page's cadence — often 1 Hz —
+                // so the meter sampled one 16 ms window/sec and read silence.)
+                AppState::Sound => Duration::from_millis(33),
                 AppState::Watchface
                 | AppState::Launcher
                 | AppState::Wled
                 | AppState::Hunt
                 | AppState::Energy
                 | AppState::Climate
-                | AppState::Voice
-                | AppState::Sound => {
+                | AppState::Voice => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -996,6 +1008,11 @@ async fn main(_spawner: Spawner) -> ! {
             let t0 = Instant::now();
             rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
             let cause = wakeup_cause();
+            // Light sleep clock-gated the I2S peripheral, stalling the silent-TX
+            // clock + the mic RX DMA. Re-arm both so the mic recovers on wake
+            // (otherwise the Sound app / Voice read exact zeros after any AOD).
+            mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+            mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
@@ -2013,23 +2030,64 @@ async fn main(_spawner: Spawner) -> ! {
                         let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
                         mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
                         meter_peak = mic_dsp::DBFS_FLOOR;
+                        meter_env = mic_dsp::DBFS_FLOOR;
+                        wave_ring = [0.0f32; WAVE_BARS];
+                        wave_ref = 0.0;
                         meter_on = true;
                     }
-                    // Drain all buffered chunks; rms the newest for a live meter.
+                    // Drain ALL buffered chunks each 33 ms tick. For each 16 ms window
+                    // compute both rms (dBFS, for the meter) and DC-removed peak (for
+                    // the scrolling waveform); scroll one auto-scaled bar per window.
                     let rx = MIC_CH.receiver();
-                    let mut latest: Option<f32> = None;
+                    let mut latest_dbfs: Option<f32> = None;
+                    let mut latest_peak: u16 = 0;
+                    let mut got = false;
+                    // Full-scale reference for a quiet room; loud events expand it, and
+                    // it decays back so quiet speech re-fills the waveform. Tune from
+                    // [MICDBG] peak_raw if normal speech under/over-drives the bars.
+                    const WAVE_MIN_REF: f32 = 800.0;
                     while let Ok(chunk) = rx.try_receive() {
+                        got = true;
                         let n = chunk.len() / 2;
                         let mut samples = [0i16; mic_capture::MONO_CHUNK / 2];
                         for i in 0..n {
                             samples[i] = i16::from_le_bytes([chunk[2 * i], chunk[2 * i + 1]]);
                         }
-                        latest = Some(mic_dsp::rms_dbfs(&samples[..n]));
+                        let dbfs = mic_dsp::rms_dbfs(&samples[..n]);
+                        let peak = mic_dsp::peak_abs(&samples[..n]) as f32;
+                        latest_dbfs = Some(dbfs);
+                        latest_peak = peak as u16;
+                        // Auto-scale + scroll the waveform ring (oldest drops off left).
+                        wave_ref = (wave_ref * 0.90).max(peak).max(WAVE_MIN_REF);
+                        let norm = (peak / wave_ref).clamp(0.0, 1.0);
+                        wave_ring.copy_within(1.., 0);
+                        wave_ring[WAVE_BARS - 1] = norm;
                     }
-                    if let Some(dbfs) = latest {
-                        // Peak-hold with slow decay so it tracks down after a transient.
+                    if let Some(dbfs) = latest_dbfs {
+                        // Bar = fast-attack / slow-release envelope so speech visibly
+                        // fills + holds instead of collapsing between syllables.
+                        const RELEASE_DB: f32 = 1.5; // per 33 ms tick (~45 dB/s)
+                        meter_env = dbfs.max(meter_env - RELEASE_DB).max(mic_dsp::DBFS_FLOOR);
+                        // Peak marker: slower decay so it lingers after a transient.
                         meter_peak = (meter_peak - 0.5).max(dbfs).max(mic_dsp::DBFS_FLOOR);
-                        shell.set_mic_level(dbfs, meter_peak);
+                        shell.set_mic_level(meter_env, meter_peak);
+                    }
+                    if got {
+                        shell.push_mic_waveform(&wave_ring);
+                        // [MICDBG] — TEMP: what the METER path actually computes on
+                        // JP's speech (vs [MICHEX] raw at the capture layer). Throttled
+                        // ~2 Hz. Strip with the other verify scaffolding before v0.6.1.
+                        micdbg_ctr = micdbg_ctr.wrapping_add(1);
+                        if micdbg_ctr % 15 == 0 {
+                            println!(
+                                "[MICDBG] dbfs={} env={} peak_raw={} meter_peak={} wref={}",
+                                latest_dbfs.unwrap_or(mic_dsp::DBFS_FLOOR) as i32,
+                                meter_env as i32,
+                                latest_peak,
+                                meter_peak as i32,
+                                wave_ref as u32,
+                            );
+                        }
                     }
                 } else if meter_on {
                     mic_capture::METER.store(false, core::sync::atomic::Ordering::Relaxed);

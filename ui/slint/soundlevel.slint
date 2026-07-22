@@ -12,6 +12,8 @@ import { Theme, PageTitle } from "theme.slint";
 export component SoundLevel {
     in property <float> mic-dbfs: -60;
     in property <float> mic-peak: -60;
+    // Scrolling waveform amplitudes, [0,1], oldest first (pushed by Rust ~30 Hz).
+    in property <[float]> mic-waveform: [];
 
     // dBFS [-60,0] -> fill fraction [0,1]. clamp() guards out-of-range pushes.
     property <float> fill: clamp((root.mic-dbfs + 60) / 60, 0.0, 1.0);
@@ -29,6 +31,26 @@ export component SoundLevel {
     Rectangle { width: 100%; height: 100%; background: #000000; }
 
     PageTitle { title: "SOUND LEVEL"; }
+
+    // Scrolling waveform (one auto-scaled bar per 16 ms window). Bipolar: each bar
+    // grows from a centre line so it reads like a live waveform envelope. Newest
+    // is on the right; the band sits between the title and the hero number.
+    HorizontalLayout {
+        x: root.bar-x;
+        y: 66px;
+        width: root.bar-w;
+        height: 56px;
+        spacing: 2px;
+        for v in root.mic-waveform: Rectangle {
+            Rectangle {
+                width: parent.width;
+                height: max(2px, parent.height * clamp(v, 0.0, 1.0));
+                y: (parent.height - self.height) / 2;
+                border-radius: min(self.width, self.height) / 2;
+                background: v >= 0.85 ? Theme.warn : (v >= 0.5 ? Theme.warm : Theme.accent);
+            }
+        }
+    }
 
     // Hero numeric readout, coloured by zone. "-inf" at the silence floor.
     Text {
