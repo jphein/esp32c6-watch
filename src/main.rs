@@ -20,11 +20,18 @@ mod net;
 mod peripherals;
 mod ui;
 mod apps;
+// UI test automator (feature `debug-console`, on by default): drive + measure
+// the UI over the USB-Serial-JTAG RX. See src/debug_console.rs.
+#[cfg(feature = "debug-console")]
+mod debug_console;
 
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+// select3 for the normal build; the debug-console build uses select4 (adds the
+// synthetic-input wake) fully-qualified at the call site.
+#[cfg(not(feature = "debug-console"))]
 use embassy_futures::select::select3;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::Rgb565;
@@ -484,6 +491,19 @@ async fn main(_spawner: Spawner) -> ! {
     let mut fb: Option<Framebuffer> = None;
     display.fill_screen(Rgb565::BLACK);
     log_heap("boot");
+
+    // === Debug console (feature `debug-console`): UI test automator ==========
+    // Take the USB-Serial-JTAG peripheral in async, RX-only mode. esp-println
+    // keeps writing the TX side via raw MMIO (it never owns the peripheral or
+    // uses interrupts), so `println!` output is unaffected — we only `.read()`
+    // here and echo results back through `println!`. USB_DEVICE is otherwise
+    // unused. See src/debug_console.rs for the sharing rationale.
+    #[cfg(feature = "debug-console")]
+    {
+        use esp_hal::usb_serial_jtag::UsbSerialJtag;
+        let usb = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+        _spawner.spawn(debug_console::debug_console_task(usb).expect("debug_console_task token"));
+    }
 
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
     let mut touch_rst = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
@@ -1072,6 +1092,18 @@ async fn main(_spawner: Spawner) -> ! {
                 (Instant::now() - t0).as_millis()
             );
         } else {
+            // debug-console adds a 4th wake source (a queued synthetic-input
+            // command) so the console drives the loop without waiting out the
+            // idle tick. Zero cost when nothing is queued.
+            #[cfg(feature = "debug-console")]
+            let _ = embassy_futures::select::select4(
+                Timer::after(tick),
+                touch_int.wait_for_falling_edge(),
+                boot_button.wait_for_falling_edge(),
+                debug_console::wait_inject(),
+            )
+            .await;
+            #[cfg(not(feature = "debug-console"))]
             let _ = select3(
                 Timer::after(tick),
                 touch_int.wait_for_falling_edge(),
@@ -1177,9 +1209,53 @@ async fn main(_spawner: Spawner) -> ! {
             }
         }
 
+        // === Synthetic input injection (debug-console) ===
+        // Drain ONE queued command and merge it into the SAME variables the real
+        // touch path just wrote, so it flows through `shell.handle_touch` (and
+        // framebuffer `AppInput`) identically. A tap is press+release across two
+        // ticks; the take() re-arms the wake signal so the release lands next
+        // tick. `injected_this_tick` feeds the wake check below so an injection
+        // lights the screen exactly like a real touch.
+        #[cfg(feature = "debug-console")]
+        let injected_this_tick = {
+            if let Some(inj) = debug_console::take_inject() {
+                match inj {
+                    debug_console::Inject::Touch { point, swipe, start_y, tap } => {
+                        touch_point = point;
+                        swipe_event = swipe;
+                        swipe_start_y = start_y;
+                        if tap {
+                            tap_event = true;
+                        }
+                        if let Some(p) = point {
+                            last_touch_x = p.x;
+                            last_touch_y = p.y;
+                        }
+                    }
+                    debug_console::Inject::Launch(idx) => {
+                        // Same cell a launcher tile tap sets; the launch drain in
+                        // the shell arm raises the app identically.
+                        if let Some(st) = crate::apps::registry::launch_state(idx) {
+                            shell.req.launch.set(Some(st));
+                        }
+                    }
+                    debug_console::Inject::Home => {
+                        shell.set_launcher_open(false);
+                        fb = None;
+                        app_state = AppState::Watchface;
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+        #[cfg(not(feature = "debug-console"))]
+        let injected_this_tick = false;
+
         // === Screen sleep/wake state machine ===
         let any_touch = touch_int.is_low();
-        if any_touch || swipe_event.is_some() || tap_event || boot_button.is_low() {
+        if any_touch || swipe_event.is_some() || tap_event || boot_button.is_low() || injected_this_tick {
             last_interaction = now;
             if screen_state < 3 {
                 if screen_state == 0 {
@@ -2491,7 +2567,14 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Theme
                 ) {
                     if screen_state >= 2 {
+                        // Time the shell render — the responsiveness metric the
+                        // `perf` command exposes (catches theme-slow /
+                        // launcher-scroll style regressions).
+                        #[cfg(feature = "debug-console")]
+                        let _t0 = Instant::now();
                         shell.render(&mut display);
+                        #[cfg(feature = "debug-console")]
+                        debug_console::record_frame((Instant::now() - _t0).as_micros() as u32);
                     } else if screen_state == 1 {
                         // AOD: repaint only when the minute changes so the dim
                         // scene isn't driven every wake. last_dt is refreshed at
@@ -2499,7 +2582,13 @@ async fn main(_spawner: Spawner) -> ! {
                         if let Some(dt) = last_dt.as_ref() {
                             if dt.minutes != aod_last_minute {
                                 aod_last_minute = dt.minutes;
+                                #[cfg(feature = "debug-console")]
+                                let _t0 = Instant::now();
                                 shell.render(&mut display);
+                                #[cfg(feature = "debug-console")]
+                                debug_console::record_frame(
+                                    (Instant::now() - _t0).as_micros() as u32,
+                                );
                             }
                         }
                     }
@@ -2632,6 +2721,18 @@ async fn main(_spawner: Spawner) -> ! {
                 fb = None;
             }
         }
+
+        // Publish the UI snapshot for the debug-console `state` command (once per
+        // awake tick — screen-off ticks `continue` above and keep the last one).
+        #[cfg(feature = "debug-console")]
+        debug_console::publish_state(debug_console::UiState {
+            app: app_state,
+            page: shell.page(),
+            screen_state,
+            wifi: wifi_connected,
+            ble: ble_on,
+            mesh_peers: last_mesh_peers,
+        });
 
         // Track the arm we ran so the shell arm can detect a return from an app
         // that painted straight to the panel and force a repaint. Use the
