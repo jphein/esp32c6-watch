@@ -1,8 +1,6 @@
 // App framework - common types and trait for all apps/games
 
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::DrawTarget;
-
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::{SwipeDirection, TouchPoint};
 
 pub mod snake;
@@ -12,6 +10,7 @@ pub mod tetris;
 pub mod flappy;
 pub mod maze;
 pub mod settings;
+pub mod registry;
 
 /// Input state passed to apps each frame
 pub struct AppInput {
@@ -28,12 +27,42 @@ pub enum AppResult {
     Exit, // Return to launcher/watchface
 }
 
-/// Common trait for all apps/games
+/// A one-shot sound effect an app can queue during `update`, drained by the
+/// generic framebuffer runner and played on the shared I2S path.
+pub enum Sfx {
+    /// Short blip (e.g. Snake eating food).
+    Beep,
+}
+
+/// Common trait for all apps/games.
+///
+/// `render` is monomorphized to the one concrete [`Framebuffer`] (rather than a
+/// generic `D: DrawTarget`) so the trait is **object-safe** — that is what lets
+/// the main loop dispatch every framebuffer app through a single `&mut dyn App`
+/// runner (`run_fb_app`) instead of a per-game match arm.
 pub trait App {
     fn name(&self) -> &str;
     fn setup(&mut self);
     fn update(&mut self, input: &AppInput) -> AppResult;
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D);
+    fn render(&self, fb: &mut Framebuffer);
+
+    /// Whether the last `update` produced a frame worth flushing. Default: always
+    /// (cadence-driven apps). Event-driven apps override to gate on their own
+    /// change signal (Snake on a step, 2048 on a swipe).
+    fn dirty(&self) -> bool {
+        true
+    }
+
+    /// Minimum milliseconds between flushes (cadence throttle). `0` = flush
+    /// whenever `dirty` (event-driven); `33` ≈ 30fps for continuous animation.
+    fn min_flush_ms(&self) -> u32 {
+        0
+    }
+
+    /// Drain a one-shot sound effect the last `update` queued. Default: none.
+    fn take_sfx(&mut self) -> Option<Sfx> {
+        None
+    }
 }
 
 /// All available app states

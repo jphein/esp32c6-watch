@@ -33,6 +33,7 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle, RoundedRectangle}
 use embedded_graphics::text::{Alignment, Baseline, Text};
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::SwipeDirection;
 
 // ===========================================================================
@@ -1109,7 +1110,13 @@ impl App for WorldSnakeApp {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    // Remote peers dead-reckon between our steps, so repaint on a steady 30fps
+    // cadence rather than only on local steps (matches the old arm's next_flush).
+    fn min_flush_ms(&self) -> u32 {
+        33
+    }
+
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(SCREEN_W as u32, SCREEN_H as u32))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
             .draw(d);

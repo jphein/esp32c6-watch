@@ -50,22 +50,44 @@ pub fn brightness_raw(frac: f32) -> u8 {
 /// starting here are slider drags, not page switches.
 pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
-/// Launcher item order — MUST match the `for` list in ui/slint/launcher.slint
-/// (which lands in plan task 8).
-pub const LAUNCHER_APPS: [AppState; 13] = [
-    AppState::Snake,
-    AppState::WorldSnake,
-    AppState::Game2048,
-    AppState::Tetris,
-    AppState::Flappy,
-    AppState::Maze,
-    AppState::Settings,
-    AppState::Wled,   // idx 7 — SYSTEM-section WLED tile (icon-id 9)
-    AppState::Hunt,   // idx 8 — GAMES-section HUNT tile (icon-id 10)
-    AppState::Energy,  // idx 9 — SYSTEM-section ENERGY tile (icon-id 11)
-    AppState::Climate, // idx 10 — SYSTEM-section CLIMATE tile (icon-id 12)
-    AppState::Voice,   // idx 11 — SYSTEM-section VOICE tile (icon-id 7)
-    AppState::Sound,   // idx 12 — SYSTEM-section SOUND-meter tile (icon-id 8)
+// The launcher launch-index → AppState mapping now lives in the app registry
+// (src/apps/registry.rs): `REGISTRY[idx].state`, exposed via
+// `registry::launch_state(idx)`. The launcher tiles are built from the same
+// registry (see `build_launcher_rows`), so the idx→app contract is
+// single-sourced instead of a hand-kept parallel array.
+
+/// Full-screen Slint overlays that share the shell's Slint dispatch branch (no
+/// framebuffer of their own). One table drives all three pieces of overlay
+/// boilerplate: the open-flag mirror + post-touch reconcile (main loop, via
+/// [`ShellUi::mirror_overlays`] / [`ShellUi::reconcile_overlay`]) and the
+/// Right-swipe close cascade ([`ShellUi::handle_touch`]). Adding an overlay app
+/// is one row here instead of a line in each of those three places. Order ==
+/// the swipe-cascade check order. The Launcher is handled separately (it is not
+/// a registry app).
+struct Overlay {
+    state: AppState,
+    is_open: fn(&WatchShell) -> bool,
+    set_open: fn(&WatchShell, bool),
+    close: OverlayClose,
+}
+
+/// How a Right-swipe closes an overlay.
+enum OverlayClose {
+    /// Clear the open flag directly (stateless overlays).
+    Flag,
+    /// Fire a request cell instead — the main loop drains it to ALSO release a
+    /// resource hold (WiFi for energy/climate). A direct flag-clear would strand
+    /// the hold: the cell drain that frees the radio + restores mesh never runs.
+    Cell(fn(&ShellRequests)),
+}
+
+const OVERLAYS: &[Overlay] = &[
+    Overlay { state: AppState::Wled, is_open: WatchShell::get_wled_open, set_open: WatchShell::set_wled_open, close: OverlayClose::Flag },
+    Overlay { state: AppState::Hunt, is_open: WatchShell::get_hunt_open, set_open: WatchShell::set_hunt_open, close: OverlayClose::Flag },
+    Overlay { state: AppState::Energy, is_open: WatchShell::get_energy_open, set_open: WatchShell::set_energy_open, close: OverlayClose::Cell(|r| r.energy_close.set(true)) },
+    Overlay { state: AppState::Climate, is_open: WatchShell::get_climate_open, set_open: WatchShell::set_climate_open, close: OverlayClose::Cell(|r| r.climate_closed.set(true)) },
+    Overlay { state: AppState::Voice, is_open: WatchShell::get_voice_open, set_open: WatchShell::set_voice_open, close: OverlayClose::Flag },
+    Overlay { state: AppState::Sound, is_open: WatchShell::get_mic_open, set_open: WatchShell::set_mic_open, close: OverlayClose::Flag },
 ];
 
 #[derive(Default)]
@@ -255,60 +277,28 @@ impl ShellUi {
         }
 
         if let Some(direction) = swipe {
-            // WLED overlay first: it's full-screen over the scene, so swallow all
-            // nav swipes (no paging behind it); Right closes, mirroring the
-            // launcher. Taps still reach the tiles via the pointer events above.
-            if ui.get_wled_open() {
-                if direction == SwipeDirection::Right {
-                    ui.set_wled_open(false);
+            // Overlays are full-screen over the scene, so whichever is open
+            // swallows ALL nav swipes (no paging behind it) and a Right-swipe
+            // closes it. Table-driven (`OVERLAYS`, in check order): stateless
+            // overlays (WLED/Hunt/Voice/Sound) clear their flag directly;
+            // energy/climate fire a close CELL instead so main.rs also releases
+            // the WiFi hold — a direct flag-clear would strand WiFi because the
+            // cell drain (which frees the radio + restores mesh) would never run.
+            // (Taps still reach the tiles via the pointer events above.)
+            for o in OVERLAYS {
+                if (o.is_open)(ui) {
+                    if direction == SwipeDirection::Right {
+                        match o.close {
+                            OverlayClose::Flag => (o.set_open)(ui, false),
+                            OverlayClose::Cell(fire) => fire(&self.req),
+                        }
+                    }
+                    return;
                 }
-                return;
             }
-            // Hunt overlay: same contract — swallow nav swipes, Right closes.
-            if ui.get_hunt_open() {
-                if direction == SwipeDirection::Right {
-                    ui.set_hunt_open(false);
-                }
-                return;
-            }
-            // Energy overlay: swallow nav swipes; Right routes through the close
-            // CELL (not a direct set_energy_open) so main.rs clears energy_active +
-            // releases the WiFi hold. A direct set would strand WiFi (luna-uifix's
-            // finding on the oracle-t10 finding-b bug — the cell drain never fires).
-            if ui.get_energy_open() {
-                if direction == SwipeDirection::Right {
-                    self.req.energy_close.set(true);
-                }
-                return;
-            }
-            // Climate overlay: swallow nav swipes; Right fires the close cell (a
-            // swipe never reaches the chevron TouchArea, so a bare return would
-            // strand WiFi). main.rs clears climate_active + releases the hold.
-            if ui.get_climate_open() {
-                if direction == SwipeDirection::Right {
-                    self.req.climate_closed.set(true);
-                }
-                return;
-            }
-            // Voice overlay: same contract — swallow nav swipes, Right closes.
-            // (No back-chevron; Right-swipe is the only close. A swipe only lands
-            // here when the button isn't held — the loop is parked during a hold.)
-            if ui.get_voice_open() {
-                if direction == SwipeDirection::Right {
-                    ui.set_voice_open(false);
-                }
-                return;
-            }
-            // SoundLevel meter: display-only overlay, Right closes (main.rs then
-            // clears the METER gate + powers the ADC off).
-            if ui.get_mic_open() {
-                if direction == SwipeDirection::Right {
-                    ui.set_mic_open(false);
-                }
-                return;
-            }
-            // Launcher overlay next: it swallows nav swipes wherever they
-            // start (including the power page's slider band); Right closes.
+            // Launcher overlay next (not a registry app): it swallows nav swipes
+            // wherever they start (including the power page's slider band); Right
+            // closes.
             if ui.get_launcher_open() {
                 if direction == SwipeDirection::Right {
                     ui.set_launcher_open(false);
@@ -343,6 +333,39 @@ impl ShellUi {
     #[allow(dead_code)]
     pub fn touch_is_down(&self) -> bool {
         self.touch_down
+    }
+
+    /// Mirror `app_state` into the launcher + overlay open-flags before feeding
+    /// touch, so the scene shows the overlay the loop is in. Table-driven
+    /// (`OVERLAYS`); no-op while the scene is suspended.
+    pub fn mirror_overlays(&self, app_state: AppState) {
+        let Some(ui) = self.ui.as_ref() else {
+            return;
+        };
+        ui.set_launcher_open(app_state == AppState::Launcher);
+        for o in OVERLAYS {
+            (o.set_open)(ui, app_state == o.state);
+        }
+    }
+
+    /// After [`handle_touch`], reconcile which launcher/overlay is still open
+    /// back into an `AppState` (a Right-swipe may have closed one). Overlays that
+    /// close via a request cell (energy/climate) still report open here until the
+    /// main loop drains the cell. Table-driven (`OVERLAYS`); the launcher wins
+    /// over overlays, matching the previous if-ladder order.
+    pub fn reconcile_overlay(&self) -> AppState {
+        let Some(ui) = self.ui.as_ref() else {
+            return AppState::Watchface;
+        };
+        if ui.get_launcher_open() {
+            return AppState::Launcher;
+        }
+        for o in OVERLAYS {
+            if (o.is_open)(ui) {
+                return o.state;
+            }
+        }
+        AppState::Watchface
     }
 
     // === property push (call only when the source value changed) ===
@@ -535,18 +558,9 @@ impl ShellUi {
         ui.set_launcher_open(open);
     }
 
-    pub fn launcher_open(&self) -> bool {
-        // No launcher while a game holds the framebuffer (scene suspended).
-        self.ui.as_ref().is_some_and(|ui| ui.get_launcher_open())
-    }
-
     pub fn set_wled_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_wled_open(open);
-    }
-
-    pub fn wled_open(&self) -> bool {
-        self.ui.as_ref().is_some_and(|ui| ui.get_wled_open())
     }
 
     /// Feedback line under the WLED tiles ("→ On", "Radio off …", "" = idle).
@@ -558,10 +572,6 @@ impl ShellUi {
     pub fn set_hunt_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_hunt_open(open);
-    }
-
-    pub fn hunt_open(&self) -> bool {
-        self.ui.as_ref().is_some_and(|ui| ui.get_hunt_open())
     }
 
     /// Push one hunt tick: maps `hunt::HuntView` onto the HuntPage props. The
@@ -600,10 +610,6 @@ impl ShellUi {
         ui.set_energy_open(open);
     }
 
-    pub fn energy_open(&self) -> bool {
-        self.ui.as_ref().is_some_and(|ui| ui.get_energy_open())
-    }
-
     /// Home energy figures (grid_w is SIGNED: >0 importing, <0 exporting).
     pub fn set_energy(&self, batt_pct: i32, solar_w: i32, grid_w: i32, charging: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -622,10 +628,6 @@ impl ShellUi {
     pub fn set_climate_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_climate_open(open);
-    }
-
-    pub fn climate_open(&self) -> bool {
-        self.ui.as_ref().is_some_and(|ui| ui.get_climate_open())
     }
 
     /// Push the climate roster → `ClimateCard` rows + the connection banner.
@@ -665,10 +667,6 @@ impl ShellUi {
         ui.set_voice_open(open);
     }
 
-    pub fn voice_open(&self) -> bool {
-        self.ui.as_ref().is_some_and(|ui| ui.get_voice_open())
-    }
-
     /// Voice UI state: 0 idle · 1 listening · 2 sending · 3 result · 4 error · 5 connecting.
     pub fn set_voice_state(&self, state: i32) {
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -699,10 +697,6 @@ impl ShellUi {
     pub fn set_mic_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_mic_open(open);
-    }
-
-    pub fn mic_open(&self) -> bool {
-        self.ui.as_ref().is_some_and(|ui| ui.get_mic_open())
     }
 
     /// SoundLevel meter (#28): current dBFS + peak-hold, both in [-60, 0].
@@ -863,8 +857,8 @@ fn build_scene(
     {
         let r = req.clone();
         ui.on_launch_app(move |idx| {
-            if let Some(app) = LAUNCHER_APPS.get(idx as usize) {
-                r.launch.set(Some(*app));
+            if let Some(app) = crate::apps::registry::launch_state(idx as usize) {
+                r.launch.set(Some(app));
             }
         });
 
@@ -907,11 +901,59 @@ fn build_scene(
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
     ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
+    // Launcher tiles are built once from the app registry (single source of
+    // truth) — static per boot, so a plain VecModel the scene owns is enough.
+    ui.set_launcher_rows(ModelRc::from(Rc::new(VecModel::from(build_launcher_rows()))));
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
     ui.show().expect("show failed");
     ui
+}
+
+/// Build the launcher's row model from the app registry — the single source of
+/// truth for tile metadata. One header row per section (in display order:
+/// Audio, Games, System), then that section's apps in registry order chunked
+/// two-per-row; a lone trailing tile gets a spacer (`present = false`). The tile
+/// `idx` is the app's registry position, so `launch_app(idx)` maps back through
+/// `registry::launch_state(idx)`.
+fn build_launcher_rows() -> Vec<LauncherRow> {
+    use crate::apps::registry::{AppDescriptor, Section, REGISTRY};
+    let tile = |idx: usize, d: &AppDescriptor| LauncherTile {
+        name: SharedString::from(d.name),
+        accent: color_from_rgb(d.accent),
+        icon_id: d.icon_id as i32,
+        idx: idx as i32,
+        present: true,
+    };
+    let mut rows: Vec<LauncherRow> = Vec::new();
+    for sec in [Section::Audio, Section::Games, Section::System] {
+        rows.push(LauncherRow {
+            is_header: true,
+            header: SharedString::from(sec.label()),
+            a: LauncherTile::default(),
+            b: LauncherTile::default(),
+        });
+        let apps: Vec<(usize, &AppDescriptor)> = REGISTRY
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.section == sec)
+            .collect();
+        for pair in apps.chunks(2) {
+            let a = tile(pair[0].0, pair[0].1);
+            let b = match pair.get(1) {
+                Some((i, d)) => tile(*i, d),
+                None => LauncherTile::default(), // present:false -> spacer
+            };
+            rows.push(LauncherRow { is_header: false, header: SharedString::new(), a, b });
+        }
+    }
+    rows
+}
+
+/// 0xRRGGBB -> Slint opaque color.
+fn color_from_rgb(rgb: u32) -> slint::Color {
+    slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
 fn weather_label(code: u8) -> &'static str {

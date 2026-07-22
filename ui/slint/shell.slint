@@ -4,7 +4,7 @@ import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
 import { PowerPage } from "power.slint";
 import { MeshPage } from "mesh.slint";
-import { LauncherOverlay } from "launcher.slint";
+import { LauncherOverlay, LauncherRow, LauncherTile } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
@@ -14,7 +14,9 @@ import { SoundLevel } from "soundlevel.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
-export { PeerRow, ClimateCard }
+// LauncherRow/LauncherTile likewise: slint_shell.rs builds them from the
+// app registry and pushes them into `launcher-rows`.
+export { PeerRow, ClimateCard, LauncherRow, LauncherTile }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -82,6 +84,8 @@ export component WatchShell inherits Window {
     // --- paging / modes ---
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
+    // Launcher tiles, built from the app registry in slint_shell.rs (build_scene).
+    in property <[LauncherRow]> launcher-rows: [];
     // WLED remote overlay (a launcher app that lives in the scene, not the fb).
     in-out property <bool> wled-open: false;
     in property <string> wled-status: "";
@@ -342,6 +346,7 @@ export component WatchShell inherits Window {
     // Rendered below the AOD overlay so AOD still wins when both are visible.
     if root.launcher-open: LauncherOverlay {
         width: 100%; height: 100%;
+        rows: root.launcher-rows;
         launch-app(idx) => { root.launch-app(idx); }
     }
 

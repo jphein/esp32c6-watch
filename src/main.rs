@@ -60,7 +60,7 @@ use crate::apps::settings::SettingsApp;
 use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
-use crate::apps::{App, AppInput, AppResult, AppState};
+use crate::apps::{App, AppInput, AppResult, AppState, Sfx};
 use crate::drivers::co5300::Co5300Display;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
@@ -1702,31 +1702,13 @@ async fn main(_spawner: Spawner) -> ! {
                 // back-chevron) back into app_state. The shell owns page/launcher
                 // navigation via swipes internally; WLED is a scene overlay that
                 // shares this Slint branch (no framebuffer of its own).
-                shell.set_launcher_open(app_state == AppState::Launcher);
-                shell.set_wled_open(app_state == AppState::Wled);
-                shell.set_hunt_open(app_state == AppState::Hunt);
-                shell.set_energy_open(app_state == AppState::Energy);
-                shell.set_climate_open(app_state == AppState::Climate);
-                shell.set_voice_open(app_state == AppState::Voice);
-                shell.set_mic_open(app_state == AppState::Sound);
+                // Mirror app_state -> overlay open-flags, feed touch, then
+                // reconcile any swipe-driven close back into app_state. All three
+                // are table-driven (OVERLAYS in slint_shell.rs) so adding an
+                // overlay app doesn't fan out here.
+                shell.mirror_overlays(app_state);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
-                app_state = if shell.launcher_open() {
-                    AppState::Launcher
-                } else if shell.wled_open() {
-                    AppState::Wled
-                } else if shell.hunt_open() {
-                    AppState::Hunt
-                } else if shell.energy_open() {
-                    AppState::Energy
-                } else if shell.climate_open() {
-                    AppState::Climate
-                } else if shell.voice_open() {
-                    AppState::Voice
-                } else if shell.mic_open() {
-                    AppState::Sound
-                } else {
-                    AppState::Watchface
-                };
+                app_state = shell.reconcile_overlay();
 
                 // WLED remote: back-chevron closes; a tapped tile broadcasts a
                 // WiZmote frame over ESP-NOW (reusing the mesh block's broadcast
@@ -2482,245 +2464,124 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
 
-            AppState::Snake => {
+            // === Framebuffer apps (games + Settings) ===
+            // ONE generic arm for every app whose registry `kind` is Framebuffer.
+            // The per-game arms collapsed into `run_fb_app` (update -> drain sfx ->
+            // render+flush on the app's own `dirty`/`min_flush_ms`). Peripheral
+            // service that can't live behind the trait stays keyed on the state
+            // (Flappy's INT-touch, Settings' cred-save); WorldSnake's ESP-NOW feed
+            // already runs in the per-tick net section above.
+            s if crate::apps::registry::is_framebuffer(s) => {
                 let Some(fb_ref) = fb.as_mut() else {
                     app_state = AppState::Watchface;
                     continue;
                 };
-                // Beep gate retired for the mic-capture verify build (see below).
-                // let prev_score = snake_game.score();
+
+                // Settings: CONNECT persists creds to flash + (re)starts WiFi.
+                // Kept keyed on the state (flash + radio service), at the same
+                // point as the old Settings arm — behavior-preserving.
+                if s == AppState::Settings {
+                    use crate::peripherals::wifi::WifiState;
+                    if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending
+                    {
+                        let ssid = settings_app.wifi_config.ssid_str();
+                        if ssid.is_empty() {
+                            settings_app.wifi_state = WifiState::Error;
+                        } else {
+                            watch_cfg.ssid.clear();
+                            let _ = watch_cfg.ssid.push_str(ssid);
+                            watch_cfg.pass.clear();
+                            let pw = core::str::from_utf8(
+                                &settings_app.wifi_config.password
+                                    [..settings_app.wifi_config.pass_len],
+                            )
+                            .unwrap_or("");
+                            let _ = watch_cfg.pass.push_str(pw);
+                            match config_offset
+                                .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                            {
+                                Some(Ok(())) => println!("[CFG] credentials saved to flash"),
+                                _ => println!("[CFG] save failed"),
+                            }
+                            station_config = esp_radio::wifi::Config::Station(
+                                StationConfig::default()
+                                    .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
+                                    .with_password(watch_cfg.pass.as_str().into()),
+                            );
+                            wifi_has_creds = true;
+                            radio_started = false;
+                            wifi_connected = false;
+                            ntp_synced = false;
+                            wifi_on_request = true;
+                            settings_connect_pending = true;
+                        }
+                    }
+                }
+
+                // Per-app input shaping: Flappy reads the touch INT for a reliable
+                // held-to-flap signal; Settings taps use the last-known coords (the
+                // tap frame's point may already be None on lift); games ignore touch.
+                let touch = match s {
+                    AppState::Flappy => {
+                        if touch_int.is_low() {
+                            Some(crate::peripherals::touch::TouchPoint {
+                                x: 200,
+                                y: 250,
+                                fingers: 1,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    AppState::Settings => Some(crate::peripherals::touch::TouchPoint {
+                        x: last_touch_x,
+                        y: last_touch_y,
+                        fingers: 1,
+                    }),
+                    _ => None,
+                };
                 let input = AppInput {
-                    touch: None,
+                    touch,
                     swipe: swipe_event,
                     tap: tap_event,
                     accel,
                     dt_ms: dt_ms.max(1),
                 };
-                match snake_game.update(&input) {
-                    AppResult::Continue => {
-                        if snake_game.stepped() {
-                            snake_game.render(fb_ref);
-                            fb_ref.flush(&mut display);
-                            // Beep DISABLED for the mic-capture verify build: i2s_tx is
-                            // now the continuous SILENT full-duplex TX (it drives the
-                            // shared BCLK/WS the ES8311 ADC needs), so it can't also do
-                            // one-shot beeps here. SAFE: amp GPIO6 stays LOW, TX = silence,
-                            // no tone. TODO(v0.6.1): route beeps through the shared stream.
-                        }
-                    }
-                    AppResult::Exit => {
+
+                // The one instance-wiring match: state -> concrete app as dyn App.
+                let app: &mut dyn App = match s {
+                    AppState::Snake => &mut snake_game,
+                    AppState::WorldSnake => &mut world_snake,
+                    AppState::Game2048 => &mut game_2048,
+                    AppState::Tetris => &mut tetris_game,
+                    AppState::Flappy => &mut flappy_game,
+                    AppState::Maze => &mut maze_game,
+                    AppState::Settings => &mut settings_app,
+                    // is_framebuffer(s) already gated this arm; anything else is a
+                    // registry/enum mismatch — bail to the watchface.
+                    _ => {
                         app_state = AppState::Watchface;
                         fb = None;
-                        println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
+                        continue;
                     }
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Watchface;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::WorldSnake => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
                 };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                world_snake.update(&input);
-                // Remote peers dead-reckon between our steps, so repaint on a
-                // steady cadence rather than only on local steps.
-                if now >= next_flush {
-                    world_snake.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
+                let (exit, _sfx) =
+                    run_fb_app(app, &input, fb_ref, &mut display, now, &mut next_flush);
+                // Snake food-eat beep (Sfx::Beep) is disabled in this build: i2s_tx is
+                // owned by the continuous silent full-duplex TX (mic_capture::silent_clock_task)
+                // that clocks the ES7210 mic ADC, so it can't also drive one-shot beeps here.
+                // The effect is dropped (_sfx). TODO(v0.6.1): route beeps through the shared TX.
+                // Exit (app-signalled or boot-button) returns to the launcher.
+                // Normalized: Snake used to drop to the watchface (P3 fix — every
+                // game now exits consistently to the launcher).
+                let boot = boot_button.is_low();
+                if exit || boot {
                     app_state = AppState::Launcher;
                     fb = None;
                     println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Game2048 => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                game_2048.update(&input);
-                if swipe_event.is_some() {
-                    game_2048.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Tetris => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                tetris_game.update(&input);
-                if tetris_game.stepped() || swipe_event.is_some() || tap_event {
-                    tetris_game.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Flappy => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let touch_down = touch_int.is_low();
-                let fake_touch = if touch_down {
-                    Some(crate::peripherals::touch::TouchPoint {
-                        x: 200,
-                        y: 250,
-                        fingers: 1,
-                    })
-                } else {
-                    None
-                };
-                let input = AppInput {
-                    touch: fake_touch,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                flappy_game.update(&input);
-                flappy_game.render(fb_ref);
-                if now >= next_flush {
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Maze => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                maze_game.update(&input);
-                if now >= next_flush {
-                    maze_game.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Settings => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                // CONNECT pressed in Settings: persist creds to flash and
-                // (re)start WiFi with them.
-                use crate::peripherals::wifi::WifiState;
-                if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending {
-                    let ssid = settings_app.wifi_config.ssid_str();
-                    if ssid.is_empty() {
-                        settings_app.wifi_state = WifiState::Error;
-                    } else {
-                        watch_cfg.ssid.clear();
-                        let _ = watch_cfg.ssid.push_str(ssid);
-                        watch_cfg.pass.clear();
-                        let pw = core::str::from_utf8(
-                            &settings_app.wifi_config.password
-                                [..settings_app.wifi_config.pass_len],
-                        )
-                        .unwrap_or("");
-                        let _ = watch_cfg.pass.push_str(pw);
-                        match config_offset
-                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                        {
-                            Some(Ok(())) => println!("[CFG] credentials saved to flash"),
-                            _ => println!("[CFG] save failed"),
-                        }
-                        station_config = esp_radio::wifi::Config::Station(
-                            StationConfig::default()
-                                .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
-                                .with_password(watch_cfg.pass.as_str().into()),
-                        );
-                        wifi_has_creds = true;
-                        radio_started = false;
-                        wifi_connected = false;
-                        ntp_synced = false;
-                        wifi_on_request = true;
-                        settings_connect_pending = true;
+                    if boot {
+                        Timer::after(Duration::from_millis(200)).await;
                     }
-                }
-                settings_app.update(dt_ms.max(1));
-                if tap_event {
-                    settings_app.handle_tap(last_touch_x, last_touch_y);
-                }
-                if let Ok((Some(tp), _)) = touch.poll() {
-                    last_touch_x = tp.x;
-                    last_touch_y = tp.y;
-                }
-                settings_app.render(fb_ref);
-                if now >= next_flush {
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(50);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
@@ -2735,6 +2596,36 @@ async fn main(_spawner: Spawner) -> ! {
         // pre-dispatch snapshot, not the (possibly mutated) current app_state.
         prev_app_state = dispatched;
     }
+}
+
+/// Generic per-frame driver for a framebuffer app, dispatched through `&mut dyn
+/// App` (object-safe since `App::render` is monomorphized to `Framebuffer`).
+/// Runs `update` → drains any queued [`Sfx`] → renders + flushes when the app is
+/// `dirty` and its `min_flush_ms` cadence has elapsed.
+///
+/// Returns `(exit, sfx)`: `exit` is true when the app's own `update` signalled
+/// `AppResult::Exit` (the boot-button exit stays in the caller's arm — it needs
+/// `.await`); `sfx` is any one-shot effect for the caller to play on the shared
+/// I2S path. This one body replaces the per-game render/flush arms.
+fn run_fb_app(
+    app: &mut dyn App,
+    input: &AppInput,
+    fb: &mut Framebuffer,
+    display: &mut Co5300Display,
+    now: Instant,
+    next_flush: &mut Instant,
+) -> (bool, Option<Sfx>) {
+    let result = app.update(input);
+    let sfx = app.take_sfx();
+    if let AppResult::Exit = result {
+        return (true, sfx);
+    }
+    if app.dirty() && now >= *next_flush {
+        app.render(fb);
+        fb.flush(display);
+        *next_flush = now + Duration::from_millis(app.min_flush_ms() as u64);
+    }
+    (false, sfx)
 }
 
 /// Map a WLED page action id (see ui/slint/wled.slint) to a WiZmote button.

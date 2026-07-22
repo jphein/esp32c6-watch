@@ -8,6 +8,8 @@ use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
+use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::wifi::{WifiConfig, WifiState};
 use crate::ui::t9_keyboard::T9Keyboard;
 
@@ -85,11 +87,36 @@ impl SettingsApp {
         false
     }
 
-    pub fn update(&mut self, dt_ms: u32) {
-        self.keyboard.update(dt_ms);
+}
+
+impl App for SettingsApp {
+    fn name(&self) -> &str {
+        "Settings"
     }
 
-    pub fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    // Launch does no per-entry reset (the old launcher setup was a no-op for
+    // Settings — WiFi creds/state persist across opens).
+    fn setup(&mut self) {}
+
+    fn update(&mut self, input: &AppInput) -> AppResult {
+        self.keyboard.update(input.dt_ms);
+        // Tap targets use the last-known touch coords (the tap frame's point may
+        // already be None on finger-lift); the runner passes them via input.touch.
+        if input.tap {
+            if let Some(tp) = input.touch {
+                self.handle_tap(tp.x, tp.y);
+            }
+        }
+        AppResult::Continue
+    }
+
+    // Fairly static screen; repaint on a 50ms cadence (matches the old arm's
+    // `next_flush + 50ms` gate). `dirty` stays the default `true`.
+    fn min_flush_ms(&self) -> u32 {
+        50
+    }
+
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(410, 502))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::new(1, 2, 2)))
             .draw(d);
