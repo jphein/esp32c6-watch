@@ -1,5 +1,8 @@
 pub mod audio;
 pub mod ble;
+// ES7210 4-ch ADC — the actual microphone codec on this board (mics wired to it,
+// SDOUT1 -> GPIO21; ES8311 is speaker-DAC only). Must be I2C-inited for capture.
+pub mod es7210;
 pub mod config;
 pub mod cpu_clock;
 // Die-temp helper: pre-staged, wired into main.rs's system-page push once

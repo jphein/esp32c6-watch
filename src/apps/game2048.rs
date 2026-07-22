@@ -10,6 +10,7 @@ use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::SwipeDirection;
 
 const GRID: usize = 4;
@@ -24,11 +25,12 @@ pub struct Game2048 {
     game_over: bool,
     rng: u32,
     moved: bool,
+    redraw: bool, // a swipe arrived this frame → the runner should flush
 }
 
 impl Game2048 {
     pub fn new() -> Self {
-        let mut g = Self { tiles: [[0; GRID]; GRID], score: 0, game_over: false, rng: 54321, moved: false };
+        let mut g = Self { tiles: [[0; GRID]; GRID], score: 0, game_over: false, rng: 54321, moved: false, redraw: false };
         g.spawn_tile();
         g.spawn_tile();
         g
@@ -167,6 +169,8 @@ impl App for Game2048 {
     }
 
     fn update(&mut self, input: &AppInput) -> AppResult {
+        // Old arm rendered on any swipe (moved or not); mirror that exactly.
+        self.redraw = input.swipe.is_some();
         if let Some(swipe) = input.swipe {
             if !self.game_over {
                 self.do_move(swipe);
@@ -175,7 +179,11 @@ impl App for Game2048 {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    fn dirty(&self) -> bool {
+        self.redraw
+    }
+
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(410, 502))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::new(4, 8, 4)))
             .draw(d);

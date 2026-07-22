@@ -12,6 +12,7 @@ use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::SwipeDirection;
 
 const GW: usize = 12;
@@ -48,6 +49,7 @@ pub struct TetrisGame {
     gyro_timer: u32,
     rng: u32,
     did_step: bool,
+    redraw: bool, // did_step || swipe || tap this frame → the runner flushes
 }
 
 impl TetrisGame {
@@ -55,7 +57,7 @@ impl TetrisGame {
         let mut g = Self {
             grid: [[0; GW]; GH], piece: 0, rot: 0, px: 4, py: -1,
             score: 0, lines: 0, game_over: false,
-            drop_timer: 0, gyro_timer: 0, rng: 77777, did_step: false,
+            drop_timer: 0, gyro_timer: 0, rng: 77777, did_step: false, redraw: false,
         };
         g.spawn_piece();
         g
@@ -153,8 +155,6 @@ impl TetrisGame {
             true
         } else { false }
     }
-
-    pub fn stepped(&self) -> bool { self.did_step }
 }
 
 impl App for TetrisGame {
@@ -173,7 +173,8 @@ impl App for TetrisGame {
 
         // Game over: tap to restart
         if self.game_over {
-            if input.tap { self.setup(); }
+            if input.tap { self.setup(); } // setup() sets did_step = true
+            self.redraw = self.did_step || input.swipe.is_some() || input.tap;
             return AppResult::Continue;
         }
 
@@ -218,10 +219,16 @@ impl App for TetrisGame {
             self.did_step = true;
         }
 
+        // Old arm rendered on `stepped() || swipe || tap`; mirror that exactly.
+        self.redraw = self.did_step || input.swipe.is_some() || input.tap;
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    fn dirty(&self) -> bool {
+        self.redraw
+    }
+
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(SCREEN_W as u32, SCREEN_H as u32))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK)).draw(d);
 

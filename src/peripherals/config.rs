@@ -17,6 +17,11 @@ const REC_LEN_V1: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 2;
 /// upgrade; the first save rewrites it as v2 in place.
 const MAGIC_V2: [u8; 6] = *b"SWCFG2";
 const REC_LEN_V2: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 2;
+/// v3 record: v2 + theme scheme byte (0..3), appended before the checksum. A
+/// v1/v2 record still loads (theme defaults to 0 = Midnight), so WiFi creds +
+/// page + units survive the upgrade; the first save rewrites it as v3 in place.
+const MAGIC_V3: [u8; 6] = *b"SWCFG3";
+const REC_LEN_V3: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 2;
 
 /// Units flags bit 0: 24-hour clock (CFG `U` value `..|24`).
 const UNITS_CLK_24H: u8 = 0x01;
@@ -34,6 +39,8 @@ pub struct WatchConfig {
     pub units_temp_f: bool,
     /// 24-hour (vs 12-hour) clock (CFG key `U`).
     pub units_clk_24h: bool,
+    /// Active theme scheme: 0 Midnight · 1 Paper · 2 Amber · 3 Violet.
+    pub theme: u8,
 }
 
 impl Default for WatchConfig {
@@ -47,6 +54,7 @@ impl Default for WatchConfig {
             // Fleet defaults (smol units.rs `Units::default`): °F + 12h.
             units_temp_f: true,
             units_clk_24h: false,
+            theme: 0,
         }
     }
 }
@@ -56,12 +64,15 @@ fn checksum(buf: &[u8]) -> u16 {
 }
 
 pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
-    let mut buf = [0u8; REC_LEN_V2];
+    let mut buf = [0u8; REC_LEN_V3];
     flash.read(offset, &mut buf).ok()?;
-    let (rec_len, v2) = if buf[..6] == MAGIC_V2 {
-        (REC_LEN_V2, true)
+    // v2plus = has default_page + units (v2 & v3); v3 = also has the theme byte.
+    let (rec_len, v2plus, v3) = if buf[..6] == MAGIC_V3 {
+        (REC_LEN_V3, true, true)
+    } else if buf[..6] == MAGIC_V2 {
+        (REC_LEN_V2, true, false)
     } else if buf[..6] == MAGIC_V1 {
-        (REC_LEN_V1, false)
+        (REC_LEN_V1, false, false)
     } else {
         return None;
     };
@@ -80,7 +91,7 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
     let mut pass = heapless::String::new();
     let _ = pass.push_str(core::str::from_utf8(pass_bytes).unwrap_or(""));
     let defaults = WatchConfig::default();
-    let (default_page, units_temp_f, units_clk_24h) = if v2 {
+    let (default_page, units_temp_f, units_clk_24h) = if v2plus {
         let flags = buf[107];
         (
             buf[106].min(3),
@@ -94,6 +105,7 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
             defaults.units_clk_24h,
         )
     };
+    let theme = if v3 { buf[108].min(3) } else { defaults.theme };
     Some(WatchConfig {
         node_id,
         brightness,
@@ -102,12 +114,13 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
         default_page,
         units_temp_f,
         units_clk_24h,
+        theme,
     })
 }
 
 pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
-    let mut buf = [0u8; REC_LEN_V2];
-    buf[..6].copy_from_slice(&MAGIC_V2);
+    let mut buf = [0u8; REC_LEN_V3];
+    buf[..6].copy_from_slice(&MAGIC_V3);
     buf[6] = cfg.node_id;
     buf[7] = cfg.brightness;
     let sb = cfg.ssid.as_bytes();
@@ -119,7 +132,8 @@ pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Res
     buf[106] = cfg.default_page.min(3);
     buf[107] = (if cfg.units_clk_24h { UNITS_CLK_24H } else { 0 })
         | (if cfg.units_temp_f { UNITS_TEMP_F } else { 0 });
-    let sum = checksum(&buf[..REC_LEN_V2 - 2]);
-    buf[REC_LEN_V2 - 2..].copy_from_slice(&sum.to_le_bytes());
+    buf[108] = cfg.theme.min(3);
+    let sum = checksum(&buf[..REC_LEN_V3 - 2]);
+    buf[REC_LEN_V3 - 2..].copy_from_slice(&sum.to_le_bytes());
     flash.write(offset, &buf).map_err(|_| ())
 }

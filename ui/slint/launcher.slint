@@ -1,11 +1,33 @@
 import { Theme, PageTitle } from "theme.slint";
 
-// PROTOTYPE (direction check) — categorised launcher with drawn vector icons +
-// big finger tiles. Icons are lightweight Slint shapes (no bitmaps) so they cost
-// no RAM/flash and render crisp on the RGB565 sw renderer.
+// Categorised launcher with drawn vector icons + big finger tiles. Icons are
+// lightweight Slint shapes (no bitmaps) so they cost no RAM/flash and render
+// crisp on the RGB565 sw renderer.
 //
-// launch-app(idx) keeps the existing contract: idx indexes LAUNCHER_APPS in
-// slint_shell.rs. Each tile carries its own idx, so category grouping is free.
+// The tile content is DATA-DRIVEN: `rows` is pushed from Rust, built from the
+// app REGISTRY (src/apps/registry.rs, the single source of truth). Each tile
+// carries its launch `idx` (its registry position), so `launch-app(idx)` still
+// maps through registry::launch_state(idx). Adding an app is a REGISTRY row —
+// no tile edit here (only a new AppIcon glyph if the icon-id is new).
+
+// One launcher tile's data. `present` = false renders a half-width spacer (a
+// lone tile at the end of a section).
+export struct LauncherTile {
+    name: string,
+    accent: color,
+    icon-id: int,
+    idx: int,
+    present: bool,
+}
+
+// One launcher row: either a section header, or a pair of tiles (b may be a
+// spacer). Rust chunks each section's apps two-per-row.
+export struct LauncherRow {
+    is-header: bool,
+    header: string,
+    a: LauncherTile,
+    b: LauncherTile,
+}
 
 // A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS order.
 component AppIcon {
@@ -113,6 +135,13 @@ component AppIcon {
         Rectangle { x: 31px; y: 11px; width: 6px;  height: 2px;  border-radius: 1px; background: root.tint; }
         Rectangle { x: 31px; y: 19px; width: 6px;  height: 2px;  border-radius: 1px; background: root.tint; }
     }
+    // 13 — Theme: a 2x2 swatch grid (the picker's schemes) at descending alpha.
+    if root.id == 13: Rectangle {
+        Rectangle { x: 4px;  y: 4px;  width: 17px; height: 17px; border-radius: 4px; background: root.tint; }
+        Rectangle { x: 25px; y: 4px;  width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.75); }
+        Rectangle { x: 4px;  y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.5); }
+        Rectangle { x: 25px; y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.3); }
+    }
 }
 
 // One big app tile: icon over label. Carries its launch idx.
@@ -160,6 +189,9 @@ component SectionHeader {
 
 export component LauncherOverlay {
     callback launch-app(int);
+    // Rows built from the app REGISTRY in Rust (build_scene). Section display
+    // order + two-per-row chunking are done there; this just lays them out.
+    in property <[LauncherRow]> rows;
 
     // Scrim (watchface faintly behind).
     Rectangle { width: 100%; height: 100%; background: #05080aF2; }
@@ -173,53 +205,42 @@ export component LauncherOverlay {
         x: 22px; y: 96px;
         width: parent.width - 44px;
         height: parent.height - 112px;
-        // Content height = 3 section headers (30px) + 7 tile rows (116px) + 9
-        // inter-item gaps (12px) = 1010px. The old 900px clipped the last
-        // (SYSTEM Energy/Climate) row ~110px below the scroll range, so it was
-        // unreachable. +20px bottom margin so the last row isn't flush.
-        viewport-height: 1030px;
-        VerticalLayout {
+        // Viewport auto-sizes to the content (headers 30px + tile rows 116px +
+        // 12px gaps), so the last SYSTEM row is always reachable regardless of
+        // how many apps the registry defines. +20px bottom margin.
+        viewport-height: content-col.preferred-height + 20px;
+        content-col := VerticalLayout {
             spacing: 12px;
-            // AUDIO first so Voice/Sound are reachable the instant the launcher
-            // opens — no scroll (on-glass the Flickable scroll is flaky and JP
-            // couldn't reach the bottom SYSTEM row). idx unchanged (11/12).
-            SectionHeader { title: "AUDIO"; }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Voice";       accent: #a78bfa; icon-id: 7; idx: 11; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "Sound";       accent: #4fd6ff; icon-id: 8; idx: 12; launch(i) => { root.launch-app(i); } }
-            }
-            SectionHeader { title: "GAMES"; }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Snake";       accent: #35e0b0; icon-id: 0; idx: 0; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "World Snake"; accent: #00ff80; icon-id: 1; idx: 1; launch(i) => { root.launch-app(i); } }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "2048";        accent: #f0d000; icon-id: 2; idx: 2; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "Tetris";      accent: #00d0f0; icon-id: 3; idx: 3; launch(i) => { root.launch-app(i); } }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Flappy Bird"; accent: #ffffff; icon-id: 4; idx: 4; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "Maze (Tilt)"; accent: #8090ff; icon-id: 5; idx: 5; launch(i) => { root.launch-app(i); } }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Hunt";        accent: #ff7a3d; icon-id: 10; idx: 8; launch(i) => { root.launch-app(i); } }
-                Rectangle { }  // spacer keeps the lone tile half-width
-            }
-            SectionHeader { title: "SYSTEM"; }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Settings";    accent: #c0ffc0; icon-id: 6; idx: 6; launch(i) => { root.launch-app(i); } }
-                AppTile { name: "WLED";        accent: Theme.warm; icon-id: 9; idx: 7; launch(i) => { root.launch-app(i); } }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                AppTile { name: "Energy";      accent: #35e0b0; icon-id: 11; idx: 9;  launch(i) => { root.launch-app(i); } }
-                AppTile { name: "Climate";     accent: #ff9d5c; icon-id: 12; idx: 10; launch(i) => { root.launch-app(i); } }
+            // AUDIO section is emitted first by Rust so Voice/Sound are reachable
+            // the instant the launcher opens (on-glass the Flickable scroll is
+            // flaky). Ordering + idx come from the registry.
+            for row in root.rows: Rectangle {
+                height: row.is-header ? 30px : 116px;
+                if row.is-header: SectionHeader {
+                    width: 100%;
+                    title: row.header;
+                }
+                if !row.is-header: HorizontalLayout {
+                    width: 100%;
+                    height: 100%;
+                    spacing: 12px;
+                    AppTile {
+                        name: row.a.name;
+                        accent: row.a.accent;
+                        icon-id: row.a.icon-id;
+                        idx: row.a.idx;
+                        launch(i) => { root.launch-app(i); }
+                    }
+                    if row.b.present: AppTile {
+                        name: row.b.name;
+                        accent: row.b.accent;
+                        icon-id: row.b.icon-id;
+                        idx: row.b.idx;
+                        launch(i) => { root.launch-app(i); }
+                    }
+                    // spacer keeps a lone end-of-section tile half-width
+                    if !row.b.present: Rectangle { }
+                }
             }
         }
     }

@@ -9,7 +9,8 @@ use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::text::{Alignment, Text};
 
-use crate::apps::{App, AppInput, AppResult};
+use crate::apps::{App, AppInput, AppResult, Sfx};
+use crate::drivers::framebuffer::Framebuffer;
 use crate::peripherals::touch::SwipeDirection;
 
 const GRID_SIZE: i32 = 20;
@@ -39,6 +40,7 @@ pub struct SnakeGame {
     time_accum: u32, // ms since last step
     rng_state: u32,
     did_step: bool,
+    sfx_beep: bool, // queued on food-eat, drained by the runner via take_sfx
 }
 
 impl SnakeGame {
@@ -53,6 +55,7 @@ impl SnakeGame {
             time_accum: 0,
             rng_state: 12345,
             did_step: false,
+            sfx_beep: false,
         };
         game.setup();
         game
@@ -70,9 +73,6 @@ impl SnakeGame {
         self.food.x = self.random(GRID_W);
         self.food.y = self.random(GRID_H);
     }
-
-    pub fn score(&self) -> u32 { self.score }
-    pub fn stepped(&self) -> bool { self.did_step }
 
     fn handle_swipe(&mut self, dir: SwipeDirection) {
         self.next_dir = match dir {
@@ -97,6 +97,7 @@ impl App for SnakeGame {
         self.next_dir = Direction::Up;
         self.score = 0;
         self.time_accum = 0;
+        self.sfx_beep = false;
         self.spawn_food();
     }
 
@@ -143,6 +144,7 @@ impl App for SnakeGame {
                     self.len += 1;
                 }
                 self.score += 10;
+                self.sfx_beep = true; // beep on food-eat (drained by take_sfx)
                 self.spawn_food();
             }
 
@@ -156,7 +158,22 @@ impl App for SnakeGame {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    // Snake only repaints on a game step (the old arm gated render on
+    // `stepped()`); `min_flush_ms` stays 0 so a step flushes immediately.
+    fn dirty(&self) -> bool {
+        self.did_step
+    }
+
+    fn take_sfx(&mut self) -> Option<Sfx> {
+        if self.sfx_beep {
+            self.sfx_beep = false;
+            Some(Sfx::Beep)
+        } else {
+            None
+        }
+    }
+
+    fn render(&self, d: &mut Framebuffer) {
         // Clear
         let _ = Rectangle::new(EgPoint::zero(), Size::new(410, 502))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))

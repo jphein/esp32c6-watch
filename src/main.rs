@@ -60,7 +60,7 @@ use crate::apps::settings::SettingsApp;
 use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
-use crate::apps::{App, AppInput, AppResult, AppState};
+use crate::apps::{App, AppInput, AppResult, AppState, Sfx};
 use crate::drivers::co5300::Co5300Display;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
@@ -68,6 +68,7 @@ use crate::net::voice_stt;
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::{fill_beep_buffer, Es8311};
+use crate::peripherals::es7210::Es7210;
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::mic_capture;
@@ -419,8 +420,10 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Speaker amp enable (GPIO6). CRITICAL: keep LOW before the ES8311 is
     // initialized and muted below — a floating I2S line through an enabled
-    // amp produces loud white noise. Raised only for the duration of a beep.
-    let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    // amp produces loud white noise. For the mic-capture verify build the beep
+    // is disabled, so this stays LOW for the whole session (SAFE — never blasts).
+    // Bound (not `_`) so the Output guard holds the pin LOW for the program life.
+    let _amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
 
     // === I2C bus (AXP2101 + FT3168 + PCF85063 + QMI8658) ===
     let i2c = I2c::new(
@@ -526,46 +529,50 @@ async fn main(_spawner: Spawner) -> ! {
     // demand at playback time.
     let _ = audio_codec.shutdown();
 
-    // === I2S TX for beep playback (16kHz stereo 16-bit) ===
-    // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DAC data=GPIO21.
-    // DMA_CH1 — the display QSPI owns DMA_CH0.
-    println!("[AUDIO] Init I2S...");
+    // === I2S FULL-DUPLEX (shared clock) — beep playback + mic capture ===
+    // C6 pins: MCLK=GPIO19, BCLK=GPIO20, LRCK/WS=GPIO22, DSDIN(DAC in)=GPIO23,
+    // ASDOUT(ADC/mic out)=GPIO21. DMA_CH1 — the display QSPI owns DMA_CH0.
+    // signal_loopback=true is the vendor topology via esp-hal's native API: TX and RX
+    // share ONE WS/BCK internally — TX stays master and drives the pins, RX slaves to
+    // TX's clock (ES8311 = external slave). This is what makes the ES8311 ADC actually
+    // clock data onto ASDOUT (a plain RX-master did not; vendor firmware proved the HW
+    // is fine — the topology was the gap).
+    println!("[AUDIO] Init I2S (full-duplex, shared clock)...");
     let i2s_config = I2sConfig::default()
         .with_sample_rate(Rate::from_hz(16000))
-        .with_data_format(DataFormat::Data16Channel16);
+        .with_data_format(DataFormat::Data16Channel16)
+        .with_signal_loopback(true);
     let i2s_periph = I2s::new(peripherals.I2S0, peripherals.DMA_CH1, i2s_config)
         .expect("I2S failed")
         .with_mclk(peripherals.GPIO19);
-    static I2S_TX_DESC: StaticCell<[DmaDescriptor; 8]> = StaticCell::new();
-    // BCLK/WS are driven from the RX side below (RX-master): on esp-hal 1.1.1 the C6 I2S
-    // RX is its own master with its own clock signals I2SI_BCK/I2SI_WS. The mic RX runs
-    // continuously from boot, keeping the ES8311 clocked; TX (beep) shares those physical
-    // pins and its DAC latches DOUT on them. TX keeps only its data-out line here.
+    // TX is the I2S MASTER: it drives the shared BCLK(GPIO20)/WS(GPIO22) + MCLK. A
+    // continuous SILENT circular TX (below) keeps them free-running so the ES8311 ADC
+    // clocks data onto ASDOUT; the RX slaves to this clock via signal_loopback (internal).
+    // A circular TX needs EXACTLY descriptor_count() descriptors for its silence buffer.
+    const TX_SILENCE_LEN: usize = 3 * mic_capture::STEREO_CHUNK; // 3072 bytes → 3 descriptors
+    const TX_CIRC_DESCS: usize =
+        esp_hal::dma::descriptor_count(TX_SILENCE_LEN, esp_hal::dma::CHUNK_SIZE, true);
+    static I2S_TX_DESC: StaticCell<[DmaDescriptor; TX_CIRC_DESCS]> = StaticCell::new();
     let mut i2s_tx = i2s_periph
         .i2s_tx
+        .with_bclk(peripherals.GPIO20) // TX-master BCLK → codec (shared w/ RX via loopback)
+        .with_ws(peripherals.GPIO22)   // TX-master WS/LRCK → codec
         .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
-        .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; 8]));
-    // === I2S RX for mic capture — the SINGLE shared owner (#42 voice + #28 meter) ===
-    // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx).
-    // ROOT-CAUSE FIX (mic read floor / zero usable PCM): the C6 I2S RX is master
-    // with its OWN clock signals I2SI_BCK / I2SI_WS (esp-hal 1.1.1 master.rs:
-    // bclk_rx_signal=I2SI_BCK @2231, ws_rx_signal=I2SI_WS @2241) — NOT the TX
-    // signals (I2SO_BCK/I2SO_WS) routed above — and set_rx_clock (@2029) enables a
-    // separate rx clock module. So RX must drive BCLK/WS itself; otherwise the
-    // ES8311 is unclocked whenever TX (beep) is idle → its ADC never shifts data
-    // out → the RX DMA ring only ever sees a static line → the meter floors. We
-    // therefore route BCLK (GPIO20) + WS (GPIO22) + DIN (GPIO23) on the RX builder.
+        .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; TX_CIRC_DESCS]));
+    // === I2S RX for mic capture (#42 voice + #28 meter) — SLAVE via signal_loopback ===
+    // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx). With
+    // signal_loopback=true the RX shares the TX-master WS/BCK internally (configure()
+    // sets rx_slave_mod + sig_loopback from the Config flag) and just reads DIN(GPIO21)=
+    // ASDOUT — NO with_bclk/with_ws, NO GPIO-matrix hack. This is the ONLY place
+    // I2S0/DMA_CH1 is claimed; voice PTT + the SoundLevel meter subscribe to MIC_CH.
     // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
-    // mic_capture_task drives it via read_dma_circular + poll. This is the ONLY
-    // place I2S0/DMA_CH1 is claimed — both the voice PTT stream and the SoundLevel
-    // meter subscribe to MIC_CH, never re-owning I2S.
+    // mic_capture_task drives it via read_dma_circular + poll.
     //
     // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
-    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds
-    // its walk from chain.last() expecting last.next → first; a padded array (we had
-    // 8, copied from the one-shot TX side) leaves trailing EMPTY descriptors whose
-    // next=null, so the first available() poll derefs null. descriptor_count() gives
-    // the exact count (3 for an 8KB ring @ CHUNK_SIZE=4092) → last is the real wrap.
+    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds its
+    // walk from chain.last() expecting last.next → first; a padded array leaves trailing
+    // EMPTY descriptors whose next=null, so the first available() poll derefs null.
+    // descriptor_count() gives the exact count (3 for the ring @ CHUNK_SIZE=4092).
     const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
         mic_capture::MIC_RING_LEN,
         esp_hal::dma::CHUNK_SIZE,
@@ -574,9 +581,7 @@ async fn main(_spawner: Spawner) -> ! {
     static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
     let i2s_rx = i2s_periph
         .i2s_rx
-        .with_bclk(peripherals.GPIO20) // RX master → ES8311 BCLK
-        .with_ws(peripherals.GPIO22)   // RX master → ES8311 WS/LRCK
-        .with_din(peripherals.GPIO21)  // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
+        .with_din(peripherals.GPIO21) // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
         .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
     // Mic PCM channel (capture task → consumers) + the DMA capture ring.
     // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.
@@ -587,14 +592,54 @@ async fn main(_spawner: Spawner) -> ! {
         mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
             .expect("mic_capture_task token"),
     );
-    println!("[AUDIO] I2S RX (mic) ready on GPIO23");
+    println!("[AUDIO] I2S RX (mic) ready on GPIO21 (DIN <- ES8311 ASDOUT)");
+
+    // === Continuous SILENT full-duplex TX — the clock generator ===
+    // The ES8311 ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
+    // I2S MASTER, our TX must free-run those shared clocks continuously; RX slaves to
+    // them (signal_loopback). We stream a ring of ZEROS forever: the shared BCLK/WS keep
+    // toggling, the ADC keeps clocking real mic data into the RX DMA, and NOTHING audible
+    // ever reaches the amp (amp GPIO6 is held LOW; the data is silence anyway). This is
+    // the SAFE clock source — no tone, no risk of blasting.
+    static TX_SILENCE: StaticCell<[u8; TX_SILENCE_LEN]> = StaticCell::new();
+    let tx_silence: &'static [u8] = TX_SILENCE.init([0u8; TX_SILENCE_LEN]);
+    // Silent-TX clock in a dedicated task that re-arms on CLOCK_REARM (AOD light sleep
+    // clock-gates I2S; the task restarts the DMA after each wake). This produces the
+    // shared MCLK/BCLK/WS the ES7210 mic ADC (I2S slave) needs.
+    _spawner.spawn(
+        mic_capture::silent_clock_task(i2s_tx, tx_silence)
+            .expect("silent_clock_task token"),
+    );
+    println!("[AUDIO] I2S TX silent clock task spawned (full-duplex master, re-arms after sleep)");
+
+    // === ES7210 mic ADC — the ACTUAL microphone codec ===
+    // The mics are wired to the ES7210 (SDOUT1 -> GPIO21), NOT the ES8311. It MUST be
+    // I2C-inited or our RX DIN stays idle → exact zeros. Init AFTER the silent clock is
+    // live so the ES7210 (I2S slave) locks to the SoC's MCLK/BCLK/WS.
+    // Power the mic rail FIRST (AXP2101 ALDO1 @3.3V) — otherwise the mic bias rides on
+    // residual vendor state and a battery-dead cold boot silences the mic. Rail settles
+    // during the 150ms clock delay below.
+    let _ = power.enable_mic_rail();
+    Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
+    let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
+    match mic_adc.init() {
+        Ok(()) => {
+            let g = mic_adc.read_reg(0x43).unwrap_or(0xEE);
+            println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1d)", g);
+        }
+        Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
+    }
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
     let beep_storage = BEEP_BUF.init([0u8; 4000]);
     let beep_len = fill_beep_buffer(beep_storage, 800, 16000, 50);
-    let beep_buf: &'static [u8] = &beep_storage[..beep_len];
-    println!("[AUDIO] I2S OK ({} bytes beep)", beep_len);
+    // Beep buffer kept generated (harmless static) but unused in this verify build —
+    // i2s_tx is consumed by the continuous silent full-duplex TX above, so the snake
+    // "food eaten" beep is disabled here (see below). Restore beeps via the shared TX
+    // stream in v0.6.1.
+    let _beep_buf: &'static [u8] = &beep_storage[..beep_len];
+    println!("[AUDIO] I2S OK ({} bytes beep buf, playback disabled for mic verify)", beep_len);
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
     let mut boot_button = Input::new(
@@ -749,6 +794,9 @@ async fn main(_spawner: Spawner) -> ! {
     // clock; apply default_page so the watch boots where the user left it. Until
     // now this value was written to flash but never read back at boot.
     shell.set_page(watch_cfg.default_page as i32);
+    // Apply the persisted theme scheme (config.rs v3). Records saved before the
+    // theme byte existed default to 0 (Midnight), preserving the shipped look.
+    shell.set_scheme(watch_cfg.theme as i32);
     // LP (low-power RISC-V) core status on the power page. No offload yet
     // (task #24 got a RED verdict), so this is a static availability indicator:
     // the LP core is idle at its ~20MHz clock (HP core runs 160MHz). One-shot.
@@ -845,12 +893,28 @@ async fn main(_spawner: Spawner) -> ! {
     // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
+    // Digital mic-gain index into mic_capture::GAIN_STEPS_* (Sound-app −/+ stepper).
+    // Default 0 dB: the ES7210 analog PGA (36 dB) + the now-explicit ALDO1 mic rail
+    // already give a strong, clean level; digital gain adds NO SNR (it amplifies noise
+    // equally) and was turning residual hiss into audible static. Bump on the Sound app
+    // only if a specific room needs it. (Runtime-only until config reconciliation.)
+    let mut gain_idx: usize = 0;
+    mic_capture::MIC_GAIN_Q8.store(
+        mic_capture::GAIN_STEPS_Q8[gain_idx],
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
     let mut meter_peak = mic_dsp::DBFS_FLOOR;
-    // Voice PTT network-readiness latch: set true when a PTT press arrives before
-    // WiFi+DHCP are up (we show "Connecting…" state 5 instead of a doomed connect),
-    // cleared back to idle ("Hold to talk", state 0) the moment the link comes up.
-    // Only ever gates the Voice-page idle↔connecting display; never holds WiFi.
-    let mut voice_wait_ready = false;
+    // Bar envelope (dBFS): fast attack (jumps to the level instantly), slow
+    // release — so brief speech syllables visibly fill/hold the bar instead of
+    // the raw instantaneous RMS collapsing to -inf between words.
+    let mut meter_env = mic_dsp::DBFS_FLOOR;
+    // Scrolling waveform ring (per-16 ms-window peak, auto-scaled to [0,1]) and a
+    // slowly-decaying reference so quiet speech still fills it while loud events
+    // expand the scale. WAVE_BARS bars ≈ WAVE_BARS×16 ms of history.
+    const WAVE_BARS: usize = 48;
+    let mut wave_ring = [0.0f32; WAVE_BARS];
+    let mut wave_ref = 0.0f32;
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -901,6 +965,14 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(5)
         } else {
             match app_state {
+                // Sound meter + waveform are a live 30 Hz display; pace them
+                // explicitly. (In the grouped arm below, a Sound overlay would
+                // otherwise inherit the underlying page's cadence — often 1 Hz —
+                // so the meter sampled one 16 ms window/sec and read silence.)
+                // 66ms (15Hz): still smooth for a meter/waveform, but halves the
+                // scene-render load that was blocking the executor and starving the
+                // capture DMA (→ gap "spikes" in the waveform + laggy feel at 30Hz).
+                AppState::Sound => Duration::from_millis(66),
                 AppState::Watchface
                 | AppState::Launcher
                 | AppState::Wled
@@ -908,7 +980,7 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Energy
                 | AppState::Climate
                 | AppState::Voice
-                | AppState::Sound => {
+                | AppState::Theme => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -967,6 +1039,15 @@ async fn main(_spawner: Spawner) -> ! {
             let t0 = Instant::now();
             rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
             let cause = wakeup_cause();
+            // Light sleep clock-gated the I2S peripheral, stalling the silent-TX
+            // clock + the mic RX DMA. Re-arm both so the mic recovers on wake
+            // (otherwise the Sound app / Voice read exact zeros after any AOD).
+            mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+            mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+            // The ES7210 is a separate I2C chip (AXP rail) that normally survives
+            // light sleep, but re-init defensively so the mic can never be left dead
+            // after a wake (cheap: it only runs on the ~15s-idle AOD transition).
+            let _ = mic_adc.init();
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
@@ -1573,7 +1654,8 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Energy
             | AppState::Climate
             | AppState::Voice
-            | AppState::Sound => {
+            | AppState::Sound
+            | AppState::Theme => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1587,6 +1669,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Climate
                         | AppState::Voice
                         | AppState::Sound
+                        | AppState::Theme
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -1625,31 +1708,13 @@ async fn main(_spawner: Spawner) -> ! {
                 // back-chevron) back into app_state. The shell owns page/launcher
                 // navigation via swipes internally; WLED is a scene overlay that
                 // shares this Slint branch (no framebuffer of its own).
-                shell.set_launcher_open(app_state == AppState::Launcher);
-                shell.set_wled_open(app_state == AppState::Wled);
-                shell.set_hunt_open(app_state == AppState::Hunt);
-                shell.set_energy_open(app_state == AppState::Energy);
-                shell.set_climate_open(app_state == AppState::Climate);
-                shell.set_voice_open(app_state == AppState::Voice);
-                shell.set_mic_open(app_state == AppState::Sound);
+                // Mirror app_state -> overlay open-flags, feed touch, then
+                // reconcile any swipe-driven close back into app_state. All three
+                // are table-driven (OVERLAYS in slint_shell.rs) so adding an
+                // overlay app doesn't fan out here.
+                shell.mirror_overlays(app_state);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
-                app_state = if shell.launcher_open() {
-                    AppState::Launcher
-                } else if shell.wled_open() {
-                    AppState::Wled
-                } else if shell.hunt_open() {
-                    AppState::Hunt
-                } else if shell.energy_open() {
-                    AppState::Energy
-                } else if shell.climate_open() {
-                    AppState::Climate
-                } else if shell.voice_open() {
-                    AppState::Voice
-                } else if shell.mic_open() {
-                    AppState::Sound
-                } else {
-                    AppState::Watchface
-                };
+                app_state = shell.reconcile_overlay();
 
                 // WLED remote: back-chevron closes; a tapped tile broadcasts a
                 // WiZmote frame over ESP-NOW (reusing the mesh block's broadcast
@@ -1925,67 +1990,82 @@ async fn main(_spawner: Spawner) -> ! {
                 // would cancel that mid-flush and drop the transcript.
                 let voice_pressed = shell.req.voice_ptt_pressed.take();
                 let _ = shell.req.voice_ptt_released.take();
-                // Network readiness for STT: WiFi associated AND DHCP landed (an IPv4
-                // config exists) — the exact precondition `socket.connect()` needs.
-                // Same snapshot the NTP burst gates on (line ~1261); both reads are
-                // non-blocking, so consulting them here NEVER parks the loop.
-                //
-                // This is the deadlock-safe seam: WiFi bring-up is driven by the loop's
-                // WiFi state machine (line ~1162), but `stream_utterance` is join-parked
-                // from INSIDE this loop for the entire PTT hold. If we awaited "WiFi up"
-                // inside the stream, the loop that raises WiFi could never run → wedge.
-                // So the link MUST be confirmed up BEFORE we enter the stream await.
+                // STT needs WiFi associated AND DHCP landed. Pressing before that is up
+                // is the "connect failed" bug — show "Connecting…" and DON'T attempt;
+                // WiFi bring-up keeps running in the loop, so a beat later the next press
+                // streams. (dream/mic-fix predates morpheus's gate; add it here.)
                 let voice_net_ready = wifi_connected && stack.config_v4().is_some();
-                // Waiting-to-talk latch: flip "Connecting…" → "Hold to talk" the instant
-                // the link lands so the user knows they can now talk. Only ever touches
-                // the idle(0)/connecting(5) band — never a live listening/result/error.
-                if app_state == AppState::Voice && voice_wait_ready && voice_net_ready {
-                    shell.set_voice_state(0); // idle: "Hold to talk"
-                    voice_wait_ready = false;
-                    shell.request_redraw();
-                }
-                // PTT pressed before the link is up: a connect() here is the reported
-                // "connect failed" bug. Don't attempt — show "Connecting…" and latch.
-                // WiFi bring-up keeps running in the loop (we did NOT park in a stream),
-                // so a beat later the latch above flips to "Hold to talk" and the next
-                // press streams. No WiFi hold is added here → mesh-restore invariant
-                // (oracle-t10 inv-b) is untouched; the wifi_want block still owns it.
                 if app_state == AppState::Voice && voice_pressed && !voice_net_ready {
                     shell.set_voice_state(5); // connecting (waiting for WiFi/DHCP)
-                    voice_wait_ready = true;
                     shell.request_redraw();
                 }
                 if app_state == AppState::Voice && voice_pressed && voice_net_ready {
                     use core::sync::atomic::Ordering;
-                    // Power the analog mic/ADC path, then arm the capture gate.
-                    let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
-                    // Flush any chunks left buffered by a prior utterance so stale
-                    // audio can't be prepended to this one, then arm + source.
+                    // Mic is the ES7210 (inited at boot + kept alive); just arm the gate.
+                    // Flush stale chunks + reset the live level so the meter starts low.
                     let rx = MIC_CH.receiver();
                     while rx.try_receive().is_ok() {}
+                    mic_capture::MIC_LEVEL.store(mic_dsp::DBFS_FLOOR as i32, Ordering::Relaxed);
                     mic_capture::RECORDING.store(true, Ordering::Relaxed);
                     shell.set_voice_state(1); // listening
+                    shell.set_voice_level(0.0);
+                    shell.render(&mut display); // paint LISTENING ONCE (no repaint during the hold)
                     let mut src = mic_capture::MicPcmSource::new(rx);
 
-                    // Release watcher: poll the INT pin (HIGH = no touch = finger up),
-                    // then clear RECORDING (ends the source) and flip to "sending".
-                    let watch_release = async {
+                    // ONE monitor future runs alongside the stream during the hold. It does
+                    // NOT render (see below) — its only jobs are release-detection + peak-track:
+                    //  detect release from the AUTHORITATIVE I2C finger count — NOT the INT pin.
+                    //  The INT is a data-ready PULSE that goes high the moment a still finger
+                    //  stops generating reports, so the old `touch_int.is_high()` fired ~20ms
+                    //  into a hold → 0.3s truncated captures. REG_FINGER_NUM reflects real
+                    //  contact. Debounced (3 no-finger reads ≈ 180ms) vs transient I2C misreads;
+                    //  a ~20s tick cap backstops a stuck finger / I2C error.
+                    // `touch`/`shell`/`display` are borrowed ONLY here; the stream uses
+                    // `stack`/`src` → no aliasing.
+                    let monitor = async {
+                        let mut up = 0u8;
+                        let mut peak_dbfs = i32::MIN;
+                        let mut ticks: u32 = 0;
                         loop {
-                            if touch_int.is_high() {
-                                break;
+                            // Track the loudest window (for the "too quiet" heuristic).
+                            // CRITICAL: do NOT render here. Painting the Slint scene blocks
+                            // the single-threaded executor for ~tens of ms, starving the
+                            // audio-capture DMA → ring overruns → the recording came back
+                            // truncated with static/glitch "peaks". LISTENING is painted
+                            // ONCE before the join; the live level bar is sacrificed so the
+                            // capture stays clean and full-length. (A live bar can return
+                            // later once capture runs in its own task, not parked here.)
+                            let dbfs = mic_capture::MIC_LEVEL.load(Ordering::Relaxed);
+                            if dbfs > peak_dbfs {
+                                peak_dbfs = dbfs;
                             }
-                            Timer::after(Duration::from_millis(20)).await;
+                            // Authoritative finger-present via I2C (fingers == 0 ⇒ up).
+                            let finger_down = matches!(touch.read(), Ok(Some(_)));
+                            if finger_down {
+                                up = 0;
+                            } else {
+                                up += 1;
+                                if up >= 3 {
+                                    break; // released
+                                }
+                            }
+                            ticks += 1;
+                            if ticks > 330 {
+                                break; // ~20s max-duration cap
+                            }
+                            Timer::after(Duration::from_millis(60)).await;
                         }
                         mic_capture::RECORDING.store(false, Ordering::Relaxed);
-                        shell.set_voice_state(2); // sending (STT round-trip in flight)
+                        shell.set_voice_state(2); // transcribing (STT round-trip in flight)
+                        shell.render(&mut display); // one render AFTER release (capture done → safe)
+                        peak_dbfs
                     };
 
-                    let (result, ()) =
-                        join(voice_stt::stream_utterance(stack, &mut src), watch_release).await;
+                    let (result, peak_dbfs) =
+                        join(voice_stt::stream_utterance(stack, &mut src), monitor).await;
 
-                    // Ensure the gate is down (belt-and-suspenders), then power the mic off.
+                    // Ensure the gate is down (belt-and-suspenders).
                     mic_capture::RECORDING.store(false, Ordering::Relaxed);
-                    let _ = audio_codec.disable_adc();
 
                     match result {
                         Ok(t) if !t.is_empty() => {
@@ -1993,7 +2073,14 @@ async fn main(_spawner: Spawner) -> ! {
                             shell.set_voice_state(3); // result
                         }
                         Ok(_) => {
-                            shell.set_voice_error(""); // → page's "No speech heard"
+                            // 200 + empty text: tell the user WHY so they can act. A low
+                            // peak ⇒ the mic barely heard them (speak up / closer); a
+                            // healthy peak ⇒ audio was fine, Azure just found no words.
+                            if peak_dbfs < -40 {
+                                shell.set_voice_error("Too quiet — speak up");
+                            } else {
+                                shell.set_voice_error(""); // page shows "No speech heard"
+                            }
                             shell.set_voice_state(4);
                         }
                         Err(e) => {
@@ -2004,37 +2091,59 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.request_redraw(); // paint the transcript/error promptly
                 }
 
-                // #28 sound-level meter: drain the SHARED capture → dBFS + peak-hold
-                // on SoundLevel. Non-blocking (unlike the PTT flow, which parks the
-                // loop): update once per tick so the screen stays responsive. Arms
-                // the ADC + METER gate on entry, tears them down on close so the
-                // codec draws ~0mA when the meter isn't open.
+                // #28 sound-level meter: drain the SHARED ES7210 capture → dBFS bar +
+                // peak-hold + scrolling waveform on SoundLevel. Non-blocking (unlike the
+                // PTT flow, which parks the loop): update once per 33 ms tick. Opens the
+                // METER gate on entry (mic is the ES7210, inited at boot), closes on exit.
                 if app_state == AppState::Sound {
                     if !meter_on {
-                        let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
                         mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
                         meter_peak = mic_dsp::DBFS_FLOOR;
+                        meter_env = mic_dsp::DBFS_FLOOR;
+                        wave_ring = [0.0f32; WAVE_BARS];
+                        wave_ref = 0.0;
                         meter_on = true;
                     }
-                    // Drain all buffered chunks; rms the newest for a live meter.
+                    // Drain ALL buffered chunks each 33 ms tick. For each 16 ms window
+                    // compute rms (dBFS, for the meter) and a DC-removed peak (for the
+                    // scrolling waveform); scroll one auto-scaled bar per window.
                     let rx = MIC_CH.receiver();
-                    let mut latest: Option<f32> = None;
+                    let mut latest_dbfs: Option<f32> = None;
+                    let mut got = false;
+                    // Full-scale reference for a quiet room; loud events expand it and
+                    // it decays back so quiet speech re-fills the waveform.
+                    const WAVE_MIN_REF: f32 = 800.0;
                     while let Ok(chunk) = rx.try_receive() {
+                        got = true;
                         let n = chunk.len() / 2;
                         let mut samples = [0i16; mic_capture::MONO_CHUNK / 2];
                         for i in 0..n {
                             samples[i] = i16::from_le_bytes([chunk[2 * i], chunk[2 * i + 1]]);
                         }
-                        latest = Some(mic_dsp::rms_dbfs(&samples[..n]));
+                        let dbfs = mic_dsp::rms_dbfs(&samples[..n]);
+                        let peak = mic_dsp::peak_abs(&samples[..n]) as f32;
+                        latest_dbfs = Some(dbfs);
+                        // Auto-scale + scroll the waveform ring (oldest drops off left).
+                        wave_ref = (wave_ref * 0.90).max(peak).max(WAVE_MIN_REF);
+                        let norm = (peak / wave_ref).clamp(0.0, 1.0);
+                        wave_ring.copy_within(1.., 0);
+                        wave_ring[WAVE_BARS - 1] = norm;
                     }
-                    if let Some(dbfs) = latest {
-                        // Peak-hold with slow decay so it tracks down after a transient.
+                    if let Some(dbfs) = latest_dbfs {
+                        // Bar = fast-attack / slow-release envelope so speech visibly
+                        // fills + holds instead of collapsing between syllables.
+                        const RELEASE_DB: f32 = 1.5; // per 33 ms tick (~45 dB/s)
+                        meter_env = dbfs.max(meter_env - RELEASE_DB).max(mic_dsp::DBFS_FLOOR);
+                        // Peak marker: slower decay so it lingers after a transient.
                         meter_peak = (meter_peak - 0.5).max(dbfs).max(mic_dsp::DBFS_FLOOR);
-                        shell.set_mic_level(dbfs, meter_peak);
+                        shell.set_mic_level(meter_env, meter_peak);
+                    }
+                    if got {
+                        shell.push_mic_waveform(&wave_ring);
                     }
                 } else if meter_on {
+                    // Close the meter gate (ES7210 stays inited; RX idles + discards).
                     mic_capture::METER.store(false, core::sync::atomic::Ordering::Relaxed);
-                    let _ = audio_codec.disable_adc();
                     meter_on = false;
                 }
 
@@ -2104,6 +2213,39 @@ async fn main(_spawner: Spawner) -> ! {
                 if let Some(raw) = shell.req.brightness.take() {
                     brightness = raw;
                     display.set_brightness(raw);
+                }
+                // Sound-app mic-gain stepper: bump the digital-gain index, apply it
+                // live (the capture task reads MIC_GAIN_Q8), refresh the readout.
+                // Read each cell exactly once (take() also clears it).
+                let gain_up = shell.req.mic_gain_up.take();
+                let gain_down = shell.req.mic_gain_down.take();
+                if gain_up || gain_down {
+                    if gain_up {
+                        gain_idx = (gain_idx + 1).min(mic_capture::GAIN_STEPS_Q8.len() - 1);
+                    } else {
+                        gain_idx = gain_idx.saturating_sub(1);
+                    }
+                    mic_capture::MIC_GAIN_Q8.store(
+                        mic_capture::GAIN_STEPS_Q8[gain_idx],
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
+                    shell.request_redraw();
+                }
+                if let Some(scheme) = shell.req.theme.take() {
+                    // The picker already set Theme.scheme for instant preview;
+                    // sync our stored scheme (so a scene resume restores it) and
+                    // persist to flash, edge-triggered like the page/units saves.
+                    shell.set_scheme(scheme);
+                    if watch_cfg.theme != scheme as u8 {
+                        watch_cfg.theme = scheme as u8;
+                        if let Some(off) = config_offset {
+                            match peripherals::config::save(&mut flash, off, &watch_cfg) {
+                                Ok(()) => println!("[CFG] theme {} saved to flash", scheme),
+                                Err(()) => println!("[CFG] theme save failed"),
+                            }
+                        }
+                    }
                 }
                 if shell.req.wifi_toggle.take() {
                     wifi_toggle_request = true;
@@ -2214,7 +2356,6 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_voice_state(0);
                         shell.set_voice_transcript("");
                         shell.set_voice_error("");
-                        voice_wait_ready = false; // drop any stale "Connecting…" latch
                         shell.set_voice_open(true);
                         // STT is WiFi-dependent (HTTP to the LAN bridge). Hold WiFi
                         // up like climate/energy: raise it here, release + restore
@@ -2235,6 +2376,13 @@ async fn main(_spawner: Spawner) -> ! {
                         // MIC_CH → rms_dbfs → dBFS/peak; tears them down on close.
                         shell.set_mic_open(true);
                         app_state = AppState::Sound;
+                    } else if target == AppState::Theme {
+                        // Theme picker: a Slint overlay (scene-resident, no fb, no
+                        // WiFi). Raise it; taps set Theme.scheme for instant preview
+                        // and emit theme-changed (drained above → flash persist).
+                        // Right-swipe closes via the OVERLAYS table (Flag close).
+                        shell.set_theme_open(true);
+                        app_state = AppState::Theme;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -2344,252 +2492,124 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
 
-            AppState::Snake => {
+            // === Framebuffer apps (games + Settings) ===
+            // ONE generic arm for every app whose registry `kind` is Framebuffer.
+            // The per-game arms collapsed into `run_fb_app` (update -> drain sfx ->
+            // render+flush on the app's own `dirty`/`min_flush_ms`). Peripheral
+            // service that can't live behind the trait stays keyed on the state
+            // (Flappy's INT-touch, Settings' cred-save); WorldSnake's ESP-NOW feed
+            // already runs in the per-tick net section above.
+            s if crate::apps::registry::is_framebuffer(s) => {
                 let Some(fb_ref) = fb.as_mut() else {
                     app_state = AppState::Watchface;
                     continue;
                 };
-                let prev_score = snake_game.score();
+
+                // Settings: CONNECT persists creds to flash + (re)starts WiFi.
+                // Kept keyed on the state (flash + radio service), at the same
+                // point as the old Settings arm — behavior-preserving.
+                if s == AppState::Settings {
+                    use crate::peripherals::wifi::WifiState;
+                    if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending
+                    {
+                        let ssid = settings_app.wifi_config.ssid_str();
+                        if ssid.is_empty() {
+                            settings_app.wifi_state = WifiState::Error;
+                        } else {
+                            watch_cfg.ssid.clear();
+                            let _ = watch_cfg.ssid.push_str(ssid);
+                            watch_cfg.pass.clear();
+                            let pw = core::str::from_utf8(
+                                &settings_app.wifi_config.password
+                                    [..settings_app.wifi_config.pass_len],
+                            )
+                            .unwrap_or("");
+                            let _ = watch_cfg.pass.push_str(pw);
+                            match config_offset
+                                .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                            {
+                                Some(Ok(())) => println!("[CFG] credentials saved to flash"),
+                                _ => println!("[CFG] save failed"),
+                            }
+                            station_config = esp_radio::wifi::Config::Station(
+                                StationConfig::default()
+                                    .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
+                                    .with_password(watch_cfg.pass.as_str().into()),
+                            );
+                            wifi_has_creds = true;
+                            radio_started = false;
+                            wifi_connected = false;
+                            ntp_synced = false;
+                            wifi_on_request = true;
+                            settings_connect_pending = true;
+                        }
+                    }
+                }
+
+                // Per-app input shaping: Flappy reads the touch INT for a reliable
+                // held-to-flap signal; Settings taps use the last-known coords (the
+                // tap frame's point may already be None on lift); games ignore touch.
+                let touch = match s {
+                    AppState::Flappy => {
+                        if touch_int.is_low() {
+                            Some(crate::peripherals::touch::TouchPoint {
+                                x: 200,
+                                y: 250,
+                                fingers: 1,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    AppState::Settings => Some(crate::peripherals::touch::TouchPoint {
+                        x: last_touch_x,
+                        y: last_touch_y,
+                        fingers: 1,
+                    }),
+                    _ => None,
+                };
                 let input = AppInput {
-                    touch: None,
+                    touch,
                     swipe: swipe_event,
                     tap: tap_event,
                     accel,
                     dt_ms: dt_ms.max(1),
                 };
-                match snake_game.update(&input) {
-                    AppResult::Continue => {
-                        if snake_game.stepped() {
-                            snake_game.render(fb_ref);
-                            fb_ref.flush(&mut display);
-                            // Beep when food eaten via I2S DMA
-                            if snake_game.score() > prev_score {
-                                // Unmute codec, then raise the amp, then play
-                                let _ = audio_codec.unmute();
-                                delay.delay_millis(2); // let codec stabilize before enabling amp
-                                amp_en.set_high();
-                                if let Ok(transfer) = i2s_tx.write_dma(&beep_buf) {
-                                    let _ = transfer.wait();
-                                }
-                                // Lower amp FIRST, then mute codec to avoid pop
-                                amp_en.set_low();
-                                let _ = audio_codec.mute();
-                            }
-                        }
-                    }
-                    AppResult::Exit => {
+
+                // The one instance-wiring match: state -> concrete app as dyn App.
+                let app: &mut dyn App = match s {
+                    AppState::Snake => &mut snake_game,
+                    AppState::WorldSnake => &mut world_snake,
+                    AppState::Game2048 => &mut game_2048,
+                    AppState::Tetris => &mut tetris_game,
+                    AppState::Flappy => &mut flappy_game,
+                    AppState::Maze => &mut maze_game,
+                    AppState::Settings => &mut settings_app,
+                    // is_framebuffer(s) already gated this arm; anything else is a
+                    // registry/enum mismatch — bail to the watchface.
+                    _ => {
                         app_state = AppState::Watchface;
                         fb = None;
-                        println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
+                        continue;
                     }
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Watchface;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::WorldSnake => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
                 };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                world_snake.update(&input);
-                // Remote peers dead-reckon between our steps, so repaint on a
-                // steady cadence rather than only on local steps.
-                if now >= next_flush {
-                    world_snake.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
+                let (exit, _sfx) =
+                    run_fb_app(app, &input, fb_ref, &mut display, now, &mut next_flush);
+                // Snake food-eat beep (Sfx::Beep) is disabled in this build: i2s_tx is
+                // owned by the continuous silent full-duplex TX (mic_capture::silent_clock_task)
+                // that clocks the ES7210 mic ADC, so it can't also drive one-shot beeps here.
+                // The effect is dropped (_sfx). TODO(v0.6.1): route beeps through the shared TX.
+                // Exit (app-signalled or boot-button) returns to the launcher.
+                // Normalized: Snake used to drop to the watchface (P3 fix — every
+                // game now exits consistently to the launcher).
+                let boot = boot_button.is_low();
+                if exit || boot {
                     app_state = AppState::Launcher;
                     fb = None;
                     println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Game2048 => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                game_2048.update(&input);
-                if swipe_event.is_some() {
-                    game_2048.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Tetris => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                tetris_game.update(&input);
-                if tetris_game.stepped() || swipe_event.is_some() || tap_event {
-                    tetris_game.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Flappy => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let touch_down = touch_int.is_low();
-                let fake_touch = if touch_down {
-                    Some(crate::peripherals::touch::TouchPoint {
-                        x: 200,
-                        y: 250,
-                        fingers: 1,
-                    })
-                } else {
-                    None
-                };
-                let input = AppInput {
-                    touch: fake_touch,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                flappy_game.update(&input);
-                flappy_game.render(fb_ref);
-                if now >= next_flush {
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Maze => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                let input = AppInput {
-                    touch: None,
-                    swipe: swipe_event,
-                    tap: tap_event,
-                    accel,
-                    dt_ms: dt_ms.max(1),
-                };
-                maze_game.update(&input);
-                if now >= next_flush {
-                    maze_game.render(fb_ref);
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(33);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-
-            AppState::Settings => {
-                let Some(fb_ref) = fb.as_mut() else {
-                    app_state = AppState::Watchface;
-                    continue;
-                };
-                // CONNECT pressed in Settings: persist creds to flash and
-                // (re)start WiFi with them.
-                use crate::peripherals::wifi::WifiState;
-                if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending {
-                    let ssid = settings_app.wifi_config.ssid_str();
-                    if ssid.is_empty() {
-                        settings_app.wifi_state = WifiState::Error;
-                    } else {
-                        watch_cfg.ssid.clear();
-                        let _ = watch_cfg.ssid.push_str(ssid);
-                        watch_cfg.pass.clear();
-                        let pw = core::str::from_utf8(
-                            &settings_app.wifi_config.password
-                                [..settings_app.wifi_config.pass_len],
-                        )
-                        .unwrap_or("");
-                        let _ = watch_cfg.pass.push_str(pw);
-                        match config_offset
-                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                        {
-                            Some(Ok(())) => println!("[CFG] credentials saved to flash"),
-                            _ => println!("[CFG] save failed"),
-                        }
-                        station_config = esp_radio::wifi::Config::Station(
-                            StationConfig::default()
-                                .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
-                                .with_password(watch_cfg.pass.as_str().into()),
-                        );
-                        wifi_has_creds = true;
-                        radio_started = false;
-                        wifi_connected = false;
-                        ntp_synced = false;
-                        wifi_on_request = true;
-                        settings_connect_pending = true;
+                    if boot {
+                        Timer::after(Duration::from_millis(200)).await;
                     }
-                }
-                settings_app.update(dt_ms.max(1));
-                if tap_event {
-                    settings_app.handle_tap(last_touch_x, last_touch_y);
-                }
-                if let Ok((Some(tp), _)) = touch.poll() {
-                    last_touch_x = tp.x;
-                    last_touch_y = tp.y;
-                }
-                settings_app.render(fb_ref);
-                if now >= next_flush {
-                    fb_ref.flush(&mut display);
-                    next_flush = now + Duration::from_millis(50);
-                }
-                if boot_button.is_low() {
-                    app_state = AppState::Launcher;
-                    fb = None;
-                    println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    Timer::after(Duration::from_millis(200)).await;
                 }
             }
 
@@ -2604,6 +2624,36 @@ async fn main(_spawner: Spawner) -> ! {
         // pre-dispatch snapshot, not the (possibly mutated) current app_state.
         prev_app_state = dispatched;
     }
+}
+
+/// Generic per-frame driver for a framebuffer app, dispatched through `&mut dyn
+/// App` (object-safe since `App::render` is monomorphized to `Framebuffer`).
+/// Runs `update` → drains any queued [`Sfx`] → renders + flushes when the app is
+/// `dirty` and its `min_flush_ms` cadence has elapsed.
+///
+/// Returns `(exit, sfx)`: `exit` is true when the app's own `update` signalled
+/// `AppResult::Exit` (the boot-button exit stays in the caller's arm — it needs
+/// `.await`); `sfx` is any one-shot effect for the caller to play on the shared
+/// I2S path. This one body replaces the per-game render/flush arms.
+fn run_fb_app(
+    app: &mut dyn App,
+    input: &AppInput,
+    fb: &mut Framebuffer,
+    display: &mut Co5300Display,
+    now: Instant,
+    next_flush: &mut Instant,
+) -> (bool, Option<Sfx>) {
+    let result = app.update(input);
+    let sfx = app.take_sfx();
+    if let AppResult::Exit = result {
+        return (true, sfx);
+    }
+    if app.dirty() && now >= *next_flush {
+        app.render(fb);
+        fb.flush(display);
+        *next_flush = now + Duration::from_millis(app.min_flush_ms() as u64);
+    }
+    (false, sfx)
 }
 
 /// Map a WLED page action id (see ui/slint/wled.slint) to a WiZmote button.

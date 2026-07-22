@@ -151,6 +151,10 @@ impl<I: I2c> Es8311<I> {
         // mean-subtracts, so it is not a DC issue — it's ~30 dB of missing gain).
         // 0x06 = +30 dB (es8311_mic_gain_t code 6), the level esp_codec_dev opens at.
         self.write_reg(0x16, 0x06)?;
+        // ADCDAT source select: 0x00 = ADCDAT_SEL 0 = the REAL ADC output drives ASDOUT
+        // (0x60 = ADCDAT_SEL 6 was the DAC→ASDOUT test loopback). Made explicit so the
+        // mic serial-out carries the true converter regardless of the reset default.
+        self.write_reg(0x44, 0x00)?;
         // NB: deliberately do NOT write reg 0x15 (ADC ramp / dmic-sense). The vendor
         // record path never touches it; leave 0x15 at its reset default.
         Ok(())

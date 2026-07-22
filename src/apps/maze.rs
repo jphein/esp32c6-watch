@@ -10,6 +10,7 @@ use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::geometry::Point as EgPoint;
 
 use crate::apps::{App, AppInput, AppResult};
+use crate::drivers::framebuffer::Framebuffer;
 
 const ROWS: usize = 12;
 const COLS: usize = 10;
@@ -116,7 +117,13 @@ impl App for MazeGame {
         AppResult::Continue
     }
 
-    fn render<D: DrawTarget<Color = Rgb565>>(&self, d: &mut D) {
+    // Ball physics run continuously; repaint on a 30fps cadence (matches the old
+    // maze arm's `next_flush + 33ms` gate). `dirty` stays the default `true`.
+    fn min_flush_ms(&self) -> u32 {
+        33
+    }
+
+    fn render(&self, d: &mut Framebuffer) {
         let _ = Rectangle::new(EgPoint::zero(), Size::new(410, 502))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK)).draw(d);
 

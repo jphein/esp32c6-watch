@@ -4,22 +4,27 @@ import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
 import { PowerPage } from "power.slint";
 import { MeshPage } from "mesh.slint";
-import { LauncherOverlay } from "launcher.slint";
+import { LauncherOverlay, LauncherRow, LauncherTile } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel } from "soundlevel.slint";
+import { ThemeOverlay } from "theme_overlay.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
-export { PeerRow, ClimateCard }
+// LauncherRow/LauncherTile likewise: slint_shell.rs builds them from the
+// app registry and pushes them into `launcher-rows`.
+// `Theme` is re-exported too so Rust can drive the scheme selector via
+// `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
+export { PeerRow, ClimateCard, LauncherRow, LauncherTile, Theme }
 
 export component WatchShell inherits Window {
     width: 410px;
     height: 502px;
-    background: #000000;
+    background: Theme.bg;
 
     // --- clock ---
     in property <string> time-text: "--:--";
@@ -82,6 +87,8 @@ export component WatchShell inherits Window {
     // --- paging / modes ---
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
+    // Launcher tiles, built from the app registry in slint_shell.rs (build_scene).
+    in property <[LauncherRow]> launcher-rows: [];
     // WLED remote overlay (a launcher app that lives in the scene, not the fb).
     in-out property <bool> wled-open: false;
     in property <string> wled-status: "";
@@ -123,6 +130,15 @@ export component WatchShell inherits Window {
     in-out property <bool> mic-open: false;
     in property <float> mic-dbfs: -60;
     in property <float> mic-peak: -60;
+    // Scrolling waveform: one amplitude per 16 ms window, [0,1], oldest first.
+    in property <[float]> mic-waveform: [];
+    // Mic digital-gain (0..+18 dB) shown on the Sound app; stepped by its buttons.
+    in property <int> mic-gain-db: 0;
+    // Theme picker overlay: scheme swatches. Opened by the launcher (plugin
+    // registry); `theme-changed(int)` carries the new scheme index to Rust for
+    // flash persistence (the tile also sets Theme.scheme directly for instant
+    // preview). Right-swipe / chevron closes.
+    in-out property <bool> theme-open: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
 
@@ -145,16 +161,20 @@ export component WatchShell inherits Window {
     callback climate-closed();             // back-chevron / right-swipe → mesh
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
+    callback mic-gain-down();      // Sound app − : lower digital mic gain
+    callback mic-gain-up();        // Sound app + : raise digital mic gain
+    callback theme-changed(int);   // Theme picker → new scheme index (Rust persists)
 
     in-out property <float> brightness: 0.8;
 
-    // True-black AMOLED background. A dark diagonal gradient across near-blacks
-    // bands badly on this panel's software renderer (RGB565, no dithering), so
-    // the field is solid #000000 — crisp, self-emissive-black, battery-optimal.
-    // The teal brand accent lives in the content, not the backdrop.
+    // Page backdrop. On the dark schemes (Midnight/Amber/Violet) `Theme.bg` is
+    // solid #000000 — crisp, self-emissive-black, battery-optimal on this
+    // RGB565 software renderer (a near-black gradient bands badly, so no
+    // gradient). On Paper it's the warm off-white. The brand accent lives in the
+    // content, not the backdrop.
     Rectangle {
         width: 100%; height: 100%;
-        background: #000000;
+        background: Theme.bg;
     }
 
     pages := Rectangle {
@@ -336,6 +356,7 @@ export component WatchShell inherits Window {
     // Rendered below the AOD overlay so AOD still wins when both are visible.
     if root.launcher-open: LauncherOverlay {
         width: 100%; height: 100%;
+        rows: root.launcher-rows;
         launch-app(idx) => { root.launch-app(idx); }
     }
 
@@ -402,6 +423,17 @@ export component WatchShell inherits Window {
         width: 100%; height: 100%;
         mic-dbfs: root.mic-dbfs;
         mic-peak: root.mic-peak;
+        mic-waveform: root.mic-waveform;
+        gain-db: root.mic-gain-db;
+        gain-down => { root.mic-gain-down(); }
+        gain-up => { root.mic-gain-up(); }
+    }
+
+    // ==================== Theme picker overlay ====================
+    if root.theme-open: ThemeOverlay {
+        width: 100%; height: 100%;
+        changed(n) => { root.theme-changed(n); }
+        close => { root.theme-open = false; }
     }
 
     // ==================== AOD overlay ====================

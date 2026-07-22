@@ -38,6 +38,24 @@ impl<I: I2c> Axp2101Power<I> {
         self.i2c.write(AXP2101_ADDR, &[REG_ADC_ENABLE, 0b0001_1101])
     }
 
+    fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), I::Error> {
+        self.i2c.write(AXP2101_ADDR, &[reg, val])
+    }
+
+    /// Power the microphone rail: AXP2101 **ALDO1 @ 3.3V** (regs 0x92 voltage, 0x90
+    /// enable bit0). The vendor board file powers the mics from ALDO1; our firmware
+    /// otherwise never enables any LDO, so the ES7210 mic bias has been riding on
+    /// *residual* rail state left on by a prior vendor flash (the PMIC keeps rail
+    /// state across SoC resets) — a battery-dead cold boot would leave it off and the
+    /// mic would go silent again. Read-modify-write the enable reg so we do NOT
+    /// disturb the display/touch rails also controlled there. Idempotent; call once
+    /// at boot before the ES7210 init.
+    pub fn enable_mic_rail(&mut self) -> Result<(), I::Error> {
+        self.write_reg(0x92, 0x1C)?; // ALDO1 = 3.3V : (3300-500)/100 = 28 = 0x1C
+        let en = self.read_reg(0x90)?;
+        self.write_reg(0x90, en | 0x01) // set ALDO1 enable, preserve other rails
+    }
+
     pub fn read_chip_id(&mut self) -> Result<u8, I::Error> {
         self.read_reg(REG_IC_TYPE)
     }
