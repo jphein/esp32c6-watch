@@ -3,6 +3,7 @@
 // I2C address 0x6B
 
 use embedded_hal::i2c::I2c;
+use esp_hal::delay::Delay;
 
 const QMI8658_ADDR: u8 = 0x6B;
 
@@ -43,9 +44,11 @@ const CTRL7_GYRO_EN: u8 = 0x02;
 const CTRL8_PEDO_EN: u8 = 0x10;
 
 // Max STATUSINT polls while waiting for a CTRL9 command to complete.
-// Each poll is a blocking I2C read (~0.1 ms at 400 kHz), so this bounds
-// the wait to roughly 200 ms without needing a delay provider.
-const CTRL9_POLL_LIMIT: u32 = 2000;
+// Each poll now delays 1 ms (matching SensorLib writeCommand's `delay(1)`,
+// SensorQMI8658.hpp ~L1241 assert / ~L1258 clear), so this bounds the
+// CmdDone wait to ~1000 ms — the same budget as SensorLib writeCommand's
+// default `wait_ms = 1000`.
+const CTRL9_POLL_LIMIT: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AccelData {
@@ -163,9 +166,18 @@ impl<I: I2c> Qmi8658Imu<I> {
 
     /// Poll STATUSINT until CmdDone matches `set` (true = wait for the bit
     /// to assert, false = wait for it to clear). Bounded by CTRL9_POLL_LIMIT.
+    ///
+    /// Mirrors SensorLib's writeCommand poll loop (SensorQMI8658.hpp: the
+    /// assert wait ~L1236-1244, the clear wait ~L1250-1260) — read STATUSINT,
+    /// then `delay(1)` (1 ms) before re-checking. That 1 ms settling delay
+    /// between polls is the robustness fix: the chip needs real wall-clock
+    /// time to process the CTRL9 command and toggle CmdDone, which the old
+    /// tight I2C poll (zero delay) never reliably gave it.
     fn wait_cmd_done(&mut self, set: bool) -> Result<bool, I::Error> {
+        let delay = Delay::new();
         for _ in 0..CTRL9_POLL_LIMIT {
             let s = self.read_reg(REG_STATUSINT)?;
+            delay.delay_millis(1);
             if ((s & STATUSINT_CMD_DONE) != 0) == set {
                 return Ok(true);
             }
