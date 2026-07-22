@@ -68,6 +68,7 @@ use crate::net::voice_stt;
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::{fill_beep_buffer, Es8311};
+use crate::peripherals::es7210::Es7210;
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::mic_capture;
@@ -434,6 +435,20 @@ async fn main(_spawner: Spawner) -> ! {
     .with_scl(peripherals.GPIO7);
     let i2c_ref = RefCell::new(i2c);
 
+    // [I2CSCAN] TEMP: probe the bus (non-destructive 1-byte reads) to confirm the
+    // ES7210 mic-ADC address (strap-selectable 0x40-0x43) alongside ES8311 (0x18),
+    // AXP2101 (0x34), FT3168, PCF85063 (0x51), QMI8658 (0x6b). Strip pre-v0.6.1.
+    {
+        use embedded_hal::i2c::I2c as _;
+        for addr in 0x08u8..=0x77 {
+            let mut b = [0u8; 1];
+            if RefCellDevice::new(&i2c_ref).read(addr, &mut b).is_ok() {
+                println!("[I2CSCAN] ACK 0x{:02x}", addr);
+            }
+        }
+        println!("[I2CSCAN] done");
+    }
+
     // === Power (read-mostly: rails left as the bootloader configured them) ===
     let mut power = Axp2101Power::new(RefCellDevice::new(&i2c_ref));
     let _ = power.enable_adc();
@@ -602,19 +617,31 @@ async fn main(_spawner: Spawner) -> ! {
     // the SAFE clock source — no tone, no risk of blasting.
     static TX_SILENCE: StaticCell<[u8; TX_SILENCE_LEN]> = StaticCell::new();
     let tx_silence: &'static [u8] = TX_SILENCE.init([0u8; TX_SILENCE_LEN]);
-    // Own i2s_tx in a dedicated task that re-arms the circular DMA on CLOCK_REARM.
-    // AOD light sleep clock-gates I2S, so a boot-held transfer would stall on the
-    // first watchface AOD and never recover — the task restarts it after each wake.
+    // Silent-TX clock in a dedicated task that re-arms on CLOCK_REARM (AOD light sleep
+    // clock-gates I2S; the task restarts the DMA after each wake). This produces the
+    // shared MCLK/BCLK/WS the ES7210 mic ADC (I2S slave) needs.
     _spawner.spawn(
         mic_capture::silent_clock_task(i2s_tx, tx_silence)
             .expect("silent_clock_task token"),
     );
     println!("[AUDIO] I2S TX silent clock task spawned (full-duplex master, re-arms after sleep)");
 
-    // The Sound screen (app_state == Sound) and Voice PTT own enable_adc + the
-    // METER/RECORDING gates — no boot-time mic power-up here, so the codec draws
-    // ~0 mA until a mic consumer opens. The silent full-duplex TX above keeps the
-    // shared clock free-running regardless.
+    // === ES7210 mic ADC — the ACTUAL microphone codec ===
+    // The mics are wired to the ES7210 (SDOUT1 -> GPIO21), NOT the ES8311. It MUST be
+    // I2C-inited or our RX DIN stays idle → exact zeros. Init AFTER the silent clock is
+    // live so the ES7210 (I2S slave) locks to the SoC's MCLK/BCLK/WS.
+    Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
+    let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
+    match mic_adc.init() {
+        Ok(()) => {
+            let g = mic_adc.read_reg(0x43).unwrap_or(0xEE);
+            println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1a)", g);
+        }
+        Err(_) => println!("[ES7210] init FAILED (I2C) — check [I2CSCAN] for addr 0x40"),
+    }
+
+    // Boot METER on so [MICHEX] streams for self-verify (TEMP — strip pre-v0.6.1).
+    mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
 
     // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
     static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
@@ -1013,6 +1040,10 @@ async fn main(_spawner: Spawner) -> ! {
             // (otherwise the Sound app / Voice read exact zeros after any AOD).
             mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
             mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+            // The ES7210 is a separate I2C chip (AXP rail) that normally survives
+            // light sleep, but re-init defensively so the mic can never be left dead
+            // after a wake (cheap: it only runs on the ~15s-idle AOD transition).
+            let _ = mic_adc.init();
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
@@ -2027,7 +2058,10 @@ async fn main(_spawner: Spawner) -> ! {
                 // codec draws ~0mA when the meter isn't open.
                 if app_state == AppState::Sound {
                     if !meter_on {
-                        let _ = audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN);
+                        match audio_codec.enable_adc(mic_capture::MIC_PGA_GAIN) {
+                            Ok(()) => println!("[MICDIAG] app enable_adc Ok"),
+                            Err(_) => println!("[MICDIAG] app enable_adc ERR (I2C write failed)"),
+                        }
                         mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
                         meter_peak = mic_dsp::DBFS_FLOOR;
                         meter_env = mic_dsp::DBFS_FLOOR;
