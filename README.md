@@ -30,10 +30,13 @@ The renderer streams two-line RGB565 strips (~1.6 KB) straight to panel GRAM, so
 - **SMOLv1 ESP-NOW mesh** — routerless fleet networking (`HELLO`/`ACK`/`TIME`/`CFG`/`RELAY` frames). Loop-free time authority: the watch runs its own NTP and both adopts time from and serves it to the fleet.
 - **Seven-app launcher** — six `embedded-graphics` games (Snake, World Snake, 2048, Tetris, Flappy Bird, a tilt-controlled Maze) plus an on-device **Settings** app with a T9 keyboard for entering WiFi credentials at runtime.
 - **Connectivity** — WiFi STA with NTP, a BLE GATT server ([`trouble-host`](https://github.com/embassy-rs/trouble)), MQTT → Home Assistant, and a live **weather** fetch.
+- **Voice & audio** — an **AUDIO** launcher section (Voice / Sound tiles). **Voice push-to-talk** streams held-button capture over WiFi to a LAN STT gateway (gated on WiFi + DHCP ready), and speaker **playback** (beep) is audible. *Live mic capture from the ES7210 is [in progress](#status--roadmap).*
 - **Pedometer** — hardware step counting on the QMI8658 IMU's dedicated engine (keeps counting while the IMU is otherwise idle).
 - **Power management** — CPU clock control, live per-subsystem current estimation, battery monitoring, and a brightness slider.
 - **OTA updates** — HTTP over-the-air firmware into an A/B partition layout.
 - **`defmt-rtt` debug** — feature-gated structured logging over an RTT channel (probe-rs), off by default.
+
+*Also landing (in progress):* a **multi-theme system** — 4 schemes (Midnight / Paper / Amber / Violet) plus a runtime picker — and a **plugin/app registry** that makes each launcher app a single registration. See [Status & roadmap](#status--roadmap).
 
 Radios (WiFi/BLE) are **off at boot** and toggled from the watchface.
 
@@ -47,7 +50,7 @@ Radios (WiFi/BLE) are **off at boot** and toggled from the watchface.
 | **Display** | CO5300 AMOLED · 410×502 · QSPI with DMA |
 | **Touch** | FT3168 capacitive controller (I²C) |
 | **IMU** | QMI8658 6-axis accel + gyro, with a hardware pedometer engine |
-| **Audio** | ES8311 codec over I²S |
+| **Audio** | **out:** ES8311 mono speaker/playback codec (U1, I²C `0x18`) · **in:** ES7210 4-channel mic ADC (U8, I²C `0x40`) — both on one shared I²S bus |
 | **Radios** | WiFi 6 (2.4 GHz) · Bluetooth 5 LE · native 802.15.4 (Zigbee/Thread) |
 | **Flash** | 16 MB · A/B OTA partition layout |
 | **Power** | battery-backed RTC · CPU clock scaling |
@@ -60,8 +63,12 @@ Radios (WiFi/BLE) are **off at boot** and toggled from the watchface.
 | Shared I²C | I²C | `SDA` GPIO8 · `SCL` GPIO7 |
 | FT3168 touch | I²C @ `0x38` | `INT` GPIO15 · `RST` GPIO10 |
 | QMI8658 IMU | I²C @ `0x6B` | *(shared I²C bus)* |
-| RTC | I²C @ `0x51` | *(shared I²C bus)* |
-| ES8311 audio | I²S | `MCLK` GPIO19 · `BCLK` GPIO20 · `LRCK` GPIO22 · `DAC` GPIO21 · `ADC` GPIO23 · amp-enable GPIO6 |
+| RTC (PCF85063) | I²C @ `0x51` | *(shared I²C bus)* |
+| Shared I²S clocks | I²S | `MCLK` GPIO19 · `BCLK/SCLK` GPIO20 · `WS/LRCK` GPIO22 · speaker amp-enable GPIO6 |
+| ES8311 speaker DAC | I²S + I²C @ `0x18` | `DSDIN` GPIO23 — playback data out (SoC → codec) |
+| ES7210 mic ADC | I²S + I²C @ `0x40` | `SDOUT1` GPIO21 — capture data in (ES7210 → SoC, via `R47`) |
+
+> **Audio topology:** playback and capture are **two different chips** sharing one I²S clock domain. The **ES8311** (U1) is the speaker/playback codec — the SoC sends DAC data to it on `DSDIN`/GPIO23. The two onboard MEMS mics (MIC1/MIC2) are analog inputs to a **separate ES7210** 4-channel ADC (U8), whose `SDOUT1` drives the SoC on GPIO21. The ES8311's own ADC is **not** wired to the SoC. *(Verified against the V1.0 schematic, the Waveshare `xiaozhi` vendor sources, and the vendor firmware image.)*
 
 ### Flash layout (`partitions.csv`)
 
@@ -114,8 +121,15 @@ Core stack: `esp-hal` ~1.1 · `esp-rtos` 0.3 · `esp-radio` 0.18 (wifi/ble/coex/
 
 ## Status & roadmap
 
-- ✅ **Shipped (v0.2.0):** Slint UI shell (5-page carousel, launcher, AOD, Mesh Familiar), on-demand framebuffer, SMOLv1 mesh, games, weather, pedometer, BLE, OTA, `defmt-rtt` debug.
-- 🔭 **Planned:** **Radio Scan** — a passive 802.15.4 monitor (Zigbee/Thread PAN IDs, channels, RSSI) as a dedicated mode that tears the mesh down first, since all three radios share one PHY. **Mic capture** — audio input from the ES8311 codec over I²S RX to drive a live dB meter.
+- ✅ **Shipped (through v0.6.0):**
+  - *v0.2.0* — Slint UI shell (5-page carousel, launcher, AOD, Mesh Familiar), on-demand framebuffer, SMOLv1 mesh, games, weather, pedometer, BLE, OTA, `defmt-rtt` debug.
+  - *v0.4.0* — light-sleep AOD, WLED WiZmote remote, RSSI treasure-hunt game, home-energy screen, C6 die-temperature, workspace split into host-tested `no_std` crates.
+  - *v0.6.0* — **voice push-to-talk** (WiFi-ready-gated capture streamed to a LAN STT gateway), **speaker playback** fixed (beep audible), **touch responsiveness** (non-blocking DMA panel flush un-starves touch), launcher scroll fix + an **AUDIO** launcher section (Voice / Sound tiles), Dependabot, and the esp-rs stack on the latest stable.
+- 🚧 **In progress:**
+  - **Mic capture** — a live dB meter / voice capture fed by the **ES7210** 4-channel mic ADC over I²S RX. The ES7210 driver is being implemented (the ADC needs its own I²C init before it drives `SDOUT1`); the ES8311 handles playback only.
+  - **Multi-theme system** — 4 schemes (Midnight / Paper / Amber / Violet) with a runtime picker (`feat/theme-system`; a live preview is on the [showcase site](https://jphein.github.io/esp32c6-watch/theme-preview.html)).
+  - **Plugin / app registry** — a single-registration source of truth for launcher apps ([PR #9](https://github.com/jphein/esp32c6-watch/pull/9)).
+- 🔭 **Planned:** **Radio Scan** — a passive 802.15.4 monitor (Zigbee/Thread PAN IDs, channels, RSSI) as a dedicated mode that tears the mesh down first, since all three radios share one PHY.
 
 ## Credits
 
