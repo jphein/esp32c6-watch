@@ -135,6 +135,13 @@ component AppIcon {
         Rectangle { x: 31px; y: 11px; width: 6px;  height: 2px;  border-radius: 1px; background: root.tint; }
         Rectangle { x: 31px; y: 19px; width: 6px;  height: 2px;  border-radius: 1px; background: root.tint; }
     }
+    // 13 — Theme: a 2x2 swatch grid (the picker's schemes) at descending alpha.
+    if root.id == 13: Rectangle {
+        Rectangle { x: 4px;  y: 4px;  width: 17px; height: 17px; border-radius: 4px; background: root.tint; }
+        Rectangle { x: 25px; y: 4px;  width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.75); }
+        Rectangle { x: 4px;  y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.5); }
+        Rectangle { x: 25px; y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.3); }
+    }
 }
 
 // One big app tile: icon over label. Carries its launch idx.

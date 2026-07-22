@@ -87,7 +87,7 @@ export component ClimateOverlay {
     // even when selected-index is -1 (list mode); the layer is just invisible then.
     property <int> di: clamp(root.selected-index, 0, max(0, root.cards.length - 1));
 
-    Rectangle { width: 100%; height: 100%; background: #000000; }
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
 
     PageTitle { title: "CLIMATE"; }
 

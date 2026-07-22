@@ -1,0 +1,105 @@
+import { Theme, Palette, PageTitle, BackChevron } from "theme.slint";
+
+// Theme picker overlay. A scene-resident overlay (no framebuffer, no WiFi) —
+// same idiom as the WLED / Energy / Climate overlays. Reached from a launcher
+// tile (wired by the plugin registry). Tapping a tile sets `Theme.scheme`
+// immediately (instant whole-watch preview) AND emits `changed(idx)` so Rust
+// persists the choice to flash.
+
+// One scheme swatch: a LIVE mini watch-face painted in that scheme's OWN colors
+// (Theme.palettes[idx].*), so every tile shows its true look regardless of which
+// scheme is currently active. The active tile carries an accent ring + check.
+component SchemeTile {
+    in property <int> idx;
+    in property <string> name;
+    callback pick(int);
+
+    // This tile's palette (its own colors), and whether it is the active scheme.
+    property <Palette> q: Theme.palettes[root.idx];
+    property <bool> active: Theme.scheme == root.idx;
+
+    width: 168px;
+    height: 150px;
+
+    Rectangle {
+        border-radius: 18px;
+        background: q.bg;
+        border-width: root.active ? 2px : 1px;
+        border-color: root.active ? Theme.accent : Theme.line;
+        clip: true;
+
+        // accent dot (top-right)
+        Rectangle {
+            x: parent.width - self.width - 14px;
+            y: 14px;
+            width: 16px; height: 16px; border-radius: 8px;
+            background: q.accent;
+        }
+        // sample time / date / steps — the text tiers
+        Text { x: 16px; y: 16px; text: "10:42"; color: q.ink; font-size: 30px; font-weight: 700; }
+        Text { x: 16px; y: 58px; text: "TUE 21 JUL"; color: q.soft; font-size: 13px; letter-spacing: 1px; }
+        Text { x: 16px; y: 78px; text: "4,280 STEPS"; color: q.dim; font-size: 11px; letter-spacing: 1px; }
+        // accent gradient bar (the minute-progress / brand cue)
+        Rectangle {
+            x: 16px; y: 100px;
+            width: 100px; height: 8px; border-radius: 4px;
+            background: @linear-gradient(90deg, q.accent2 0%, q.accent 100%);
+        }
+
+        // name footer strip (drawn in this scheme's panel/ink)
+        Rectangle {
+            x: 0; y: parent.height - 36px;
+            width: parent.width; height: 36px;
+            background: q.panel;
+            Rectangle { x: 0; y: 0; width: parent.width; height: 1px; background: q.line; }
+            Text {
+                x: 14px; y: (parent.height - self.height) / 2;
+                text: root.name; color: q.ink; font-size: 14px; font-weight: 600; letter-spacing: 1px;
+            }
+            if root.active: Text {
+                x: parent.width - self.width - 14px;
+                y: (parent.height - self.height) / 2;
+                text: "\u{2713}"; color: Theme.accent; font-size: 16px; font-weight: 700;
+            }
+        }
+
+        TouchArea { clicked => { root.pick(root.idx); } }
+    }
+}
+
+export component ThemeOverlay {
+    callback close();
+    callback changed(int); // new scheme index → Rust persists to flash
+
+    // Opaque backdrop in the ACTIVE scheme (so opening the picker already shows
+    // the current theme's ground behind the tiles).
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    PageTitle { title: "THEME"; }
+    BackChevron { clicked => { root.close(); } }
+
+    // 2×2 grid: two 168px tiles per row, 14px gutters, 30px side margins,
+    // centred under the title. y118 clears the title; the footer note sits below.
+    Rectangle {
+        x: 30px; y: 118px;
+        width: 350px; height: 314px;
+        SchemeTile { x: 0;     y: 0;     idx: 0; name: "MIDNIGHT";
+            pick(i) => { Theme.scheme = i; root.changed(i); } }
+        SchemeTile { x: 182px; y: 0;     idx: 1; name: "PAPER";
+            pick(i) => { Theme.scheme = i; root.changed(i); } }
+        SchemeTile { x: 0;     y: 164px; idx: 2; name: "AMBER";
+            pick(i) => { Theme.scheme = i; root.changed(i); } }
+        SchemeTile { x: 182px; y: 164px; idx: 3; name: "VIOLET";
+            pick(i) => { Theme.scheme = i; root.changed(i); } }
+    }
+
+    // AMOLED power hint — true-black dark schemes draw less than Paper.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 452px;
+        text: "Dark schemes save power on AMOLED";
+        color: Theme.dim;
+        font-size: 13px;
+        letter-spacing: 1px;
+    }
+}

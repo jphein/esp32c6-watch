@@ -126,6 +126,7 @@ pub static REGISTRY: &[AppDescriptor] = &[
     AppDescriptor { state: AppState::Climate,    name: "Climate",     icon_id: 12, accent: 0xff9d5c, section: System, kind: Overlay,     flags: AppFlags::WIFI },    // idx 10
     AppDescriptor { state: AppState::Voice,      name: "Voice",       icon_id: 7,  accent: 0xa78bfa, section: Audio,  kind: Overlay,     flags: AppFlags::WIFI },    // idx 11
     AppDescriptor { state: AppState::Sound,      name: "Sound",       icon_id: 8,  accent: 0x4fd6ff, section: Audio,  kind: Overlay,     flags: AppFlags::NONE },    // idx 12
+    AppDescriptor { state: AppState::Theme,      name: "Theme",       icon_id: 13, accent: 0xa78bfa, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 13
 ];
 
 /// Look up a launchable app's descriptor by state (linear scan, ≤13 entries).

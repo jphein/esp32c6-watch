@@ -101,4 +101,9 @@ pub enum AppState {
     /// peak-hold. Subscribes to the SAME shared `mic_capture_task`/MIC_CH as Voice
     /// (METER gate), draining chunks through `mic_dsp::rms_dbfs`. No WiFi (local).
     Sound,
+    /// Theme picker — a Slint overlay (ThemeOverlay): a 2×2 swatch grid to pick
+    /// the color scheme (Midnight/Paper/Amber/Violet). Scene-resident (no fb, no
+    /// WiFi); the tap sets `Theme.scheme` for instant preview and emits
+    /// `theme-changed` for flash persistence. Right-swipe closes.
+    Theme,
 }

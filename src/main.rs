@@ -794,6 +794,9 @@ async fn main(_spawner: Spawner) -> ! {
     // clock; apply default_page so the watch boots where the user left it. Until
     // now this value was written to flash but never read back at boot.
     shell.set_page(watch_cfg.default_page as i32);
+    // Apply the persisted theme scheme (config.rs v3). Records saved before the
+    // theme byte existed default to 0 (Midnight), preserving the shipped look.
+    shell.set_scheme(watch_cfg.theme as i32);
     // LP (low-power RISC-V) core status on the power page. No offload yet
     // (task #24 got a RED verdict), so this is a static availability indicator:
     // the LP core is idle at its ~20MHz clock (HP core runs 160MHz). One-shot.
@@ -976,7 +979,8 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Hunt
                 | AppState::Energy
                 | AppState::Climate
-                | AppState::Voice => {
+                | AppState::Voice
+                | AppState::Theme => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -1650,7 +1654,8 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Energy
             | AppState::Climate
             | AppState::Voice
-            | AppState::Sound => {
+            | AppState::Sound
+            | AppState::Theme => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -1664,6 +1669,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Climate
                         | AppState::Voice
                         | AppState::Sound
+                        | AppState::Theme
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -2226,6 +2232,21 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
                     shell.request_redraw();
                 }
+                if let Some(scheme) = shell.req.theme.take() {
+                    // The picker already set Theme.scheme for instant preview;
+                    // sync our stored scheme (so a scene resume restores it) and
+                    // persist to flash, edge-triggered like the page/units saves.
+                    shell.set_scheme(scheme);
+                    if watch_cfg.theme != scheme as u8 {
+                        watch_cfg.theme = scheme as u8;
+                        if let Some(off) = config_offset {
+                            match peripherals::config::save(&mut flash, off, &watch_cfg) {
+                                Ok(()) => println!("[CFG] theme {} saved to flash", scheme),
+                                Err(()) => println!("[CFG] theme save failed"),
+                            }
+                        }
+                    }
+                }
                 if shell.req.wifi_toggle.take() {
                     wifi_toggle_request = true;
                 }
@@ -2355,6 +2376,13 @@ async fn main(_spawner: Spawner) -> ! {
                         // MIC_CH → rms_dbfs → dBFS/peak; tears them down on close.
                         shell.set_mic_open(true);
                         app_state = AppState::Sound;
+                    } else if target == AppState::Theme {
+                        // Theme picker: a Slint overlay (scene-resident, no fb, no
+                        // WiFi). Raise it; taps set Theme.scheme for instant preview
+                        // and emit theme-changed (drained above → flash persist).
+                        // Right-swipe closes via the OVERLAYS table (Flag close).
+                        shell.set_theme_open(true);
+                        app_state = AppState::Theme;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
