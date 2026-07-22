@@ -2464,7 +2464,11 @@ async fn main(_spawner: Spawner) -> ! {
                 // Repaint if the scene is dirty (full-frame, line-streamed).
                 // Skip when a launch just switched us into an app this iteration:
                 // that app already painted its first frame (e.g. Game2048) and the
-                // trailing shell repaint would clobber it.
+                // trailing shell repaint would clobber it. Every scene-resident
+                // overlay must be listed here — Theme included: it paints through
+                // the scene (no framebuffer first-frame), so omitting it left the
+                // picker unpainted on the open-tick and it only appeared once some
+                // later event forced a render (the "Theme slow to load" bug).
                 if matches!(
                     app_state,
                     AppState::Watchface
@@ -2475,6 +2479,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Climate
                         | AppState::Voice
                         | AppState::Sound
+                        | AppState::Theme
                 ) {
                     if screen_state >= 2 {
                         shell.render(&mut display);
