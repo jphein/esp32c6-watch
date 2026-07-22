@@ -15,18 +15,31 @@ import logging
 from aiohttp import web
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
+from .announce import AnnounceQueue
 from .api import (
     APP_ENTRY,
     APP_HASS,
+    APP_QUEUE,
     async_register_routes,
     token_middleware,
 )
-from .const import CONF_PORT, DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_MAX_QUEUE_BYTES,
+    CONF_PORT,
+    DEFAULT_MAX_QUEUE_BYTES,
+    DEFAULT_PORT,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# The speaker capability is an actual HA entity; the climate/energy endpoints
+# are pure HTTP and create none.
+PLATFORMS = [Platform.MEDIA_PLAYER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -38,10 +51,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         port = int(conf.get(CONF_PORT, DEFAULT_PORT))
     except (TypeError, ValueError):
         port = DEFAULT_PORT
+    try:
+        max_queue_bytes = int(conf.get(CONF_MAX_QUEUE_BYTES, DEFAULT_MAX_QUEUE_BYTES))
+    except (TypeError, ValueError):
+        max_queue_bytes = DEFAULT_MAX_QUEUE_BYTES
+
+    # Shared by the media_player (producer) and the /watch/announce handlers
+    # (consumer). Created before the app so the handlers see it immediately.
+    queue = AnnounceQueue(max_queue_bytes)
 
     app = web.Application(middlewares=[token_middleware])
     app[APP_HASS] = hass
     app[APP_ENTRY] = entry
+    app[APP_QUEUE] = queue
     async_register_routes(app)
 
     runner = web.AppRunner(app)
@@ -53,8 +75,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await runner.cleanup()
         raise ConfigEntryNotReady(f"cannot bind 0.0.0.0:{port}: {err}") from err
 
-    hass.data[DOMAIN][entry.entry_id] = runner
+    hass.data[DOMAIN][entry.entry_id] = {"runner": runner, "queue": queue}
     _LOGGER.info("esp32c6_watch: serving watch HTTP on 0.0.0.0:%s", port)
+
+    # The media_player platform reads the queue back out of hass.data on setup.
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Reload (rebind / re-read entity map) when the options flow saves changes.
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
@@ -62,11 +87,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Tear the listener down cleanly."""
-    runner: web.AppRunner | None = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    if runner is not None:
-        await runner.cleanup()
-    return True
+    """Tear the listener + media_player down cleanly."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        if data is not None:
+            runner: web.AppRunner | None = data.get("runner")
+            if runner is not None:
+                await runner.cleanup()
+    return unload_ok
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

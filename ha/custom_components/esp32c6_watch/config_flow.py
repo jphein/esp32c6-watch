@@ -24,12 +24,14 @@ from .const import (
     CONF_CHARGING_ENTITY,
     CONF_CLIMATE_EXCLUDE,
     CONF_GRID_W_ENTITY,
+    CONF_MAX_QUEUE_BYTES,
     CONF_PORT,
     CONF_SOLAR_W_ENTITY,
     CONF_TOKEN,
     DEFAULT_BATTERY_PCT_ENTITY,
     DEFAULT_CLIMATE_EXCLUDE,
     DEFAULT_GRID_W_ENTITY,
+    DEFAULT_MAX_QUEUE_BYTES,
     DEFAULT_PORT,
     DEFAULT_SOLAR_W_ENTITY,
     DOMAIN,
@@ -50,6 +52,18 @@ def _build_schema(defaults: dict[str, Any]) -> vol.Schema:
             CONF_TOKEN, default=defaults.get(CONF_TOKEN, "")
         ): selector.TextSelector(
             selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+        ),
+        vol.Required(
+            CONF_MAX_QUEUE_BYTES,
+            default=defaults.get(CONF_MAX_QUEUE_BYTES, DEFAULT_MAX_QUEUE_BYTES),
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=32768,
+                max=16777216,
+                step=1,
+                mode=selector.NumberSelectorMode.BOX,
+                unit_of_measurement="bytes",
+            )
         ),
         vol.Optional(
             CONF_CLIMATE_EXCLUDE,

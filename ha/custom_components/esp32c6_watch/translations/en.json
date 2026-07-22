@@ -7,6 +7,7 @@
         "data": {
           "port": "HTTP port",
           "token": "Shared secret token (optional)",
+          "max_queue_bytes": "Speaker queue cap (bytes)",
           "climate_exclude": "Excluded climate object ids (comma-separated)",
           "battery_pct_entity": "Battery percentage sensor",
           "solar_w_entity": "Solar power sensor",
@@ -23,10 +24,11 @@
     "step": {
       "init": {
         "title": "ESP32-C6 Watch options",
-        "description": "Change the listener port, shared secret, excluded climate entities, or the energy sensor map. Saving reloads the listener.",
+        "description": "Change the listener port, shared secret, speaker queue cap, excluded climate entities, or the energy sensor map. Saving reloads the listener.",
         "data": {
           "port": "HTTP port",
           "token": "Shared secret token (optional)",
+          "max_queue_bytes": "Speaker queue cap (bytes)",
           "climate_exclude": "Excluded climate object ids (comma-separated)",
           "battery_pct_entity": "Battery percentage sensor",
           "solar_w_entity": "Solar power sensor",

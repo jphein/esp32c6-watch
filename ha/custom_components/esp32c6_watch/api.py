@@ -9,6 +9,10 @@ The JSON shapes are exactly what ``crates/climate-model`` on the watch parses
 (``parse_state`` / ``parse_energy``), plus a transparent ``"id"`` key on each
 climate element. The crate ignores unknown keys, so the extra field is free.
 
+The same app also serves the speaker/announce endpoints the watch pulls TTS
+audio from (``/watch/announce`` + ``/watch/announce/pending``); the PCM is
+produced and queued by ``media_player.py`` / ``announce.py``.
+
 Every handler is wrapped so a bad request can never take the listener down.
 """
 
@@ -24,6 +28,7 @@ from aiohttp import web
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .announce import AnnounceQueue
 from .const import (
     CONF_BATTERY_PCT_ENTITY,
     CONF_CHARGING_ENTITY,
@@ -50,6 +55,7 @@ _TRUTHY = frozenset({"on", "true", "charging", "1", "yes"})
 # Keys stashed on the aiohttp app so the handlers can reach HA + the entry.
 APP_HASS = "esp32c6_watch_hass"
 APP_ENTRY = "esp32c6_watch_entry"
+APP_QUEUE = "esp32c6_watch_queue"
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +69,10 @@ def _conf(request: web.Request) -> dict[str, Any]:
     """Merged config: options win over the initial entry data."""
     entry: ConfigEntry = request.app[APP_ENTRY]
     return {**entry.data, **entry.options}
+
+
+def _queue(request: web.Request) -> AnnounceQueue:
+    return request.app[APP_QUEUE]
 
 
 def _num(value: Any) -> float | None:
@@ -340,10 +350,36 @@ async def handle_version(request: web.Request) -> web.Response:
     )
 
 
+@_safe
+async def handle_announce_pending(request: web.Request) -> web.Response:
+    """GET /watch/announce/pending → {"pending": bool, "bytes": int}.
+
+    A cheap poll the watch hits often to decide whether to fetch audio.
+    """
+    pending, total = _queue(request).pending()
+    return web.json_response({"pending": pending, "bytes": total})
+
+
+@_safe
+async def handle_announce(request: web.Request) -> web.Response:
+    """GET /watch/announce → next queued PCM clip (and dequeue it), or 204.
+
+    Body is raw headerless 16 kHz mono s16le PCM (``application/octet-stream``)
+    — exactly the format the watch feeds its shared I2S TX. ``204 No Content``
+    when the queue is empty.
+    """
+    clip = await _queue(request).get()
+    if clip is None:
+        return web.Response(status=204)
+    return web.Response(body=clip, content_type="application/octet-stream")
+
+
 def async_register_routes(app: web.Application) -> None:
-    """Wire the five endpoints onto the component's aiohttp app."""
+    """Wire the endpoints onto the component's aiohttp app."""
     app.router.add_get("/watch/climate/state", handle_state)
     app.router.add_get("/watch/climate/roster", handle_roster)
     app.router.add_post("/watch/climate/{object_id}/set", handle_set)
     app.router.add_get("/watch/energy", handle_energy)
     app.router.add_get("/watch/version", handle_version)
+    app.router.add_get("/watch/announce/pending", handle_announce_pending)
+    app.router.add_get("/watch/announce", handle_announce)
