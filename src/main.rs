@@ -1051,7 +1051,10 @@ async fn main(_spawner: Spawner) -> ! {
             tick
         };
 
-        if screen_state == 1 {
+        // In debug-console builds, skip AOD light-sleep entirely (fall through to the
+        // console-aware select4 below) so unattended UI tests can drive the watch —
+        // injected commands can't wake the HP core out of `sleep_light`.
+        if screen_state == 1 && !cfg!(feature = "debug-console") {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass):
             // park the HP core in light sleep
             // instead of WFI-idling. Wake on a 60s RTC timer OR touch (GPIO15) OR

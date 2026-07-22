@@ -17,11 +17,12 @@ name = "slint-demo"
 path = "./src/bin/slint_demo.rs"
 
 [features]
-# `debug-console` is ON by default for now (our builds include the UI test
-# automator); drop it from `default` for a release cut later. It reads text
-# commands from the USB-Serial-JTAG RX to drive + measure the UI over serial —
-# see src/debug_console.rs and tools/ui_test.py.
-default = ["debug-console"]
+# `debug-console` is OPT-IN (NOT default): it disables AOD light-sleep and reads
+# USB-Serial-JTAG RX to drive/measure the UI for agent tests — great for testing,
+# but battery-draining for a shipped build. Release cut = default (no console, AOD
+# on). Test builds add `--features debug-console`. See src/debug_console.rs +
+# tools/ui_test.py.
+default = []
 debug-console = ["dep:embedded-io-async"]
 
 [dependencies]
