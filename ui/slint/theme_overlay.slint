@@ -1,4 +1,5 @@
-import { Theme, Palette, PageTitle, BackChevron } from "theme.slint";
+import { Theme, Palette, PageTitle } from "theme.slint";
+import { BackChevron } from "controls.slint";
 
 // Theme picker overlay. A scene-resident overlay (no framebuffer, no WiFi) —
 // same idiom as the WLED / Energy / Climate overlays. Reached from a launcher
@@ -24,8 +25,12 @@ component SchemeTile {
     Rectangle {
         border-radius: 18px;
         background: q.bg;
-        border-width: root.active ? 2px : 1px;
-        border-color: root.active ? Theme.accent : Theme.line;
+        // Pressed feedback: the ring lights in the TILE'S OWN accent on
+        // finger-down (one-frame swap) — then the instant whole-watch theme
+        // switch on release is the big confirmation.
+        border-width: root.active || ta.pressed ? 2px : 1px;
+        border-color: ta.pressed ? q.accent
+            : (root.active ? Theme.accent : Theme.line);
         clip: true;
 
         // accent dot (top-right)
@@ -63,7 +68,7 @@ component SchemeTile {
             }
         }
 
-        TouchArea { clicked => { root.pick(root.idx); } }
+        ta := TouchArea { clicked => { root.pick(root.idx); } }
     }
 }
 

@@ -1,4 +1,5 @@
 import { Theme } from "theme.slint";
+import { PressTile } from "controls.slint";
 
 export component ClockPage {
     in property <string> time-text;
@@ -87,44 +88,46 @@ export component ClockPage {
         letter-spacing: 2px;
     }
 
-    // Interactive chips row: CPU · GYRO · APPS
+    // Interactive chips row: CPU · GYRO · APPS. 44px tall (≥44px floor; was 36
+    // — grew: y402..446 keeps a 2px gap to the page dots at y448 and clears the
+    // steps line above). PressTile (Recipe A) gives every chip the pressed
+    // accent-bg fill + edge ignite; GYRO keeps its persistent active surface
+    // (Theme.track) via the rest-background override — selected ≠ pressed.
     HorizontalLayout {
         x: (parent.width - 330px) / 2;
-        y: 408px;
+        y: 402px;
         width: 330px;
-        height: 36px;
+        height: 44px;
         spacing: 10px;
-        Rectangle {
-            border-radius: 18px; border-width: 1px; border-color: Theme.line;
-            background: Theme.panel;
+        PressTile {
+            border-radius: 22px;
+            clicked => { root.cpu-tap(); }
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 text: root.cpu-text; color: Theme.soft; font-size: 15px;
             }
-            TouchArea { clicked => { root.cpu-tap(); } }
         }
-        Rectangle {
-            border-radius: 18px; border-width: 1px; border-color: Theme.line;
-            background: root.gyro-on ? Theme.track : Theme.panel;
+        PressTile {
+            border-radius: 22px;
+            rest-background: root.gyro-on ? Theme.track : Theme.panel;
+            clicked => { root.gyro-tap(); }
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 text: "GYRO"; color: root.gyro-on ? Theme.accent : Theme.soft;
                 font-size: 15px; letter-spacing: 1px;
             }
-            TouchArea { clicked => { root.gyro-tap(); } }
         }
-        Rectangle {
-            border-radius: 18px; border-width: 1px; border-color: Theme.line;
-            background: Theme.panel;
+        PressTile {
+            border-radius: 22px;
+            clicked => { root.apps-tap(); }
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 text: "APPS"; color: Theme.accent; font-size: 15px;
                 letter-spacing: 1px;
             }
-            TouchArea { clicked => { root.apps-tap(); } }
         }
     }
 

@@ -1,4 +1,5 @@
 import { Theme, PageTitle, ScanRow, ScanChannel } from "theme.slint";
+import { PillButton } from "controls.slint";
 
 // RS5 — standalone Radio Scan screen (passive 802.15.4 / Zigbee-Thread monitor).
 // Overlay-style: RS6 shows it via `if root.scan-open: RadioScanOverlay {}` (same
@@ -69,43 +70,38 @@ export component RadioScanOverlay {
                 }
             }
         }
-        // START SCAN
-        Rectangle {
+        // START SCAN — shared PillButton (Recipe D): pressed inverts to solid
+        // accent with on-accent text.
+        PillButton {
             x: (parent.width - 220px) / 2;
             y: 296px;
             width: 220px;
             height: 48px;
-            border-radius: 24px;
-            border-width: 1px;
-            border-color: Theme.accent;
-            background: Theme.accent-bg;
-            Text {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                text: "START SCAN";
-                color: Theme.accent;
-                font-size: 18px;
-                font-weight: 600;
-                letter-spacing: 2px;
-            }
-            TouchArea { clicked => { root.scan-confirm(); } }
+            text: "START SCAN";
+            text-size: 18px;
+            tracking: 2px;
+            clicked => { root.scan-confirm(); }
         }
-        // CANCEL
+        // CANCEL — hairline border so it LOOKS tappable (was bare text); 44px
+        // tall (touch-overhaul bar, was 40); pressed: panel fill lights.
         Rectangle {
             x: (parent.width - 220px) / 2;
             y: 356px;
             width: 220px;
-            height: 40px;
-            border-radius: 20px;
+            height: 44px;
+            border-radius: 22px;
+            border-width: 1px;
+            border-color: cancel-ta.pressed ? Theme.soft : Theme.line;
+            background: cancel-ta.pressed ? Theme.pressed : transparent;
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 text: "CANCEL";
-                color: Theme.dim;
+                color: cancel-ta.pressed ? Theme.soft : Theme.dim;
                 font-size: 16px;
                 letter-spacing: 2px;
             }
-            TouchArea { clicked => { root.scan-exit(); } }
+            cancel-ta := TouchArea { clicked => { root.scan-exit(); } }
         }
     }
 
@@ -216,21 +212,18 @@ export component RadioScanOverlay {
             Text { horizontal-alignment: center; text: "SCAN ERROR"; color: Theme.warn; font-size: 26px; font-weight: 700; letter-spacing: 3px; }
             Text { horizontal-alignment: center; wrap: word-wrap; text: "The radios could not be restored."; color: Theme.soft; font-size: 16px; }
         }
-        Rectangle {
+        // REBOOT — shared PillButton danger variant (Recipe D): pressed
+        // inverts to solid warn with on-accent text.
+        PillButton {
             x: (parent.width - 200px) / 2;
             y: 336px;
             width: 200px;
             height: 48px;
-            border-radius: 24px;
-            border-width: 1px;
-            border-color: Theme.warn;
-            background: Theme.warn-bg;
-            Text {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                text: "REBOOT"; color: Theme.warn; font-size: 18px; letter-spacing: 3px;
-            }
-            TouchArea { clicked => { root.scan-reboot(); } }
+            danger: true;
+            text: "REBOOT";
+            text-size: 18px;
+            tracking: 3px;
+            clicked => { root.scan-reboot(); }
         }
     }
 }

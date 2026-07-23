@@ -1,0 +1,266 @@
+import { Theme } from "theme.slint";
+
+// ============================================================================
+// Shared interactive component library (design spec 2026-07-23, §5 + §10
+// Phase 0). Every element a finger can touch composes ONE of these instead of
+// re-deriving inline ternaries, so the feedback contract (§3) is enforced in
+// exactly one place per archetype:
+//
+//   REST → PRESSED (bold, token-only, hard 1-frame swap — NO `animate`: at the
+//   sw renderer's 6-11 fps a tween yields 0-1 intermediate frames and queues
+//   wasted full repaints) → DISABLED (opacity 0.4 + TouchArea.enabled: false).
+//
+// Toggles/selectors add a persistent SELECTED state (solid accent), distinct
+// from the momentary pressed state. Touch-target floor: 44px (callers size the
+// components; nothing here shrinks a hit area to make room for pressed chrome).
+// ============================================================================
+
+// --- Recipe A — PressTile -------------------------------------------------
+// Panel surfaces: launcher tiles, WLED tiles, list cards, hunt "next", clock
+// chips. Pressed: fill lights to accent-bg, edge ignites (Theme.accent by
+// default; tiles with their own brand accent pass it via `ignite`). Icon/label
+// tint is unchanged by press — the tile "lights up under the thumb".
+export component PressTile inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <color> ignite: Theme.accent;
+    // Rest fill override for chips that encode state in their surface
+    // (e.g. the GYRO chip shows Theme.track while the gyro streams).
+    in property <color> rest-background: Theme.panel;
+    callback clicked();
+    out property <bool> pressed: ta.pressed;
+
+    border-radius: Theme.r-card;
+    background: ta.pressed ? Theme.accent-bg : root.rest-background;
+    border-width: 1px;
+    border-color: ta.pressed ? root.ignite : Theme.line;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    ta := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    @children
+}
+
+// --- Recipe B — IconButton ------------------------------------------------
+// Glyph-only targets with no panel at rest (chevrons, radio dots, page dots):
+// a pill "halo" of accent-bg appears under the thumb while pressed. Content is
+// the caller's; read `pressed` (e.g. `ib.pressed`) to ignite the glyph.
+export component IconButton inherits Rectangle {
+    in property <bool> enabled: true;
+    callback clicked();
+    out property <bool> pressed: ta.pressed;
+
+    border-radius: min(self.width, self.height) / 2;
+    background: ta.pressed ? Theme.accent-bg : transparent;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    ta := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    @children
+}
+
+// --- Recipe C — Stepper ---------------------------------------------------
+// Repeat-tap ± buttons (setpoint, mic gain). Pressed = FULL INVERT — the
+// boldest 1-frame delta: panel/accent-outline flips to solid accent with the
+// glyph in on-accent (safe on all 4 schemes by the palette contract).
+export component Stepper inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <string> glyph;
+    in property <length> glyph-size: 28px;
+    // Optical vertical correction for the − / + glyphs at large sizes.
+    in property <length> glyph-dy: -2px;
+    callback clicked();
+
+    border-radius: min(self.width, self.height) / 2;
+    background: ta.pressed ? Theme.accent : Theme.panel;
+    border-width: 2px;
+    border-color: Theme.accent;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2 + root.glyph-dy;
+        text: root.glyph;
+        color: ta.pressed ? Theme.on-accent : Theme.accent;
+        font-size: root.glyph-size;
+        font-weight: 700;
+    }
+    ta := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+// --- Recipe D — PillButton (+ danger variant) -------------------------------
+// Primary CTAs and danger actions (reboot). Pressed = invert to the solid edge
+// colour with on-accent text. Hit-pads let a visually-compact button meet the
+// 44px floor without moving neighbours — asymmetric on purpose (e.g. the power
+// page reboot pads up/sideways only, so it can't shadow the page dots below).
+export component PillButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <string> text;
+    in property <length> text-size: 16px;
+    in property <length> tracking: 2px;
+    in property <length> hit-pad-x: 0px;
+    in property <length> hit-pad-top: 0px;
+    in property <length> hit-pad-bottom: 0px;
+    callback clicked();
+    property <color> edge: root.danger ? Theme.warn : Theme.accent;
+
+    border-radius: self.height / 2;
+    background: ta.pressed ? root.edge : (root.danger ? Theme.warn-bg : Theme.accent-bg);
+    border-width: 1px;
+    border-color: root.edge;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.text;
+        color: ta.pressed ? Theme.on-accent : root.edge;
+        font-size: root.text-size;
+        font-weight: 600;
+        letter-spacing: root.tracking;
+    }
+    ta := TouchArea {
+        x: -root.hit-pad-x;
+        y: -root.hit-pad-top;
+        width: parent.width + 2 * root.hit-pad-x;
+        height: parent.height + root.hit-pad-top + root.hit-pad-bottom;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// --- Recipe E — Seg -------------------------------------------------------
+// Segmented-control chip (climate HVAC modes). Momentary press ≠ persistent
+// selection: pressed lights accent-bg, ACTIVE fills solid accent and stays.
+export component Seg inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    callback tapped();
+
+    border-radius: 10px;
+    background: root.active ? Theme.accent
+        : (ta.pressed ? Theme.accent-bg : Theme.track);
+    border-width: 1px;
+    border-color: root.active || ta.pressed ? Theme.accent : Theme.line;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: root.active ? Theme.on-accent : Theme.soft;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 1px;
+    }
+    ta := TouchArea { enabled: root.enabled; clicked => { root.tapped(); } }
+}
+
+// --- Recipe F — SliderControl ----------------------------------------------
+// Continuous drag (brightness). The one place a size change earns its cost:
+// the knob grows + brightens to accent while the pointer is down — the drag
+// itself provides the motion, so still no `animate`.
+export component SliderControl inherits Rectangle {
+    in-out property <float> value: 0.0;
+    callback changed(float);
+    out property <bool> pressed: ta.pressed;
+    height: 40px;
+
+    Rectangle {
+        x: 0; y: (parent.height - self.height) / 2;
+        width: parent.width; height: 10px; border-radius: 5px;
+        background: Theme.track;
+        Rectangle {
+            x: 0; y: 0;
+            width: max(10px, parent.width * root.value);
+            height: parent.height; border-radius: 5px;
+            background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
+        }
+    }
+    Rectangle {
+        x: clamp(root.width * root.value - self.width / 2,
+                 0px, root.width - self.width);
+        y: (parent.height - self.height) / 2;
+        width: ta.pressed ? 32px : 26px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: ta.pressed ? Theme.accent : Theme.ink;
+    }
+    ta := TouchArea {
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down
+                || (ev.kind == PointerEventKind.move && self.pressed)) {
+                root.value = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                root.changed(root.value);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Chrome components composed from the recipes (moved here from theme.slint so
+// the library owns every interactive element; theme.slint keeps the tokens).
+// ============================================================================
+
+// One radio indicator: dot + label, tappable (Recipe B halo + Recipe E active).
+// BIG finger target (78x64): the whole component is the hit area. The visual
+// dot+label sit ~30px down so, placed at shell y=8, they align at ~y38-52 with
+// the battery-pill row; the hit area then spans the top strip (y8..72) — where
+// a finger lands reaching for a top-row toggle (see shell.slint x 22/102/182).
+// Pressed: accent-bg halo + label ignites to accent; the persistent active
+// state keeps the accent dot (selected ≠ pressed).
+export component RadioDot {
+    in property <string> label;
+    in property <bool> active;
+    callback tapped();
+    width: 78px;
+    height: 64px;
+
+    ib := IconButton {
+        width: 100%; height: 100%;
+        clicked => { root.tapped(); }
+        Rectangle {
+            x: 2px;
+            y: 30px;
+            width: 14px; height: 14px; border-radius: 7px;
+            background: root.active ? Theme.accent
+                : (ib.pressed ? Theme.soft : Theme.off-dot);
+        }
+        Text {
+            x: 22px;
+            y: 28px;
+            text: root.label;
+            color: ib.pressed ? Theme.accent
+                : (root.active ? Theme.soft : Theme.faint);
+            font-size: 13px;
+            letter-spacing: 1px;
+        }
+    }
+}
+
+// Shared back-chevron for overlay pages (climate / energy / wled / hunt /
+// voice / sound / theme). One canonical 78x64 finger target, top-left, glyph
+// left-anchored + vertically centred — the single source of truth for chevron
+// placement so overlays can't drift. SELF-POSITIONED: drop
+// `BackChevron { clicked => {...} }` into an overlay and it lands identically
+// every time. Corner-safe: the glyph sits at abs (~22, ~23), inside the ~48px
+// rounded-corner arc. Pressed: accent-bg halo + the ‹ ignites to accent
+// (Recipe B) — all 7 overlays inherit it from this one component.
+export component BackChevron {
+    x: 14px;
+    y: 8px;
+    width: 78px;
+    height: 64px;
+    callback clicked();
+
+    ib := IconButton {
+        width: 100%; height: 100%;
+        clicked => { root.clicked(); }
+        Text {
+            x: 8px;
+            y: (parent.height - self.height) / 2;
+            text: "\u{2039}";
+            color: ib.pressed ? Theme.accent : Theme.soft;
+            font-size: 34px;
+        }
+    }
+}
