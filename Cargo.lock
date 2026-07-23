@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "esp32c6-watch"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "climate-model",
  "critical-section",
@@ -2056,6 +2056,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
  "embedded-io 0.7.1",
+ "embedded-io-async 0.7.0",
  "embedded-storage",
  "esp-alloc",
  "esp-backtrace",
@@ -2964,8 +2965,6 @@ dependencies = [
 [[package]]
 name = "i-slint-renderer-software"
 version = "1.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73496f164f8e471877c35e0fadb996dcc674922712abd9c2be2cbe80c58859bd"
 dependencies = [
  "bytemuck",
  "clru",

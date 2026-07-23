@@ -1,8 +1,9 @@
-// AXP2101 power management — read-only port from waveshare-watch-rs.
+// AXP2101 power management — read-mostly port from waveshare-watch-rs.
 // We deliberately do NOT touch the DCDC/LDO rail configuration: the boot
 // state Waveshare ships already powers the panel, and a wrong rail write
-// can brown-out the board. Only the ADC-enable register is written so
-// battery telemetry reads real values.
+// can brown-out the board. Writes are limited to: the ADC-enable register
+// (telemetry), the ALDO1 mic rail (read-modify-write enable bit only), and
+// the charger profile regs 0x61-0x64 (issue #16, field-masked RMW).
 
 use embedded_hal::i2c::I2c;
 
@@ -54,6 +55,31 @@ impl<I: I2c> Axp2101Power<I> {
         self.write_reg(0x92, 0x1C)?; // ALDO1 = 3.3V : (3300-500)/100 = 28 = 0x1C
         let en = self.read_reg(0x90)?;
         self.write_reg(0x90, en | 0x01) // set ALDO1 enable, preserve other rails
+    }
+
+    /// Configure the battery charger to the vendor's profile (issue #16), ported
+    /// from the vendor board file `esp32-c6-touch-amoled-2.06.cc` Pmic ctor:
+    /// CV 4.10V, precharge 50mA, fast-charge 400mA, termination 25mA.
+    ///
+    /// Read-modify-write each register, masking in ONLY the documented field so
+    /// reserved/adjacent bits keep their reset values. Charger regs 0x61-0x64
+    /// exclusively — the vendor's surrounding DC/LDO rail block (`.cc:32-46`) is
+    /// deliberately NOT ported (see module header + `enable_mic_rail`: a wrong
+    /// rail write can brown out the panel). Idempotent; call once at boot.
+    pub fn configure_charger(&mut self) -> Result<(), I::Error> {
+        // 0x64 CHG_V_CFG, CV[2:0]: 0b010 = 4.10V (vendor `.cc:48`)
+        let v = self.read_reg(0x64)?;
+        self.write_reg(0x64, (v & !0x07) | 0x02)?;
+        // 0x61 IPRECHG[3:0]: 25mA/step -> 0x02 = 50mA (vendor `.cc:50`)
+        let v = self.read_reg(0x61)?;
+        self.write_reg(0x61, (v & !0x0F) | 0x02)?;
+        // 0x62 ICC[4:0]: n<=8 -> n*25mA, n>8 -> 200+(n-8)*100mA -> 0x0A = 400mA
+        // (vendor `.cc:51`: "0x08-200mA, 0x09-300mA, 0x0A-400mA")
+        let v = self.read_reg(0x62)?;
+        self.write_reg(0x62, (v & !0x1F) | 0x0A)?;
+        // 0x63 ITERM[3:0]: 25mA/step -> 0x01 = 25mA (vendor `.cc:52`)
+        let v = self.read_reg(0x63)?;
+        self.write_reg(0x63, (v & !0x0F) | 0x01)
     }
 
     pub fn read_chip_id(&mut self) -> Result<u8, I::Error> {

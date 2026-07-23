@@ -649,6 +649,14 @@ async fn main(_spawner: Spawner) -> ! {
     // residual vendor state and a battery-dead cold boot silences the mic. Rail settles
     // during the 150ms clock delay below.
     let _ = power.enable_mic_rail();
+    // Charger profile (issue #16): CV 4.1V / pre 50mA / CC 400mA / term 25mA —
+    // vendor parity (board .cc:48-52). Field-masked RMW of regs 0x61-0x64 only;
+    // rail enables are untouched (panel brown-out caution in power.rs header).
+    if power.configure_charger().is_ok() {
+        println!("[POWER] charger configured: CV 4.1V, pre 50mA, CC 400mA, term 25mA");
+    } else {
+        println!("[POWER] charger config FAILED (I2C)");
+    }
     Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
     let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
     match mic_adc.init() {

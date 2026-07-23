@@ -1,5 +1,8 @@
 [workspace]
 members = [".", "crates/*"]
+# The vendored Slint renderer fork is a [patch.crates-io] source, not a
+# workspace member — keeps `cargo test --workspace` (host crates) untouched.
+exclude = ["crates/i-slint-renderer-software"]
 
 [package]
 name = "esp32c6-watch"
@@ -129,6 +132,13 @@ slint = { version = "1.17.1", default-features = false, features = [
 
 [build-dependencies]
 slint-build = "1.17.1"
+
+# Vendored fork of Slint's software renderer with ONE local patch: even-grid
+# dirty-region alignment for the CO5300's CASET/RASET window restrictions
+# (issue #18 — Slint 1.17 has no LVGL-rounder equivalent). See the crate's
+# README for the divergence contract; grep `esp32c6-watch LOCAL PATCH`.
+[patch.crates-io]
+i-slint-renderer-software = { path = "crates/i-slint-renderer-software" }
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
