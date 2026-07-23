@@ -62,7 +62,9 @@ else
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
     scp -q "familiar:$ELF_REMOTE" "$TMP/esp32c6-watch.elf"
-    espflash save-image --chip esp32c6 "$TMP/esp32c6-watch.elf" "$TMP/watch.bin"
+    # espflash may be absent from a non-login shell's PATH; fall back to cargo bin.
+    ESPFLASH="$(command -v espflash || echo "$HOME/.cargo/bin/espflash")"
+    "$ESPFLASH" save-image --chip esp32c6 "$TMP/esp32c6-watch.elf" "$TMP/watch.bin"
 
     # 4. Publish the image to the OTA HTTP server.
     scp -q "$TMP/watch.bin" "$OTA_DEST"
