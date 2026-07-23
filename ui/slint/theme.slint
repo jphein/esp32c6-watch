@@ -26,10 +26,10 @@ export struct ScanChannel {
     peak: float,       // peak-hold marker height, 0..1
 }
 
-// One complete color scheme: 18 tokens. Field order mirrors the token roles —
-// background → text tiers → brand → surfaces → state → one-off fills. Exported
-// so the Theme-picker overlay can render each scheme's OWN colors
-// (Theme.palettes[i].*) independent of whichever scheme is currently active.
+// One complete color scheme: 21 tokens. Field order mirrors the token roles —
+// background → text tiers → brand → surfaces → state → one-off fills → pressed
+// feedback. Exported so the Theme-picker overlay can render each scheme's OWN
+// colors (Theme.palettes[i].*) independent of whichever scheme is active.
 export struct Palette {
     bg: color,          // page/overlay opaque background
     scrim: color,       // translucent scrim over content (launcher)
@@ -49,6 +49,18 @@ export struct Palette {
     warn-panel: color,  // warn card/panel
     accent-bg: color,   // tinted fill behind a primary/accent action
     on-accent: color,   // near-black ink/detail on a bright fill (btn text, eyes, pips)
+    // Pressed-feedback fills (touch overhaul): swapped in on TouchArea.pressed —
+    // ONE-FRAME state swaps, never animation loops (the sw renderer's full-frame
+    // budget is ~90-170ms). Dark schemes press BRIGHTER, Paper presses DARKER.
+    // The main recipes (controls.slint) use accent-bg / solid accent / solid
+    // warn for their pressed states (design spec §5); these three are the
+    // NEUTRAL/deep variants: `pressed` is the ghost-button held fill (scan
+    // CANCEL); accent-/warn-pressed are reserved for held states on already-
+    // tinted surfaces (e.g. a future long-press), where a full invert would
+    // swamp adjacent content.
+    pressed: color,        // held fill for neutral/ghost controls (rest = transparent/panel)
+    accent-pressed: color, // held fill for accent surfaces (rest = accent-bg)
+    warn-pressed: color,   // held fill for warn surfaces (rest = warn-bg)
 }
 
 export global Theme {
@@ -80,22 +92,26 @@ export global Theme {
         { bg: #000000, scrim: #05080af2, ink: #f2f5ff, soft: #9fb4d8, dim: #6b7794,
           faint: #55617a, accent: #35e0b0, accent2: #3a7bd5, panel: #101728, line: #2a3550,
           track: #16202f, warn: #ff5566, warm: #ffd166, off-dot: #223048, warn-bg: #200a10,
-          warn-panel: #1a0a0e, accent-bg: #08201a, on-accent: #05100a },
+          warn-panel: #1a0a0e, accent-bg: #08201a, on-accent: #05100a,
+          pressed: #1c2942, accent-pressed: #0f3a2e, warn-pressed: #38121c },
         // 1 — Paper: calm warm off-white (AMOLED-aware — not pure white).
         { bg: #eae7df, scrim: #d8d4c8ee, ink: #21252e, soft: #464e60, dim: #6d7486,
           faint: #a2a7b2, accent: #0e9e77, accent2: #2f6fca, panel: #f5f3ec, line: #d3cec1,
           track: #dcd7ca, warn: #cf3a49, warm: #c0851c, off-dot: #c7c2b5, warn-bg: #f7dfe1,
-          warn-panel: #fbe6e8, accent-bg: #d3f0e6, on-accent: #0a1f16 },
+          warn-panel: #fbe6e8, accent-bg: #d3f0e6, on-accent: #0a1f16,
+          pressed: #dedacc, accent-pressed: #b5e4d2, warn-pressed: #eec3c8 },
         // 2 — Amber: cozy sunset. Warm dark on true-black.
         { bg: #000000, scrim: #0a0602f2, ink: #fdf3e3, soft: #d8b48f, dim: #9c7c5e,
           faint: #6e5a45, accent: #ffb454, accent2: #ff7a3d, panel: #1c1409, line: #3a2c18,
           track: #201810, warn: #ff5566, warm: #ffd166, off-dot: #33261a, warn-bg: #200a10,
-          warn-panel: #1a0a0e, accent-bg: #2a1b08, on-accent: #1a0f02 },
+          warn-panel: #1a0a0e, accent-bg: #2a1b08, on-accent: #1a0f02,
+          pressed: #2b2010, accent-pressed: #46300e, warn-pressed: #38121c },
         // 3 — Violet: nocturne. Cool indigo on true-black.
         { bg: #000000, scrim: #06060af2, ink: #f1eefc, soft: #bcb2e6, dim: #837aa8,
           faint: #5f5880, accent: #a78bfa, accent2: #6366f1, panel: #16121f, line: #2e2842,
           track: #1b1626, warn: #ff5d7a, warm: #ffd166, off-dot: #2a2440, warn-bg: #200a14,
-          warn-panel: #1a0a10, accent-bg: #1a1330, on-accent: #0b0616 },
+          warn-panel: #1a0a10, accent-bg: #1a1330, on-accent: #0b0616,
+          pressed: #221b31, accent-pressed: #2c2151, warn-pressed: #381226 },
     ];
 
     // Active palette — reactive: changing `scheme` re-evaluates this and every
@@ -120,6 +136,32 @@ export global Theme {
     out property <color> warn-panel: p.warn-panel;
     out property <color> accent-bg: p.accent-bg;
     out property <color> on-accent: p.on-accent;
+    out property <color> pressed: p.pressed;
+    out property <color> accent-pressed: p.accent-pressed;
+    out property <color> warn-pressed: p.warn-pressed;
+
+    // --- type scale (design spec §7) ---
+    // Named sizes so screens stop inventing their own. Weights/tracking stay at
+    // the call site (Slint has no composite text style); the SIZE is the token.
+    out property <length> t-display: 84px; // AOD & meter hero numerals
+    out property <length> t-hero: 76px;    // current temp / dBFS heroes
+    out property <length> t-title: 26px;   // PageTitle
+    out property <length> t-value: 22px;   // StatRow values
+    out property <length> t-body: 17px;    // tile labels, body copy
+    out property <length> t-label: 14px;   // field labels, captions
+    out property <length> t-caption: 13px; // honesty notes, hints
+
+    // --- spacing scale (the de-facto grid, named) ---
+    out property <length> sp1: 4px;
+    out property <length> sp2: 8px;
+    out property <length> sp3: 12px;
+    out property <length> sp4: 16px;
+    out property <length> sp5: 22px;
+    out property <length> sp6: 30px;
+
+    // --- radii ---
+    out property <length> r-card: 16px;
+    out property <length> r-chip: 12px;
 }
 
 // One radio indicator: dot + label, tappable.
