@@ -74,8 +74,12 @@ fi
 # 5. RETAINED announce: the watch triggers only if <epoch> > its running
 #    OTA_BUILD (monotonic gate), so re-announces and the post-reboot retained
 #    copy are harmless.
-mosquitto_pub -h "$BROKER_HOST" -p "$BROKER_PORT" \
-    ${MQTT_USER:+-u "$MQTT_USER"} ${MQTT_PASS:+-P "$MQTT_PASS"} \
-    -r -t "$ANNOUNCE_TOPIC" -m "OTA|$EPOCH|$OTA_URL"
+#    Published FROM ubox0 (VLAN-11, same subnet as the broker's reachable leg):
+#    publishing from katana (VLAN-6) connects but stalls mid-handshake
+#    ("Keepalive exceeded") — an asymmetric-routing quirk on the katana→VLAN-11
+#    path. ubox0 already hosts the image, so the announce rides the same ssh.
+ssh ubox0 "mosquitto_pub -h '$BROKER_HOST' -p '$BROKER_PORT' \
+    ${MQTT_USER:+-u '$MQTT_USER'} ${MQTT_PASS:+-P '$MQTT_PASS'} \
+    -r -t '$ANNOUNCE_TOPIC' -m 'OTA|$EPOCH|$OTA_URL'"
 echo "ota_push: retained announce published: OTA|$EPOCH|$OTA_URL"
 echo "ota_push: the watch updates on its next MQTT window (reboot it, or open Climate/Energy)"
