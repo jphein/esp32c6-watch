@@ -981,6 +981,16 @@ async fn main(_spawner: Spawner) -> ! {
     let mut sync_src: &str = "none";
     let mut last_sync = Instant::now();
 
+    // OTA rollback-safety: a freshly-OTA'd image boots "on trial" (PendingVerify
+    // when the bootloader has auto-rollback on). Once the app has run
+    // OTA_HEALTHY_UPTIME without crashing, confirm the slot Valid so the bootloader
+    // keeps it; a bricked image that never reaches that point auto-rolls-back.
+    // `boot_instant` is the health-window start; `ota_marked_valid` is the one-shot
+    // latch. See net::ota_http::mark_valid_if_pending.
+    const OTA_HEALTHY_UPTIME: Duration = Duration::from_secs(10);
+    let boot_instant = Instant::now();
+    let mut ota_marked_valid = false;
+
     loop {
         let touch_held = touch_int.is_low();
         let button_held = boot_button.is_low();
@@ -1466,6 +1476,18 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
             next_ntp_attempt = now + Duration::from_secs(10);
+        }
+
+        // OTA rollback-safety: once the app has stayed alive OTA_HEALTHY_UPTIME
+        // (peripherals up + this loop ticking), confirm the running slot so the
+        // bootloader stops treating a freshly-OTA'd image as on-trial and won't
+        // revert it on the next boot. WiFi-independent (a credential-less watch
+        // still confirms a good image) and one-shot regardless of outcome.
+        if !ota_marked_valid && now.duration_since(boot_instant) >= OTA_HEALTHY_UPTIME {
+            if let Err(e) = crate::net::ota_http::mark_valid_if_pending(&mut flash) {
+                println!("[OTA] mark-valid failed: {e}");
+            }
+            ota_marked_valid = true;
         }
 
         // TIME-SHARE steady state: whenever WiFi is down but the radio is up,
@@ -2648,6 +2670,42 @@ async fn main(_spawner: Spawner) -> ! {
                             ntp_synced = false;
                             wifi_on_request = true;
                             settings_connect_pending = true;
+                        }
+                    }
+
+                    // Update firmware (OTA). One-tick handshake: the on-glass tap
+                    // set `ota_requested` in the app's update() last tick; take it
+                    // here, gate on a baked-in OTA_URL + WiFi ready (associated AND
+                    // DHCP up — the same readiness check voice/NTP use), then
+                    // download -> stage the inactive A/B slot -> reboot to apply.
+                    // A deliberate user action, so blocking this loop for the
+                    // download is fine; kept off the per-tick hot path.
+                    if settings_app.take_ota_request() {
+                        if !crate::net::ota_http::URL_SET {
+                            settings_app.ota_status = "No OTA URL in build";
+                        } else if !(wifi_connected && stack.config_v4().is_some()) {
+                            settings_app.ota_status = "Connect WiFi first";
+                        } else {
+                            // Paint "Updating" before the blocking download —
+                            // run_fb_app won't repaint until ota_update returns
+                            // (or we've already rebooted on success).
+                            settings_app.ota_status = "Updating\u{2026}";
+                            settings_app.render(fb_ref);
+                            fb_ref.flush(&mut display);
+                            match crate::net::ota_http::ota_update(stack, &mut flash).await {
+                                Ok(()) => {
+                                    settings_app.ota_status = "Staged \u{2013} rebooting";
+                                    settings_app.render(fb_ref);
+                                    fb_ref.flush(&mut display);
+                                    println!("[OTA] staged via Settings - rebooting to apply");
+                                    Timer::after(Duration::from_millis(1200)).await;
+                                    esp_hal::system::software_reset();
+                                }
+                                Err(e) => {
+                                    println!("[OTA] failed: {e}");
+                                    settings_app.ota_status = e;
+                                }
+                            }
                         }
                     }
                 }
