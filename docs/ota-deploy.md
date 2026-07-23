@@ -70,3 +70,12 @@ Push a new firmware image to the watch over WiFi instead of USB-flashing.
   and rebuild.
 - Serving the file: any static HTTP server rooted at `/home/jp/watch-ota/` works,
   e.g. `cd /home/jp/watch-ota && python3 -m http.server 8000`.
+
+## ⚠️ USB-flash rule (learned 2026-07-23)
+
+`espflash flash <elf>` **without `--partition-table partitions.csv` silently
+rewrites the DEFAULT factory-only table**, destroying the A/B OTA layout
+(next OTA attempt fails "no otadata partition"). EVERY USB flash of this
+project must pass `--partition-table partitions.csv`. OTA updates
+(`/watch/announce` or the Settings button) never touch the table — only USB
+flashes can break it.
