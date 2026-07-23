@@ -1,4 +1,4 @@
-import { Theme, PageTitle } from "theme.slint";
+import { Theme, PageTitle, BackChevron } from "theme.slint";
 
 // Voice-to-text screen (push-to-talk → stream mic → transcript back). Standalone
 // overlay-style component, like SoundLevel (MC4) / RadioScanOverlay (RS5). Pure
@@ -20,6 +20,10 @@ export component VoicePage {
     in property <string> error-text;
     callback ptt-pressed();
     callback ptt-released();
+    // Back-chevron / right-swipe close (parity with every other overlay). The
+    // right-swipe path is handled in the Rust shell (OVERLAYS table); this is the
+    // visible tap affordance so the screen isn't a gesture-only trap.
+    callback close();
 
     // Push-to-talk button geometry (shared by the circle, pulse, icon, hit area).
     property <length> btn: 148px;
@@ -30,6 +34,11 @@ export component VoicePage {
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
 
     PageTitle { title: "VOICE"; }
+
+    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // 78x64 placement so overlays never drift. Right-swipe also closes (Rust
+    // shell). Sits top-left, clear of the centred PTT button.
+    BackChevron { clicked => { root.close(); } }
 
     // ---------------- state content (above the button) ----------------
     // idle

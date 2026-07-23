@@ -419,6 +419,10 @@ export component WatchShell inherits Window {
         error-text: root.voice-error;
         ptt-pressed => { root.voice-ptt-pressed(); }
         ptt-released => { root.voice-ptt-released(); }
+        // Chevron close: clear the flag directly (same as the Theme overlay and
+        // the right-swipe Flag path in OVERLAYS). reconcile_overlay picks it up
+        // and the Rust loop tears down Voice on the app_state transition.
+        close => { root.voice-open = false; }
     }
 
     // ==================== SoundLevel meter overlay ====================
@@ -430,6 +434,10 @@ export component WatchShell inherits Window {
         gain-db: root.mic-gain-db;
         gain-down => { root.mic-gain-down(); }
         gain-up => { root.mic-gain-up(); }
+        // Chevron close: clear the flag directly (same as Theme + the right-swipe
+        // Flag path in OVERLAYS). The Rust loop tears the meter down on the
+        // app_state transition.
+        close => { root.mic-open = false; }
     }
 
     // ==================== Theme picker overlay ====================
