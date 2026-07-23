@@ -994,6 +994,9 @@ async fn main(_spawner: Spawner) -> ! {
     const OTA_HEALTHY_UPTIME: Duration = Duration::from_secs(10);
     let boot_instant = Instant::now();
     let mut ota_marked_valid = false;
+    // Settings UPDATE-FIRMWARE pending window: set on tap (raising WiFi if it's
+    // down), consumed when WiFi is ready (runs the OTA) or after a 25s timeout.
+    let mut ota_pending_since: Option<Instant> = None;
 
     loop {
         let touch_held = touch_int.is_low();
@@ -2752,17 +2755,33 @@ async fn main(_spawner: Spawner) -> ! {
 
                     // Update firmware (OTA). One-tick handshake: the on-glass tap
                     // set `ota_requested` in the app's update() last tick; take it
-                    // here, gate on a baked-in OTA_URL + WiFi ready (associated AND
-                    // DHCP up — the same readiness check voice/NTP use), then
-                    // download -> stage the inactive A/B slot -> reboot to apply.
-                    // A deliberate user action, so blocking this loop for the
-                    // download is fine; kept off the per-tick hot path.
+                    // here. SELF-SERVE WiFi: the single-radio time-share drops WiFi
+                    // after the boot burst, so "Connect WiFi first" was the near-
+                    // guaranteed (and near-invisible) outcome of every tap — JP's
+                    // "no feedback" bug. Now the tap itself RAISES WiFi (same
+                    // wifi_on_request knob the boot burst uses), shows "Connecting
+                    // WiFi…", and the pending arm below proceeds automatically once
+                    // associated + DHCP'd (25s timeout). One tap end-to-end.
                     if settings_app.take_ota_request() {
                         if !crate::net::ota_http::URL_SET {
+                            println!("[OTA] tap: no OTA_URL baked into this build");
                             settings_app.ota_status = "No OTA URL in build";
-                        } else if !(wifi_connected && stack.config_v4().is_some()) {
-                            settings_app.ota_status = "Connect WiFi first";
+                        } else if wifi_connected && stack.config_v4().is_some() {
+                            println!("[OTA] tap: WiFi ready - updating now");
+                            ota_pending_since = Some(now); // proceed immediately below
                         } else {
+                            println!("[OTA] tap: raising WiFi for update");
+                            settings_app.ota_status = "Connecting WiFi\u{2026}";
+                            wifi_on_request = true;
+                            ota_pending_since = Some(now);
+                        }
+                    }
+                    // Pending OTA: run once WiFi is ready (or time out with a
+                    // visible, actionable status). A deliberate user action, so
+                    // blocking this loop for the download is fine.
+                    if let Some(t0) = ota_pending_since {
+                        if wifi_connected && stack.config_v4().is_some() {
+                            ota_pending_since = None;
                             // Paint "Updating" before the blocking download —
                             // run_fb_app won't repaint until ota_update returns
                             // (or we've already rebooted on success).
@@ -2783,6 +2802,10 @@ async fn main(_spawner: Spawner) -> ! {
                                     settings_app.ota_status = e;
                                 }
                             }
+                        } else if (now - t0) > Duration::from_secs(25) {
+                            ota_pending_since = None;
+                            println!("[OTA] WiFi didn't come up within 25s - giving up");
+                            settings_app.ota_status = "WiFi failed \u{2014} tap to retry";
                         }
                     }
                 }
