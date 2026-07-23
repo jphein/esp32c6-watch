@@ -34,8 +34,12 @@ pub const URL: &str = match option_env!("OTA_URL") {
 /// True when an explicit `OTA_URL` was baked into this build.
 pub const URL_SET: bool = option_env!("OTA_URL").is_some();
 
-/// Overall budget for the whole download + flash write.
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// Overall budget for the whole download + flash write. Generous on purpose:
+/// a ~3.8 MB image on a slow/contended link (single radio, weak RSSI) can
+/// legitimately take minutes — the old 30s cap killed a real on-glass update
+/// mid-transfer (died past 1 MB). The socket's 10s inactivity timeout (below)
+/// is what catches a genuinely dead transfer; this is only a hard cap.
+const TIMEOUT: Duration = Duration::from_secs(300);
 /// Flash write granularity: one 4 KiB sector per `Storage::write`.
 const CHUNK: usize = 4096;
 /// Progress log granularity.
@@ -53,7 +57,7 @@ pub async fn ota_update(
 ) -> Result<(), &'static str> {
     match with_timeout(TIMEOUT, run(stack, flash)).await {
         Ok(result) => result,
-        Err(_) => Err("timeout (30s)"),
+        Err(_) => Err("timeout (5 min)"),
     }
 }
 
