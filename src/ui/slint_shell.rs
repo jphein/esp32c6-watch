@@ -171,6 +171,11 @@ impl ShellUi {
         let climate_cards: Rc<VecModel<ClimateCard>> = Rc::new(VecModel::default());
         let waveform_model: Rc<VecModel<f32>> = Rc::new(VecModel::default());
         let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model);
+        // First frame under ReusedBuffer must be a full paint (the panel just
+        // showed fill_screen(BLACK); the renderer has no prior frame to diff
+        // against). Slint already dirties everything on first show, but request it
+        // explicitly so the boot frame can never come up as a partial box.
+        window.window().request_redraw();
 
         Self {
             window,
@@ -218,6 +223,13 @@ impl ShellUi {
         // 1Hz gate so the caller's next set_time repaints the clock even if the
         // second hasn't ticked since the game launched.
         self.last_second = 0xFF;
+        // A game painted its framebuffer straight to the panel while suspended, so
+        // the panel no longer shows what the (ReusedBuffer) renderer believes is
+        // on-screen. Force a full repaint so the recreated scene paints the whole
+        // screen, not just its first dirty box. (Callers also request_redraw, but
+        // owning it here makes every resume path — game exit AND fb-alloc-fail —
+        // correct without relying on each call site.)
+        self.request_redraw();
     }
 
     // === input ===
