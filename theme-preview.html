@@ -277,7 +277,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:64px 0 4
         <ul>
           <li>A scene-resident Slint overlay — <b>no framebuffer, no WiFi</b> — reached from a SYSTEM launcher tile, the same idiom as WLED / Energy / Climate.</li>
           <li>Right-swipe or the back-chevron closes; the active tile carries an accent ring and check.</li>
-          <li>Restored at boot and re-applied after a game exit, so the watch never snaps back to Midnight.</li>
+          <li>Restored at boot and re-applied after a game exit, so the watch never snaps back to the default (<b>Amber</b>, as of v0.8.0).</li>
         </ul>
       </div>
     </div>
@@ -312,7 +312,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:64px 0 4
       <div class="note"><h4><span class="tag">AMOLED</span> Paper costs power</h4><p>Three dark schemes ride true-black <code>#000000</code> — self-emissive-black, battery-optimal. Paper lights most pixels, so it draws more. Noted under the picker; not a blocker.</p></div>
       <div class="note"><h4><span class="tag">Contract</span> on-accent stays near-black</h4><p><code>accent</code> and <code>warm</code> stay bright in every scheme so near-black detail always reads on them — no per-call conditionals anywhere.</p></div>
       <div class="note"><h4><span class="tag">AOD</span> always true-black</h4><p>The always-on display stays black with dim text regardless of scheme — a light AOD would defeat the power-saving point of the mode.</p></div>
-      <div class="note"><h4><span class="tag">Flash</span> config.rs v3</h4><p>A <code>SWCFG3</code> record appends one <code>theme</code> byte before the checksum. v1/v2 records still load (default Midnight); WiFi creds, page and units survive the upgrade.</p></div>
+      <div class="note"><h4><span class="tag">Flash</span> config.rs v3</h4><p>A <code>SWCFG3</code> record appends one <code>theme</code> byte before the checksum. v1/v2 records still load (falling back to the compiled default — <b>Amber</b> as of v0.8.0); WiFi creds, page and units survive the upgrade.</p></div>
     </div>
   </div>
 </section>
@@ -383,9 +383,9 @@ var PAL = {
   Violet:{bg:'#000000',ink:'#f1eefc',soft:'#bcb2e6',dim:'#837aa8',faint:'#5f5880',accent:'#a78bfa',accent2:'#6366f1',panel:'#16121f',line:'#2e2842',track:'#1b1626',warn:'#ff5d7a',warm:'#ffd166','off-dot':'#2a2440',scrim:'#06060af2','warn-bg':'#200a14','warn-panel':'#1a0a10','accent-bg':'#1a1330','on-accent':'#0b0616'}
 };
 var FEEL = {
-  Midnight:'Current, refined — teal on true-black',
+  Midnight:'Refined — teal on true-black',
   Paper:'Calm warm off-white · AMOLED-aware, not pure white',
-  Amber:'Cozy sunset — warm dark, true-black',
+  Amber:'Cozy sunset — warm dark · default since v0.8.0',
   Violet:'Nocturne — cool indigo, true-black'
 };
 var KEYHEX = {Midnight:['accent','accent2','panel'],Paper:['bg','accent','panel'],Amber:['accent','accent2','panel'],Violet:['accent','accent2','panel']};

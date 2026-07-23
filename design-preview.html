@@ -214,9 +214,9 @@ footer{border-top:1px solid var(--line); padding:34px 0 60px; color:var(--dim); 
 <main>
 <!-- ============================ HERO ============================ -->
 <section class="phero"><div class="phero-in">
-  <div class="eyebrow">UI Overhaul · Interaction Design</div>
-  <h1>Every tap should <span class="g">announce itself</span>.</h1>
-  <p class="desc">Today exactly one screen acknowledges a press. This is the standard for the rest of the watch: a bold, one-frame pressed state on every interactive element — the only feedback channel we have, because the board has no haptic motor and audio-click is offline. <b>Press the mockups below</b> — they swap on <span class="mono">:active</span> exactly like the recipes specify.</p>
+  <div class="eyebrow">UI Overhaul · Interaction Design · Shipped v0.8.0</div>
+  <h1>Every tap <span class="g">announces itself</span>.</h1>
+  <p class="desc">It used to be that exactly one screen acknowledged a press. As of <b>v0.8.0</b> this is the standard across the whole watch: a bold, one-frame pressed state on every interactive element — the only feedback channel there is, because the board has no haptic motor and audio-click is offline. All ~52 touch targets now bind to it. <b>Press the mockups below</b> — they swap on <span class="mono">:active</span> exactly like the shipped recipes do on glass.</p>
 
   <div class="std">
     <div><span class="n">1</span><span><b>Rest → Pressed → Disabled.</b> Every touchable element binds its fill/border/glyph to <span class="mono" style="color:var(--accent)">TouchArea.pressed</span> — a bold, unmistakable swap while the finger is down.</span></div>
@@ -238,7 +238,7 @@ footer{border-top:1px solid var(--line); padding:34px 0 60px; color:var(--dim); 
   <div class="section-head">
     <div class="eyebrow">The constraint that shapes everything</div>
     <h2>We get one frame. Make it count.</h2>
-    <p>A full-frame repaint takes 90–170 ms and there is no partial rendering (reverted, #18). So the pressed state can't tween in — it lands as a single frame ~one render after touch, right at the edge of the ~100 ms "instant" threshold. The answer isn't a subtle 12% Material overlay (invisible here) — it's a <b>large, high-contrast delta</b> that reads unambiguously even as one late frame.</p>
+    <p>A full-frame repaint takes 90–170 ms, and even with partial rendering v2 (even-aligned dirty regions, #18) a fresh full frame is what a press schedules. So the pressed state can't tween in — it lands as a single frame ~one render after touch, right at the edge of the ~100 ms "instant" threshold. The answer isn't a subtle 12% Material overlay (invisible here) — it's a <b>large, high-contrast delta</b> that reads unambiguously even as one late frame.</p>
   </div>
   <div class="tryrow">
     <div class="screen sm"><div class="stage"><div class="w-tile"><div class="ic"></div><div class="lbl">SNAKE</div></div></div></div>
@@ -254,7 +254,7 @@ footer{border-top:1px solid var(--line); padding:34px 0 60px; color:var(--dim); 
   <div class="section-head">
     <div class="eyebrow">Component overhaul</div>
     <h2>Before / after — the recipes on real controls.</h2>
-    <p><span style="color:var(--warn)">BEFORE</span> is what a press looks like today: nothing. <span style="color:var(--dim)">REST</span> and <span style="color:var(--accent)">PRESSED</span> are the two states of the new standard (the pressed column is frozen so you can see it; the hero row above is live).</p>
+    <p><span style="color:var(--warn)">BEFORE</span> is what a press looked like pre-v0.8.0: nothing. <span style="color:var(--dim)">REST</span> and <span style="color:var(--accent)">PRESSED</span> are the two states of the shipped standard (the pressed column is frozen so you can see it; the hero row above is live).</p>
   </div>
 
   <div class="gallery">
@@ -394,15 +394,15 @@ footer{border-top:1px solid var(--line); padding:34px 0 60px; color:var(--dim); 
 <!-- ============================ PHASES ============================ -->
 <section class="section" style="padding-top:20px"><div class="wrap">
   <div class="section-head">
-    <div class="eyebrow">Implementation order</div>
-    <h2>Phased rollout for Luna.</h2>
-    <p>Each phase is independently shippable and on-glass verifiable. Because feedback is a per-element visual swap, phases don't collide.</p>
+    <div class="eyebrow">Implementation order · all landed in v0.8.0</div>
+    <h2>How it rolled out.</h2>
+    <p>Each phase was independently shippable and on-glass verifiable. Because feedback is a per-element visual swap, the phases never collided — they merged one after another into v0.8.0.</p>
   </div>
   <div class="phase">
     <div><span class="pn">Phase 0</span><span><b>Foundation.</b> Build <span class="mono">ui/slint/controls.slint</span> — shared <span class="mono">PressTile · IconButton · Stepper · PillButton · Seg · SliderControl</span> implementing each recipe once. Add type/spacing tokens. This makes it a system, not 40 inline ternaries.</span></div>
     <div><span class="pn">Phase 1</span><span><b>Highest-traffic surfaces.</b> Launcher tiles, radio dots, back-chevron, page dots — touched every session, every screen. Biggest perceived win.</span></div>
     <div><span class="pn">Phase 2</span><span><b>App controls.</b> WLED grid, mic-gain steppers, reboot, brightness knob, theme swatches, hunt "next".</span></div>
-    <div><span class="pn">Phase 3</span><span><b>Round-trip-lag killers.</b> Voice PTT local pressed state (react before the loop returns) and climate list rows — worst perceived lag today.</span></div>
+    <div><span class="pn">Phase 3</span><span><b>Round-trip-lag killers.</b> Voice PTT local pressed state (react before the loop returns) and climate list rows — the worst perceived lag before the overhaul.</span></div>
     <div><span class="pn">Phase 4</span><span><b>Align the reference.</b> Migrate climate.slint onto the shared components, drop its press animates. Whole UI now consistent.</span></div>
     <div><span class="pn">Phase 5</span><span><b>Polish.</b> Typography/spacing sweep, AOD pixel-shift, corner-safe re-audit, optional fb-app pressed cells.</span></div>
   </div>
@@ -410,7 +410,7 @@ footer{border-top:1px solid var(--line); padding:34px 0 60px; color:var(--dim); 
 </main>
 
 <footer><div class="wrap">
-  Design foundation by <b style="color:var(--accent)">Nebula</b> · spec: <span class="mono">docs/superpowers/specs/2026-07-23-ui-overhaul-design.md</span> · implementer: Luna (<span class="mono">fix/ui-overhaul</span>) · esp32c6-watch
+  Design foundation by <b style="color:var(--accent)">Nebula</b> · spec: <span class="mono">docs/superpowers/specs/2026-07-23-ui-overhaul-design.md</span> · shipped in <b>v0.8.0</b> · esp32c6-watch
 </div></footer>
 
 <script>
