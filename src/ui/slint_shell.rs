@@ -53,7 +53,7 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 // The launcher launch-index → AppState mapping now lives in the app registry
 // (src/apps/registry.rs): `REGISTRY[idx].state`, exposed via
 // `registry::launch_state(idx)`. The launcher tiles are built from the same
-// registry (see `build_launcher_rows`), so the idx→app contract is
+// registry (see `build_launcher_pages`), so the idx→app contract is
 // single-sourced instead of a hand-kept parallel array.
 
 /// Full-screen Slint overlays that share the shell's Slint dispatch branch (no
@@ -171,6 +171,11 @@ impl ShellUi {
         let climate_cards: Rc<VecModel<ClimateCard>> = Rc::new(VecModel::default());
         let waveform_model: Rc<VecModel<f32>> = Rc::new(VecModel::default());
         let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model);
+        // First frame under ReusedBuffer must be a full paint (the panel just
+        // showed fill_screen(BLACK); the renderer has no prior frame to diff
+        // against). Slint already dirties everything on first show, but request it
+        // explicitly so the boot frame can never come up as a partial box.
+        window.window().request_redraw();
 
         Self {
             window,
@@ -218,6 +223,13 @@ impl ShellUi {
         // 1Hz gate so the caller's next set_time repaints the clock even if the
         // second hasn't ticked since the game launched.
         self.last_second = 0xFF;
+        // A game painted its framebuffer straight to the panel while suspended, so
+        // the panel no longer shows what the (ReusedBuffer) renderer believes is
+        // on-screen. Force a full repaint so the recreated scene paints the whole
+        // screen, not just its first dirty box. (Callers also request_redraw, but
+        // owning it here makes every resume path — game exit AND fb-alloc-fail —
+        // correct without relying on each call site.)
+        self.request_redraw();
     }
 
     // === input ===
@@ -263,16 +275,12 @@ impl ShellUi {
             let slider_drag = !ui.get_launcher_open()
                 && ui.get_current_page() == PAGE_POWER
                 && SLIDER_BAND.contains(&swipe_start_y);
-            // Vertical swipes while the launcher is open belong to the Flickable's
-            // own scroll/fling; releasing off-screen would kill its momentum. Keep
-            // the natural release — Flickable's drag-capture suppresses stray item
-            // clicks on a real scroll. (slider_drag already excludes launcher-open,
-            // so the two are mutually exclusive.)
-            let launcher_scroll = ui.get_launcher_open()
-                && matches!(swipe, Some(SwipeDirection::Up) | Some(SwipeDirection::Down));
+            // (The old launcher-scroll exclusion is gone with the Flickable: a
+            // vertical swipe in the paged launcher is a page FLIP — navigation —
+            // so the off-window release below correctly suppresses a stray tile
+            // click at the lift point.)
             let directional = matches!(swipe, Some(d) if d != SwipeDirection::Tap)
-                && !slider_drag
-                && !launcher_scroll;
+                && !slider_drag;
             let release_pos = if directional {
                 let off = slint::LogicalPosition::new(-1.0, -1.0);
                 let _ = self
@@ -310,11 +318,22 @@ impl ShellUi {
                 }
             }
             // Launcher overlay next (not a registry app): it swallows nav swipes
-            // wherever they start (including the power page's slider band); Right
-            // closes.
+            // wherever they start (including the power page's slider band).
+            // PAGED: swipe up/down flips exactly one section page (clamped at
+            // the ends — the dots show position); Right closes. One flip = one
+            // hard-cut full-frame render, replacing the 6-10fps Flickable
+            // scroll that dirtied the whole viewport per frame.
             if ui.get_launcher_open() {
-                if direction == SwipeDirection::Right {
-                    ui.set_launcher_open(false);
+                match direction {
+                    SwipeDirection::Right => ui.set_launcher_open(false),
+                    SwipeDirection::Up => {
+                        let last = ui.get_launcher_page_count() - 1;
+                        ui.set_launcher_page((ui.get_launcher_page() + 1).min(last.max(0)));
+                    }
+                    SwipeDirection::Down => {
+                        ui.set_launcher_page((ui.get_launcher_page() - 1).max(0));
+                    }
+                    _ => {}
                 }
                 return;
             }
@@ -939,15 +958,14 @@ fn build_scene(
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
     ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
-    // Launcher tiles are built once from the app registry (single source of
-    // truth) — static per boot, so a plain VecModel the scene owns is enough.
-    let launcher_rows = build_launcher_rows();
-    // Push the exact scroll-content height too: the Flickable can't derive it
-    // from `preferred-height` (a repeater-only VerticalLayout under-reports it),
-    // so we compute it from the same rows. Without this the viewport collapses
-    // and the bottom SYSTEM rows are unreachable — the v0.7.0 scroll regression.
-    ui.set_launcher_content_height(launcher_content_height(&launcher_rows));
-    ui.set_launcher_rows(ModelRc::from(Rc::new(VecModel::from(launcher_rows))));
+    // Launcher pages are built once from the app registry (single source of
+    // truth) — static per boot, so plain VecModels the scene owns are enough.
+    // (The old Flickable + content-height plumbing is gone with the paged
+    // launcher: page geometry is fixed 3x3, nothing to measure.)
+    let (launcher_tiles, launcher_titles) = build_launcher_pages();
+    ui.set_launcher_page_count(launcher_titles.len().max(1) as i32);
+    ui.set_launcher_titles(ModelRc::from(Rc::new(VecModel::from(launcher_titles))));
+    ui.set_launcher_tiles(ModelRc::from(Rc::new(VecModel::from(launcher_tiles))));
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
@@ -955,13 +973,19 @@ fn build_scene(
     ui
 }
 
-/// Build the launcher's row model from the app registry — the single source of
-/// truth for tile metadata. One header row per section (in display order:
-/// Audio, Games, System), then that section's apps in registry order chunked
-/// two-per-row; a lone trailing tile gets a spacer (`present = false`). The tile
-/// `idx` is the app's registry position, so `launch_app(idx)` maps back through
-/// `registry::launch_state(idx)`.
-fn build_launcher_rows() -> Vec<LauncherRow> {
+/// Slots per launcher page — a fixed 3x3 grid. MUST match the `for slot in 9`
+/// grid + geometry in `ui/slint/launcher.slint`.
+const LAUNCHER_PAGE_SLOTS: usize = 9;
+
+/// Build the PAGED launcher model from the app registry — the single source of
+/// truth for tile metadata. One page per section (display order: Audio, Games,
+/// System; a section that ever outgrows 9 apps chunks into repeated pages with
+/// the same title). Returns the page-major tile list — each page padded to
+/// exactly [`LAUNCHER_PAGE_SLOTS`] entries with `present:false` defaults so the
+/// Slint grid can index `tiles[page*9 + slot]` — plus one title per page. The
+/// tile `idx` is the app's registry position, so `launch_app(idx)` maps back
+/// through `registry::launch_state(idx)`.
+fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
     use crate::apps::registry::{AppDescriptor, Section, REGISTRY};
     let tile = |idx: usize, d: &AppDescriptor| LauncherTile {
         name: SharedString::from(d.name),
@@ -970,57 +994,30 @@ fn build_launcher_rows() -> Vec<LauncherRow> {
         idx: idx as i32,
         present: true,
     };
-    let mut rows: Vec<LauncherRow> = Vec::new();
+    let mut tiles: Vec<LauncherTile> = Vec::new();
+    let mut titles: Vec<SharedString> = Vec::new();
     for sec in [Section::Audio, Section::Games, Section::System] {
-        rows.push(LauncherRow {
-            is_header: true,
-            header: SharedString::from(sec.label()),
-            a: LauncherTile::default(),
-            b: LauncherTile::default(),
-        });
         let apps: Vec<(usize, &AppDescriptor)> = REGISTRY
             .iter()
             .enumerate()
             .filter(|(_, d)| d.section == sec)
             .collect();
-        for pair in apps.chunks(2) {
-            let a = tile(pair[0].0, pair[0].1);
-            let b = match pair.get(1) {
-                Some((i, d)) => tile(*i, d),
-                None => LauncherTile::default(), // present:false -> spacer
-            };
-            rows.push(LauncherRow { is_header: false, header: SharedString::new(), a, b });
+        for chunk in apps.chunks(LAUNCHER_PAGE_SLOTS) {
+            titles.push(SharedString::from(sec.label()));
+            for (i, d) in chunk {
+                tiles.push(tile(*i, d));
+            }
+            for _ in chunk.len()..LAUNCHER_PAGE_SLOTS {
+                tiles.push(LauncherTile::default()); // present:false pad
+            }
         }
     }
-    rows
+    (tiles, titles)
 }
 
 /// 0xRRGGBB -> Slint opaque color.
 fn color_from_rgb(rgb: u32) -> slint::Color {
     slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
-}
-
-/// Total launcher scroll-content height in logical px, matching the layout in
-/// `ui/slint/launcher.slint`: a header row is 30px, a tile row 116px, rows are
-/// separated by 12px of `VerticalLayout` spacing, plus a 20px bottom margin so
-/// the last row isn't flush against the scroll end. Pushed to the Flickable's
-/// `viewport-height` (via `LauncherOverlay.content-height`) because the layout's
-/// own `preferred-height` under-reports a repeater-only column.
-fn launcher_content_height(rows: &[LauncherRow]) -> f32 {
-    // Keep in sync with launcher.slint (SectionHeader.height / AppTile.height /
-    // VerticalLayout spacing / the +20px bottom margin).
-    const HEADER_H: f32 = 30.0;
-    const TILE_ROW_H: f32 = 116.0;
-    const SPACING: f32 = 12.0;
-    const BOTTOM_MARGIN: f32 = 20.0;
-    if rows.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = rows
-        .iter()
-        .map(|r| if r.is_header { HEADER_H } else { TILE_ROW_H })
-        .sum();
-    sum + SPACING * (rows.len() as f32 - 1.0) + BOTTOM_MARGIN
 }
 
 fn weather_label(code: u8) -> &'static str {

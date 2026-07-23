@@ -9,10 +9,26 @@
 //!
 //! The image URL is baked in at build time: `OTA_URL=http://... cargo build`.
 //! Plain HTTP only (no TLS, no DNS — the host must be a dotted-quad IPv4).
+//!
+//! Live deploy server: `http://10.0.11.11:8000/watch.bin` (ubox0, VLAN-11, same
+//! subnet as the watch's "roam" WiFi). Set via `OTA_URL` in `.cargo/config.toml`
+//! (gitignored). Full deploy flow: `docs/ota-deploy.md`.
+//!
+//! **Push OTA** (`tools/ota_push.sh`): the deploy host publishes a *retained*
+//! MQTT announce (`OTA|<build_id>|<url>`) to [`ANNOUNCE_TOPIC`]; both MQTT
+//! paths (boot burst + climate session) subscribe and feed the payload to
+//! [`handle_announce`], which gates on [`BUILD_EPOCH`] monotonicity and posts
+//! an [`Announce`] for main.rs to [`take_announce`] — the same one-tap update
+//! flow as the Settings button, zero-touch from any screen. Retained is what
+//! makes push work on a single bursty radio: a watch offline at publish time
+//! picks the announce up on its next MQTT window.
+
+use core::cell::RefCell;
 
 use alloc::{format, vec};
 
 use embassy_net::{tcp::TcpSocket, Ipv4Address, Stack};
+use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex as BlockingMutex};
 use embassy_time::{with_timeout, Duration};
 use embedded_storage::Storage;
 use esp_bootloader_esp_idf::ota::{Ota, OtaImageState};
@@ -20,6 +36,7 @@ use esp_bootloader_esp_idf::partitions::{
     self, AppPartitionSubType, DataPartitionSubType, PartitionType,
 };
 use esp_println::println;
+use heapless::String;
 
 /// Firmware image URL, fixed at build time via the `OTA_URL` env var.
 pub const URL: &str = match option_env!("OTA_URL") {
@@ -30,8 +47,51 @@ pub const URL: &str = match option_env!("OTA_URL") {
 /// True when an explicit `OTA_URL` was baked into this build.
 pub const URL_SET: bool = option_env!("OTA_URL").is_some();
 
-/// Overall budget for the whole download + flash write.
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// Build id of the RUNNING firmware, baked at compile time via the `OTA_BUILD`
+/// env var (unix-seconds, stamped into `.cargo/config.toml [env]` by
+/// `tools/ota_push.sh`). `0` when unset (dev builds). The push-OTA
+/// monotonicity gate: an announce only triggers when its build id is
+/// **strictly greater** — after the post-OTA reboot the still-retained
+/// announce carries `build_id == BUILD_EPOCH` and is rejected, so a retained
+/// announce can never re-trigger-loop the watch.
+pub const BUILD_EPOCH: u64 = match option_env!("OTA_BUILD") {
+    Some(s) => parse_u64_or_zero(s),
+    None => 0,
+};
+
+/// MQTT topic the deploy host publishes the retained OTA announce to.
+pub const ANNOUNCE_TOPIC: &str = "watch/ota/announce";
+
+/// Max announce-URL length we accept (baked URL is ~31 chars; generous).
+pub const ANNOUNCE_URL_CAP: usize = 96;
+
+/// An accepted (gate-passed) push-OTA announce, posted for main.rs.
+pub struct Announce {
+    /// The announced build id (unix-seconds; `> BUILD_EPOCH` by construction).
+    pub build: u64,
+    /// Image URL override; `None` = use the baked [`URL`].
+    pub url: Option<String<ANNOUNCE_URL_CAP>>,
+}
+
+/// Latest accepted announce, written by the MQTT rx paths (boot burst /
+/// climate session task), consumed by the main loop. A blocking critical-
+/// section cell (single write + single take per announce, never held across
+/// an await).
+static PENDING_ANNOUNCE: BlockingMutex<CriticalSectionRawMutex, RefCell<Option<Announce>>> =
+    BlockingMutex::new(RefCell::new(None));
+
+/// Overall budget for the whole download + flash write. Generous on purpose:
+/// a ~3.8 MB image on a slow/contended link (single radio, weak RSSI) can
+/// legitimately take minutes — the old 30s cap killed a real on-glass update
+/// mid-transfer (died past 1 MB). [`STALL_TIMEOUT`] is what catches a
+/// genuinely dead transfer; this is only a hard cap.
+const TIMEOUT: Duration = Duration::from_secs(300);
+/// Per-read inactivity budget: if the socket produces no data for this long
+/// the transfer is declared stalled. Distinct from the overall [`TIMEOUT`]
+/// cap so the error names which failure mode actually happened —
+/// "stalled (10s, no data)" (server/link went quiet mid-transfer) vs
+/// "timeout (5 min overall)" (transfer alive but too slow to finish).
+const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Flash write granularity: one 4 KiB sector per `Storage::write`.
 const CHUNK: usize = 4096;
 /// Progress log granularity.
@@ -39,23 +99,106 @@ const LOG_STEP: u32 = 64 * 1024;
 /// First byte of every valid ESP-IDF app image.
 const ESP_IMAGE_MAGIC: u8 = 0xE9;
 
-/// Download `URL` into the inactive OTA slot and stage it for the next boot.
+/// Const decimal parser for [`BUILD_EPOCH`]: any non-digit (or empty) → 0,
+/// so a malformed `OTA_BUILD` degrades to "dev build", never a compile error.
+const fn parse_u64_or_zero(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return 0;
+    }
+    let mut n: u64 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let d = bytes[i];
+        if d < b'0' || d > b'9' {
+            return 0;
+        }
+        n = n * 10 + (d - b'0') as u64;
+        i += 1;
+    }
+    n
+}
+
+/// Feed an inbound `watch/ota/announce` payload through the monotonicity gate.
+///
+/// Payload contract (from `tools/ota_push.sh`): `OTA|<build_id>[|<url>]`,
+/// where `<build_id>` is decimal unix-seconds and `<url>` (optional, may be
+/// empty) overrides the baked [`URL`]. Accepted announces (build id strictly
+/// greater than the running [`BUILD_EPOCH`]) are posted for
+/// [`take_announce`]; everything else is logged and dropped. Malformed
+/// payloads never panic — bounded, UTF-8 checked, quietly rejected.
+///
+/// Called from both MQTT rx paths (boot burst + climate session). Non-async,
+/// no locks held across awaits.
+pub fn handle_announce(payload: &[u8]) {
+    let Ok(text) = core::str::from_utf8(payload) else {
+        println!("[OTA] announce rejected (not utf-8)");
+        return;
+    };
+    // An empty retained-clear (`mosquitto_pub -r -n`) is not an announce.
+    if text.is_empty() {
+        return;
+    }
+    let mut parts = text.split('|');
+    let (Some("OTA"), Some(build_str)) = (parts.next(), parts.next()) else {
+        println!("[OTA] announce rejected (malformed: {text})");
+        return;
+    };
+    let Ok(build) = build_str.parse::<u64>() else {
+        println!("[OTA] announce rejected (bad build id: {build_str})");
+        return;
+    };
+    let url = match parts.next() {
+        None | Some("") => None, // no override — use the baked URL
+        Some(u) => {
+            if !u.starts_with("http://") {
+                println!("[OTA] announce rejected (url not http://): {u}");
+                return;
+            }
+            let mut owned: String<ANNOUNCE_URL_CAP> = String::new();
+            if owned.push_str(u).is_err() {
+                println!("[OTA] announce rejected (url too long)");
+                return;
+            }
+            Some(owned)
+        }
+    };
+    println!("[OTA] announce received: build {build} (running {})", BUILD_EPOCH);
+    if build <= BUILD_EPOCH {
+        println!("[OTA] announce rejected (build {build} <= running {})", BUILD_EPOCH);
+        return;
+    }
+    println!("[OTA] announce accepted (build {build} > running {})", BUILD_EPOCH);
+    PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().replace(Announce { build, url }));
+}
+
+/// Take the pending accepted announce, if any (clears it). Polled by main.rs.
+pub fn take_announce() -> Option<Announce> {
+    PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().take())
+}
+
+/// Download the firmware image into the inactive OTA slot and stage it for
+/// the next boot. `url_override` (from a push announce) replaces the baked
+/// [`URL`] for this one download.
 ///
 /// Never reboots by itself. On success logs
 /// `[OTA] update staged - reboot to apply`.
 pub async fn ota_update(
     stack: Stack<'static>,
     flash: &mut esp_storage::FlashStorage<'_>,
+    url_override: Option<&str>,
 ) -> Result<(), &'static str> {
-    match with_timeout(TIMEOUT, run(stack, flash)).await {
+    let url = url_override.unwrap_or(URL);
+    match with_timeout(TIMEOUT, run(stack, flash, url)).await {
         Ok(result) => result,
-        Err(_) => Err("timeout (30s)"),
+        Err(_) => Err("timeout (5 min overall)"),
     }
 }
 
 async fn run(
     stack: Stack<'static>,
     flash: &mut esp_storage::FlashStorage<'_>,
+    url: &str,
 ) -> Result<(), &'static str> {
     // --- Slot selection: read the partition table + otadata -----------------
     let mut pt_mem = vec![0u8; partitions::PARTITION_TABLE_MAX_LEN];
@@ -87,27 +230,31 @@ async fn run(
     let slot_size = target_entry.len() as u64;
 
     // --- HTTP GET ------------------------------------------------------------
-    let (addr, port, host, path) = parse_url(URL)?;
-    println!("[OTA] GET {URL}");
+    let (addr, port, host, path) = parse_url(url)?;
+    println!("[OTA] GET {url}");
 
+    // No blanket socket inactivity timeout — every await below carries its own
+    // explicit STALL_TIMEOUT so the error can NAME the phase that went quiet
+    // (JP kept hitting an undiagnosable generic "timeout").
     let mut rx_buf = vec![0u8; 4096];
     let mut tx_buf = vec![0u8; 512];
     let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-    socket.set_timeout(Some(Duration::from_secs(10)));
-    socket
-        .connect((addr, port))
-        .await
-        .map_err(|_| "connect failed")?;
+    match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return Err("connect refused/reset"),
+        Err(_) => return Err("connect timeout (10s, server down?)"),
+    }
 
     let request = format!(
         "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
     );
     let mut sent = 0;
     while sent < request.len() {
-        let n = socket
-            .write(&request.as_bytes()[sent..])
-            .await
-            .map_err(|_| "request send failed")?;
+        let n = match with_timeout(STALL_TIMEOUT, socket.write(&request.as_bytes()[sent..])).await
+        {
+            Ok(r) => r.map_err(|_| "request send failed")?,
+            Err(_) => return Err("stalled sending request (10s)"),
+        };
         sent += n;
     }
 
@@ -118,10 +265,10 @@ async fn run(
         if header_len == header.len() {
             return Err("response headers too large");
         }
-        let n = socket
-            .read(&mut header[header_len..])
-            .await
-            .map_err(|_| "socket read failed")?;
+        let n = match with_timeout(STALL_TIMEOUT, socket.read(&mut header[header_len..])).await {
+            Ok(r) => r.map_err(|_| "connection reset in headers")?,
+            Err(_) => return Err("stalled in headers (10s, no data)"),
+        };
         if n == 0 {
             return Err("connection closed in headers");
         }
@@ -168,10 +315,15 @@ async fn run(
             break;
         }
         let want = (CHUNK - chunk_len).min((content_len - received) as usize);
-        let n = socket
-            .read(&mut chunk[chunk_len..chunk_len + want])
-            .await
-            .map_err(|_| "socket read failed")?;
+        let n = match with_timeout(
+            STALL_TIMEOUT,
+            socket.read(&mut chunk[chunk_len..chunk_len + want]),
+        )
+        .await
+        {
+            Ok(r) => r.map_err(|_| "connection reset mid-body")?,
+            Err(_) => return Err("stalled (10s, no data)"),
+        };
         if n == 0 {
             return Err("connection closed mid-body");
         }
@@ -191,6 +343,52 @@ async fn run(
         .map_err(|_| "otadata state update failed")?;
     println!("[OTA] update staged - reboot to apply");
     Ok(())
+}
+
+/// Rollback-safety: confirm the running image is healthy so the bootloader keeps
+/// it. A freshly-OTA'd slot is staged as [`OtaImageState::New`]; when the
+/// bootloader has auto-rollback enabled it flips that to
+/// [`OtaImageState::PendingVerify`] on first boot. If the app never transitions
+/// that to [`OtaImageState::Valid`], the bootloader reverts to the previous slot
+/// on the next boot (and marks the unconfirmed slot `Aborted`). So a good image
+/// only *sticks* once this is called — and a bricked one that never reaches this
+/// call auto-rolls-back. Call it once the app has proven itself healthy
+/// (peripherals up + the main loop running for a few seconds).
+///
+/// Transitions both `New` and `PendingVerify` -> `Valid` so the confirm is
+/// correct whether or not the bootloader was built with auto-rollback (with it
+/// off the state stays `New`; marking it valid is harmless and forward-safe).
+///
+/// Returns `Ok(true)` if it just marked the slot valid, `Ok(false)` if there was
+/// nothing to do (already `Valid`/`Invalid`, or a factory layout with no
+/// otadata). Never touches flash beyond the otadata select entry.
+pub fn mark_valid_if_pending(
+    flash: &mut esp_storage::FlashStorage<'_>,
+) -> Result<bool, &'static str> {
+    let mut pt_mem = vec![0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let pt = partitions::read_partition_table(flash, &mut pt_mem)
+        .map_err(|_| "partition table read failed")?;
+
+    let Some(otadata) = pt
+        .find_partition(PartitionType::Data(DataPartitionSubType::Ota))
+        .map_err(|_| "partition table scan failed")?
+    else {
+        // Factory layout (no otadata) — nothing to confirm, nothing to roll back.
+        return Ok(false);
+    };
+
+    let region = otadata.as_embedded_storage(flash);
+    let mut ota = Ota::new(region, 2).map_err(|_| "otadata invalid")?;
+    let state = ota.current_ota_state().map_err(|_| "otadata read failed")?;
+    match state {
+        OtaImageState::New | OtaImageState::PendingVerify => {
+            ota.set_current_ota_state(OtaImageState::Valid)
+                .map_err(|_| "otadata mark-valid failed")?;
+            println!("[OTA] marked current slot VALID (was {state:?}) - rollback cancelled");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// `http://a.b.c.d[:port][/path]` -> (addr, port, host, path). IPv4 only.

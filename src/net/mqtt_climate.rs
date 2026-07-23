@@ -362,7 +362,16 @@ pub async fn run_climate_session(
 // --- SUBSCRIBE + SUBACK -----------------------------------------------------
 
 async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
-    let topics = [STATE_WILDCARD, ROSTER_TOPIC, ENERGY_TOPIC, ENERGY_AVAIL_TOPIC];
+    // Push-OTA rides along: the retained `watch/ota/announce` is delivered on
+    // every (re)subscribe, so any climate/energy session doubles as a push-OTA
+    // window (gate + dispatch live in `ota_http::handle_announce`).
+    let topics = [
+        STATE_WILDCARD,
+        ROSTER_TOPIC,
+        ENERGY_TOPIC,
+        ENERGY_AVAIL_TOPIC,
+        crate::net::ota_http::ANNOUNCE_TOPIC,
+    ];
 
     // remaining length = 2 (packet id) + sum(2-byte len + topic + 1-byte QoS)
     let mut remaining = 2usize;
@@ -459,6 +468,10 @@ async fn handle_publish(
             // in v1. Kept as an explicit branch (subscribed + drained, never
             // choked on) for a future roster-diff prune.
         }
+        Some(TopicKind::OtaAnnounce) => {
+            // Push-OTA: gate (BUILD_EPOCH monotonicity) + post for main.rs.
+            crate::net::ota_http::handle_announce(payload);
+        }
         None => {} // not one of our topics — ignore
     }
 }
@@ -468,6 +481,7 @@ enum TopicKind<'a> {
     Energy,
     EnergyAvail,
     Roster,
+    OtaAnnounce,
 }
 
 /// Classify an inbound topic. Bounded, UTF-8 checked, no panic.
@@ -475,6 +489,9 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
     let t = core::str::from_utf8(topic).ok()?;
     if t == ROSTER_TOPIC {
         return Some(TopicKind::Roster);
+    }
+    if t == crate::net::ota_http::ANNOUNCE_TOPIC {
+        return Some(TopicKind::OtaAnnounce);
     }
     if t == ENERGY_TOPIC {
         return Some(TopicKind::Energy);
@@ -532,8 +549,12 @@ async fn read_frame_body(socket: &mut TcpSocket<'_>, buf: &mut [u8]) -> Result<u
 
 /// Read a whole frame (type byte + remaining-length + body). Used for the
 /// handshake replies; the main loop splits type-byte / body so only the 1-byte
-/// read is cancellable.
-async fn read_frame(socket: &mut TcpSocket<'_>, buf: &mut [u8]) -> Result<(u8, usize), Error> {
+/// read is cancellable. `pub(crate)` — reused by [`crate::net::mqtt_ha`]'s
+/// boot-burst push-OTA announce wait (SUBACK + retained PUBLISH).
+pub(crate) async fn read_frame(
+    socket: &mut TcpSocket<'_>,
+    buf: &mut [u8],
+) -> Result<(u8, usize), Error> {
     let ty = read_type_byte(socket).await?;
     let n = read_frame_body(socket, buf).await?;
     Ok((ty, n))

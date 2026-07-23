@@ -46,14 +46,24 @@ const UPTIME_TOPIC: &str = "smolwatch/uptime";
 /// `pub(crate)` so the climate session reuses the shared packet builders.
 pub(crate) const PKT_CAP: usize = 512;
 
+/// How long the burst lingers for a retained push-OTA announce after
+/// subscribing (a present retained message arrives ~immediately after SUBACK;
+/// this only costs the full window when there is NO announce). Must stay under
+/// the socket's 2s inactivity timeout so an empty wait cancels cleanly and the
+/// DISCONNECT still goes out.
+const ANNOUNCE_WAIT: Duration = Duration::from_millis(1500);
+
 /// Publish the HA discovery config, battery percent, and uptime to the
-/// broker. Never fails the caller: logs `[MQTT] published` or
-/// `[MQTT] failed: <reason>` and returns. Bounded at 5s wall time.
+/// broker, then check the retained push-OTA announce (`watch/ota/announce`)
+/// — the boot burst is the once-per-boot MQTT window that makes a pushed
+/// update reach a watch with no screen-held session up. Never fails the
+/// caller: logs `[MQTT] published` or `[MQTT] failed: <reason>` and returns.
+/// Bounded at 8s wall time (was 5s; +subscribe/announce phase).
 pub async fn publish_burst(stack: Stack<'static>, batt_pct: u8) {
-    match with_timeout(Duration::from_secs(5), burst(stack, batt_pct)).await {
+    match with_timeout(Duration::from_secs(8), burst(stack, batt_pct)).await {
         Ok(Ok(())) => println!("[MQTT] published"),
         Ok(Err(reason)) => println!("[MQTT] failed: {reason}"),
-        Err(_) => println!("[MQTT] failed: timeout (5s)"),
+        Err(_) => println!("[MQTT] failed: timeout (8s)"),
     }
 }
 
@@ -101,11 +111,71 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
     let uptime = fmt_u64(Instant::now().as_secs(), &mut num);
     publish(&mut socket, UPTIME_TOPIC, uptime, false).await?;
 
+    // Push-OTA window: SUBSCRIBE the retained announce topic and linger
+    // ANNOUNCE_WAIT for the broker's immediate retained delivery. Placed after
+    // the telemetry publishes so a broken announce path can never cost them.
+    check_ota_announce(&mut socket).await?;
+
     // DISCONNECT, then flush so everything hits the wire before close.
     write_all(&mut socket, &[0xE0, 0x00]).await?;
     socket.flush().await.map_err(|_| "tcp flush")?;
     socket.close();
     Ok(())
+}
+
+/// SUBSCRIBE `watch/ota/announce` (QoS 0) and wait [`ANNOUNCE_WAIT`] for the
+/// retained announce PUBLISH. A delivered announce is fed through
+/// [`crate::net::ota_http::handle_announce`] (gate + post for main.rs); no
+/// retained message just times the wait out — that is the common case and not
+/// an error. Frame decode reuses [`crate::net::mqtt_climate::read_frame`].
+async fn check_ota_announce(socket: &mut TcpSocket<'_>) -> Result<(), &'static str> {
+    let topic = crate::net::ota_http::ANNOUNCE_TOPIC;
+
+    // SUBSCRIBE (packet id 1, QoS 0) -> SUBACK.
+    let mut pkt: Vec<u8, PKT_CAP> = Vec::new();
+    push(&mut pkt, &[0x82])?; // SUBSCRIBE, reserved flags 0b0010
+    push_remaining_len(&mut pkt, 2 + 2 + topic.len() + 1)?;
+    push(&mut pkt, &[0x00, 0x01])?; // packet identifier = 1
+    push_str(&mut pkt, topic)?;
+    push(&mut pkt, &[0x00])?; // requested QoS 0
+    write_all(socket, &pkt).await?;
+
+    // Announce frame = topic (~18 B) + payload (`OTA|epoch|url<=96`) — 192 is
+    // roomy. SUBACK reuses the same buffer first.
+    let mut buf = [0u8; 192];
+    let (ty, n) = crate::net::mqtt_climate::read_frame(socket, &mut buf).await?;
+    if ty & 0xF0 != 0x90 || n < 3 || buf[2] == 0x80 {
+        return Err("bad SUBACK (announce)");
+    }
+
+    // Retained announce, if any, arrives immediately after the SUBACK. The
+    // with_timeout expiring = no retained announce (fine); read_frame is
+    // cancel-safe enough here — on timeout we only ever DISCONNECT + close.
+    match with_timeout(ANNOUNCE_WAIT, crate::net::mqtt_climate::read_frame(socket, &mut buf)).await
+    {
+        Ok(Ok((ty, n))) if ty & 0xF0 == 0x30 => handle_announce_frame(&buf[..n]),
+        Ok(Ok(_)) => {}  // unexpected control packet — ignore, disconnect below
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {} // window elapsed with no retained announce — common case
+    }
+    Ok(())
+}
+
+/// Minimal QoS-0 PUBLISH body split (topic + payload) for the announce frame.
+/// Checked slicing throughout — a malformed frame is dropped, never a panic.
+fn handle_announce_frame(body: &[u8]) {
+    if body.len() < 2 {
+        return;
+    }
+    let topic_len = ((body[0] as usize) << 8) | body[1] as usize;
+    let idx = 2 + topic_len;
+    if idx > body.len() {
+        return; // topic overruns frame — malformed
+    }
+    if &body[2..idx] != crate::net::ota_http::ANNOUNCE_TOPIC.as_bytes() {
+        return; // only the announce topic is subscribed; anything else is noise
+    }
+    crate::net::ota_http::handle_announce(&body[idx..]);
 }
 
 /// Build the MQTT 3.1.1 CONNECT packet (clean session, optional user/pass).

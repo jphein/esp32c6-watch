@@ -1,4 +1,5 @@
-import { Theme, PageTitle, BackChevron } from "theme.slint";
+import { Theme, PageTitle } from "theme.slint";
+import { BackChevron, PressTile } from "controls.slint";
 
 // Treasure-hunt (#60) page — RSSI warmer/colder. Rust (ShellUi) pushes values
 // derived from `hunt::HuntView` each tick; the "NEXT" area taps `next-target`
@@ -29,7 +30,7 @@ export component HuntPage {
 
     PageTitle { title: "HUNT"; }
 
-    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // Back chevron — shared BackChevron component (controls.slint): one canonical
     // 78x64 placement so overlays never drift. Right-swipe also closes
     // (slint_shell::handle_touch), matching the launcher / WLED overlays.
     BackChevron { clicked => { root.close(); } }
@@ -100,27 +101,21 @@ export component HuntPage {
         letter-spacing: 1px;
     }
 
-    // NEXT TARGET tap area (cycles the target peer).
-    next-area := TouchArea {
+    // NEXT TARGET tap area (cycles the target peer). PressTile (Recipe A):
+    // fill lights to accent-bg + edge ignites on finger-down (1-frame swap).
+    next-area := PressTile {
         x: (parent.width - self.width) / 2;
         y: 380px;
         width: 240px;
         height: 56px;
         clicked => { root.next-target(); }
-        Rectangle {
-            width: 100%; height: 100%;
-            border-radius: 16px;
-            background: Theme.panel;
-            border-width: 1px;
-            border-color: Theme.line;
-            Text {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                text: "NEXT TARGET";
-                color: Theme.soft;
-                font-size: 18px;
-                letter-spacing: 2px;
-            }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: "NEXT TARGET";
+            color: Theme.soft;
+            font-size: 18px;
+            letter-spacing: 2px;
         }
     }
 }

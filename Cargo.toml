@@ -1,9 +1,12 @@
 [workspace]
 members = [".", "crates/*"]
+# The vendored Slint renderer fork is a [patch.crates-io] source, not a
+# workspace member — keeps `cargo test --workspace` (host crates) untouched.
+exclude = ["crates/i-slint-renderer-software"]
 
 [package]
 name = "esp32c6-watch"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -15,6 +18,15 @@ path = "./src/main.rs"
 [[bin]]
 name = "slint-demo"
 path = "./src/bin/slint_demo.rs"
+
+[features]
+# `debug-console` is OPT-IN (NOT default): it disables AOD light-sleep and reads
+# USB-Serial-JTAG RX to drive/measure the UI for agent tests — great for testing,
+# but battery-draining for a shipped build. Release cut = default (no console, AOD
+# on). Test builds add `--features debug-console`. See src/debug_console.rs +
+# tools/ui_test.py.
+default = []
+debug-console = ["dep:embedded-io-async"]
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [
@@ -51,6 +63,10 @@ embassy-net = { version = "0.9.1", features = [
     "log",
 ] }
 embedded-io = "0.7"
+# debug-console only: async `Read` for esp-hal's UsbSerialJtag<Async>. The 0.7
+# line unifies with esp-hal's own `embedded-io-async-07` (enabled by its
+# `unstable` feature), so the trait we import is the one the HAL impls.
+embedded-io-async = { version = "0.7", optional = true }
 esp-storage = { version = "0.9.0", features = ["esp32c6"] }
 embedded-storage = "0.3"
 
@@ -116,6 +132,13 @@ slint = { version = "1.17.1", default-features = false, features = [
 
 [build-dependencies]
 slint-build = "1.17.1"
+
+# Vendored fork of Slint's software renderer with ONE local patch: even-grid
+# dirty-region alignment for the CO5300's CASET/RASET window restrictions
+# (issue #18 — Slint 1.17 has no LVGL-rounder equivalent). See the crate's
+# README for the divergence contract; grep `esp32c6-watch LOCAL PATCH`.
+[patch.crates-io]
+i-slint-renderer-software = { path = "crates/i-slint-renderer-software" }
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

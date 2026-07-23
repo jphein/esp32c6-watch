@@ -20,12 +20,33 @@ enum SettingsField {
     Connect,
 }
 
+/// Which tap target the finger is on RIGHT NOW (live, from `AppInput.down`).
+/// Drawn highlighted so every control acknowledges the touch on finger-down —
+/// the action itself still fires on the lift-tap (touch overhaul).
+#[derive(Clone, Copy, PartialEq)]
+enum PressedZone {
+    None,
+    Ssid,
+    Password,
+    Connect,
+    Ota,
+}
+
 pub struct SettingsApp {
     pub wifi_config: WifiConfig,
     pub wifi_state: WifiState,
     pub keyboard: T9Keyboard,
     active_field: SettingsField,
     editing: bool,
+    /// Set true when the user taps "Update firmware". main.rs takes it (one-tick
+    /// handshake, same as the Connect flow), gates on WiFi + a baked-in OTA_URL,
+    /// runs the OTA download, and reboots on success.
+    pub ota_requested: bool,
+    /// One-line OTA status shown under the button (`&'static` so the error string
+    /// from `ota_http::ota_update` drops straight in). "" hides the line.
+    pub ota_status: &'static str,
+    /// Live pressed-state (finger currently on a control), for render feedback.
+    pressed: PressedZone,
 }
 
 impl SettingsApp {
@@ -36,7 +57,36 @@ impl SettingsApp {
             keyboard: T9Keyboard::new(),
             active_field: SettingsField::Ssid,
             editing: false,
+            ota_requested: false,
+            ota_status: "",
+            pressed: PressedZone::None,
         }
+    }
+
+    /// Map a live touch coordinate to the control under it — the SAME y-bands as
+    /// `handle_tap`, so the highlight always matches what the lift-tap will hit.
+    /// While the keyboard is open its keys get the highlight instead (handled by
+    /// the caller via `T9Keyboard::key_at`); the fields under it don't light.
+    fn zone_at(&self, _x: u16, y: u16) -> PressedZone {
+        if self.keyboard.is_active() {
+            return PressedZone::None;
+        }
+        if (60..115).contains(&y) {
+            PressedZone::Ssid
+        } else if (120..175).contains(&y) {
+            PressedZone::Password
+        } else if (185..230).contains(&y) {
+            PressedZone::Connect
+        } else if (250..295).contains(&y) {
+            PressedZone::Ota
+        } else {
+            PressedZone::None
+        }
+    }
+
+    /// Take a pending OTA request (clears it). One-shot handshake for main.rs.
+    pub fn take_ota_request(&mut self) -> bool {
+        core::mem::take(&mut self.ota_requested)
     }
 
     /// Handle tap at screen position. Returns true if consumed.
@@ -84,6 +134,13 @@ impl SettingsApp {
             }
             return true;
         }
+        // Update-firmware button (250-295). Guarded on !keyboard so a stray tap
+        // while typing SSID/pass can't kick off an OTA. main.rs does the WiFi gate.
+        if y >= 250 && y < 295 && !self.keyboard.is_active() {
+            self.ota_requested = true;
+            self.ota_status = "Requested\u{2026}";
+            return true;
+        }
         false
     }
 
@@ -100,6 +157,18 @@ impl App for SettingsApp {
 
     fn update(&mut self, input: &AppInput) -> AppResult {
         self.keyboard.update(input.dt_ms);
+        // Live pressed-state (touch overhaul): while the finger is down, light
+        // the control (or T9 key) under it. `input.touch` carries the live
+        // coords while `input.down` is true; both clear on the lift tick — the
+        // same tick the tap fires — so the highlight releases with the action.
+        self.pressed = match (input.down, input.touch) {
+            (true, Some(tp)) => self.zone_at(tp.x, tp.y),
+            _ => PressedZone::None,
+        };
+        self.keyboard.set_pressed_key(match (input.down, input.touch) {
+            (true, Some(tp)) if self.keyboard.is_active() => T9Keyboard::key_at(tp.x, tp.y),
+            _ => None,
+        });
         // Tap targets use the last-known touch coords (the tap frame's point may
         // already be None on finger-lift); the runner passes them via input.touch.
         if input.tap {
@@ -127,8 +196,15 @@ impl App for SettingsApp {
 
         let _ = Text::with_alignment("SETTINGS", EgPoint::new(205, 35), title, Alignment::Center).draw(d);
 
-        // SSID field
-        let ssid_bg = if self.active_field == SettingsField::Ssid && self.editing { Rgb565::new(3, 6, 3) } else { Rgb565::new(2, 4, 2) };
+        // SSID field — pressed (finger down right now) is brightest, then the
+        // editing highlight, then the resting fill.
+        let ssid_bg = if self.pressed == PressedZone::Ssid {
+            Rgb565::new(5, 11, 6)
+        } else if self.active_field == SettingsField::Ssid && self.editing {
+            Rgb565::new(3, 6, 3)
+        } else {
+            Rgb565::new(2, 4, 2)
+        };
         let _ = RoundedRectangle::with_equal_corners(
             Rectangle::new(EgPoint::new(15, 60), Size::new(380, 50)),
             Size::new(8, 8),
@@ -138,8 +214,14 @@ impl App for SettingsApp {
         let ssid_display = if ssid.is_empty() { "(tap to enter)" } else { ssid };
         let _ = Text::new(ssid_display, EgPoint::new(25, 98), value).draw(d);
 
-        // Password field
-        let pass_bg = if self.active_field == SettingsField::Password && self.editing { Rgb565::new(3, 6, 3) } else { Rgb565::new(2, 4, 2) };
+        // Password field — same pressed > editing > rest ladder as SSID.
+        let pass_bg = if self.pressed == PressedZone::Password {
+            Rgb565::new(5, 11, 6)
+        } else if self.active_field == SettingsField::Password && self.editing {
+            Rgb565::new(3, 6, 3)
+        } else {
+            Rgb565::new(2, 4, 2)
+        };
         let _ = RoundedRectangle::with_equal_corners(
             Rectangle::new(EgPoint::new(15, 120), Size::new(380, 50)),
             Size::new(8, 8),
@@ -166,6 +248,27 @@ impl App for SettingsApp {
             WifiState::Error => "RETRY",
         };
         let _ = Text::with_alignment(btn_text, EgPoint::new(205, 210), MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE), Alignment::Center).draw(d);
+
+        // Update-firmware button (OTA). Tap requests an OTA; main.rs gates on WiFi.
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(EgPoint::new(60, 250), Size::new(290, 45)),
+            Size::new(10, 10),
+        ).into_styled(PrimitiveStyle::with_fill(Rgb565::new(6, 12, 20))).draw(d);
+        let _ = Text::with_alignment(
+            "UPDATE FIRMWARE",
+            EgPoint::new(205, 278),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_LIGHT_BLUE),
+            Alignment::Center,
+        ).draw(d);
+        // OTA status line (download progress / staged / error), hidden when empty.
+        if !self.ota_status.is_empty() {
+            let _ = Text::with_alignment(
+                self.ota_status,
+                EgPoint::new(205, 320),
+                MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_ORANGE),
+                Alignment::Center,
+            ).draw(d);
+        }
 
         // Draw keyboard overlay if active
         self.keyboard.render(d);

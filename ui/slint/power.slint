@@ -1,4 +1,5 @@
 import { Theme, StatRow, PageTitle } from "theme.slint";
+import { PillButton, SliderControl } from "controls.slint";
 
 // One subsystem read-out cell: dim name over "STATE · NNmA". Compact 38px so
 // the six-cell grid leaves room for the LP CORE row above TOTAL (see below).
@@ -121,54 +122,35 @@ export component PowerPage {
         text: "BRIGHTNESS";
         color: Theme.dim; font-size: 16px; letter-spacing: 2px;
     }
-    slider := Rectangle {
+    // Shared SliderControl (Recipe F): the knob grows + brightens to accent
+    // while the finger holds it — the grab is visibly acknowledged.
+    slider := SliderControl {
         x: (parent.width - self.width) / 2;
         y: 366px;
-        width: 330px; height: 40px;
-        Rectangle {
-            x: 0; y: (parent.height - self.height) / 2;
-            width: parent.width; height: 10px; border-radius: 5px;
-            background: Theme.track;
-            Rectangle {
-                x: 0; y: 0;
-                width: max(10px, parent.width * root.brightness);
-                height: parent.height; border-radius: 5px;
-                background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
-            }
-        }
-        Rectangle {
-            x: clamp(slider.width * root.brightness - self.width / 2,
-                     0px, slider.width - self.width);
-            y: (parent.height - self.height) / 2;
-            width: 26px; height: 26px; border-radius: 13px;
-            background: Theme.ink;
-        }
-        TouchArea {
-            pointer-event(ev) => {
-                if (ev.kind == PointerEventKind.down
-                    || (ev.kind == PointerEventKind.move && self.pressed)) {
-                    root.brightness = clamp(self.mouse-x / self.width, 0.0, 1.0);
-                    root.brightness-changed(root.brightness);
-                }
-            }
-        }
+        width: 330px;
+        value <=> root.brightness;
+        changed(f) => { root.brightness-changed(f); }
     }
 
     // Reboot button (kicks OTA check first when WiFi is up, then resets).
     // Placed at y 410 / height 36 (ends y 446) so it clears the raised page-dots
     // TouchArea at y 448 with a 2px gap, and still sits below the brightness
     // slider (ends y 406, outside the Rust SLIDER_BAND 330..430 swipe guard).
-    reboot := Rectangle {
+    // Shared PillButton danger variant (Recipe D): pressed inverts to solid
+    // warn with on-accent text — an unmistakable "you are about to reboot".
+    // Hit area padded past the 36px visual to a 196x44 finger target (≥44px
+    // floor) — sideways + upward only: the bottom edge stays at y446 so it
+    // can't shadow the page-dots TouchArea starting at y448.
+    reboot := PillButton {
         x: (parent.width - self.width) / 2;
         y: 410px;
-        width: 180px; height: 36px; border-radius: 18px;
-        border-width: 1px; border-color: Theme.warn;
-        background: Theme.warn-bg;
-        Text {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            text: "REBOOT"; color: Theme.warn; font-size: 16px; letter-spacing: 3px;
-        }
-        TouchArea { clicked => { root.reboot-tap(); } }
+        width: 180px; height: 36px;
+        danger: true;
+        text: "REBOOT";
+        text-size: 16px;
+        tracking: 3px;
+        hit-pad-x: 8px;
+        hit-pad-top: 8px;
+        clicked => { root.reboot-tap(); }
     }
 }

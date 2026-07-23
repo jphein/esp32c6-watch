@@ -1,4 +1,5 @@
-import { Theme, PageTitle, BackChevron } from "theme.slint";
+import { Theme, PageTitle } from "theme.slint";
+import { BackChevron, PressTile } from "controls.slint";
 
 // WLED WiZmote remote page (smol #25 port, UI half). Standalone overlay-style
 // component, like SoundLevel / VoicePage. Big finger tiles; tapping one fires
@@ -10,17 +11,19 @@ import { Theme, PageTitle, BackChevron } from "theme.slint";
 //   0 On · 1 Off · 2 Preset1 · 3 Preset2 · 4 Preset3 · 5 Preset4
 //   6 BrightUp (DIM+) · 7 BrightDown (DIM-) · 8 Night
 
-// A big finger-tile button.
+// A big finger-tile button. PressTile (Recipe A): fill lights to accent-bg +
+// border ignites in the tile's own accent on finger-down — hard 1-frame swap,
+// so every WiZmote send is visibly acknowledged at the finger, before the
+// "-> ON" status line updates. Label keeps its accent tint (spec §6 #6).
 component WledTile {
     in property <string> label;
     in property <color> accent;
     in property <int> act;
     callback fire(int);
-    Rectangle {
+    PressTile {
         border-radius: 14px;
-        background: Theme.panel;
-        border-width: 1px;
-        border-color: Theme.line;
+        ignite: root.accent;
+        clicked => { root.fire(root.act); }
         Text {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
@@ -30,7 +33,6 @@ component WledTile {
             font-weight: 700;
             letter-spacing: 1px;
         }
-        TouchArea { clicked => { root.fire(root.act); } }
     }
 }
 
@@ -43,7 +45,7 @@ export component WledRemote {
 
     PageTitle { title: "WLED"; }
 
-    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // Back chevron — shared BackChevron component (controls.slint): one canonical
     // 78x64 placement so overlays never drift. Right-swipe also closes
     // (slint_shell::handle_touch, like the launcher).
     BackChevron { clicked => { root.close(); } }

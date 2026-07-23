@@ -17,6 +17,12 @@ pub struct AppInput {
     pub touch: Option<TouchPoint>,
     pub swipe: Option<SwipeDirection>,
     pub tap: bool,
+    /// True while a finger is physically on the glass THIS frame (live
+    /// touch-controller sample). Distinct from `touch`, which some apps receive
+    /// as last-known coords even after lift (Settings) or as a synthesized hold
+    /// (Flappy). Lets apps draw pressed-state feedback on finger-DOWN instead of
+    /// only reacting to the tap that fires on lift (touch overhaul).
+    pub down: bool,
     pub accel: (f32, f32, f32),
     pub dt_ms: u32, // milliseconds since last frame
 }

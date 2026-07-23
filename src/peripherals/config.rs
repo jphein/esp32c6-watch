@@ -18,8 +18,8 @@ const REC_LEN_V1: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 2;
 const MAGIC_V2: [u8; 6] = *b"SWCFG2";
 const REC_LEN_V2: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 2;
 /// v3 record: v2 + theme scheme byte (0..3), appended before the checksum. A
-/// v1/v2 record still loads (theme defaults to 0 = Midnight), so WiFi creds +
-/// page + units survive the upgrade; the first save rewrites it as v3 in place.
+/// v1/v2 record still loads (theme takes the default — 2 = Amber), so WiFi creds
+/// + page + units survive the upgrade; the first save rewrites it as v3 in place.
 const MAGIC_V3: [u8; 6] = *b"SWCFG3";
 const REC_LEN_V3: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 2;
 
@@ -54,7 +54,10 @@ impl Default for WatchConfig {
             // Fleet defaults (smol units.rs `Units::default`): °F + 12h.
             units_temp_f: true,
             units_clk_24h: false,
-            theme: 0,
+            // Amber by default (JP 2026-07-23). Applies to fresh devices AND
+            // v1/v2 records (which lack the theme byte and take this default);
+            // an explicit picker choice persists as v3 and wins.
+            theme: 2,
         }
     }
 }

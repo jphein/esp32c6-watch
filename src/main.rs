@@ -20,11 +20,18 @@ mod net;
 mod peripherals;
 mod ui;
 mod apps;
+// UI test automator (feature `debug-console`, on by default): drive + measure
+// the UI over the USB-Serial-JTAG RX. See src/debug_console.rs.
+#[cfg(feature = "debug-console")]
+mod debug_console;
 
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+// select3 for the normal build; the debug-console build uses select4 (adds the
+// synthetic-input wake) fully-qualified at the call site.
+#[cfg(not(feature = "debug-console"))]
 use embassy_futures::select::select3;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::Rgb565;
@@ -485,6 +492,19 @@ async fn main(_spawner: Spawner) -> ! {
     display.fill_screen(Rgb565::BLACK);
     log_heap("boot");
 
+    // === Debug console (feature `debug-console`): UI test automator ==========
+    // Take the USB-Serial-JTAG peripheral in async, RX-only mode. esp-println
+    // keeps writing the TX side via raw MMIO (it never owns the peripheral or
+    // uses interrupts), so `println!` output is unaffected — we only `.read()`
+    // here and echo results back through `println!`. USB_DEVICE is otherwise
+    // unused. See src/debug_console.rs for the sharing rationale.
+    #[cfg(feature = "debug-console")]
+    {
+        use esp_hal::usb_serial_jtag::UsbSerialJtag;
+        let usb = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+        _spawner.spawn(debug_console::debug_console_task(usb).expect("debug_console_task token"));
+    }
+
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
     let mut touch_rst = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
     let mut touch_int = Input::new(
@@ -629,6 +649,14 @@ async fn main(_spawner: Spawner) -> ! {
     // residual vendor state and a battery-dead cold boot silences the mic. Rail settles
     // during the 150ms clock delay below.
     let _ = power.enable_mic_rail();
+    // Charger profile (issue #16): CV 4.1V / pre 50mA / CC 400mA / term 25mA —
+    // vendor parity (board .cc:48-52). Field-masked RMW of regs 0x61-0x64 only;
+    // rail enables are untouched (panel brown-out caution in power.rs header).
+    if power.configure_charger().is_ok() {
+        println!("[POWER] charger configured: CV 4.1V, pre 50mA, CC 400mA, term 25mA");
+    } else {
+        println!("[POWER] charger config FAILED (I2C)");
+    }
     Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
     let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
     match mic_adc.init() {
@@ -880,6 +908,10 @@ async fn main(_spawner: Spawner) -> ! {
     // so the QMI8658's hardware pedometer keeps counting in the background.
     let _ = imu.power_down();
     let mut imu_powered = false;
+    // Wrist-raise (tilt-to-wake) detector for the polling AOD path. The
+    // QMI8658 INT is not wired to a wake GPIO on this board, so raise wake is
+    // done by reading the accel on each short AOD light-sleep poll (below).
+    let mut raise_detector = crate::peripherals::imu::RaiseDetector::new();
     let mut next_step_poll = Instant::now();
     let mut was_touching = false;
 
@@ -961,6 +993,25 @@ async fn main(_spawner: Spawner) -> ! {
     let mut sync_src: &str = "none";
     let mut last_sync = Instant::now();
 
+    // OTA rollback-safety: a freshly-OTA'd image boots "on trial" (PendingVerify
+    // when the bootloader has auto-rollback on). Once the app has run
+    // OTA_HEALTHY_UPTIME without crashing, confirm the slot Valid so the bootloader
+    // keeps it; a bricked image that never reaches that point auto-rolls-back.
+    // `boot_instant` is the health-window start; `ota_marked_valid` is the one-shot
+    // latch. See net::ota_http::mark_valid_if_pending.
+    const OTA_HEALTHY_UPTIME: Duration = Duration::from_secs(10);
+    let boot_instant = Instant::now();
+    let mut ota_marked_valid = false;
+    // UPDATE-FIRMWARE pending window: set by the Settings tap OR an accepted
+    // push announce (raising WiFi if it's down), consumed by the hoisted
+    // executor below (per-tick, any screen) once WiFi is ready, or dropped
+    // after a 25s WiFi timeout.
+    let mut ota_pending_since: Option<Instant> = None;
+    // Push-OTA image-URL override from the accepted announce (`None` = the
+    // baked OTA_URL). Set alongside ota_pending_since; cleared with it.
+    let mut ota_push_url: Option<heapless::String<{ crate::net::ota_http::ANNOUNCE_URL_CAP }>> =
+        None;
+
     loop {
         let touch_held = touch_int.is_low();
         let button_held = boot_button.is_low();
@@ -971,7 +1022,14 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(30)
         } else if screen_state == 1 {
             // AOD: wake often enough that the minute flip never looks stuck.
-            Duration::from_secs(5)
+            // debug-console builds skip AOD light-sleep (the raise detector runs
+            // on THIS tick instead of the 700ms sleep-poll), so match its cadence
+            // there; release builds keep the lazy 5s (the sleep block self-paces).
+            if cfg!(feature = "debug-console") {
+                Duration::from_millis(700)
+            } else {
+                Duration::from_secs(5)
+            }
         } else {
             match app_state {
                 // Sound meter + waveform are a live 30 Hz display; pace them
@@ -1031,35 +1089,80 @@ async fn main(_spawner: Spawner) -> ! {
             tick
         };
 
-        if screen_state == 1 {
-            // AOD light sleep (#29, now default — tap-wake confirmed on glass):
-            // park the HP core in light sleep
-            // instead of WFI-idling. Wake on a 60s RTC timer OR touch (GPIO15) OR
-            // boot button (GPIO9), both active-low. GPIO wake needs BOTH the pin
-            // armed (`wakeup_enable`) AND the GpioWakeupSource trigger in the wake
-            // set — the timer-only source would never wake on the pins. The clock
-            // is the external PCF85063 (sleep-safe); embassy-time (TIMG0) pauses,
-            // so it lags real time by the sleep span — fine, AOD repaints from the
-            // RTC minute. `sleep_light` blocks (executor paused → mesh quiesces).
-            let timer_wake = TimerWakeupSource::new(core::time::Duration::from_secs(60));
+        // In debug-console builds, skip AOD light-sleep entirely (fall through to the
+        // console-aware select4 below) so unattended UI tests can drive the watch —
+        // injected commands can't wake the HP core out of `sleep_light`.
+        if screen_state == 1 && !cfg!(feature = "debug-console") {
+            // AOD light sleep (#29, now default — tap-wake confirmed on glass)
+            // + WRIST-RAISE wake (polling): park the HP core in light sleep
+            // instead of WFI-idling. Wake on a short poll timer OR touch (GPIO15)
+            // OR boot button (GPIO9), both active-low. GPIO wake needs BOTH the
+            // pin armed (`wakeup_enable`) AND the GpioWakeupSource trigger in the
+            // wake set — the timer-only source would never wake on the pins. The
+            // clock is the external PCF85063 (sleep-safe); embassy-time (TIMG0)
+            // pauses, so it lags real time by the sleep span — fine, AOD repaints
+            // from the RTC minute. `sleep_light` blocks (executor paused → mesh
+            // quiesces).
+            //
+            // WRIST-RAISE / BATTERY TRADEOFF: the QMI8658 INT is NOT wired to a
+            // wake-capable GPIO on this board (vendor BSP BSP_CAPS_IMU=0, no INT
+            // macro; only the FT3168 touch INT is a wake input), so there is no
+            // hardware wake-on-motion. We POLL instead: the timer is dropped from
+            // 60 s to 700 ms so each poll can read the accel (kept live at 62.5Hz
+            // by imu.power_down — accel on, gyro off) and test the raise gesture.
+            // That is ~85x more light-sleep wakes than the old 60 s AOD timer.
+            // Each poll is cheap (a light-sleep re-entry + one 6-byte I2C accel
+            // read, sub-ms) and — unlike a real wake — SKIPS the ES7210/mic
+            // re-init below, so the average current adder is modest vs. keeping
+            // the HP core awake. Side benefit: the AOD minute-repaint lag drops
+            // from up to 60 s to <1 s.
+            const AOD_POLL_MS: u64 = 700;
+            let timer_wake =
+                TimerWakeupSource::new(core::time::Duration::from_millis(AOD_POLL_MS));
             let gpio_wake = GpioWakeupSource::new();
             let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(true, WakeEvent::LowLevel);
             let t0 = Instant::now();
             rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
             let cause = wakeup_cause();
-            // Light sleep clock-gated the I2S peripheral, stalling the silent-TX
-            // clock + the mic RX DMA. Re-arm both so the mic recovers on wake
-            // (otherwise the Sound app / Voice read exact zeros after any AOD).
-            mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
-            mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
-            // The ES7210 is a separate I2C chip (AXP rail) that normally survives
-            // light sleep, but re-init defensively so the mic can never be left dead
-            // after a wake (cheap: it only runs on the ~15s-idle AOD transition).
-            let _ = mic_adc.init();
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+
+            // Wrist-raise: read one accel sample and test the tilt-to-wake
+            // gesture. Accel is alive during AOD (power_down keeps it at 62.5Hz),
+            // so this is a single cheap I2C read. On a raise, wake to bright
+            // exactly like a tap (the display stays ON through AOD — only the
+            // brightness was dropped — so no display_on() is needed here).
+            let mut raised = false;
+            if let Ok(a) = imu.read_accel() {
+                raised = raise_detector.update(a);
+            }
+            if raised {
+                last_interaction = Instant::now();
+                display.set_brightness(brightness);
+                screen_state = 3;
+                next_flush = last_interaction;
+                shell.set_aod(false);
+                shell.request_redraw();
+                println!("[AOD-SLEEP] wrist-raise -> bright");
+            }
+
+            // Mic recovery is only needed on a REAL wake that resumes normal
+            // operation (touch / button / raise) — NOT on the frequent poll-timer
+            // wakes that go straight back to light sleep (the mic is idle in AOD).
+            // Light sleep clock-gated the I2S peripheral, stalling the silent-TX
+            // clock + the mic RX DMA; re-arm both and re-init the ES7210 (a
+            // separate I2C chip) so the Sound app / Voice never read exact zeros
+            // after the AOD. Gating this to real wakes is what keeps 700 ms
+            // polling from paying the ES7210 re-init ~85x/min.
+            let real_wake = raised || touch_int.is_low() || boot_button.is_low();
+            if real_wake {
+                mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+                mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+                let _ = mic_adc.init();
+            }
+
             // embassy-time froze during sleep, so the loop's next_rtc gate won't
             // refresh last_dt — force a read now so the AOD minute repaint and the
             // wall-clock AOD->off (below) both see the real time (#29 DS1).
@@ -1067,17 +1170,53 @@ async fn main(_spawner: Spawner) -> ! {
                 last_dt = Some(dt);
             }
             println!(
-                "[AOD-SLEEP] woke cause={:?} embassy_lag_ms={}",
+                "[AOD-SLEEP] woke cause={:?} embassy_lag_ms={} real={}",
                 cause,
-                (Instant::now() - t0).as_millis()
+                (Instant::now() - t0).as_millis(),
+                real_wake
             );
         } else {
+            // debug-console adds a 4th wake source (a queued synthetic-input
+            // command) so the console drives the loop without waiting out the
+            // idle tick. Zero cost when nothing is queued.
+            #[cfg(feature = "debug-console")]
+            let _ = embassy_futures::select::select4(
+                Timer::after(tick),
+                touch_int.wait_for_falling_edge(),
+                boot_button.wait_for_falling_edge(),
+                debug_console::wait_inject(),
+            )
+            .await;
+            #[cfg(not(feature = "debug-console"))]
             let _ = select3(
                 Timer::after(tick),
                 touch_int.wait_for_falling_edge(),
                 boot_button.wait_for_falling_edge(),
             )
             .await;
+
+            // Wrist-raise for debug-console builds: they SKIP the AOD light-sleep
+            // block above (so automator tests aren't interrupted), which is where
+            // the sleep-path raise detector lives — leaving tilt-to-wake dead in
+            // test images. Run the SAME detector here whenever the screen is in
+            // AOD (the AOD cadence arm ticks this path at 700ms to match). Same
+            // wake actions as the sleep path; no mic re-arm needed (no light sleep
+            // happened, so the I2S clock was never gated).
+            if screen_state == 1 {
+                let mut raised = false;
+                if let Ok(a) = imu.read_accel() {
+                    raised = raise_detector.update(a);
+                }
+                if raised {
+                    last_interaction = Instant::now();
+                    display.set_brightness(brightness);
+                    screen_state = 3;
+                    next_flush = last_interaction;
+                    shell.set_aod(false);
+                    shell.request_redraw();
+                    println!("[AOD] wrist-raise -> bright (no-sleep path)");
+                }
+            }
         }
 
         let now = Instant::now();
@@ -1177,9 +1316,53 @@ async fn main(_spawner: Spawner) -> ! {
             }
         }
 
+        // === Synthetic input injection (debug-console) ===
+        // Drain ONE queued command and merge it into the SAME variables the real
+        // touch path just wrote, so it flows through `shell.handle_touch` (and
+        // framebuffer `AppInput`) identically. A tap is press+release across two
+        // ticks; the take() re-arms the wake signal so the release lands next
+        // tick. `injected_this_tick` feeds the wake check below so an injection
+        // lights the screen exactly like a real touch.
+        #[cfg(feature = "debug-console")]
+        let injected_this_tick = {
+            if let Some(inj) = debug_console::take_inject() {
+                match inj {
+                    debug_console::Inject::Touch { point, swipe, start_y, tap } => {
+                        touch_point = point;
+                        swipe_event = swipe;
+                        swipe_start_y = start_y;
+                        if tap {
+                            tap_event = true;
+                        }
+                        if let Some(p) = point {
+                            last_touch_x = p.x;
+                            last_touch_y = p.y;
+                        }
+                    }
+                    debug_console::Inject::Launch(idx) => {
+                        // Same cell a launcher tile tap sets; the launch drain in
+                        // the shell arm raises the app identically.
+                        if let Some(st) = crate::apps::registry::launch_state(idx) {
+                            shell.req.launch.set(Some(st));
+                        }
+                    }
+                    debug_console::Inject::Home => {
+                        shell.set_launcher_open(false);
+                        fb = None;
+                        app_state = AppState::Watchface;
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+        #[cfg(not(feature = "debug-console"))]
+        let injected_this_tick = false;
+
         // === Screen sleep/wake state machine ===
         let any_touch = touch_int.is_low();
-        if any_touch || swipe_event.is_some() || tap_event || boot_button.is_low() {
+        if any_touch || swipe_event.is_some() || tap_event || boot_button.is_low() || injected_this_tick {
             last_interaction = now;
             if screen_state < 3 {
                 if screen_state == 0 {
@@ -1387,6 +1570,107 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
             next_ntp_attempt = now + Duration::from_secs(10);
+        }
+
+        // OTA rollback-safety: once the app has stayed alive OTA_HEALTHY_UPTIME
+        // (peripherals up + this loop ticking), confirm the running slot so the
+        // bootloader stops treating a freshly-OTA'd image as on-trial and won't
+        // revert it on the next boot. WiFi-independent (a credential-less watch
+        // still confirms a good image) and one-shot regardless of outcome.
+        if !ota_marked_valid && now.duration_since(boot_instant) >= OTA_HEALTHY_UPTIME {
+            if let Err(e) = crate::net::ota_http::mark_valid_if_pending(&mut flash) {
+                println!("[OTA] mark-valid failed: {e}");
+            }
+            ota_marked_valid = true;
+        }
+
+        // === OTA pending executor (any screen) ===
+        // ONE executor for both triggers — the Settings tap and an accepted push
+        // announce both set `ota_pending_since` (+ optional `ota_push_url`); this
+        // runs the download once WiFi is ready. Hoisted out of the Settings arm
+        // so a pushed update is zero-touch from ANY screen (games included).
+        // Runs BEFORE the announce-accept block below, so a fresh accept always
+        // gets one full dispatch pass first — the toast/status paints before the
+        // download blocks this loop (deliberate: an update is a user/deploy
+        // action, blocking is fine; it is off the hot path otherwise).
+        if let Some(t0) = ota_pending_since {
+            if wifi_connected && stack.config_v4().is_some() {
+                ota_pending_since = None;
+                settings_app.ota_status = "Updating\u{2026}";
+                // Paint before the blocking download: Settings via its fb when
+                // open. Scene-resident screens already show the "Updating
+                // firmware…" toast (set when the trigger queued, one tick ago) —
+                // no point re-setting it here, the scene can't repaint again
+                // before the download blocks this loop.
+                if app_state == AppState::Settings {
+                    if let Some(fb_ref) = fb.as_mut() {
+                        settings_app.render(fb_ref);
+                        fb_ref.flush(&mut display);
+                    }
+                }
+                let url = ota_push_url.take();
+                match crate::net::ota_http::ota_update(stack, &mut flash, url.as_deref()).await {
+                    Ok(()) => {
+                        println!("[OTA] staged - rebooting to apply");
+                        settings_app.ota_status = "Staged \u{2013} rebooting";
+                        if app_state == AppState::Settings {
+                            if let Some(fb_ref) = fb.as_mut() {
+                                settings_app.render(fb_ref);
+                                fb_ref.flush(&mut display);
+                            }
+                            Timer::after(Duration::from_millis(1200)).await;
+                        }
+                        esp_hal::system::software_reset();
+                    }
+                    Err(e) => {
+                        println!("[OTA] failed: {e}");
+                        settings_app.ota_status = e;
+                        let mut msg: heapless::String<64> = heapless::String::new();
+                        let _ = msg.push_str("Update failed: ");
+                        let _ = msg.push_str(e);
+                        shell.set_toast(msg.as_str());
+                        // Fresh timestamp, NOT the tick-start `now`: the download
+                        // may have blocked for minutes, and a stale-based window
+                        // would already be expired — the toast would flash for a
+                        // single tick and be auto-cleared.
+                        toast_until = Instant::now() + Duration::from_secs(5);
+                        toast_active = true;
+                    }
+                }
+            } else if (now - t0) > Duration::from_secs(25) {
+                ota_pending_since = None;
+                ota_push_url = None;
+                println!("[OTA] WiFi didn't come up within 25s - giving up");
+                settings_app.ota_status = "WiFi failed \u{2014} tap to retry";
+                shell.set_toast("Update failed: WiFi");
+                toast_until = now + Duration::from_secs(5);
+                toast_active = true;
+            } else {
+                // Keep WiFi requested for the whole pending window — the NTP
+                // burst-complete drop (wifi_on_request = false after sync) must
+                // not tear the association down under a queued update.
+                wifi_on_request = true;
+            }
+        }
+
+        // === Push-OTA announce accept ===
+        // `ota_http::handle_announce` (fed by both MQTT paths) already applied
+        // the BUILD_EPOCH monotonicity gate; anything taken here is a go. Same
+        // flow as the Settings tap: raise WiFi, queue, executor above runs it
+        // next tick (after one paint pass shows the toast).
+        if let Some(ann) = crate::net::ota_http::take_announce() {
+            if ota_pending_since.is_some() {
+                println!("[OTA] push: build {} ignored (update already pending)", ann.build);
+            } else {
+                println!("[OTA] push: build {} queued (zero-touch)", ann.build);
+                ota_push_url = ann.url;
+                settings_app.ota_status = "Updating\u{2026}";
+                shell.set_toast("Updating firmware\u{2026}");
+                toast_until = now + Duration::from_secs(30);
+                toast_active = true;
+                wifi_on_request = true;
+                ota_pending_since = Some(now);
+            }
         }
 
         // TIME-SHARE steady state: whenever WiFi is down but the radio is up,
@@ -2306,7 +2590,9 @@ async fn main(_spawner: Spawner) -> ! {
                     // If WiFi is up and an OTA_URL was baked in at build time,
                     // try to stage an OTA update first; reboot either way.
                     if wifi_connected && crate::net::ota_http::URL_SET {
-                        if let Err(e) = crate::net::ota_http::ota_update(stack, &mut flash).await {
+                        if let Err(e) =
+                            crate::net::ota_http::ota_update(stack, &mut flash, None).await
+                        {
                             println!("[OTA] failed: {e}");
                         }
                     }
@@ -2491,7 +2777,14 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Theme
                 ) {
                     if screen_state >= 2 {
+                        // Time the shell render — the responsiveness metric the
+                        // `perf` command exposes (catches theme-slow /
+                        // launcher-scroll style regressions).
+                        #[cfg(feature = "debug-console")]
+                        let _t0 = Instant::now();
                         shell.render(&mut display);
+                        #[cfg(feature = "debug-console")]
+                        debug_console::record_frame((Instant::now() - _t0).as_micros() as u32);
                     } else if screen_state == 1 {
                         // AOD: repaint only when the minute changes so the dim
                         // scene isn't driven every wake. last_dt is refreshed at
@@ -2499,7 +2792,13 @@ async fn main(_spawner: Spawner) -> ! {
                         if let Some(dt) = last_dt.as_ref() {
                             if dt.minutes != aod_last_minute {
                                 aod_last_minute = dt.minutes;
+                                #[cfg(feature = "debug-console")]
+                                let _t0 = Instant::now();
                                 shell.render(&mut display);
+                                #[cfg(feature = "debug-console")]
+                                debug_console::record_frame(
+                                    (Instant::now() - _t0).as_micros() as u32,
+                                );
                             }
                         }
                     }
@@ -2558,6 +2857,35 @@ async fn main(_spawner: Spawner) -> ! {
                             settings_connect_pending = true;
                         }
                     }
+
+                    // Update firmware (OTA). One-tick handshake: the on-glass tap
+                    // set `ota_requested` in the app's update() last tick; take it
+                    // here. SELF-SERVE WiFi: the single-radio time-share drops WiFi
+                    // after the boot burst, so "Connect WiFi first" was the near-
+                    // guaranteed (and near-invisible) outcome of every tap — JP's
+                    // "no feedback" bug. Now the tap itself RAISES WiFi (same
+                    // wifi_on_request knob the boot burst uses), shows "Connecting
+                    // WiFi…", and the pending arm below proceeds automatically once
+                    // associated + DHCP'd (25s timeout). One tap end-to-end.
+                    if settings_app.take_ota_request() {
+                        if !crate::net::ota_http::URL_SET {
+                            println!("[OTA] tap: no OTA_URL baked into this build");
+                            settings_app.ota_status = "No OTA URL in build";
+                        } else if wifi_connected && stack.config_v4().is_some() {
+                            println!("[OTA] tap: WiFi ready - updating now");
+                            ota_push_url = None; // tap = the baked OTA_URL
+                            ota_pending_since = Some(now);
+                        } else {
+                            println!("[OTA] tap: raising WiFi for update");
+                            settings_app.ota_status = "Connecting WiFi\u{2026}";
+                            ota_push_url = None; // tap = the baked OTA_URL
+                            wifi_on_request = true;
+                            ota_pending_since = Some(now);
+                        }
+                        // The download itself runs in the hoisted per-tick "OTA
+                        // pending executor" (shared with push-OTA announces) —
+                        // it paints this app's status via the fb when ready.
+                    }
                 }
 
                 // Per-app input shaping: Flappy reads the touch INT for a reliable
@@ -2586,6 +2914,11 @@ async fn main(_spawner: Spawner) -> ! {
                     touch,
                     swipe: swipe_event,
                     tap: tap_event,
+                    // Live finger-on-glass flag: Some only while the controller
+                    // reports a contact this tick (drops to None on the lift tick,
+                    // the same tick `tap` fires). Drives pressed-state redraw in
+                    // Settings/T9 (touch overhaul); games ignore it.
+                    down: touch_point.is_some(),
                     accel,
                     dt_ms: dt_ms.max(1),
                 };
@@ -2632,6 +2965,18 @@ async fn main(_spawner: Spawner) -> ! {
                 fb = None;
             }
         }
+
+        // Publish the UI snapshot for the debug-console `state` command (once per
+        // awake tick — screen-off ticks `continue` above and keep the last one).
+        #[cfg(feature = "debug-console")]
+        debug_console::publish_state(debug_console::UiState {
+            app: app_state,
+            page: shell.page(),
+            screen_state,
+            wifi: wifi_connected,
+            ble: ble_on,
+            mesh_peers: last_mesh_peers,
+        });
 
         // Track the arm we ran so the shell arm can detect a return from an app
         // that painted straight to the panel and force a repaint. Use the

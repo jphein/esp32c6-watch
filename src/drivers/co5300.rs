@@ -1,6 +1,27 @@
 // CO5300 AMOLED display driver
 // Translated from Arduino_CO5300.h/.cpp
 // Resolution: 410x502, col_offset=22, RGB565
+//
+// Controller identity (issue #17, resolved 2026-07): the panel controller on the
+// Waveshare ESP32-C6-Touch-AMOLED-2.06 IS a Chipone CO5300. Waveshare's docs name
+// it ("Built-in CO5300 driver chip and FT3168 capacitive touch controller") and
+// their Resources page links the CO5300 datasheet (no SH8601 datasheet exists for
+// this board). The vendor xiaozhi firmware and Waveshare's own BSP drive it via
+// the `esp_lcd_sh8601` component instead — a software convenience only: SH8601 and
+// CO5300 are register-compatible across everything used here (QSPI opcodes
+// 0x02 cmd / 0x32 color, MIPI-DCS subset, 0xC4 SPI-mode, 0x51/0x63 brightness,
+// 2-pixel alignment quirk), and the sh8601 wrapper accepts a custom init table.
+// Waveshare's newer CO5300 boards (e.g. C6-Touch-AMOLED-1.32) use a proper
+// esp_lcd_co5300 driver whose init table matches ours (0xFE page sel, 0x3A=0x55,
+// 0xC4=0x80, 0x53=0x20, 0x63=0xFF, 0x51). Differences vs vendor init, all benign:
+// we skip 0x35 TE-on + 0x44 tear-scanline (LCD_TE is wired on the FPC but unused),
+// and we set 0x51=0xD0 after DISPON where the vendor holds 0x51=0x00 until the
+// first frame (boot-flash cosmetics).
+//
+// CRITICAL flush quirk (both vendor stacks enforce this): address windows must be
+// EVEN-aligned on both axes — start x/y rounded down to even, end x/y rounded up
+// to odd (even width/height >= 2). The vendor LVGL rounder (board .cc:78-92) exists
+// solely for this. Odd-aligned partial windows corrupt/smear rows (see issue #18).
 
 use embedded_graphics_core::draw_target::DrawTarget;
 use embedded_graphics_core::geometry::{OriginDimensions, Size};

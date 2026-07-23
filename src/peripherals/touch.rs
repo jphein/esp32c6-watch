@@ -141,19 +141,30 @@ impl<I: I2c> Ft3168Touch<I> {
                     let abs_dx = dx.unsigned_abs();
                     let abs_dy = dy.unsigned_abs();
 
-                    // Require dominant axis to be at least 1.5x the other
-                    // to prevent diagonal swipes from triggering left/right
-                    let direction = if abs_dx < 30 && abs_dy < 30 {
+                    // Classify the lift-off gesture. It's a directional swipe once
+                    // the DOMINANT axis travels at least SWIPE_MIN logical px; the
+                    // direction is simply that larger axis. Otherwise it's a Tap.
+                    //
+                    // This deliberately drops the old "dominant axis must beat the
+                    // other by 1.5x, else fall back to Tap" rule. That rule created
+                    // a dead-zone that silently swallowed any swipe whose axes were
+                    // within 1.5x of each other — a 100x80 px drag, or the slightly
+                    // diagonal swipes people actually make — turning a deliberate
+                    // navigation gesture into a stray tap. Dominant-axis is both
+                    // more reliable (no dropped swipes) and identical on every
+                    // screen (page carousel, launcher-close, every overlay close).
+                    // SWIPE_MIN (~10% of the 410px panel) is a hair above the old
+                    // 30px tap cutoff, so a jittery tap that slides a little still
+                    // reads as a tap rather than an accidental swipe.
+                    const SWIPE_MIN: u32 = 36;
+                    let direction = if abs_dx.max(abs_dy) < SWIPE_MIN {
                         SwipeDirection::Tap
-                    } else if abs_dx > abs_dy * 3 / 2 {
-                        // Clearly horizontal
+                    } else if abs_dx >= abs_dy {
                         if dx > 0 { SwipeDirection::Right } else { SwipeDirection::Left }
-                    } else if abs_dy > abs_dx * 3 / 2 {
-                        // Clearly vertical
-                        if dy > 0 { SwipeDirection::Down } else { SwipeDirection::Up }
+                    } else if dy > 0 {
+                        SwipeDirection::Down
                     } else {
-                        // Diagonal - treat as tap (ignore)
-                        SwipeDirection::Tap
+                        SwipeDirection::Up
                     };
 
                     let event = SwipeEvent {

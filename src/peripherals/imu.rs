@@ -3,6 +3,7 @@
 // I2C address 0x6B
 
 use embedded_hal::i2c::I2c;
+use esp_hal::delay::Delay;
 
 const QMI8658_ADDR: u8 = 0x6B;
 
@@ -43,9 +44,11 @@ const CTRL7_GYRO_EN: u8 = 0x02;
 const CTRL8_PEDO_EN: u8 = 0x10;
 
 // Max STATUSINT polls while waiting for a CTRL9 command to complete.
-// Each poll is a blocking I2C read (~0.1 ms at 400 kHz), so this bounds
-// the wait to roughly 200 ms without needing a delay provider.
-const CTRL9_POLL_LIMIT: u32 = 2000;
+// Each poll now delays 1 ms (matching SensorLib writeCommand's `delay(1)`,
+// SensorQMI8658.hpp ~L1241 assert / ~L1258 clear), so this bounds the
+// CmdDone wait to ~1000 ms — the same budget as SensorLib writeCommand's
+// default `wait_ms = 1000`.
+const CTRL9_POLL_LIMIT: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AccelData {
@@ -163,9 +166,18 @@ impl<I: I2c> Qmi8658Imu<I> {
 
     /// Poll STATUSINT until CmdDone matches `set` (true = wait for the bit
     /// to assert, false = wait for it to clear). Bounded by CTRL9_POLL_LIMIT.
+    ///
+    /// Mirrors SensorLib's writeCommand poll loop (SensorQMI8658.hpp: the
+    /// assert wait ~L1236-1244, the clear wait ~L1250-1260) — read STATUSINT,
+    /// then `delay(1)` (1 ms) before re-checking. That 1 ms settling delay
+    /// between polls is the robustness fix: the chip needs real wall-clock
+    /// time to process the CTRL9 command and toggle CmdDone, which the old
+    /// tight I2C poll (zero delay) never reliably gave it.
     fn wait_cmd_done(&mut self, set: bool) -> Result<bool, I::Error> {
+        let delay = Delay::new();
         for _ in 0..CTRL9_POLL_LIMIT {
             let s = self.read_reg(REG_STATUSINT)?;
+            delay.delay_millis(1);
             if ((s & STATUSINT_CMD_DONE) != 0) == set {
                 return Ok(true);
             }
@@ -269,5 +281,90 @@ impl<I: I2c> Qmi8658Imu<I> {
     /// Read chip ID.
     pub fn read_chip_id(&mut self) -> Result<u8, I::Error> {
         self.read_reg(REG_WHO_AM_I)
+    }
+}
+
+// ===========================================================================
+// Wrist-raise ("tilt-to-wake") detector
+// ===========================================================================
+//
+// HARDWARE PATH: polling, NOT interrupt. On the Waveshare
+// ESP32-C6-Touch-AMOLED-2.06 the QMI8658 INT1/INT2 pins are NOT routed to any
+// wake-capable ESP32-C6 GPIO — the vendor BSP declares `BSP_CAPS_IMU 0` and
+// defines no IMU-INT pin macro (the only interrupt input on the board is the
+// FT3168 touch INT on GPIO15). So there is no hardware wake-on-motion to arm
+// as a light-sleep GPIO wake source. Instead the AOD loop wakes on a short
+// timer, reads one accel sample, and feeds it to this detector.
+//
+// AXIS CONVENTION (confirmed from the tilt games + parallax in main.rs:
+// maze.rs maps `ax`=fore/aft and `ay`=left/right in-plane tilt, and
+// set_parallax uses (ax, ay)): x and y are the two IN-PLANE display axes, so
+// `z` is the DISPLAY NORMAL (out of the screen). Face-up (screen toward the
+// sky) => gravity lies along the outward normal => `az ~= +1 g`. If a build
+// reads the gesture inverted on glass, flip `RAISE_FACE_SIGN` to -1.0.
+
+/// Signed direction of "face up" along the display-normal (z) axis.
+/// +1.0 => face-up gives az ~ +1g. Flip to -1.0 if the mounting is inverted.
+const RAISE_FACE_SIGN: f32 = 1.0;
+/// Face-up detection threshold on the (signed) display-normal component.
+/// az beyond this (toward face-up) counts as "looking at the watch".
+/// 0.60 g == the normal within ~53 deg of vertical (a comfortable reading tilt).
+const RAISE_UP_Z: f32 = 0.60;
+/// "Wrist down" threshold: the (signed) normal component must first fall below
+/// this to arm the detector, so a raise is a genuine down->up transition and a
+/// watch already held face-up cannot re-trigger. Hysteresis gap vs RAISE_UP_Z.
+const RAISE_DOWN_Z: f32 = 0.35;
+/// Max in-plane gravity (squared) allowed in the face-up pose. Rejects edge-on
+/// / tumbling poses so a pocket can't fake a clean face-up. 0.70 g -> 0.49 g^2.
+const RAISE_INPLANE_MAX_SQ: f32 = 0.49;
+/// Total accel magnitude band (squared) for a "stable, gravity-dominated"
+/// sample: rejects violent shake and freefall. [0.60 g, 1.40 g].
+const RAISE_MAG_LO_SQ: f32 = 0.36;
+const RAISE_MAG_HI_SQ: f32 = 1.96;
+
+/// Debounced wrist-raise gesture detector fed one accel sample per AOD poll
+/// (~0.7 s). `update` returns `true` exactly once when the watch is raised from
+/// a clear wrist-down pose to a stable face-up pose; it will not fire again
+/// until the wrist drops (re-arming the detector), so holding the watch up does
+/// not re-wake. All comparisons are squared to avoid a sqrt / libm dependency.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RaiseDetector {
+    /// Set once a clear wrist-down pose is seen; consumed on a fired raise.
+    armed: bool,
+}
+
+impl RaiseDetector {
+    pub const fn new() -> Self {
+        Self { armed: false }
+    }
+
+    /// Reset to the disarmed state (e.g. a fresh AOD session). Not required for
+    /// correctness — the arm/consume logic self-recovers — but available.
+    pub fn reset(&mut self) {
+        self.armed = false;
+    }
+
+    /// Feed one accelerometer sample. Returns true on a detected wrist-raise.
+    pub fn update(&mut self, a: AccelData) -> bool {
+        // Signed display-normal component, oriented so +ve == face-up.
+        let n = a.z * RAISE_FACE_SIGN;
+
+        // A clear non-facing-up pose arms the detector.
+        if n < RAISE_DOWN_Z {
+            self.armed = true;
+        }
+
+        let inplane_sq = a.x * a.x + a.y * a.y;
+        let mag_sq = inplane_sq + a.z * a.z;
+        let stable = mag_sq > RAISE_MAG_LO_SQ
+            && mag_sq < RAISE_MAG_HI_SQ
+            && inplane_sq < RAISE_INPLANE_MAX_SQ;
+
+        // Fire once on the down->up crossing into a stable face-up pose.
+        if self.armed && n > RAISE_UP_Z && stable {
+            self.armed = false;
+            return true;
+        }
+        false
     }
 }
