@@ -9,6 +9,10 @@
 //!
 //! The image URL is baked in at build time: `OTA_URL=http://... cargo build`.
 //! Plain HTTP only (no TLS, no DNS — the host must be a dotted-quad IPv4).
+//!
+//! Live deploy server: `http://10.0.11.11:8000/watch.bin` (ubox0, VLAN-11, same
+//! subnet as the watch's "roam" WiFi). Set via `OTA_URL` in `.cargo/config.toml`
+//! (gitignored). Full deploy flow: `docs/ota-deploy.md`.
 
 use alloc::{format, vec};
 
@@ -191,6 +195,52 @@ async fn run(
         .map_err(|_| "otadata state update failed")?;
     println!("[OTA] update staged - reboot to apply");
     Ok(())
+}
+
+/// Rollback-safety: confirm the running image is healthy so the bootloader keeps
+/// it. A freshly-OTA'd slot is staged as [`OtaImageState::New`]; when the
+/// bootloader has auto-rollback enabled it flips that to
+/// [`OtaImageState::PendingVerify`] on first boot. If the app never transitions
+/// that to [`OtaImageState::Valid`], the bootloader reverts to the previous slot
+/// on the next boot (and marks the unconfirmed slot `Aborted`). So a good image
+/// only *sticks* once this is called — and a bricked one that never reaches this
+/// call auto-rolls-back. Call it once the app has proven itself healthy
+/// (peripherals up + the main loop running for a few seconds).
+///
+/// Transitions both `New` and `PendingVerify` -> `Valid` so the confirm is
+/// correct whether or not the bootloader was built with auto-rollback (with it
+/// off the state stays `New`; marking it valid is harmless and forward-safe).
+///
+/// Returns `Ok(true)` if it just marked the slot valid, `Ok(false)` if there was
+/// nothing to do (already `Valid`/`Invalid`, or a factory layout with no
+/// otadata). Never touches flash beyond the otadata select entry.
+pub fn mark_valid_if_pending(
+    flash: &mut esp_storage::FlashStorage<'_>,
+) -> Result<bool, &'static str> {
+    let mut pt_mem = vec![0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let pt = partitions::read_partition_table(flash, &mut pt_mem)
+        .map_err(|_| "partition table read failed")?;
+
+    let Some(otadata) = pt
+        .find_partition(PartitionType::Data(DataPartitionSubType::Ota))
+        .map_err(|_| "partition table scan failed")?
+    else {
+        // Factory layout (no otadata) — nothing to confirm, nothing to roll back.
+        return Ok(false);
+    };
+
+    let region = otadata.as_embedded_storage(flash);
+    let mut ota = Ota::new(region, 2).map_err(|_| "otadata invalid")?;
+    let state = ota.current_ota_state().map_err(|_| "otadata read failed")?;
+    match state {
+        OtaImageState::New | OtaImageState::PendingVerify => {
+            ota.set_current_ota_state(OtaImageState::Valid)
+                .map_err(|_| "otadata mark-valid failed")?;
+            println!("[OTA] marked current slot VALID (was {state:?}) - rollback cancelled");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// `http://a.b.c.d[:port][/path]` -> (addr, port, host, path). IPv4 only.

@@ -26,6 +26,13 @@ pub struct SettingsApp {
     pub keyboard: T9Keyboard,
     active_field: SettingsField,
     editing: bool,
+    /// Set true when the user taps "Update firmware". main.rs takes it (one-tick
+    /// handshake, same as the Connect flow), gates on WiFi + a baked-in OTA_URL,
+    /// runs the OTA download, and reboots on success.
+    pub ota_requested: bool,
+    /// One-line OTA status shown under the button (`&'static` so the error string
+    /// from `ota_http::ota_update` drops straight in). "" hides the line.
+    pub ota_status: &'static str,
 }
 
 impl SettingsApp {
@@ -36,7 +43,14 @@ impl SettingsApp {
             keyboard: T9Keyboard::new(),
             active_field: SettingsField::Ssid,
             editing: false,
+            ota_requested: false,
+            ota_status: "",
         }
+    }
+
+    /// Take a pending OTA request (clears it). One-shot handshake for main.rs.
+    pub fn take_ota_request(&mut self) -> bool {
+        core::mem::take(&mut self.ota_requested)
     }
 
     /// Handle tap at screen position. Returns true if consumed.
@@ -82,6 +96,13 @@ impl SettingsApp {
             if self.wifi_state == WifiState::Disconnected || self.wifi_state == WifiState::Error {
                 self.wifi_state = WifiState::Connecting;
             }
+            return true;
+        }
+        // Update-firmware button (250-295). Guarded on !keyboard so a stray tap
+        // while typing SSID/pass can't kick off an OTA. main.rs does the WiFi gate.
+        if y >= 250 && y < 295 && !self.keyboard.is_active() {
+            self.ota_requested = true;
+            self.ota_status = "Requested\u{2026}";
             return true;
         }
         false
@@ -166,6 +187,27 @@ impl App for SettingsApp {
             WifiState::Error => "RETRY",
         };
         let _ = Text::with_alignment(btn_text, EgPoint::new(205, 210), MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE), Alignment::Center).draw(d);
+
+        // Update-firmware button (OTA). Tap requests an OTA; main.rs gates on WiFi.
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(EgPoint::new(60, 250), Size::new(290, 45)),
+            Size::new(10, 10),
+        ).into_styled(PrimitiveStyle::with_fill(Rgb565::new(6, 12, 20))).draw(d);
+        let _ = Text::with_alignment(
+            "UPDATE FIRMWARE",
+            EgPoint::new(205, 278),
+            MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_LIGHT_BLUE),
+            Alignment::Center,
+        ).draw(d);
+        // OTA status line (download progress / staged / error), hidden when empty.
+        if !self.ota_status.is_empty() {
+            let _ = Text::with_alignment(
+                self.ota_status,
+                EgPoint::new(205, 320),
+                MonoTextStyle::new(&FONT_10X20, Rgb565::CSS_ORANGE),
+                Alignment::Center,
+            ).draw(d);
+        }
 
         // Draw keyboard overlay if active
         self.keyboard.render(d);
