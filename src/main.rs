@@ -900,6 +900,10 @@ async fn main(_spawner: Spawner) -> ! {
     // so the QMI8658's hardware pedometer keeps counting in the background.
     let _ = imu.power_down();
     let mut imu_powered = false;
+    // Wrist-raise (tilt-to-wake) detector for the polling AOD path. The
+    // QMI8658 INT is not wired to a wake GPIO on this board, so raise wake is
+    // done by reading the accel on each short AOD light-sleep poll (below).
+    let mut raise_detector = crate::peripherals::imu::RaiseDetector::new();
     let mut next_step_poll = Instant::now();
     let mut was_touching = false;
 
@@ -1055,34 +1059,76 @@ async fn main(_spawner: Spawner) -> ! {
         // console-aware select4 below) so unattended UI tests can drive the watch —
         // injected commands can't wake the HP core out of `sleep_light`.
         if screen_state == 1 && !cfg!(feature = "debug-console") {
-            // AOD light sleep (#29, now default — tap-wake confirmed on glass):
-            // park the HP core in light sleep
-            // instead of WFI-idling. Wake on a 60s RTC timer OR touch (GPIO15) OR
-            // boot button (GPIO9), both active-low. GPIO wake needs BOTH the pin
-            // armed (`wakeup_enable`) AND the GpioWakeupSource trigger in the wake
-            // set — the timer-only source would never wake on the pins. The clock
-            // is the external PCF85063 (sleep-safe); embassy-time (TIMG0) pauses,
-            // so it lags real time by the sleep span — fine, AOD repaints from the
-            // RTC minute. `sleep_light` blocks (executor paused → mesh quiesces).
-            let timer_wake = TimerWakeupSource::new(core::time::Duration::from_secs(60));
+            // AOD light sleep (#29, now default — tap-wake confirmed on glass)
+            // + WRIST-RAISE wake (polling): park the HP core in light sleep
+            // instead of WFI-idling. Wake on a short poll timer OR touch (GPIO15)
+            // OR boot button (GPIO9), both active-low. GPIO wake needs BOTH the
+            // pin armed (`wakeup_enable`) AND the GpioWakeupSource trigger in the
+            // wake set — the timer-only source would never wake on the pins. The
+            // clock is the external PCF85063 (sleep-safe); embassy-time (TIMG0)
+            // pauses, so it lags real time by the sleep span — fine, AOD repaints
+            // from the RTC minute. `sleep_light` blocks (executor paused → mesh
+            // quiesces).
+            //
+            // WRIST-RAISE / BATTERY TRADEOFF: the QMI8658 INT is NOT wired to a
+            // wake-capable GPIO on this board (vendor BSP BSP_CAPS_IMU=0, no INT
+            // macro; only the FT3168 touch INT is a wake input), so there is no
+            // hardware wake-on-motion. We POLL instead: the timer is dropped from
+            // 60 s to 700 ms so each poll can read the accel (kept live at 62.5Hz
+            // by imu.power_down — accel on, gyro off) and test the raise gesture.
+            // That is ~85x more light-sleep wakes than the old 60 s AOD timer.
+            // Each poll is cheap (a light-sleep re-entry + one 6-byte I2C accel
+            // read, sub-ms) and — unlike a real wake — SKIPS the ES7210/mic
+            // re-init below, so the average current adder is modest vs. keeping
+            // the HP core awake. Side benefit: the AOD minute-repaint lag drops
+            // from up to 60 s to <1 s.
+            const AOD_POLL_MS: u64 = 700;
+            let timer_wake =
+                TimerWakeupSource::new(core::time::Duration::from_millis(AOD_POLL_MS));
             let gpio_wake = GpioWakeupSource::new();
             let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(true, WakeEvent::LowLevel);
             let t0 = Instant::now();
             rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
             let cause = wakeup_cause();
-            // Light sleep clock-gated the I2S peripheral, stalling the silent-TX
-            // clock + the mic RX DMA. Re-arm both so the mic recovers on wake
-            // (otherwise the Sound app / Voice read exact zeros after any AOD).
-            mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
-            mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
-            // The ES7210 is a separate I2C chip (AXP rail) that normally survives
-            // light sleep, but re-init defensively so the mic can never be left dead
-            // after a wake (cheap: it only runs on the ~15s-idle AOD transition).
-            let _ = mic_adc.init();
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+
+            // Wrist-raise: read one accel sample and test the tilt-to-wake
+            // gesture. Accel is alive during AOD (power_down keeps it at 62.5Hz),
+            // so this is a single cheap I2C read. On a raise, wake to bright
+            // exactly like a tap (the display stays ON through AOD — only the
+            // brightness was dropped — so no display_on() is needed here).
+            let mut raised = false;
+            if let Ok(a) = imu.read_accel() {
+                raised = raise_detector.update(a);
+            }
+            if raised {
+                last_interaction = Instant::now();
+                display.set_brightness(brightness);
+                screen_state = 3;
+                next_flush = last_interaction;
+                shell.set_aod(false);
+                shell.request_redraw();
+                println!("[AOD-SLEEP] wrist-raise -> bright");
+            }
+
+            // Mic recovery is only needed on a REAL wake that resumes normal
+            // operation (touch / button / raise) — NOT on the frequent poll-timer
+            // wakes that go straight back to light sleep (the mic is idle in AOD).
+            // Light sleep clock-gated the I2S peripheral, stalling the silent-TX
+            // clock + the mic RX DMA; re-arm both and re-init the ES7210 (a
+            // separate I2C chip) so the Sound app / Voice never read exact zeros
+            // after the AOD. Gating this to real wakes is what keeps 700 ms
+            // polling from paying the ES7210 re-init ~85x/min.
+            let real_wake = raised || touch_int.is_low() || boot_button.is_low();
+            if real_wake {
+                mic_capture::CLOCK_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+                mic_capture::RX_REARM.store(true, core::sync::atomic::Ordering::Relaxed);
+                let _ = mic_adc.init();
+            }
+
             // embassy-time froze during sleep, so the loop's next_rtc gate won't
             // refresh last_dt — force a read now so the AOD minute repaint and the
             // wall-clock AOD->off (below) both see the real time (#29 DS1).
@@ -1090,9 +1136,10 @@ async fn main(_spawner: Spawner) -> ! {
                 last_dt = Some(dt);
             }
             println!(
-                "[AOD-SLEEP] woke cause={:?} embassy_lag_ms={}",
+                "[AOD-SLEEP] woke cause={:?} embassy_lag_ms={} real={}",
                 cause,
-                (Instant::now() - t0).as_millis()
+                (Instant::now() - t0).as_millis(),
+                real_wake
             );
         } else {
             // debug-console adds a 4th wake source (a queued synthetic-input
