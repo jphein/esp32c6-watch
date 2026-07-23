@@ -1,4 +1,5 @@
-import { Theme, RadioDot, PeerRow } from "theme.slint";
+import { Theme, PeerRow } from "theme.slint";
+import { RadioDot, IconButton } from "controls.slint";
 import { ClockPage } from "clock.slint";
 import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
@@ -320,20 +321,22 @@ export component WatchShell inherits Window {
     // Page dots: 5 pages, tap advances. Raised off the bottom edge (was y456);
     // stays centred, so it was already clear of the bottom corners, this just
     // adds straight-edge margin. Clears the power page's reboot button (ends
-    // y446) with a 2px gap.
-    dots := TouchArea {
+    // y446) with a 2px gap. 160x44 hit area (≥44px floor); IconButton gives the
+    // pressed accent-bg halo (Recipe B) and the idle dots ignite while held.
+    dots := IconButton {
         x: (parent.width - self.width) / 2;
         y: 448px;
         width: 160px;
-        height: 40px;
+        height: 44px;
         clicked => { root.current-page = mod(root.current-page + 1, 5); }
         HorizontalLayout {
             x: (parent.width - 5 * 10px - 4 * 12px) / 2;
-            y: (parent.height - 10px) / 2;
+            y: (parent.height - 10px) / 2 - 2px;
             spacing: 12px;
             for i in 5: Rectangle {
                 width: 10px; height: 10px; border-radius: 5px;
-                background: root.current-page == i ? Theme.accent : Theme.line;
+                background: root.current-page == i ? Theme.accent
+                    : (dots.pressed ? Theme.soft : Theme.line);
             }
         }
     }

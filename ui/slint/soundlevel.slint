@@ -1,4 +1,5 @@
-import { Theme, PageTitle, BackChevron } from "theme.slint";
+import { Theme, PageTitle } from "theme.slint";
+import { BackChevron, Stepper } from "controls.slint";
 
 // MC4 — standalone "Sound Level" dBFS meter screen. Overlay-style: MC5 shows it
 // via `if root.mic-open: SoundLevel {}` (same pattern as launcher/AOD) and
@@ -41,7 +42,7 @@ export component SoundLevel {
 
     PageTitle { title: "SOUND LEVEL"; }
 
-    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // Back chevron — shared BackChevron component (controls.slint): one canonical
     // 78x64 placement so overlays never drift. Right-swipe also closes (Rust
     // shell). Sits top-left, above the waveform band.
     BackChevron { clicked => { root.close(); } }
@@ -154,12 +155,14 @@ export component SoundLevel {
     // ---------------- mic gain stepper ----------------
     // Digital boost on top of the ES7210 analog PGA; the live meter above reacts
     // as you step it, so you can dial quiet speech up to a workable level.
-    minus-btn := Rectangle {
-        x: root.bar-x; y: 380px; width: 48px; height: 44px; border-radius: 22px;
-        background: Theme.panel; border-width: 2px; border-color: Theme.accent;
-        Text { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 3px;
-               text: "\u{2212}"; color: Theme.accent; font-size: 28px; font-weight: 700; }
-        TouchArea { clicked => { root.gain-down(); } }
+    // Shared Stepper (Recipe C): 56x48 finger targets (grew from 48x44 — ≥44px
+    // floor with margin); pressed is a FULL INVERT to solid accent so each step
+    // is acknowledged at the finger, before the meter/gain label move.
+    minus-btn := Stepper {
+        x: root.bar-x; y: 378px; width: 56px; height: 48px;
+        glyph: "\u{2212}";
+        glyph-dy: -3px;
+        clicked => { root.gain-down(); }
     }
     Text {
         x: (parent.width - self.width) / 2; y: 384px;
@@ -169,12 +172,11 @@ export component SoundLevel {
         x: (parent.width - self.width) / 2; y: 398px;
         text: "+\{root.gain-db} dB"; color: Theme.soft; font-size: 22px; font-weight: 700;
     }
-    plus-btn := Rectangle {
-        x: root.bar-x + root.bar-w - 48px; y: 380px; width: 48px; height: 44px; border-radius: 22px;
-        background: Theme.panel; border-width: 2px; border-color: Theme.accent;
-        Text { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 3px;
-               text: "+"; color: Theme.accent; font-size: 28px; font-weight: 700; }
-        TouchArea { clicked => { root.gain-up(); } }
+    plus-btn := Stepper {
+        x: root.bar-x + root.bar-w - 56px; y: 378px; width: 56px; height: 48px;
+        glyph: "+";
+        glyph-dy: -3px;
+        clicked => { root.gain-up(); }
     }
 
     // Honesty caption — relative dBFS, not calibrated SPL (per the plan/spec).

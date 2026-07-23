@@ -1,4 +1,5 @@
-import { Theme, PageTitle, BackChevron } from "theme.slint";
+import { Theme, PageTitle } from "theme.slint";
+import { BackChevron } from "controls.slint";
 
 // Home energy screen — shows YOUR HOUSE's battery / solar / grid (not the
 // watch's own battery, which lives in the chrome pill). Standalone overlay-style
@@ -41,7 +42,7 @@ export component EnergyPage {
 
     PageTitle { title: "ENERGY"; }
 
-    // Back chevron — shared BackChevron component (theme.slint): one canonical
+    // Back chevron — shared BackChevron component (controls.slint): one canonical
     // 78x64 placement so overlays never drift. Right-swipe also closes
     // (slint_shell::handle_touch).
     BackChevron { clicked => { root.close(); } }

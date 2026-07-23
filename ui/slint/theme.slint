@@ -164,38 +164,10 @@ export global Theme {
     out property <length> r-chip: 12px;
 }
 
-// One radio indicator: dot + label, tappable.
-export component RadioDot {
-    in property <string> label;
-    in property <bool> active;
-    callback tapped();
-    // BIG finger target (78x64): the whole component is the TouchArea. The
-    // visual dot+label sit ~30px down so, placed at shell y=8, they align at
-    // ~y38-52 with the battery-pill row; the hit area then spans the top strip
-    // (y8..72) — panel-top edge down to the title band — where a finger lands
-    // reaching for a top-row toggle. Width fills the strip left of the battery
-    // pill (see shell.slint placement: x 22/102/182). +72% area over the old
-    // 66x44 (JP asked twice for bigger), extending UP to the corner-safe top
-    // edge and keeping the same bottom (y72≈old y74) so no new title overlap.
-    width: 78px;
-    height: 64px;
-
-    Rectangle {
-        x: 2px;
-        y: 30px;
-        width: 14px; height: 14px; border-radius: 7px;
-        background: root.active ? Theme.accent : Theme.off-dot;
-    }
-    Text {
-        x: 22px;
-        y: 28px;
-        text: root.label;
-        color: root.active ? Theme.soft : Theme.faint;
-        font-size: 13px;
-        letter-spacing: 1px;
-    }
-    TouchArea { clicked => { root.tapped(); } }
-}
+// RadioDot and BackChevron (the interactive chrome) moved to controls.slint —
+// the shared component library (design spec §5 / §10 Phase 0). theme.slint keeps
+// only tokens + non-interactive helpers so controls.slint can import it without
+// an import cycle.
 
 // One label/value line for stats-style pages.
 export component StatRow {
@@ -239,28 +211,3 @@ export component PageTitle {
     }
 }
 
-// Shared back-chevron for overlay pages (climate / energy / wled / hunt). One
-// canonical 78x64 finger target, top-left, glyph left-anchored + vertically
-// centred — the single source of truth for chevron placement so overlays can't
-// drift (was climate x8/y6 vs the others x14/y8; luna-website P3 audit). It is
-// SELF-POSITIONED: drop `BackChevron { clicked => {...} }` into an overlay and it
-// lands identically every time — the caller sets no geometry. Each overlay wires
-// `clicked` to its own intent (energy/wled/hunt: close(); climate: detail->list
-// then closed()). Corner-safe: the glyph sits at abs (~22, ~23), inside the
-// ~48px rounded-corner arc. Same 78x64 hit-area discipline as RadioDot (#40).
-export component BackChevron {
-    x: 14px;
-    y: 8px;
-    width: 78px;
-    height: 64px;
-    callback clicked();
-
-    TouchArea { clicked => { root.clicked(); } }
-    Text {
-        x: 8px;
-        y: (parent.height - self.height) / 2;
-        text: "\u{2039}";
-        color: Theme.soft;
-        font-size: 34px;
-    }
-}
