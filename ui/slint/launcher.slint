@@ -1,33 +1,35 @@
 import { Theme, PageTitle } from "theme.slint";
-import { PressTile } from "controls.slint";
+import { PressTile, IconButton } from "controls.slint";
 
-// Categorised launcher with drawn vector icons + big finger tiles. Icons are
-// lightweight Slint shapes (no bitmaps) so they cost no RAM/flash and render
-// crisp on the RGB565 sw renderer.
+// Categorised PAGED launcher with drawn vector icons + big finger tiles. Icons
+// are lightweight Slint shapes (no bitmaps) so they cost no RAM/flash and
+// render crisp on the RGB565 sw renderer.
 //
-// The tile content is DATA-DRIVEN: `rows` is pushed from Rust, built from the
-// app REGISTRY (src/apps/registry.rs, the single source of truth). Each tile
+// PAGED, not scrolled: the old Flickable's continuous scroll dirtied the whole
+// viewport every frame → ~100ms full-frame renders → a 6-10fps scroll that no
+// library can save on this sw renderer. Instead the launcher is SCREENFULS: a
+// 3x3 tile grid per page, one page per registry section (AUDIO / GAMES /
+// SYSTEM — a section >9 apps would chunk into repeated pages), swipe up/down
+// flips exactly ONE page (handled in slint_shell::handle_touch, same place the
+// old scroll swipes were routed) as a single hard-cut full-frame render —
+// instant, no intermediate frames. Right-swipe still closes.
+//
+// The tile content is DATA-DRIVEN: Rust (build_launcher_pages) flattens the
+// REGISTRY (src/apps/registry.rs, the single source of truth) into `tiles` —
+// page-count × 9 entries, each page padded to 9 with `present:false` — plus a
+// per-page `titles` list. The grid indexes tiles[page*9 + slot], so paging is
+// pure property math: no models rebuilt, no Rust round-trip per flip. Each tile
 // carries its launch `idx` (its registry position), so `launch-app(idx)` still
-// maps through registry::launch_state(idx). Adding an app is a REGISTRY row —
-// no tile edit here (only a new AppIcon glyph if the icon-id is new).
+// maps through registry::launch_state(idx). Adding an app is a REGISTRY row.
 
-// One launcher tile's data. `present` = false renders a half-width spacer (a
-// lone tile at the end of a section).
+// One launcher tile's data. `present` = false renders an empty grid slot
+// (page padding).
 export struct LauncherTile {
     name: string,
     accent: color,
     icon-id: int,
     idx: int,
     present: bool,
-}
-
-// One launcher row: either a section header, or a pair of tiles (b may be a
-// spacer). Rust chunks each section's apps two-per-row.
-export struct LauncherRow {
-    is-header: bool,
-    header: string,
-    a: LauncherTile,
-    b: LauncherTile,
 }
 
 // A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS order.
@@ -145,111 +147,111 @@ component AppIcon {
     }
 }
 
-// One big app tile: icon over label. Carries its launch idx. PressTile
-// (Recipe A) supplies the feedback: fill lights to accent-bg + border ignites
-// in the tile's OWN accent on finger-down — hard 1-frame swap, no animation.
-// Label is ink (was soft) for legibility — design spec §6 #1. (A Flickable
-// scroll that starts on a tile flashes it briefly; drag-capture still
-// suppresses the click, so the flash reads as "touch registered".)
+// One app tile: icon over label, sized for the 3x3 page grid (114x108).
+// Carries its launch idx. PressTile (Recipe A) supplies the feedback: fill
+// lights to accent-bg + border ignites in the tile's OWN accent on
+// finger-down — hard 1-frame swap, no animation. Label is ink for legibility
+// (design spec §6 #1), elided if a long name outgrows the narrower tile.
 component AppTile {
     in property <string> name;
     in property <color> accent;
     in property <int> icon-id;
     in property <int> idx;
     callback launch(int);
-    height: 116px;
     PressTile {
         ignite: root.accent;
         clicked => { root.launch(root.idx); }
         AppIcon {
             x: (parent.width - self.width) / 2;
-            y: 18px;
+            y: 14px;
             id: root.icon-id;
             tint: root.accent;
         }
         Text {
-            x: (parent.width - self.width) / 2;
-            y: 78px;
+            x: 4px;
+            y: 72px;
+            width: parent.width - 8px;
+            horizontal-alignment: center;
+            overflow: elide;
             text: root.name;
             color: Theme.ink;
-            font-size: 17px;
+            font-size: 15px;
             font-weight: 600;
         }
     }
 }
 
-component SectionHeader {
-    in property <string> title;
-    height: 30px;
-    Text {
-        x: 0; y: 6px;
-        text: root.title;
-        color: Theme.dim;
-        font-size: 14px;
-        letter-spacing: 3px;
-    }
-}
-
 export component LauncherOverlay {
     callback launch-app(int);
-    // Rows built from the app REGISTRY in Rust (build_scene). Section display
-    // order + two-per-row chunking are done there; this just lays them out.
-    in property <[LauncherRow]> rows;
-    // Total scroll-content height, computed in Rust from the same rows (see
-    // `launcher_content_height` in slint_shell.rs) and pushed straight to the
-    // Flickable's viewport. It is NOT read from the layout's `preferred-height`:
-    // a VerticalLayout whose only child is a `for` repeater under-reports it, so
-    // the viewport collapsed shorter than its content and the bottom SYSTEM rows
-    // were unreachable — the v0.7.0 scroll regression this restores.
-    in property <length> content-height;
+    // Flat page-major tile list from Rust (build_launcher_pages): page-count
+    // pages × 9 slots, padded with present:false. AUDIO is page 0 (Rust emits
+    // it first) so Voice/Sound are reachable the instant the launcher opens.
+    in property <[LauncherTile]> tiles: [];
+    // One section title per page ("AUDIO" / "GAMES" / "SYSTEM").
+    in property <[string]> titles: [];
+    in property <int> page-count: 1;
+    // Current page. Flipped by the Rust shell on swipe up/down (handle_touch)
+    // and by the indicator-dots tap below; two-way bound through WatchShell.
+    in-out property <int> page: 0;
 
-    // Scrim (watchface faintly behind).
-    Rectangle { width: 100%; height: 100%; background: #05080aF2; }
+    // 3x3 grid geometry — keep in sync with LAUNCHER_PAGE_SLOTS (slint_shell.rs).
+    // Grid area x22..388, y96..444: 3 cols of 114 + 2x12 gutters, 3 rows of
+    // 108 + 2x12; ends 4px above the indicator dots at y448.
+    property <length> tile-w: 114px;
+    property <length> tile-h: 108px;
+    property <length> gutter: 12px;
 
-    // Title uses the shared PageTitle convention (#31) — same y/size/letter-
-    // spacing as every other overlay's heading; the Flickable drops to y96 to
-    // clear it (matching the climate/list content start).
-    PageTitle { title: "APPS"; }
+    // Scrim (watchface faintly behind) — the per-scheme token, so Paper gets
+    // its warm light scrim instead of a hardcoded Midnight-dark one.
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
 
-    Flickable {
-        x: 22px; y: 96px;
-        width: parent.width - 44px;
-        height: parent.height - 112px;
-        // Viewport height is pushed from Rust (content-height), sized to the exact
-        // header/tile/gap total so every SYSTEM row is reachable for any app count.
-        viewport-height: root.content-height;
-        VerticalLayout {
+    // Eyebrow keeps the launcher's identity; the big PageTitle names the
+    // current SECTION (one section per page).
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 36px;
+        text: "APPS";
+        color: Theme.faint;
+        font-size: 12px;
+        letter-spacing: 3px;
+    }
+    PageTitle { title: root.titles[root.page]; }
+
+    // Current page's tiles: fixed 9-slot grid, pure index math — a page flip
+    // re-binds 9 tiles and renders ONCE (hard cut, no intermediate frames).
+    for slot in 9: Rectangle {
+        x: 22px + mod(slot, 3) * (root.tile-w + root.gutter);
+        y: 96px + floor(slot / 3) * (root.tile-h + root.gutter);
+        width: root.tile-w;
+        height: root.tile-h;
+        if root.tiles[root.page * 9 + slot].present: AppTile {
+            width: 100%; height: 100%;
+            name: root.tiles[root.page * 9 + slot].name;
+            accent: root.tiles[root.page * 9 + slot].accent;
+            icon-id: root.tiles[root.page * 9 + slot].icon-id;
+            idx: root.tiles[root.page * 9 + slot].idx;
+            launch(i) => { root.launch-app(i); }
+        }
+    }
+
+    // Page-indicator dots (launcher's own — the shell's dots sit under this
+    // overlay): tap advances (wraps), swipe up/down flips. IconButton supplies
+    // the pressed accent-bg halo; idle dots ignite while held.
+    dots := IconButton {
+        x: (parent.width - self.width) / 2;
+        y: 448px;
+        width: 160px;
+        height: 44px;
+        clicked => { root.page = mod(root.page + 1, max(root.page-count, 1)); }
+        HorizontalLayout {
+            x: (parent.width - root.page-count * 10px
+                - (root.page-count - 1) * 12px) / 2;
+            y: (parent.height - 10px) / 2 - 2px;
             spacing: 12px;
-            // AUDIO section is emitted first by Rust so Voice/Sound are reachable
-            // the instant the launcher opens (on-glass the Flickable scroll is
-            // flaky). Ordering + idx come from the registry.
-            for row in root.rows: Rectangle {
-                height: row.is-header ? 30px : 116px;
-                if row.is-header: SectionHeader {
-                    width: 100%;
-                    title: row.header;
-                }
-                if !row.is-header: HorizontalLayout {
-                    width: 100%;
-                    height: 100%;
-                    spacing: 12px;
-                    AppTile {
-                        name: row.a.name;
-                        accent: row.a.accent;
-                        icon-id: row.a.icon-id;
-                        idx: row.a.idx;
-                        launch(i) => { root.launch-app(i); }
-                    }
-                    if row.b.present: AppTile {
-                        name: row.b.name;
-                        accent: row.b.accent;
-                        icon-id: row.b.icon-id;
-                        idx: row.b.idx;
-                        launch(i) => { root.launch-app(i); }
-                    }
-                    // spacer keeps a lone end-of-section tile half-width
-                    if !row.b.present: Rectangle { }
-                }
+            for i in root.page-count: Rectangle {
+                width: 10px; height: 10px; border-radius: 5px;
+                background: root.page == i ? Theme.accent
+                    : (dots.pressed ? Theme.soft : Theme.line);
             }
         }
     }

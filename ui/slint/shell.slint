@@ -5,7 +5,7 @@ import { SensorsPage } from "sensors.slint";
 import { SystemPage } from "system.slint";
 import { PowerPage } from "power.slint";
 import { MeshPage } from "mesh.slint";
-import { LauncherOverlay, LauncherRow, LauncherTile } from "launcher.slint";
+import { LauncherOverlay, LauncherTile } from "launcher.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
@@ -16,11 +16,11 @@ import { ThemeOverlay } from "theme_overlay.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
-// LauncherRow/LauncherTile likewise: slint_shell.rs builds them from the
-// app registry and pushes them into `launcher-rows`.
+// LauncherTile likewise: slint_shell.rs builds them from the app registry
+// and pushes them into `launcher-tiles` (page-major, 9 slots per page).
 // `Theme` is re-exported too so Rust can drive the scheme selector via
 // `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
-export { PeerRow, ClimateCard, LauncherRow, LauncherTile, Theme }
+export { PeerRow, ClimateCard, LauncherTile, Theme }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -88,10 +88,15 @@ export component WatchShell inherits Window {
     // --- paging / modes ---
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
-    // Launcher tiles, built from the app registry in slint_shell.rs (build_scene).
-    in property <[LauncherRow]> launcher-rows: [];
-    // Launcher scroll-content height (px), computed in Rust from the same rows.
-    in property <length> launcher-content-height;
+    // Paged launcher model, built from the app registry in slint_shell.rs
+    // (build_launcher_pages): page-major tiles (9 slots per page, padded with
+    // present:false), one section title per page, and the page count. The
+    // current page is in-out: flipped by handle_touch (swipe up/down) and by
+    // the launcher's own indicator dots.
+    in property <[LauncherTile]> launcher-tiles: [];
+    in property <[string]> launcher-titles: [];
+    in property <int> launcher-page-count: 1;
+    in-out property <int> launcher-page: 0;
     // WLED remote overlay (a launcher app that lives in the scene, not the fb).
     in-out property <bool> wled-open: false;
     in property <string> wled-status: "";
@@ -361,8 +366,10 @@ export component WatchShell inherits Window {
     // Rendered below the AOD overlay so AOD still wins when both are visible.
     if root.launcher-open: LauncherOverlay {
         width: 100%; height: 100%;
-        rows: root.launcher-rows;
-        content-height: root.launcher-content-height;
+        tiles: root.launcher-tiles;
+        titles: root.launcher-titles;
+        page-count: root.launcher-page-count;
+        page <=> root.launcher-page;
         launch-app(idx) => { root.launch-app(idx); }
     }
 
