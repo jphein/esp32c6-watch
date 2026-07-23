@@ -45,10 +45,13 @@ impl Platform for EspPlatform {
 /// Create the window, register the platform. Call exactly once per boot —
 /// `slint::platform::set_platform` panics on a second call.
 pub fn init_platform() -> Rc<MinimalSoftwareWindow> {
-    // ReusedBuffer = partial rendering: only the dirty region is redrawn each
-    // frame (the panel GRAM is our persistent "reused buffer"). See the module
-    // header + TwoLineFlusher for the dirty-box streaming contract (#18).
-    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    // REVERTED to NewBuffer (#18 attempt 1): ReusedBuffer partial rendering
+    // produced strip artifacts + janky launcher scrolling on glass — the dirty
+    // region Slint feeds render_by_line doesn't match the flusher's single
+    // bounding-box assumption on this scene. NewBuffer marks the full frame
+    // dirty, so the (kept) dirty-box flusher degrades gracefully to exactly the
+    // pre-#18 full-frame streaming. Re-attempt in #18 with per-line dirty spans.
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     window.set_size(slint::PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
     slint::platform::set_platform(Box::new(EspPlatform {
         window: window.clone(),
