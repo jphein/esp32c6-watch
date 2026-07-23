@@ -2813,6 +2813,11 @@ async fn main(_spawner: Spawner) -> ! {
                     touch,
                     swipe: swipe_event,
                     tap: tap_event,
+                    // Live finger-on-glass flag: Some only while the controller
+                    // reports a contact this tick (drops to None on the lift tick,
+                    // the same tick `tap` fires). Drives pressed-state redraw in
+                    // Settings/T9 (touch overhaul); games ignore it.
+                    down: touch_point.is_some(),
                     accel,
                     dt_ms: dt_ms.max(1),
                 };

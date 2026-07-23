@@ -51,6 +51,10 @@ pub struct T9Keyboard {
     commit_timer: u32,
     active: bool,
     pending_char: bool, // char not yet committed
+    /// Key currently under a finger (live, set each frame by the host app from
+    /// `AppInput.down` + coords). Drawn highlighted so the key lights the moment
+    /// it is touched — the tap itself only fires on lift (touch overhaul).
+    pressed_key: Option<usize>,
 }
 
 impl T9Keyboard {
@@ -59,7 +63,25 @@ impl T9Keyboard {
             text: [0; 128], text_len: 0, mode: Mode::Lower,
             last_key: -1, char_index: 0, commit_timer: 0,
             active: false, pending_char: false,
+            pressed_key: None,
         }
+    }
+
+    /// Which key sits under screen coordinate (x, y), if any.
+    pub fn key_at(x: u16, y: u16) -> Option<usize> {
+        let kx = (x as i32 - KB_X) / (KEY_W + KEY_GAP);
+        let ky = (y as i32 - KB_Y) / (KEY_H + KEY_GAP);
+        if kx < 0 || kx >= KEYS_COLS as i32 || ky < 0 || ky >= KEYS_ROWS as i32 {
+            return None;
+        }
+        let idx = (ky * KEYS_COLS as i32 + kx) as usize;
+        (idx < 12).then_some(idx)
+    }
+
+    /// Live pressed-key from the host app (None when the finger lifts or leaves
+    /// the grid). No-op storage — render() draws the highlight.
+    pub fn set_pressed_key(&mut self, key: Option<usize>) {
+        self.pressed_key = key;
     }
 
     pub fn show(&mut self) { self.active = true; }
@@ -109,12 +131,8 @@ impl T9Keyboard {
     pub fn handle_tap(&mut self, x: u16, y: u16) -> bool {
         if !self.active { return false; }
 
-        // Find which key was tapped
-        let kx = (x as i32 - KB_X) / (KEY_W + KEY_GAP);
-        let ky = (y as i32 - KB_Y) / (KEY_H + KEY_GAP);
-        if kx < 0 || kx >= KEYS_COLS as i32 || ky < 0 || ky >= KEYS_ROWS as i32 { return false; }
-        let idx = (ky * KEYS_COLS as i32 + kx) as usize;
-        if idx >= 12 { return false; }
+        // Find which key was tapped (same math as the live pressed highlight).
+        let Some(idx) = Self::key_at(x, y) else { return false; };
 
         // Shift key
         if idx == 9 {
@@ -198,7 +216,11 @@ impl T9Keyboard {
                 let x = KB_X + col as i32 * (KEY_W + KEY_GAP);
                 let y = KB_Y + row as i32 * (KEY_H + KEY_GAP);
 
-                let bg = if self.pending_char && idx as i8 == self.last_key {
+                // Finger-down highlight wins (brightest), then the multi-tap
+                // pending-char key, then the resting key face.
+                let bg = if self.pressed_key == Some(idx) {
+                    Rgb565::new(7, 16, 8) // pressed under the finger RIGHT NOW
+                } else if self.pending_char && idx as i8 == self.last_key {
                     Rgb565::new(4, 10, 4) // highlight active key
                 } else {
                     Rgb565::new(3, 6, 3)

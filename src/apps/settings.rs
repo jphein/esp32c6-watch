@@ -20,6 +20,18 @@ enum SettingsField {
     Connect,
 }
 
+/// Which tap target the finger is on RIGHT NOW (live, from `AppInput.down`).
+/// Drawn highlighted so every control acknowledges the touch on finger-down —
+/// the action itself still fires on the lift-tap (touch overhaul).
+#[derive(Clone, Copy, PartialEq)]
+enum PressedZone {
+    None,
+    Ssid,
+    Password,
+    Connect,
+    Ota,
+}
+
 pub struct SettingsApp {
     pub wifi_config: WifiConfig,
     pub wifi_state: WifiState,
@@ -33,6 +45,8 @@ pub struct SettingsApp {
     /// One-line OTA status shown under the button (`&'static` so the error string
     /// from `ota_http::ota_update` drops straight in). "" hides the line.
     pub ota_status: &'static str,
+    /// Live pressed-state (finger currently on a control), for render feedback.
+    pressed: PressedZone,
 }
 
 impl SettingsApp {
@@ -45,6 +59,28 @@ impl SettingsApp {
             editing: false,
             ota_requested: false,
             ota_status: "",
+            pressed: PressedZone::None,
+        }
+    }
+
+    /// Map a live touch coordinate to the control under it — the SAME y-bands as
+    /// `handle_tap`, so the highlight always matches what the lift-tap will hit.
+    /// While the keyboard is open its keys get the highlight instead (handled by
+    /// the caller via `T9Keyboard::key_at`); the fields under it don't light.
+    fn zone_at(&self, _x: u16, y: u16) -> PressedZone {
+        if self.keyboard.is_active() {
+            return PressedZone::None;
+        }
+        if (60..115).contains(&y) {
+            PressedZone::Ssid
+        } else if (120..175).contains(&y) {
+            PressedZone::Password
+        } else if (185..230).contains(&y) {
+            PressedZone::Connect
+        } else if (250..295).contains(&y) {
+            PressedZone::Ota
+        } else {
+            PressedZone::None
         }
     }
 
@@ -121,6 +157,18 @@ impl App for SettingsApp {
 
     fn update(&mut self, input: &AppInput) -> AppResult {
         self.keyboard.update(input.dt_ms);
+        // Live pressed-state (touch overhaul): while the finger is down, light
+        // the control (or T9 key) under it. `input.touch` carries the live
+        // coords while `input.down` is true; both clear on the lift tick — the
+        // same tick the tap fires — so the highlight releases with the action.
+        self.pressed = match (input.down, input.touch) {
+            (true, Some(tp)) => self.zone_at(tp.x, tp.y),
+            _ => PressedZone::None,
+        };
+        self.keyboard.set_pressed_key(match (input.down, input.touch) {
+            (true, Some(tp)) if self.keyboard.is_active() => T9Keyboard::key_at(tp.x, tp.y),
+            _ => None,
+        });
         // Tap targets use the last-known touch coords (the tap frame's point may
         // already be None on finger-lift); the runner passes them via input.touch.
         if input.tap {
@@ -148,8 +196,15 @@ impl App for SettingsApp {
 
         let _ = Text::with_alignment("SETTINGS", EgPoint::new(205, 35), title, Alignment::Center).draw(d);
 
-        // SSID field
-        let ssid_bg = if self.active_field == SettingsField::Ssid && self.editing { Rgb565::new(3, 6, 3) } else { Rgb565::new(2, 4, 2) };
+        // SSID field — pressed (finger down right now) is brightest, then the
+        // editing highlight, then the resting fill.
+        let ssid_bg = if self.pressed == PressedZone::Ssid {
+            Rgb565::new(5, 11, 6)
+        } else if self.active_field == SettingsField::Ssid && self.editing {
+            Rgb565::new(3, 6, 3)
+        } else {
+            Rgb565::new(2, 4, 2)
+        };
         let _ = RoundedRectangle::with_equal_corners(
             Rectangle::new(EgPoint::new(15, 60), Size::new(380, 50)),
             Size::new(8, 8),
@@ -159,8 +214,14 @@ impl App for SettingsApp {
         let ssid_display = if ssid.is_empty() { "(tap to enter)" } else { ssid };
         let _ = Text::new(ssid_display, EgPoint::new(25, 98), value).draw(d);
 
-        // Password field
-        let pass_bg = if self.active_field == SettingsField::Password && self.editing { Rgb565::new(3, 6, 3) } else { Rgb565::new(2, 4, 2) };
+        // Password field — same pressed > editing > rest ladder as SSID.
+        let pass_bg = if self.pressed == PressedZone::Password {
+            Rgb565::new(5, 11, 6)
+        } else if self.active_field == SettingsField::Password && self.editing {
+            Rgb565::new(3, 6, 3)
+        } else {
+            Rgb565::new(2, 4, 2)
+        };
         let _ = RoundedRectangle::with_equal_corners(
             Rectangle::new(EgPoint::new(15, 120), Size::new(380, 50)),
             Size::new(8, 8),
