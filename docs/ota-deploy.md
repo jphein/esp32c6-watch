@@ -2,6 +2,37 @@
 
 Push a new firmware image to the watch over WiFi instead of USB-flashing.
 
+## Push OTA (one command, zero-touch) — preferred
+
+```bash
+tools/ota_push.sh
+```
+
+Does everything: stamps a build id, builds on `familiar`, converts to an app
+image, uploads to the OTA server, and publishes a **retained** MQTT announce.
+The watch picks the announce up on its **next MQTT window** — the boot burst
+(so: reboot the watch, or wait for its next boot) or any open Climate/Energy
+session — and updates itself with no taps ("Updating firmware…" toast, then it
+reboots into the new build).
+
+- **Topic**: `watch/ota/announce` on the HA broker (`MQTT_BROKER`,
+  `10.0.11.110:1883`).
+- **Payload**: `OTA|<build_id>|<url>` — `<build_id>` is unix-seconds, `<url>`
+  optional (empty/absent = the baked `OTA_URL`).
+- **Retained** is what makes push work on the single bursty radio: a watch
+  offline at publish time still gets the announce on its next window.
+- **Monotonicity gate**: the running firmware bakes its own build id
+  (`OTA_BUILD` in `.cargo/config.toml [env]`, stamped by the script). An
+  announce triggers only if its `build_id` is **strictly greater**, so the
+  still-retained announce after the reboot can never re-trigger-loop; dev
+  builds without `OTA_BUILD` run as id 0 (any announce triggers them).
+- The script **reads** `MQTT_BROKER`/`MQTT_USER`/`MQTT_PASS`/`OTA_URL` from the
+  gitignored `.cargo/config.toml` — no credentials live in the committed script.
+- `tools/ota_push.sh --announce-only` re-publishes the announce for the
+  already-uploaded image (same stamped build id).
+- Watch-side log lines: `[OTA] announce received/accepted/rejected …`, then
+  `[OTA] push: build <id> queued (zero-touch)`.
+
 ## How it works
 
 - The image URL is **baked in at build time** via `OTA_URL` in `.cargo/config.toml`
@@ -57,9 +88,14 @@ Push a new firmware image to the watch over WiFi instead of USB-flashing.
    (tap CONNECT if not), then tap **UPDATE FIRMWARE**.
    - Status line shows `Updating…` during the download,
    - then `Staged – rebooting` on success (the watch reboots itself),
-   - or an error (`Connect WiFi first`, `image larger than ota slot`,
-     `http status not 200`, `timeout (30s)`, …) on failure — the running
-     firmware is untouched, just retry.
+   - or an error on failure — the running firmware is untouched, just retry.
+     The download errors name the failure mode:
+     - `stalled (10s, no data)` — the transfer went quiet mid-body (server or
+       link died); also `stalled in headers` / `connect timeout (10s, server
+       down?)` for the earlier phases,
+     - `timeout (5 min overall)` — the transfer stayed alive but was too slow
+       to finish inside the hard cap,
+     - plus `image larger than ota slot`, `http status not 200`, ….
 
 ## Notes
 

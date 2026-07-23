@@ -1002,9 +1002,15 @@ async fn main(_spawner: Spawner) -> ! {
     const OTA_HEALTHY_UPTIME: Duration = Duration::from_secs(10);
     let boot_instant = Instant::now();
     let mut ota_marked_valid = false;
-    // Settings UPDATE-FIRMWARE pending window: set on tap (raising WiFi if it's
-    // down), consumed when WiFi is ready (runs the OTA) or after a 25s timeout.
+    // UPDATE-FIRMWARE pending window: set by the Settings tap OR an accepted
+    // push announce (raising WiFi if it's down), consumed by the hoisted
+    // executor below (per-tick, any screen) once WiFi is ready, or dropped
+    // after a 25s WiFi timeout.
     let mut ota_pending_since: Option<Instant> = None;
+    // Push-OTA image-URL override from the accepted announce (`None` = the
+    // baked OTA_URL). Set alongside ota_pending_since; cleared with it.
+    let mut ota_push_url: Option<heapless::String<{ crate::net::ota_http::ANNOUNCE_URL_CAP }>> =
+        None;
 
     loop {
         let touch_held = touch_int.is_low();
@@ -1576,6 +1582,95 @@ async fn main(_spawner: Spawner) -> ! {
                 println!("[OTA] mark-valid failed: {e}");
             }
             ota_marked_valid = true;
+        }
+
+        // === OTA pending executor (any screen) ===
+        // ONE executor for both triggers — the Settings tap and an accepted push
+        // announce both set `ota_pending_since` (+ optional `ota_push_url`); this
+        // runs the download once WiFi is ready. Hoisted out of the Settings arm
+        // so a pushed update is zero-touch from ANY screen (games included).
+        // Runs BEFORE the announce-accept block below, so a fresh accept always
+        // gets one full dispatch pass first — the toast/status paints before the
+        // download blocks this loop (deliberate: an update is a user/deploy
+        // action, blocking is fine; it is off the hot path otherwise).
+        if let Some(t0) = ota_pending_since {
+            if wifi_connected && stack.config_v4().is_some() {
+                ota_pending_since = None;
+                settings_app.ota_status = "Updating\u{2026}";
+                // Paint before the blocking download: Settings via its fb when
+                // open. Scene-resident screens already show the "Updating
+                // firmware…" toast (set when the trigger queued, one tick ago) —
+                // no point re-setting it here, the scene can't repaint again
+                // before the download blocks this loop.
+                if app_state == AppState::Settings {
+                    if let Some(fb_ref) = fb.as_mut() {
+                        settings_app.render(fb_ref);
+                        fb_ref.flush(&mut display);
+                    }
+                }
+                let url = ota_push_url.take();
+                match crate::net::ota_http::ota_update(stack, &mut flash, url.as_deref()).await {
+                    Ok(()) => {
+                        println!("[OTA] staged - rebooting to apply");
+                        settings_app.ota_status = "Staged \u{2013} rebooting";
+                        if app_state == AppState::Settings {
+                            if let Some(fb_ref) = fb.as_mut() {
+                                settings_app.render(fb_ref);
+                                fb_ref.flush(&mut display);
+                            }
+                            Timer::after(Duration::from_millis(1200)).await;
+                        }
+                        esp_hal::system::software_reset();
+                    }
+                    Err(e) => {
+                        println!("[OTA] failed: {e}");
+                        settings_app.ota_status = e;
+                        let mut msg: heapless::String<64> = heapless::String::new();
+                        let _ = msg.push_str("Update failed: ");
+                        let _ = msg.push_str(e);
+                        shell.set_toast(msg.as_str());
+                        // Fresh timestamp, NOT the tick-start `now`: the download
+                        // may have blocked for minutes, and a stale-based window
+                        // would already be expired — the toast would flash for a
+                        // single tick and be auto-cleared.
+                        toast_until = Instant::now() + Duration::from_secs(5);
+                        toast_active = true;
+                    }
+                }
+            } else if (now - t0) > Duration::from_secs(25) {
+                ota_pending_since = None;
+                ota_push_url = None;
+                println!("[OTA] WiFi didn't come up within 25s - giving up");
+                settings_app.ota_status = "WiFi failed \u{2014} tap to retry";
+                shell.set_toast("Update failed: WiFi");
+                toast_until = now + Duration::from_secs(5);
+                toast_active = true;
+            } else {
+                // Keep WiFi requested for the whole pending window — the NTP
+                // burst-complete drop (wifi_on_request = false after sync) must
+                // not tear the association down under a queued update.
+                wifi_on_request = true;
+            }
+        }
+
+        // === Push-OTA announce accept ===
+        // `ota_http::handle_announce` (fed by both MQTT paths) already applied
+        // the BUILD_EPOCH monotonicity gate; anything taken here is a go. Same
+        // flow as the Settings tap: raise WiFi, queue, executor above runs it
+        // next tick (after one paint pass shows the toast).
+        if let Some(ann) = crate::net::ota_http::take_announce() {
+            if ota_pending_since.is_some() {
+                println!("[OTA] push: build {} ignored (update already pending)", ann.build);
+            } else {
+                println!("[OTA] push: build {} queued (zero-touch)", ann.build);
+                ota_push_url = ann.url;
+                settings_app.ota_status = "Updating\u{2026}";
+                shell.set_toast("Updating firmware\u{2026}");
+                toast_until = now + Duration::from_secs(30);
+                toast_active = true;
+                wifi_on_request = true;
+                ota_pending_since = Some(now);
+            }
         }
 
         // TIME-SHARE steady state: whenever WiFi is down but the radio is up,
@@ -2495,7 +2590,9 @@ async fn main(_spawner: Spawner) -> ! {
                     // If WiFi is up and an OTA_URL was baked in at build time,
                     // try to stage an OTA update first; reboot either way.
                     if wifi_connected && crate::net::ota_http::URL_SET {
-                        if let Err(e) = crate::net::ota_http::ota_update(stack, &mut flash).await {
+                        if let Err(e) =
+                            crate::net::ota_http::ota_update(stack, &mut flash, None).await
+                        {
                             println!("[OTA] failed: {e}");
                         }
                     }
@@ -2776,45 +2873,18 @@ async fn main(_spawner: Spawner) -> ! {
                             settings_app.ota_status = "No OTA URL in build";
                         } else if wifi_connected && stack.config_v4().is_some() {
                             println!("[OTA] tap: WiFi ready - updating now");
-                            ota_pending_since = Some(now); // proceed immediately below
+                            ota_push_url = None; // tap = the baked OTA_URL
+                            ota_pending_since = Some(now);
                         } else {
                             println!("[OTA] tap: raising WiFi for update");
                             settings_app.ota_status = "Connecting WiFi\u{2026}";
+                            ota_push_url = None; // tap = the baked OTA_URL
                             wifi_on_request = true;
                             ota_pending_since = Some(now);
                         }
-                    }
-                    // Pending OTA: run once WiFi is ready (or time out with a
-                    // visible, actionable status). A deliberate user action, so
-                    // blocking this loop for the download is fine.
-                    if let Some(t0) = ota_pending_since {
-                        if wifi_connected && stack.config_v4().is_some() {
-                            ota_pending_since = None;
-                            // Paint "Updating" before the blocking download —
-                            // run_fb_app won't repaint until ota_update returns
-                            // (or we've already rebooted on success).
-                            settings_app.ota_status = "Updating\u{2026}";
-                            settings_app.render(fb_ref);
-                            fb_ref.flush(&mut display);
-                            match crate::net::ota_http::ota_update(stack, &mut flash).await {
-                                Ok(()) => {
-                                    settings_app.ota_status = "Staged \u{2013} rebooting";
-                                    settings_app.render(fb_ref);
-                                    fb_ref.flush(&mut display);
-                                    println!("[OTA] staged via Settings - rebooting to apply");
-                                    Timer::after(Duration::from_millis(1200)).await;
-                                    esp_hal::system::software_reset();
-                                }
-                                Err(e) => {
-                                    println!("[OTA] failed: {e}");
-                                    settings_app.ota_status = e;
-                                }
-                            }
-                        } else if (now - t0) > Duration::from_secs(25) {
-                            ota_pending_since = None;
-                            println!("[OTA] WiFi didn't come up within 25s - giving up");
-                            settings_app.ota_status = "WiFi failed \u{2014} tap to retry";
-                        }
+                        // The download itself runs in the hoisted per-tick "OTA
+                        // pending executor" (shared with push-OTA announces) —
+                        // it paints this app's status via the fb when ready.
                     }
                 }
 
