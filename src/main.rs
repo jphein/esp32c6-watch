@@ -1005,7 +1005,14 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(30)
         } else if screen_state == 1 {
             // AOD: wake often enough that the minute flip never looks stuck.
-            Duration::from_secs(5)
+            // debug-console builds skip AOD light-sleep (the raise detector runs
+            // on THIS tick instead of the 700ms sleep-poll), so match its cadence
+            // there; release builds keep the lazy 5s (the sleep block self-paces).
+            if cfg!(feature = "debug-console") {
+                Duration::from_millis(700)
+            } else {
+                Duration::from_secs(5)
+            }
         } else {
             match app_state {
                 // Sound meter + waveform are a live 30 Hz display; pace them
@@ -1170,6 +1177,29 @@ async fn main(_spawner: Spawner) -> ! {
                 boot_button.wait_for_falling_edge(),
             )
             .await;
+
+            // Wrist-raise for debug-console builds: they SKIP the AOD light-sleep
+            // block above (so automator tests aren't interrupted), which is where
+            // the sleep-path raise detector lives — leaving tilt-to-wake dead in
+            // test images. Run the SAME detector here whenever the screen is in
+            // AOD (the AOD cadence arm ticks this path at 700ms to match). Same
+            // wake actions as the sleep path; no mic re-arm needed (no light sleep
+            // happened, so the I2S clock was never gated).
+            if screen_state == 1 {
+                let mut raised = false;
+                if let Ok(a) = imu.read_accel() {
+                    raised = raise_detector.update(a);
+                }
+                if raised {
+                    last_interaction = Instant::now();
+                    display.set_brightness(brightness);
+                    screen_state = 3;
+                    next_flush = last_interaction;
+                    shell.set_aod(false);
+                    shell.request_redraw();
+                    println!("[AOD] wrist-raise -> bright (no-sleep path)");
+                }
+            }
         }
 
         let now = Instant::now();
