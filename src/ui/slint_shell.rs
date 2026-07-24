@@ -50,6 +50,15 @@ pub fn brightness_raw(frac: f32) -> u8 {
 /// starting here are slider drags, not page switches.
 pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
+/// Wake gesture-hint choreography, in ms after [`ShellUi::hint_wake`] arms it.
+/// The strips are created invisible with the wake frame (so that frame stays
+/// cheap), bloom in at BLOOM, start fading at FADE, and are destroyed at KILL
+/// (which must exceed FADE + the 480ms Slint opacity tween). Net: visible
+/// ~0.15s → ~3.1s after the wake — "~3 seconds", never resident.
+const HINT_BLOOM_MS: u64 = 150;
+const HINT_FADE_MS: u64 = 2600;
+const HINT_KILL_MS: u64 = 3200;
+
 // The launcher launch-index → AppState mapping now lives in the app registry
 // (src/apps/registry.rs): `REGISTRY[idx].state`, exposed via
 // `registry::launch_state(idx)`. The launcher tiles are built from the same
@@ -160,6 +169,17 @@ pub struct ShellUi {
     /// here so a scene rebuild (game suspend/resume) re-applies it — a fresh
     /// WatchShell resets the Theme global to scheme 0 otherwise.
     scheme: i32,
+    /// Gesture-hint (wake shimmer) sequencing. `hint_armed_at` is the wake
+    /// instant [`hint_wake`] stamped (None = no hint window running);
+    /// [`tick_hints`] (run from [`render`]) walks bloom → hold → fade →
+    /// destroy against it, so main.rs carries no per-tick hint logic.
+    /// `hint_lit` mirrors the Slint `hints-lit` property (edge-triggered
+    /// sets only). The `seen` latches suppress a hint for the rest of the
+    /// boot once its gesture has actually been used.
+    hint_armed_at: Option<embassy_time::Instant>,
+    hint_lit: bool,
+    hint_seen_lr: bool,
+    hint_seen_up: bool,
 }
 
 impl ShellUi {
@@ -191,6 +211,10 @@ impl ShellUi {
             last_second: 0xFF,
             saved_page: PAGE_CLOCK,
             scheme: 0,
+            hint_armed_at: None,
+            hint_lit: false,
+            hint_seen_lr: false,
+            hint_seen_up: false,
         }
     }
 
@@ -199,6 +223,9 @@ impl ShellUi {
     /// platform are set-once globals and survive; the current page is saved for
     /// the recreate. Idempotent — safe to call when already suspended.
     pub fn suspend_scene(&mut self) {
+        // Retire any running hint window: a stale armed-instant would other-
+        // wise resume ticking against the fresh (hint-free) scene on return.
+        self.hints_cancel();
         if let Some(ui) = self.ui.as_ref() {
             self.saved_page = ui.get_current_page();
             let _ = ui.hide();
@@ -344,16 +371,25 @@ impl ShellUi {
             if on_slider {
                 return;
             }
+            // "Seen it" latches: a nav gesture actually used retires its hint
+            // for the rest of the boot (and drops the strip mid-window — no
+            // point teaching a gesture that was just performed).
             match direction {
                 SwipeDirection::Left => {
+                    self.hint_seen_lr = true;
+                    ui.set_hint_sides(false);
                     ui.set_current_page((ui.get_current_page() + 1).rem_euclid(PAGE_COUNT))
                 }
                 SwipeDirection::Right => {
+                    self.hint_seen_lr = true;
+                    ui.set_hint_sides(false);
                     ui.set_current_page(
                         (ui.get_current_page() + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT),
                     )
                 }
                 SwipeDirection::Up if ui.get_current_page() == PAGE_CLOCK => {
+                    self.hint_seen_up = true;
+                    ui.set_hint_up(false);
                     ui.set_launcher_open(true)
                 }
                 _ => {}
@@ -367,10 +403,87 @@ impl ShellUi {
         self.touch_down
     }
 
+    // === gesture hints (wake shimmer) ===
+
+    /// Arm the wake gesture hints. Called by main.rs at every wake-to-bright
+    /// seam (tap/button, wrist-raise, boot). Shows nothing yet — the strips
+    /// are created invisible and [`tick_hints`] blooms them ~150ms later, so
+    /// the wake frame itself stays hint-free. No-ops once both gestures have
+    /// been used this boot, off the clock page (swipe-up → launcher wouldn't
+    /// be honest there), or while a game holds the panel.
+    pub fn hint_wake(&mut self) {
+        if self.hint_seen_lr && self.hint_seen_up {
+            return;
+        }
+        if self.page() != PAGE_CLOCK {
+            return;
+        }
+        let Some(ui) = self.ui.as_ref() else {
+            return;
+        };
+        self.hint_armed_at = Some(embassy_time::Instant::now());
+        self.hint_lit = false;
+        ui.set_hints_lit(false);
+        ui.set_hint_sides(!self.hint_seen_lr);
+        ui.set_hint_up(!self.hint_seen_up);
+    }
+
+    /// True while a hint window is running. main.rs ORs this into its 33ms
+    /// frame-pacing condition so the bloom/fade tweens get frames even when
+    /// the idle clock page would otherwise tick at 1Hz (`draw_if_needed`
+    /// no-ops through the hold phase, so the extra ticks stay cheap).
+    pub fn hints_pending(&self) -> bool {
+        self.hint_armed_at.is_some()
+    }
+
+    /// Tear the hints down immediately (window expired, an overlay/app took
+    /// the screen, or the scene is being suspended). Idempotent.
+    fn hints_cancel(&mut self) {
+        self.hint_armed_at = None;
+        self.hint_lit = false;
+        if let Some(ui) = self.ui.as_ref() {
+            ui.set_hint_sides(false);
+            ui.set_hint_up(false);
+            ui.set_hints_lit(false);
+        }
+    }
+
+    /// Walk the hint choreography; called from [`render`] each shell tick.
+    /// Everything is edge-triggered off `hint_lit`, so the hold phase sets no
+    /// properties (no dirty regions, no repaints).
+    fn tick_hints(&mut self) {
+        let Some(t0) = self.hint_armed_at else {
+            return;
+        };
+        let elapsed = t0.elapsed().as_millis();
+        if elapsed >= HINT_KILL_MS {
+            self.hints_cancel(); // fade finished — destroy the strips
+            return;
+        }
+        let Some(ui) = self.ui.as_ref() else {
+            return;
+        };
+        if elapsed >= HINT_FADE_MS {
+            if self.hint_lit {
+                self.hint_lit = false;
+                ui.set_hints_lit(false); // → 480ms fade-out tween
+            }
+        } else if elapsed >= HINT_BLOOM_MS && !self.hint_lit {
+            self.hint_lit = true;
+            ui.set_hints_lit(true); // → 480ms bloom-in tween
+        }
+    }
+
     /// Mirror `app_state` into the launcher + overlay open-flags before feeding
     /// touch, so the scene shows the overlay the loop is in. Table-driven
     /// (`OVERLAYS`); no-op while the scene is suspended.
-    pub fn mirror_overlays(&self, app_state: AppState) {
+    pub fn mirror_overlays(&mut self, app_state: AppState) {
+        // Anything on top of the watchface retires a running hint window —
+        // the user is already navigating, and this keeps the strips out from
+        // under the launcher scrim (the Slint gates cover the same frame).
+        if app_state != AppState::Watchface && self.hint_armed_at.is_some() {
+            self.hints_cancel();
+        }
         let Some(ui) = self.ui.as_ref() else {
             return;
         };
@@ -856,6 +969,9 @@ impl ShellUi {
         if self.ui.is_none() {
             return;
         }
+        // Advance the wake gesture-hint choreography on the render clock
+        // (no-op unless a hint window is armed).
+        self.tick_hints();
         slint::platform::update_timers_and_animations();
         self.window.draw_if_needed(|renderer| {
             let mut flusher =
