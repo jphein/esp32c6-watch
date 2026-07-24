@@ -89,9 +89,9 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 /// Per-read inactivity budget: if the socket produces no data for this long
 /// the transfer is declared stalled. Distinct from the overall [`TIMEOUT`]
 /// cap so the error names which failure mode actually happened —
-/// "stalled (10s, no data)" (server/link went quiet mid-transfer) vs
+/// "stalled (20s, no data)" (server/link went quiet mid-transfer) vs
 /// "timeout (5 min overall)" (transfer alive but too slow to finish).
-const STALL_TIMEOUT: Duration = Duration::from_secs(10);
+const STALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// Flash write granularity: one 4 KiB sector per `Storage::write`.
 const CHUNK: usize = 4096;
 /// Progress log granularity.
@@ -242,7 +242,7 @@ async fn run(
     match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => return Err("connect refused/reset"),
-        Err(_) => return Err("connect timeout (10s, server down?)"),
+        Err(_) => return Err("connect timeout (10s connect, server down?)"),
     }
 
     let request = format!(
@@ -322,7 +322,7 @@ async fn run(
         .await
         {
             Ok(r) => r.map_err(|_| "connection reset mid-body")?,
-            Err(_) => return Err("stalled (10s, no data)"),
+            Err(_) => return Err("stalled (20s, no data)"),
         };
         if n == 0 {
             return Err("connection closed mid-body");

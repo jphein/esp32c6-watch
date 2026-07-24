@@ -1158,6 +1158,12 @@ async fn main(_spawner: Spawner) -> ! {
     // executor below (per-tick, any screen) once WiFi is ready, or dropped
     // after a 25s WiFi timeout.
     let mut ota_pending_since: Option<Instant> = None;
+    // Download attempts for the CURRENT pending update. A failed attempt re-arms
+    // the pending state (up to OTA_MAX_ATTEMPTS) instead of giving up — the loop
+    // unblocks between attempts so the WiFi machine can reconnect, then the
+    // executor re-fires. Reset whenever a fresh update is queued.
+    const OTA_MAX_ATTEMPTS: u8 = 3;
+    let mut ota_attempts: u8 = 0;
     // Push-OTA image-URL override from the accepted announce (`None` = the
     // baked OTA_URL). Set alongside ota_pending_since; cleared with it.
     let mut ota_push_url: Option<heapless::String<{ crate::net::ota_http::ANNOUNCE_URL_CAP }>> =
@@ -1799,24 +1805,42 @@ async fn main(_spawner: Spawner) -> ! {
                         esp_hal::system::software_reset();
                     }
                     Err(e) => {
-                        println!("[OTA] failed: {e}");
-                        settings_app.ota_status = e;
-                        let mut msg: heapless::String<64> = heapless::String::new();
-                        let _ = msg.push_str("Update failed: ");
-                        let _ = msg.push_str(e);
-                        shell.set_toast(msg.as_str());
-                        // Fresh timestamp, NOT the tick-start `now`: the download
-                        // may have blocked for minutes, and a stale-based window
-                        // would already be expired — the toast would flash for a
-                        // single tick and be auto-cleared.
-                        toast_until = Instant::now() + Duration::from_secs(5);
-                        toast_active = true;
+                        ota_attempts += 1;
+                        println!("[OTA] attempt {ota_attempts}/{OTA_MAX_ATTEMPTS} failed: {e}");
+                        if ota_attempts < OTA_MAX_ATTEMPTS {
+                            // RE-ARM instead of giving up: restore the URL the
+                            // attempt consumed, keep WiFi requested, and start a
+                            // fresh pending window. The loop unblocks now, so the
+                            // WiFi machine gets to reconnect (the usual failure is
+                            // a mid-transfer link drop it couldn't service while
+                            // the download blocked this loop); the executor
+                            // re-fires once the link is back.
+                            ota_push_url = url;
+                            wifi_on_request = true;
+                            ota_pending_since = Some(Instant::now());
+                            settings_app.ota_status = "Retrying update\u{2026}";
+                            shell.set_toast("Update retrying\u{2026}");
+                            toast_until = Instant::now() + Duration::from_secs(20);
+                            toast_active = true;
+                        } else {
+                            settings_app.ota_status = e;
+                            let mut msg: heapless::String<64> = heapless::String::new();
+                            let _ = msg.push_str("Update failed: ");
+                            let _ = msg.push_str(e);
+                            shell.set_toast(msg.as_str());
+                            // Fresh timestamp, NOT the tick-start `now`: the download
+                            // may have blocked for minutes, and a stale-based window
+                            // would already be expired — the toast would flash for a
+                            // single tick and be auto-cleared.
+                            toast_until = Instant::now() + Duration::from_secs(5);
+                            toast_active = true;
+                        }
                     }
                 }
-            } else if (now - t0) > Duration::from_secs(25) {
+            } else if (now - t0) > Duration::from_secs(45) {
                 ota_pending_since = None;
                 ota_push_url = None;
-                println!("[OTA] WiFi didn't come up within 25s - giving up");
+                println!("[OTA] WiFi didn't come up within 45s - giving up");
                 settings_app.ota_status = "WiFi failed \u{2014} tap to retry";
                 shell.set_toast("Update failed: WiFi");
                 toast_until = now + Duration::from_secs(5);
@@ -1840,6 +1864,7 @@ async fn main(_spawner: Spawner) -> ! {
             } else {
                 println!("[OTA] push: build {} queued (zero-touch)", ann.build);
                 ota_push_url = ann.url;
+                ota_attempts = 0;
                 settings_app.ota_status = "Updating\u{2026}";
                 shell.set_toast("Updating firmware\u{2026}");
                 toast_until = now + Duration::from_secs(30);
@@ -1851,7 +1876,11 @@ async fn main(_spawner: Spawner) -> ! {
 
         // TIME-SHARE steady state: whenever WiFi is down but the radio is up,
         // pin ESP-NOW to the fleet's fixed channel. Re-pin after any WiFi use.
-        if radio_started && !wifi_connected && !mesh_channel_pinned {
+        // SUPPRESSED while an OTA is pending: the pin steals the radio from a
+        // RECONNECTING WiFi (observed on watch #2: mesh pin → link lost → the
+        // MQTT/OTA window never stabilizes). The update owns the radio until it
+        // completes or gives up; the mesh re-pins on the next tick after.
+        if radio_started && !wifi_connected && !mesh_channel_pinned && ota_pending_since.is_none() {
             match esp_now.set_channel(crate::net::smol_mesh::MESH_CHANNEL) {
                 Ok(()) => {
                     mesh_channel_pinned = true;
@@ -3055,6 +3084,7 @@ async fn main(_spawner: Spawner) -> ! {
                             println!("[OTA] tap: raising WiFi for update");
                             settings_app.ota_status = "Connecting WiFi\u{2026}";
                             ota_push_url = None; // tap = the baked OTA_URL
+                            ota_attempts = 0;
                             wifi_on_request = true;
                             ota_pending_since = Some(now);
                         }
