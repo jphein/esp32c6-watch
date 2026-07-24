@@ -196,6 +196,147 @@ fn us_pacific_offset_secs(days_since_epoch: i32) -> i64 {
     }
 }
 
+/// #43: make the RTC sleep-clock calibration work on ESP32-C6 rev >= v0.1, and
+/// probe whether light sleep is safe to enter at all.
+///
+/// esp-hal 1.1.1 panics `attempt to divide by zero` at
+/// `rtc_cntl/sleep/esp32c6.rs:665` (`us_to_fastclk`) when entering light sleep
+/// on newer C6 silicon. Every `sleep_light()` re-runs an RC_FAST calibration
+/// (`RtcClock::calibrate(RcFastDivClk, 2048)`) on the TIMG0 one-shot counter.
+/// On rev >= v0.1 the calibration mux taps RC_FAST through the REF_TICK /32
+/// divider, which only ticks when `PCR.ctrl_tick_conf.{fosc_tick_num,
+/// tick_enable}` are programmed — esp-idf sets both (`clk_ll_rc_fast_tick_conf`
+/// + `rtc_clk_cal`), esp-hal never does on C6 (its C6 metadata lacks
+/// `tick_enable`; the H2 flavor was fixed after esp-rs/esp-hal#5321, C6 was
+/// left out — still missing on esp-hal main as of 2026-07). The counter never
+/// advances, the hardware timeout fires, `calibrate()` returns 0, and the
+/// sleep math divides by it. Rev v0.0 parts tap RC_FAST directly — which is
+/// why watch #1 sleeps fine while factory-fresh watch #2 (newer silicon)
+/// panics deterministically. NOT the LP_AON STORE1/slowclk read: that divisor
+/// is exercised first (esp32c6.rs:560 -> :657) and would report line 657.
+///
+/// Mirrors esp-idf's calibration prep via the PAC (esp-hal `unstable` feature
+/// re-exports register blocks as `esp_hal::peripherals::<P>::regs()`):
+///   1. assert the RC_FAST gates (POR-default on, but they live in the
+///      battery-held LP domain, so previous firmware can leave them off);
+///   2. program + enable the REF_TICK divider and LEAVE it on — esp-hal's
+///      sleep-entry calibration never touches these registers on C6;
+///   3. sanity-check LP_AON.STORE1 (RTC slow-clock period, Q19 µs-per-cycle —
+///      the *other* sleep-math divisor; esp-hal's boot calibration writes it
+///      but stores 0 on failure) and write a nominal RC_SLOW default if bad;
+///   4. dry-run the exact TIMG0 one-shot calibration esp-hal will run at sleep
+///      entry; only a non-zero result enables light sleep (else the AOD path
+///      stays on the select-tick loop, like debug-console builds).
+///
+/// Returns `true` when light sleep is safe (calibration hardware works).
+fn rtc_sleep_cal_init(delay: &Delay) -> bool {
+    use esp_hal::peripherals::{LP_AON, LP_CLKRST, PCR, PMU, TIMG0};
+
+    // (1) RC_FAST (FOSC, ~17.5 MHz) analog enable + digital gate — the same
+    // two registers esp-hal's `enable_rc_fast_clk_impl` drives; the rc_fast
+    // clock-tree node is never requested on C6, so nothing else asserts them.
+    PMU::regs()
+        .hp_sleep_lp_ck_power()
+        .modify(|_, w| w.hp_sleep_xpd_fosc_clk().set_bit());
+    LP_CLKRST::regs()
+        .clk_to_hp()
+        .modify(|_, w| w.icg_hp_fosc().set_bit());
+    delay.delay_micros(5); // oscillator settle (esp-hal/esp-idf use the same 5 µs)
+
+    // (2) REF_TICK /32 divider feeding the calibration mux on rev >= v0.1.
+    // fosc_tick_num=255 == esp-idf `clk_ll_rc_fast_tick_conf()`; tick_enable ==
+    // esp-idf `SET_PERI_REG_MASK(PCR_CTRL_TICK_CONF_REG, PCR_TICK_ENABLE)`.
+    // Harmless on rev v0.0 (the divider is bypassed there).
+    PCR::regs().ctrl_tick_conf().modify(|_, w| unsafe {
+        w.fosc_tick_num().bits(255);
+        w.tick_enable().set_bit()
+    });
+
+    // (3) STORE1 holds the RTC slow-clock period as Q19 µs-per-cycle
+    // (us_to_slowclk: `(us << 19) / period`; slowclk_to_us: `(cyc * period) >>
+    // 19`). Plausibility band 0.19 µs..38 µs covers 32 kHz XTAL (16.0M) and
+    // RC_SLOW (3.86M). Nominal default: 1e6/136_000 µs << 19 = 3_855_059
+    // (C6 RC_SLOW ~= 136 kHz). RC drift (±20%) only skews sleep *duration*;
+    // wall time is re-read from the external PCF85063 after every wake.
+    const STORE1_MIN: u32 = 100_000;
+    const STORE1_MAX: u32 = 20_000_000;
+    const RC_SLOW_PERIOD_Q19: u32 = 3_855_059;
+    let store1 = LP_AON::regs().store1().read().data().bits();
+    if !(STORE1_MIN..=STORE1_MAX).contains(&store1) {
+        LP_AON::regs()
+            .store1()
+            .write(|w| unsafe { w.bits(RC_SLOW_PERIOD_Q19) });
+        println!(
+            "[RTC] slowclk cal absent — wrote default (STORE1={} -> {})",
+            store1, RC_SLOW_PERIOD_Q19
+        );
+    } else {
+        println!("[RTC] slowclk cal present: {}", store1);
+    }
+
+    // (4) Dry-run the RC_FAST_DIV one-shot calibration exactly as esp-hal's
+    // `measure_rtc_clock` does inside `sleep_light()`: TIMG0 rtccalicfg,
+    // cali_clk_sel=1 (RC_FAST_DIV). 64 cycles ~= 117 µs of fosc/32 on
+    // rev >= v0.1 (or ~4 µs of direct fosc on v0.0). The rtccalicfg2 hardware
+    // timeout bounds the wait; a software spin cap backs it up.
+    let timg0 = TIMG0::regs();
+    if timg0.rtccalicfg().read().rtc_cali_start_cycling().bit_is_set() {
+        // A cycling calibration is mid-flight (POR default) — drain it first,
+        // same dance as esp-hal/esp-idf.
+        timg0
+            .rtccalicfg2()
+            .modify(|_, w| unsafe { w.rtc_cali_timeout_thres().bits(1) });
+        while !timg0.rtccalicfg().read().rtc_cali_rdy().bit_is_set()
+            && !timg0.rtccalicfg2().read().rtc_cali_timeout().bit_is_set()
+        {}
+    }
+    timg0.rtccalicfg2().reset();
+    // Expected completion ~4.7k XTAL(40 MHz) cycles; allow 400k (10 ms).
+    timg0
+        .rtccalicfg2()
+        .modify(|_, w| unsafe { w.rtc_cali_timeout_thres().bits(400_000) });
+    timg0.rtccalicfg().modify(|_, w| unsafe {
+        w.rtc_cali_start_cycling().clear_bit();
+        w.rtc_cali_clk_sel().bits(1); // 1 = RC_FAST_DIV, the sleep path's fastclk
+        w.rtc_cali_max().bits(64);
+        w.rtc_cali_start().clear_bit()
+    });
+    timg0
+        .rtccalicfg()
+        .modify(|_, w| w.rtc_cali_start().set_bit());
+    let mut cal_value = 0u32;
+    let mut spins = 0u32;
+    loop {
+        if timg0.rtccalicfg().read().rtc_cali_rdy().bit_is_set() {
+            cal_value = timg0.rtccalicfg1().read().rtc_cali_value().bits();
+            break;
+        }
+        if timg0.rtccalicfg2().read().rtc_cali_timeout().bit_is_set() {
+            break; // counter never ticked — RC_FAST calibration dead on this unit
+        }
+        spins += 1;
+        if spins > 40_000_000 {
+            break; // paranoia cap (~seconds); treat as failed
+        }
+    }
+    timg0
+        .rtccalicfg()
+        .modify(|_, w| w.rtc_cali_start().clear_bit());
+
+    if cal_value != 0 {
+        println!(
+            "[RTC] fastclk cal probe OK ({} xtal cyc / 64) — AOD light sleep enabled",
+            cal_value
+        );
+        true
+    } else {
+        println!(
+            "[RTC] fastclk cal probe TIMEOUT — AOD light sleep DISABLED (div-by-zero guard, #43)"
+        );
+        false
+    }
+}
+
 /// Convert a Unix timestamp to Pacific local time and write it to the RTC.
 fn set_rtc_from_unix(
     rtc: &mut crate::peripherals::rtc::Pcf85063aRtc<impl embedded_hal::i2c::I2c>,
@@ -528,6 +669,13 @@ async fn main(_spawner: Spawner) -> ! {
     // AOD (#29). The wall clock stays on the external PCF85063 above, which is
     // unaffected by light sleep; this only powers the sleep/wake handshake.
     let mut rtc_lp = Rtc::new(peripherals.LPWR);
+
+    // #43: fix the RC_FAST calibration esp-hal runs at every sleep entry
+    // (REF_TICK divider unprogrammed on C6 rev >= v0.1 -> cal returns 0 ->
+    // divide-by-zero inside sleep_light), seed a sane STORE1 slowclk period if
+    // the boot calibration failed, and probe whether light sleep is safe.
+    // MUST run before the first `sleep_light` below.
+    let sleep_cal_ok = rtc_sleep_cal_init(&delay);
 
     // C6 on-die temperature sensor (#54) — read on the sensors page.
     let die_temp = DieTemp::new(peripherals.TSENS);
@@ -1092,7 +1240,11 @@ async fn main(_spawner: Spawner) -> ! {
         // In debug-console builds, skip AOD light-sleep entirely (fall through to the
         // console-aware select4 below) so unattended UI tests can drive the watch —
         // injected commands can't wake the HP core out of `sleep_light`.
-        if screen_state == 1 && !cfg!(feature = "debug-console") {
+        // `sleep_cal_ok` (#43): if the boot-time RC_FAST calibration probe timed
+        // out, esp-hal's own sleep-entry calibration would too and `sleep_light`
+        // would panic with a divide-by-zero (esp32c6.rs:665) — skip light sleep
+        // on such units the same way (logged once at boot).
+        if screen_state == 1 && !cfg!(feature = "debug-console") && sleep_cal_ok {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass)
             // + WRIST-RAISE wake (polling): park the HP core in light sleep
             // instead of WFI-idling. Wake on a short poll timer OR touch (GPIO15)
@@ -1123,6 +1275,17 @@ async fn main(_spawner: Spawner) -> ! {
             let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(true, WakeEvent::LowLevel);
             let t0 = Instant::now();
+            // #43: re-assert the REF_TICK divider feeding the RC_FAST
+            // calibration that `sleep_light` runs internally — cheap (one MMIO
+            // write per AOD poll), and shields against anything since boot
+            // (radio glue, a future esp-hal) having cleared the bits, which
+            // would bring back the divide-by-zero.
+            esp_hal::peripherals::PCR::regs()
+                .ctrl_tick_conf()
+                .modify(|_, w| unsafe {
+                    w.fosc_tick_num().bits(255);
+                    w.tick_enable().set_bit()
+                });
             rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
             let cause = wakeup_cause();
             // Disarm so normal falling-edge IRQ handling resumes.
