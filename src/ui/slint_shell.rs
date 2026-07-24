@@ -1085,6 +1085,9 @@ fn build_scene(
     // Firmware version is a compile-time constant; set it once so the system
     // page shows the real Cargo version instead of a string that drifts.
     ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
+    // Per-device sigil (#34): a device constant (efuse MAC), stamped here like
+    // fw-text so it survives suspend/resume scene rebuilds with no stored state.
+    ui.set_sigil_text(SharedString::from(crate::net::sigil::get().sigil.as_str()));
     ui.show().expect("show failed");
     ui
 }

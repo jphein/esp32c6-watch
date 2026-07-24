@@ -40,7 +40,13 @@ pub static BATTERY_PERCENT: AtomicU8 = AtomicU8::new(0);
 /// host requires a reboot.
 pub static BLE_START_REQUEST: AtomicBool = AtomicBool::new(false);
 
-const DEVICE_NAME: &str = "Rust Watch";
+/// Advertised device name: the per-device sigil (#34), e.g.
+/// "eldritch-lantern" — was a fleet-shared "Rust Watch", which made the two
+/// watches indistinguishable in any scanner. `&'static` because the sigil
+/// identity lives in a `static` (LazyLock over the efuse MAC).
+fn device_name() -> &'static str {
+    crate::net::sigil::get().sigil.as_str()
+}
 
 /// Max number of concurrent connections.
 const CONNECTIONS_MAX: usize = 1;
@@ -86,7 +92,7 @@ pub async fn ble_host_task(controller: WatchController) {
     } = stack.build();
 
     let server = match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-        name: DEVICE_NAME,
+        name: device_name(),
         appearance: &appearance::watch::SMARTWATCH,
     })) {
         Ok(server) => server,
@@ -95,7 +101,7 @@ pub async fn ble_host_task(controller: WatchController) {
             return;
         }
     };
-    println!("[BLE] host up, advertising as '{DEVICE_NAME}'");
+    println!("[BLE] host up, advertising as '{}'", device_name());
 
     // The host runner must run alongside everything else, forever.
     let host_fut = async {
@@ -130,7 +136,9 @@ pub async fn ble_host_task(controller: WatchController) {
     join(host_fut, gatt_fut).await;
 }
 
-/// Advertise as connectable "Rust Watch" and wait for a central.
+/// Advertise as the connectable per-device sigil and wait for a central.
+/// ADV payload budget: 3 (flags) + 4 (battery uuid) + 2 + sigil (≤ 20) = 29
+/// of the 31 legacy-ADV bytes — every corpus name fits (host-tested cap).
 async fn advertise<'values, 'server, C: Controller>(
     peripheral: &mut Peripheral<'values, C, DefaultPacketPool>,
     server: &'server Server<'values>,
@@ -140,7 +148,7 @@ async fn advertise<'values, 'server, C: Controller>(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
             AdStructure::ServiceUuids16(&[[0x0f, 0x18]]), // Battery Service
-            AdStructure::CompleteLocalName(DEVICE_NAME.as_bytes()),
+            AdStructure::CompleteLocalName(device_name().as_bytes()),
         ],
         &mut adv_data[..],
     )?;
@@ -153,7 +161,7 @@ async fn advertise<'values, 'server, C: Controller>(
             },
         )
         .await?;
-    println!("[BLE] advertising as '{DEVICE_NAME}'");
+    println!("[BLE] advertising as '{}'", device_name());
     let conn = advertiser.accept().await?.with_attribute_server(server)?;
     println!("[BLE] central connected");
     Ok(conn)

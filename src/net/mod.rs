@@ -17,6 +17,10 @@ pub mod mqtt_ha;
 pub mod mqtt_climate;
 pub mod names;
 pub mod ota_http;
+// Per-device SIGIL IDENTITY from the efuse MAC (#34): name, node id,
+// per-watch OTA topic. `mac` is a logs/debug field until a consumer lands.
+#[allow(dead_code)]
+pub mod sigil;
 pub mod smol_mesh;
 // Voice-to-text upload (STT bridge). Unwired until MC5 spawns it from main.rs;
 // silence dead-code until then rather than churn per-item attributes.

@@ -3,6 +3,10 @@
 #
 #   tools/ota_push.sh                  # stamp + build + image + upload + announce
 #   tools/ota_push.sh --announce-only  # re-announce the already-uploaded image
+#   tools/ota_push.sh --target <sigil> # announce to ONE watch only, via its
+#                                      # per-watch topic watch/<sigil>/ota (#34)
+#                                      # e.g. --target eldritch-lantern
+#                                      # (combines with --announce-only)
 #
 # Flow (see docs/ota-deploy.md "Push OTA"):
 #   1. Stamp OTA_BUILD=<unix-seconds> into .cargo/config.toml [env] (gitignored)
@@ -34,10 +38,34 @@ OTA_URL="$(cfg_get OTA_URL)"
 BROKER_HOST="${MQTT_BROKER%%:*}"
 BROKER_PORT="${MQTT_BROKER##*:}"
 
-ANNOUNCE_TOPIC="watch/ota/announce"
 OTA_DEST="ubox0:/home/jp/watch-ota/watch.bin"
 
-if [ "${1:-}" = "--announce-only" ]; then
+# --- args: --announce-only, --target <sigil> ---------------------------------
+ANNOUNCE_ONLY=0
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --announce-only) ANNOUNCE_ONLY=1 ;;
+        --target)
+            TARGET="${2:-}"
+            [ -n "$TARGET" ] || { echo "ota_push: --target needs a sigil (e.g. eldritch-lantern)" >&2; exit 2; }
+            shift ;;
+        *) echo "ota_push: unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# Fleet topic by default; per-watch topic (watch/<sigil>/ota, both watches'
+# firmware subscribes its own alongside the fleet topic) when targeted. The
+# sigil for each watch is printed at boot: `[SIGIL] <name> (node id N, ...)`,
+# and shown on the System page.
+ANNOUNCE_TOPIC="watch/ota/announce"
+if [ -n "$TARGET" ]; then
+    ANNOUNCE_TOPIC="watch/$TARGET/ota"
+    echo "ota_push: targeting ONE watch: $TARGET ($ANNOUNCE_TOPIC)"
+fi
+
+if [ "$ANNOUNCE_ONLY" = 1 ]; then
     # Re-announce the current stamped build (image must already be uploaded).
     EPOCH="$(cfg_get OTA_BUILD)"
     [ -n "$EPOCH" ] || { echo "ota_push: no OTA_BUILD in $CFG — run a full push first" >&2; exit 2; }

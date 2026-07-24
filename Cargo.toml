@@ -6,7 +6,7 @@ exclude = ["crates/i-slint-renderer-software"]
 
 [package]
 name = "esp32c6-watch"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -120,6 +120,11 @@ climate-model = { path = "crates/climate-model" }
 # #28: pure-logic mic sound-level DSP (rms_dbfs) — host-unit-tested. Drives the
 # SoundLevel meter from the shared mic capture (MIC_CH).
 mic-dsp = { path = "crates/mic-dsp" }
+# #34: pinned realm-sigil corpus + index math (vendored verbatim from smol) +
+# the MAC-seeded per-device identity derivations — host-unit-tested. Serves
+# both mesh peer names (src/net/names.rs re-export) and the device sigil
+# (src/net/sigil.rs).
+sigil-id = { path = "crates/sigil-id" }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.
