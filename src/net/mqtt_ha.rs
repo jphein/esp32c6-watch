@@ -26,7 +26,13 @@ pub(crate) const BROKER: &str = match option_env!("MQTT_BROKER") {
 const USER: Option<&str> = option_env!("MQTT_USER");
 const PASS: Option<&str> = option_env!("MQTT_PASS");
 
-const CLIENT_ID: &str = "smolwatch042";
+/// Client-id prefix; the per-device sigil is appended (#34). Both watches
+/// connecting under one fixed id ("smolwatch042") meant an MQTT 3.1.1 session
+/// takeover — the broker evicts the sibling mid-window — whenever their
+/// bursts overlapped. `smolwatch-<sigil>` keeps the fleet collision-free.
+pub(crate) const CLIENT_ID_PREFIX: &str = "smolwatch-";
+/// prefix (10) + sigil (≤ 20) + "-clim" (5) headroom for the climate session.
+pub(crate) const CLIENT_ID_CAP: usize = 40;
 const KEEPALIVE_SECS: u16 = 30;
 
 /// Home Assistant discovery config for the battery sensor (retained).
@@ -87,8 +93,11 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
         .map_err(|_| "tcp connect")?;
 
     // CONNECT -> CONNACK
+    let mut client_id: heapless::String<CLIENT_ID_CAP> = heapless::String::new();
+    let _ = client_id.push_str(CLIENT_ID_PREFIX);
+    let _ = client_id.push_str(crate::net::sigil::get().sigil.as_str());
     let mut pkt: Vec<u8, PKT_CAP> = Vec::new();
-    build_connect(&mut pkt, CLIENT_ID)?;
+    build_connect(&mut pkt, client_id.as_str())?;
     write_all(&mut socket, &pkt).await?;
 
     let mut ack = [0u8; 4];
@@ -123,40 +132,60 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
     Ok(())
 }
 
-/// SUBSCRIBE `watch/ota/announce` (QoS 0) and wait [`ANNOUNCE_WAIT`] for the
-/// retained announce PUBLISH. A delivered announce is fed through
+/// SUBSCRIBE the fleet `watch/ota/announce` AND the per-watch
+/// `watch/<sigil>/ota` (#34) at QoS 0, then wait [`ANNOUNCE_WAIT`] for
+/// retained announce PUBLISHes. A delivered announce is fed through
 /// [`crate::net::ota_http::handle_announce`] (gate + post for main.rs); no
 /// retained message just times the wait out — that is the common case and not
 /// an error. Frame decode reuses [`crate::net::mqtt_climate::read_frame`].
 async fn check_ota_announce(socket: &mut TcpSocket<'_>) -> Result<(), &'static str> {
-    let topic = crate::net::ota_http::ANNOUNCE_TOPIC;
+    let topics = [
+        crate::net::ota_http::ANNOUNCE_TOPIC,
+        crate::net::sigil::get().ota_topic.as_str(),
+    ];
 
     // SUBSCRIBE (packet id 1, QoS 0) -> SUBACK.
+    let mut remaining = 2usize; // packet id
+    for t in topics {
+        remaining += 2 + t.len() + 1;
+    }
     let mut pkt: Vec<u8, PKT_CAP> = Vec::new();
     push(&mut pkt, &[0x82])?; // SUBSCRIBE, reserved flags 0b0010
-    push_remaining_len(&mut pkt, 2 + 2 + topic.len() + 1)?;
+    push_remaining_len(&mut pkt, remaining)?;
     push(&mut pkt, &[0x00, 0x01])?; // packet identifier = 1
-    push_str(&mut pkt, topic)?;
-    push(&mut pkt, &[0x00])?; // requested QoS 0
+    for t in topics {
+        push_str(&mut pkt, t)?;
+        push(&mut pkt, &[0x00])?; // requested QoS 0
+    }
     write_all(socket, &pkt).await?;
 
-    // Announce frame = topic (~18 B) + payload (`OTA|epoch|url<=96`) — 192 is
-    // roomy. SUBACK reuses the same buffer first.
+    // Announce frame = topic (~30 B max) + payload (`OTA|epoch|url<=96`) — 192
+    // is roomy. SUBACK reuses the same buffer first.
     let mut buf = [0u8; 192];
     let (ty, n) = crate::net::mqtt_climate::read_frame(socket, &mut buf).await?;
-    if ty & 0xF0 != 0x90 || n < 3 || buf[2] == 0x80 {
+    if ty & 0xF0 != 0x90 || n < 2 + topics.len() || buf[2..n].contains(&0x80) {
         return Err("bad SUBACK (announce)");
     }
 
-    // Retained announce, if any, arrives immediately after the SUBACK. The
-    // with_timeout expiring = no retained announce (fine); read_frame is
-    // cancel-safe enough here — on timeout we only ever DISCONNECT + close.
-    match with_timeout(ANNOUNCE_WAIT, crate::net::mqtt_climate::read_frame(socket, &mut buf)).await
-    {
-        Ok(Ok((ty, n))) if ty & 0xF0 == 0x30 => handle_announce_frame(&buf[..n]),
-        Ok(Ok(_)) => {}  // unexpected control packet — ignore, disconnect below
-        Ok(Err(e)) => return Err(e),
-        Err(_) => {} // window elapsed with no retained announce — common case
+    // Retained announces, if any, arrive immediately after the SUBACK — with
+    // both topics subscribed there can be up to two (fleet + targeted), so
+    // drain frames until the window closes. handle_announce's BUILD_EPOCH gate
+    // arbitrates duplicates. The deadline expiring = no (more) retained
+    // announces (fine); read_frame is cancel-safe enough here — on expiry we
+    // only ever DISCONNECT + close.
+    let deadline = Instant::now() + ANNOUNCE_WAIT;
+    loop {
+        match embassy_time::with_deadline(
+            deadline,
+            crate::net::mqtt_climate::read_frame(socket, &mut buf),
+        )
+        .await
+        {
+            Ok(Ok((ty, n))) if ty & 0xF0 == 0x30 => handle_announce_frame(&buf[..n]),
+            Ok(Ok(_)) => {}  // unexpected control packet — ignore, keep draining
+            Ok(Err(e)) => return Err(e),
+            Err(_) => break, // window elapsed — common case
+        }
     }
     Ok(())
 }
@@ -172,8 +201,11 @@ fn handle_announce_frame(body: &[u8]) {
     if idx > body.len() {
         return; // topic overruns frame — malformed
     }
-    if &body[2..idx] != crate::net::ota_http::ANNOUNCE_TOPIC.as_bytes() {
-        return; // only the announce topic is subscribed; anything else is noise
+    let topic = &body[2..idx];
+    if topic != crate::net::ota_http::ANNOUNCE_TOPIC.as_bytes()
+        && topic != crate::net::sigil::get().ota_topic.as_bytes()
+    {
+        return; // only the two announce topics are subscribed; anything else is noise
     }
     crate::net::ota_http::handle_announce(&body[idx..]);
 }
