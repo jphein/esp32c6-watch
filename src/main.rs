@@ -1046,6 +1046,9 @@ async fn main(_spawner: Spawner) -> ! {
         let _ = shell.set_time(&dt);
         last_dt = Some(dt);
     }
+    // Boot is the first glance of all: shimmer the nav gesture hints (the
+    // shell sequences bloom/hold/fade itself — see ShellUi::hint_wake).
+    shell.hint_wake();
     shell.render(&mut display);
 
     let mut next_rtc = Instant::now();
@@ -1202,7 +1205,10 @@ async fn main(_spawner: Spawner) -> ! {
                         // Warmer/colder wants a responsive feel; the RSSI EWMA +
                         // 1.5s trend lag keep 4 Hz from flickering.
                         Duration::from_millis(250)
-                    } else if shell.has_active_animations() {
+                    } else if shell.has_active_animations() || shell.hints_pending() {
+                        // hints_pending: a wake gesture-hint window is running —
+                        // its bloom/fade tweens need frames, and between phase
+                        // edges draw_if_needed no-ops (cheap ticks, ≤3.2s).
                         Duration::from_millis(33)
                     } else {
                         match shell.page() {
@@ -1307,6 +1313,7 @@ async fn main(_spawner: Spawner) -> ! {
                 screen_state = 3;
                 next_flush = last_interaction;
                 shell.set_aod(false);
+                shell.hint_wake();
                 shell.request_redraw();
                 println!("[AOD-SLEEP] wrist-raise -> bright");
             }
@@ -1376,6 +1383,7 @@ async fn main(_spawner: Spawner) -> ! {
                     screen_state = 3;
                     next_flush = last_interaction;
                     shell.set_aod(false);
+                    shell.hint_wake();
                     shell.request_redraw();
                     println!("[AOD] wrist-raise -> bright (no-sleep path)");
                 }
@@ -1531,6 +1539,11 @@ async fn main(_spawner: Spawner) -> ! {
                 if screen_state == 0 {
                     display.display_on();
                     Timer::after(Duration::from_millis(20)).await;
+                }
+                // A real wake from AOD/off (tap, button, injected input) — not
+                // a dim→bright re-touch — shimmers the nav gesture hints.
+                if screen_state <= 1 {
+                    shell.hint_wake();
                 }
                 display.set_brightness(brightness);
                 screen_state = 3;
