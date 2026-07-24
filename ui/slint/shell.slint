@@ -54,6 +54,8 @@ export component WatchShell inherits Window {
     // system page (live at 2s while showing); chip/display are constants and
     // keep their SystemPage component defaults. fw-text is set once from Cargo.
     in property <string> fw-text: "--";
+    // Per-device sigil name (#34), stamped with fw-text from the efuse MAC.
+    in property <string> sigil-text: "--";
     in property <string> heap-text: "--";
     in property <string> uptime-text: "--";
     in property <string> battery-text: "--";
@@ -237,6 +239,7 @@ export component WatchShell inherits Window {
             width: pages.width; height: pages.height;
             animate x { duration: 260ms; easing: ease-out; }
             fw-text: root.fw-text;
+            sigil-text: root.sigil-text;
             heap-text: root.heap-text;
             uptime-text: root.uptime-text;
             battery-text: root.battery-text;

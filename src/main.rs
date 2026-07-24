@@ -897,6 +897,23 @@ async fn main(_spawner: Spawner) -> ! {
         watch_cfg.node_id,
         watch_cfg.ssid.as_str()
     );
+    // SIGIL IDENTITY (#34): config node id 42 is the never-explicitly-chosen
+    // default on every watch (a fleet-wide mesh collision, observed breaking
+    // MQTT windows) — treat it as the "unset" sentinel and fall back to the
+    // MAC-derived id. An explicitly set config id ≠ 42 still wins. The derived
+    // id is never persisted: it stays deterministic from the efuse MAC.
+    let sigil = net::sigil::get();
+    let node_id = if watch_cfg.node_id == 42 {
+        sigil.node_id
+    } else {
+        watch_cfg.node_id
+    };
+    println!(
+        "[SIGIL] {} (node id {}, {})",
+        sigil.sigil.as_str(),
+        node_id,
+        if watch_cfg.node_id == 42 { "mac-derived" } else { "config" },
+    );
     let mut wifi_has_creds = !watch_cfg.ssid.is_empty();
     if !wifi_has_creds {
         println!("[WIFI] no credentials - set them in Settings");
@@ -992,7 +1009,7 @@ async fn main(_spawner: Spawner) -> ! {
     let mut prev_app_state = app_state;
     let mut snake_game = SnakeGame::new();
     // World Snake shares the SMOLv1 node id so its SNK frames name us.
-    let mut world_snake = WorldSnakeApp::new(watch_cfg.node_id);
+    let mut world_snake = WorldSnakeApp::new(node_id);
     let mut game_2048 = Game2048::new();
     let mut tetris_game = TetrisGame::new();
     let mut flappy_game = FlappyGame::new();
@@ -1122,11 +1139,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut ble_toggle_request = false;
     let mut settings_connect_pending = false;
     let mut wifi_connect_attempts: u8 = 0;
-    // SMOLv1 mesh: node id comes from flash config (default 042).
-    let mut mesh = SmolMesh::new(watch_cfg.node_id);
+    // SMOLv1 mesh: explicit flash-config node id, or the MAC-derived sigil id
+    // when config still holds the 42 "unset" sentinel (#34, arbitrated above).
+    let mut mesh = SmolMesh::new(node_id);
     // Mesh Familiar (fleet #57): always-on holder/arbitration state machine,
     // ticked alongside mesh.tick. The creature renders on the watchface.
-    let mut familiar = crate::net::familiar::FamState::new(watch_cfg.node_id);
+    let mut familiar = crate::net::familiar::FamState::new(node_id);
     let mut esp_now_peer_added = false;
     // WiZmote frame sequence (WLED de-dups on it); wraps, monotonic per send.
     let mut wled_seq: u32 = 0;
@@ -2101,7 +2119,8 @@ async fn main(_spawner: Spawner) -> ! {
 
         // === BLE toggle ===
         // First press wakes the parked trouble-host task, which advertises
-        // as "Rust Watch" and serves the Battery GATT service. The trouble
+        // as the per-device sigil (#34, e.g. "eldritch-lantern") and serves
+        // the Battery GATT service. The trouble
         // host owns the controller from then on and cannot be torn down at
         // runtime, so "off" requires a reboot; later presses just log that.
         // (The old raw-HCI scan/device-discovery logging was dropped: the
@@ -2113,7 +2132,10 @@ async fn main(_spawner: Spawner) -> ! {
                 ble_on = true;
                 crate::peripherals::ble::BLE_START_REQUEST
                     .store(true, core::sync::atomic::Ordering::Relaxed);
-                println!("[BLE] GATT server start requested ('Rust Watch')");
+                println!(
+                    "[BLE] GATT server start requested ('{}')",
+                    net::sigil::get().sigil.as_str()
+                );
             } else {
                 println!("[BLE] host can't be stopped at runtime - reboot to disable");
             }
@@ -2683,7 +2705,7 @@ async fn main(_spawner: Spawner) -> ! {
                         if now >= next_flush {
                             let mut rows = [PeerView::default(); MESH_MAX_ROWS];
                             let n = mesh.peers(now.as_millis(), &mut rows);
-                            shell.set_mesh_rows(watch_cfg.node_id, &rows[..n]);
+                            shell.set_mesh_rows(node_id, &rows[..n]);
                             next_flush = now + Duration::from_secs(1);
                         }
                     }

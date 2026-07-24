@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "esp32c6-watch"
-version = "0.7.1"
+version = "0.8.4"
 dependencies = [
  "climate-model",
  "critical-section",
@@ -2071,6 +2071,7 @@ dependencies = [
  "log",
  "mic-dsp",
  "rssi",
+ "sigil-id",
  "slint",
  "slint-build",
  "static_cell",
@@ -5353,6 +5354,10 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "sigil-id"
+version = "0.1.0"
 
 [[package]]
 name = "signal-hook-registry"

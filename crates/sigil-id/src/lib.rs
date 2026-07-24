@@ -1,0 +1,237 @@
+//! Deterministic magical device names — a faithful `no_std` port of
+//! realm-sigil's `GenerateName` (github.com/jphein/realm-sigil), vendored
+//! VERBATIM from smol's `rust/clock/src/net/names.rs` (#34). A device's
+//! `(adjective, noun)` matches `sigil.generate_name(hex(seed), realm)` in
+//! Go/Python/JS for any `u32` seed, so any device's name is reproducible
+//! off-device.
+//!
+//! ⚠️ CORPUS-DRIFT WARNING — pinned deliberately. This table is copied
+//! verbatim from sigil's GENERATED embeds (`go/realms.go` ==
+//! `python/realm_sigil/realms.py` == `js/realms.js`; all three byte-identical,
+//! 20 adjectives / 20 nouns per realm), via smol's names.rs — the exact
+//! snapshot the rest of the fleet runs. If sigil ever re-runs its word-sync,
+//! do NOT re-copy: every watch's name — and its per-watch OTA topic — would
+//! change. Name stability is the point.
+//!
+//! On top of the verbatim core, this crate adds the MAC-seed path (issue #34,
+//! smol research B2): [`seed_from_mac`], [`node_id_from_mac`] and the
+//! lowercase topic-safe [`Sigil`] string ("eldritch-lantern"). All heap-free,
+//! zero-alloc, host-testable (`cargo test -p sigil-id`).
+
+#![cfg_attr(not(test), no_std)]
+
+// --- verbatim core: smol rust/clock/src/net/names.rs ------------------------
+
+/// A realm's word corpus. `name = "{adjectives[seed % |A|]} {nouns[(seed>>8) % |N|]}"`.
+pub struct Realm {
+    pub adjectives: &'static [&'static str],
+    pub nouns: &'static [&'static str],
+}
+
+/// The `fantasy` realm — verbatim from sigil's generated corpus (20 adj / 20 noun).
+pub static FANTASY: Realm = Realm {
+    adjectives: &[
+        "Arcane", "Blazing", "Celestial", "Draconic", "Eldritch", "Fabled", "Gilded",
+        "Hallowed", "Infernal", "Jade", "Kindled", "Luminous", "Mythic", "Noble", "Obsidian",
+        "Primal", "Radiant", "Spectral", "Twilight", "Valiant",
+    ],
+    nouns: &[
+        "Aegis", "Beacon", "Crown", "Dominion", "Ember", "Forge", "Grimoire", "Herald",
+        "Insignia", "Jewel", "Keystone", "Lantern", "Monolith", "Nexus", "Oracle", "Pinnacle",
+        "Quartz", "Relic", "Sigil", "Throne",
+    ],
+};
+
+/// The realm every unit agrees on (sigil's `realm` string). LOCKED to fantasy,
+/// matching the smol fleet — repoint it (and paste another realm's table from
+/// sigil's generated source) to re-theme every device's name at once.
+pub const REALM: &Realm = &FANTASY;
+
+/// Knuth multiplicative-hash constant (2^32 / φ, rounded to odd). Spreads an 8-bit
+/// id across all 32 seed bits — see [`seed_from_id`].
+const GOLDEN_U32: u32 = 2_654_435_761;
+
+/// Faithful port of sigil's index math: `adj = A[seed % |A|]`,
+/// `noun = N[(seed >> 8) % |N|]`. Uses the list LENGTH (not a hard-coded 20),
+/// exactly like sigil's Go/Python source. `(seed >> 8)` still leaves 24 bits
+/// for the noun. Matches sigil for any `u32` seed.
+#[inline]
+pub fn name_for_seed(seed: u32, realm: &'static Realm) -> (&'static str, &'static str) {
+    let adj = realm.adjectives[(seed as usize) % realm.adjectives.len()];
+    let noun = realm.nouns[((seed >> 8) as usize) % realm.nouns.len()];
+    (adj, noun)
+}
+
+/// Spread an 8-bit id across 32 bits so BOTH the adjective (`% |A|`) and the noun
+/// (`(>>8) % |N|`) vary between adjacent ids. WITHOUT this every id < 256 has
+/// `(seed >> 8) == 0` and shares noun index 0 — all nodes would get the same noun.
+/// Off-device parity: `(id * 2654435761) & 0xFFFFFFFF`, which on-device is
+/// exactly `wrapping_mul`.
+#[inline]
+pub fn seed_from_id(id: u8) -> u32 {
+    (id as u32).wrapping_mul(GOLDEN_U32)
+}
+
+/// A node's `(adjective, noun)` from its logical id. Both mesh ends call this with
+/// the id carried in the frame to get an identical name. `.1` is the noun; `.0`
+/// is the adjective.
+#[inline]
+pub fn name_for_id(id: u8) -> (&'static str, &'static str) {
+    name_for_seed(seed_from_id(id), REALM)
+}
+
+// --- MAC-seed extensions (issue #34; smol research B2) -----------------------
+
+/// Zero-config seed from the factory MAC's low 32 bits — smol research B2,
+/// verbatim. The 3-byte OUI (`98:A3:16` across this fleet) is constant and
+/// carries no entropy, so it is skipped. On-device the MAC comes from
+/// `esp_hal::efuse::base_mac_address()` (esp-hal 1.1, `unstable` feature).
+#[inline]
+pub fn seed_from_mac(mac: [u8; 6]) -> u32 {
+    u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]) // skip constant OUI
+}
+
+/// A device's `(adjective, noun)` straight from its efuse MAC.
+#[inline]
+pub fn name_for_mac(mac: [u8; 6]) -> (&'static str, &'static str) {
+    name_for_seed(seed_from_mac(mac), REALM)
+}
+
+/// Fold the efuse MAC to a mesh node id: XOR of the four [`seed_from_mac`]
+/// bytes (documented convention — smol has no node-id-from-MAC precedent, so
+/// this is the simplest fold that separates the fleet). 0 and 255 are remapped
+/// to 1 / 254 (reserved/broadcast-adjacent). The config sentinel 42 is NOT
+/// special-cased here: a derived 42 would be a legitimately-chosen id, and the
+/// fleet check below proves neither watch lands on it.
+///
+/// Fleet (host-tested below): `…A7:2F:E4` → 122, `…A5:A7:F8` → 236.
+#[inline]
+pub fn node_id_from_mac(mac: [u8; 6]) -> u8 {
+    let s = seed_from_mac(mac);
+    match (s ^ (s >> 8) ^ (s >> 16) ^ (s >> 24)) as u8 {
+        0 => 1,
+        255 => 254,
+        id => id,
+    }
+}
+
+/// Longest possible sigil: longest adjective (9, "Celestial") + `-` +
+/// longest noun (8, e.g. "Dominion") = 18; padded for slack. Exhaustively
+/// verified by the `all_sigils_fit_and_are_topic_safe` host test.
+pub const SIGIL_MAX: usize = 20;
+
+/// A lowercase hyphenated sigil string ("eldritch-lantern") in a fixed
+/// buffer — zero-alloc, `Copy`, safe to embed in a `static`. Topic-safe by
+/// construction (ASCII lowercase + `-`; no MQTT wildcards or separators).
+#[derive(Clone, Copy)]
+pub struct Sigil {
+    buf: [u8; SIGIL_MAX],
+    len: u8,
+}
+
+impl Sigil {
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len as usize]).unwrap_or("")
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len as usize]
+    }
+}
+
+impl core::fmt::Display for Sigil {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Format a seed's name as a lowercase sigil ("eldritch-lantern"). Bounded
+/// writes (a corpus word that ever outgrew [`SIGIL_MAX`] would truncate, not
+/// panic — and the host test would catch it first).
+pub fn sigil_for_seed(seed: u32) -> Sigil {
+    let (adj, noun) = name_for_seed(seed, REALM);
+    let mut buf = [0u8; SIGIL_MAX];
+    let mut len = 0usize;
+    for &b in adj.as_bytes().iter().chain(b"-").chain(noun.as_bytes()) {
+        if len == SIGIL_MAX {
+            break;
+        }
+        buf[len] = b.to_ascii_lowercase();
+        len += 1;
+    }
+    Sigil { buf, len: len as u8 }
+}
+
+/// A device's lowercase sigil straight from its efuse MAC.
+#[inline]
+pub fn sigil_for_mac(mac: [u8; 6]) -> Sigil {
+    sigil_for_seed(seed_from_mac(mac))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fleet efuse MACs (base MAC, `esp_hal::efuse::base_mac_address()`).
+    const WATCH_A: [u8; 6] = [0x98, 0xA3, 0x16, 0xA7, 0x2F, 0xE4];
+    const WATCH_B: [u8; 6] = [0x98, 0xA3, 0x16, 0xA5, 0xA7, 0xF8];
+
+    /// Parity with smol's names.rs / realm-sigil: known seeds → known names.
+    /// (sigil formula: `adj = A[seed % 20]`, `noun = N[(seed >> 8) % 20]`.)
+    #[test]
+    fn smol_parity_known_seeds() {
+        assert_eq!(name_for_seed(0, REALM), ("Arcane", "Aegis"));
+        assert_eq!(name_for_seed(1, REALM), ("Blazing", "Aegis"));
+        assert_eq!(name_for_seed(0x100, REALM), ("Radiant", "Beacon")); // 256%20=16, 1%20=1
+        // seed_from_id(42) = 42 * 2654435761 mod 2^32 = 4112119562
+        assert_eq!(seed_from_id(42), 4_112_119_562);
+        assert_eq!(name_for_id(42), ("Celestial", "Herald"));
+    }
+
+    /// The two fleet watches: seeds, names, sigils, node ids — and separation.
+    #[test]
+    fn fleet_macs() {
+        assert_eq!(seed_from_mac(WATCH_A), 0x16A7_2FE4);
+        assert_eq!(seed_from_mac(WATCH_B), 0x16A5_A7F8);
+        assert_eq!(name_for_mac(WATCH_A), ("Eldritch", "Lantern"));
+        assert_eq!(name_for_mac(WATCH_B), ("Mythic", "Throne"));
+        assert_eq!(sigil_for_mac(WATCH_A).as_str(), "eldritch-lantern");
+        assert_eq!(sigil_for_mac(WATCH_B).as_str(), "mythic-throne");
+        assert_eq!(node_id_from_mac(WATCH_A), 122);
+        assert_eq!(node_id_from_mac(WATCH_B), 236);
+        // De-collision guarantees: distinct, and neither lands back on the
+        // config "unset" sentinel (42) or the remapped reserveds (0/255).
+        assert_ne!(node_id_from_mac(WATCH_A), node_id_from_mac(WATCH_B));
+        for mac in [WATCH_A, WATCH_B] {
+            assert!(![0, 42, 255].contains(&node_id_from_mac(mac)));
+        }
+    }
+
+    /// Every (adjective, noun) combination fits SIGIL_MAX and is MQTT-topic-
+    /// and-BLE-name safe (ASCII lowercase + '-', no wildcards/separators).
+    #[test]
+    fn all_sigils_fit_and_are_topic_safe() {
+        for a in 0..REALM.adjectives.len() as u32 {
+            for n in 0..REALM.nouns.len() as u32 {
+                let seed = a | (n << 8); // adj = seed%20, noun = (seed>>8)%20
+                let s = sigil_for_seed(seed);
+                let (adj, noun) = name_for_seed(seed, REALM);
+                assert_eq!(s.as_str().len(), adj.len() + 1 + noun.len());
+                assert!(s
+                    .as_str()
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'-'));
+            }
+        }
+    }
+
+    /// The 0/255 remap in the node-id fold.
+    #[test]
+    fn node_id_reserved_remap() {
+        // mac[2..6] chosen so the XOR fold hits 0 and 255 exactly.
+        let zero_fold = [0x98, 0xA3, 0xAA, 0xAA, 0xAA, 0xAA]; // AA^AA^AA^AA = 0
+        assert_eq!(node_id_from_mac(zero_fold), 1);
+        let ff_fold = [0x98, 0xA3, 0xFF, 0x00, 0x00, 0x00]; // FF^00^00^00 = FF
+        assert_eq!(node_id_from_mac(ff_fold), 254);
+    }
+}

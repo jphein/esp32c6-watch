@@ -166,10 +166,12 @@ impl ClimateCmd {
 
 // --- session tunables -------------------------------------------------------
 
-/// Distinct from `mqtt_ha`'s telemetry client id so the broker never kicks the
-/// telemetry connection if the two ever briefly overlap (MQTT: same client id =
-/// the newer connection evicts the older).
-const CLIMATE_CLIENT_ID: &str = "smolwatch042-clim";
+/// Suffix appended to `mqtt_ha`'s per-device client id (`smolwatch-<sigil>`)
+/// so the broker never kicks the telemetry connection if the two ever briefly
+/// overlap (MQTT: same client id = the newer connection evicts the older).
+/// Per-device (#34): the old fleet-shared "smolwatch042-clim" meant two
+/// watches holding climate sessions evicted each other.
+const CLIMATE_CLIENT_ID_SUFFIX: &str = "-clim";
 
 /// Send PINGREQ this often while idle (< the 30s keepalive `mqtt_ha` bakes into
 /// the CONNECT). Reset on every packet we *send* (command or ping), so a busy
@@ -264,9 +266,15 @@ pub async fn run_climate_session(
     }
 
     // CONNECT (clean session, keepalive 30s) -> CONNACK. Reuses mqtt_ha's
-    // builder with a climate-specific client id.
+    // builder with a climate-specific per-device client id
+    // ("smolwatch-<sigil>-clim", #34).
+    let mut client_id: heapless::String<{ crate::net::mqtt_ha::CLIENT_ID_CAP }> =
+        heapless::String::new();
+    let _ = client_id.push_str(crate::net::mqtt_ha::CLIENT_ID_PREFIX);
+    let _ = client_id.push_str(crate::net::sigil::get().sigil.as_str());
+    let _ = client_id.push_str(CLIMATE_CLIENT_ID_SUFFIX);
     let mut pkt: Vec<u8, PKT_CAP> = Vec::new();
-    build_connect(&mut pkt, CLIMATE_CLIENT_ID)?;
+    build_connect(&mut pkt, client_id.as_str())?;
     write_all(&mut socket, &pkt).await?;
 
     let mut ack = [0u8; 4];
@@ -362,8 +370,9 @@ pub async fn run_climate_session(
 // --- SUBSCRIBE + SUBACK -----------------------------------------------------
 
 async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
-    // Push-OTA rides along: the retained `watch/ota/announce` is delivered on
-    // every (re)subscribe, so any climate/energy session doubles as a push-OTA
+    // Push-OTA rides along: the retained `watch/ota/announce` (fleet) and
+    // `watch/<sigil>/ota` (per-watch, #34) are delivered on every
+    // (re)subscribe, so any climate/energy session doubles as a push-OTA
     // window (gate + dispatch live in `ota_http::handle_announce`).
     let topics = [
         STATE_WILDCARD,
@@ -371,6 +380,7 @@ async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
         ENERGY_TOPIC,
         ENERGY_AVAIL_TOPIC,
         crate::net::ota_http::ANNOUNCE_TOPIC,
+        crate::net::sigil::get().ota_topic.as_str(),
     ];
 
     // remaining length = 2 (packet id) + sum(2-byte len + topic + 1-byte QoS)
@@ -490,7 +500,9 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
     if t == ROSTER_TOPIC {
         return Some(TopicKind::Roster);
     }
-    if t == crate::net::ota_http::ANNOUNCE_TOPIC {
+    if t == crate::net::ota_http::ANNOUNCE_TOPIC
+        || t == crate::net::sigil::get().ota_topic.as_str()
+    {
         return Some(TopicKind::OtaAnnounce);
     }
     if t == ENERGY_TOPIC {

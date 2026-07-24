@@ -1,0 +1,22 @@
+# #34 — per-device SIGIL IDENTITY from the efuse MAC.
+#
+# Deliberately a STANDALONE crate (repo convention, see crates/scan-model): the
+# firmware package's deps (esp-hal/esp-radio/slint/…) don't build on the host,
+# so the name algorithm + word tables live here where `cargo test` runs.
+#
+# Contents: a VERBATIM vendor of smol's `rust/clock/src/net/names.rs` core
+# (itself a faithful no_std port of realm-sigil's GenerateName), plus the
+# MAC-seed variant from smol research B2 (`seed_from_mac`) and the watch's
+# MAC→node-id fold. The word tables are PINNED — do NOT regenerate or re-sync
+# from sigil; every device's name (and per-watch OTA topic) would change.
+#
+# Zero dependencies, zero alloc — pure integer math over static string tables.
+[package]
+name = "sigil-id"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+
+[lib]
+name = "sigil_id"
+path = "src/lib.rs"
