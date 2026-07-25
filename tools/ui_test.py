@@ -57,8 +57,12 @@ REGISTRY = [
     "Snake", "WorldSnake", "Game2048", "Tetris", "Flappy", "Maze",   # 0-5
     "Settings",                                                       # 6
     "Wled", "Hunt", "Energy", "Climate", "Voice", "Sound", "Theme",  # 7-13
+    "Lights",                                                         # 14
 ]
-THEME_IDX = REGISTRY.index("Theme")  # 13
+THEME_IDX = REGISTRY.index("Theme")    # 13
+LIGHTS_IDX = REGISTRY.index("Lights")  # 14
+# Lights hero button centre (lights.slint: cx = width/2, cy = 226px).
+LIGHTS_HERO = (206, 226)
 
 REPLY_PREFIX = "[DBGCON] "
 PANEL = 412  # square AMOLED, logical px
@@ -255,6 +259,22 @@ class Watch:
         time.sleep(warmup)
         return self.perf().get("max_us", 0)
 
+    def capture(self, secs: float, needle: str = "[LAT]") -> list[str]:
+        """Collect raw firmware log lines containing `needle` for `secs`.
+
+        Does NOT reset the input buffer, so lines that raced ahead of the call
+        are kept. Used for the [LAT] latency stamps (see `lights` mode)."""
+        deadline = time.monotonic() + secs
+        out: list[str] = []
+        while True:
+            raw = self.port.read_line(deadline)
+            if raw is None:
+                return out
+            if self.verbose:
+                print(f"  < {raw}")
+            if needle in raw:
+                out.append(raw)
+
 
 # --------------------------------------------------------------------------- #
 # Assertion suite
@@ -377,6 +397,74 @@ def repl(w: Watch) -> int:
             print(f"error: {e}")
 
 
+def run_hotpaths(w: Watch) -> int:
+    """Frame-cost report for the hot interactions (launcher open, page flips,
+    Lights/Theme overlay opens). Pure measurement — no PASS/FAIL gates; run it
+    before/after a perf change and diff the numbers."""
+    w.home()
+    time.sleep(0.3)
+
+    def measure(name: str, action, warmup: float = 0.30) -> None:
+        w.cmd("perf")  # reset the observation window
+        action()
+        time.sleep(warmup)
+        p = w.perf()
+        frames = p.get("frames_us", [])
+        if frames:
+            worst = max(frames)
+            avg = sum(frames) // len(frames)
+            print(f"{name:<28} frames={len(frames):>2} "
+                  f"worst={worst/1000:6.1f}ms avg={avg/1000:6.1f}ms")
+        else:
+            print(f"{name:<28} (no frames rendered)")
+
+    measure("launcher open (swipe up)", lambda: w.swipe("up"))
+    w.home(); time.sleep(0.2)
+    measure("page flip left", lambda: w.swipe("left"))
+    measure("page flip right", lambda: w.swipe("right"))
+
+    def scroll():
+        w.swipe("up"); time.sleep(0.1)
+        for _ in range(3):
+            w.cmd("swipe up"); time.sleep(0.12)
+    measure("launcher scroll x3", scroll, warmup=0.5)
+    w.home(); time.sleep(0.2)
+
+    measure("Theme overlay open", lambda: w.launch(THEME_IDX))
+    w.home(); time.sleep(0.2)
+    measure("Lights overlay open", lambda: w.launch(LIGHTS_IDX))
+    w.home(); time.sleep(0.2)
+    return 0
+
+
+def run_lights(w: Watch, wait_state: float = 20.0, wait_reply: float = 12.0) -> int:
+    """End-to-end Lights latency: open the screen, wait for the first state
+    frame, tap the hero, and report the [LAT] breakdown the firmware prints.
+
+    Interpretation (all `t=` stamps are firmware-uptime ms):
+      connect+handshake   TCP+CONNACK+SUBACK once WiFi/DHCP were ready
+      open->first-state   the "Finding your room…" duration (0 if state warm)
+      cmd queued->published  UI tick -> session task publish (firmware-side)
+      published->state rx    broker + HA automation (incl. its settle delay)
+      press->state-render    the full firmware-visible round trip
+    """
+    print(f"opening Lights (idx {LIGHTS_IDX})…")
+    w.cmd(f"launch {LIGHTS_IDX}")
+    for line in w.capture(wait_state):
+        print(line)
+    st = w.state()
+    if st.get("app") != "Lights":
+        print(f"Lights did not open: {st}")
+        return 1
+    x, y = LIGHTS_HERO
+    print(f"tapping hero at ({x},{y})…")
+    w.port.write_line(f"tap {x} {y}")   # raw write: cmd() would drop [LAT] races
+    for line in w.capture(wait_reply):
+        print(line)
+    w.home()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="esp32c6-watch UI test automator (host driver)")
     ap.add_argument("--port", default="/dev/ttyACM3", help="serial device (default /dev/ttyACM3)")
@@ -384,7 +472,8 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=0.20, help="UI settle delay after input (s)")
     ap.add_argument("-v", "--verbose", action="store_true", help="echo every serial line read")
     ap.add_argument("mode", nargs="?", default="suite",
-                    choices=["suite", "repl", "cmd"], help="what to run (default: suite)")
+                    choices=["suite", "repl", "cmd", "hotpaths", "lights"],
+                    help="what to run (default: suite)")
     ap.add_argument("arg", nargs="?", help="command string when mode=cmd")
     args = ap.parse_args()
 
@@ -403,6 +492,10 @@ def main() -> int:
                 return 2
             print(w.cmd(args.arg))
             return 0
+        if args.mode == "hotpaths":
+            return run_hotpaths(w)
+        if args.mode == "lights":
+            return run_lights(w)
         return run_suite(w)
     finally:
         w.close()
