@@ -4,6 +4,25 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.8] — 2026-07-25
+
+- **The fastpath release** — five stacked latency/freeze causes fixed (forensics):
+  MQTT state arrivals wake the render loop (was a +1s idle tick); "Finding your
+  room" no longer eats a 10s backoff racing DHCP; presses while disconnected
+  reject with a hint instead of silently replaying later; Energy reports
+  unreachable only on a real offline LWT; the config record is dual-slot
+  mirrored so a freeze can't wipe creds/theme/BLE.
+
+## [0.8.7] — 2026-07-25
+
+- **Lights plugin** (#39): room-aware light control — hero button → MQTT → HA
+  resolves the watch's Bermuda area and toggles that room, retained state back
+  (HA side: `packages/watch_lights.yaml` in the ha repo, field-tested).
+- **BLE-sleep lockup hotfix**: light-sleep with the BLE controller active locks
+  the chip → BLE-on now tick-idles AOD (continuous adverts keep room presence
+  alive). Audio seam (#23) + stable BLE identity (#47/#46 partial) landed as
+  v0.8.5/0.8.6 and are folded into this tag.
+
 ## [0.8.5] — 2026-07-24
 
 - **Sound is back — shared I2S TX playback seam** (#23): SFX play by substituting

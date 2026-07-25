@@ -135,6 +135,8 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 - *v0.8.3* — **reliable zero-touch OTA** ([#25](https://github.com/jphein/esp32c6-watch/issues/25) validated end-to-end): pull *and* push (retained MQTT announce + monotonic build gate, `tools/ota_push.sh`), retry that survives link drops, mesh suppression during updates.
 - *v0.8.4* — **per-device sigil identity** ([#34](https://github.com/jphein/esp32c6-watch/issues/34)) from the efuse MAC: `eldritch-lantern` & `mythic-throne`, MAC-derived mesh node ids, per-watch MQTT client ids + OTA topics (`ota_push.sh --target <sigil>`), sigil BLE advertising.
 - *v0.8.5* — **sound restored: shared I²S TX playback seam** ([#23](https://github.com/jphein/esp32c6-watch/issues/23)): `audio_out::play_pcm()` (mono 16 kHz s16le) substitutes samples into the always-running silent-clock ring — the mic's clock master never stops for a beep; amp+codec power only while a clip plays; half-duplex capture gate; Snake food beep + launcher/UPDATE-FIRMWARE tap-clicks; `beep` console probe.
+- *v0.8.7* — **room-aware Lights plugin** ([#39](https://github.com/jphein/esp32c6-watch/issues/39)): hero button → MQTT → HA resolves the watch's Bermuda room and toggles it, retained state back; plus a BLE-sleep lockup hotfix (BLE-on tick-idles AOD) and stable efuse-derived BLE identities ([#47](https://github.com/jphein/esp32c6-watch/issues/47)).
+- *v0.8.8* — **the fastpath release**: state-wake rendering, DHCP-gated session open, press gating, Energy-unreachable only on a real LWT, freeze-proof dual-slot config mirror.
 
 ### 🧭 Gesture shell & UI
 
@@ -165,7 +167,6 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 ### 🏠 Home Assistant
 
 - [#24](https://github.com/jphein/esp32c6-watch/issues/24) — Deploy + verify the HA component; firmware announce-poller (**speaker end-to-end**)
-- [#39](https://github.com/jphein/esp32c6-watch/issues/39) — **Light button**: room-aware light control via Bermuda BLE presence
 - [#40](https://github.com/jphein/esp32c6-watch/issues/40) — **Watering plugin**: sprinkler zones with countdowns + auto-off safety ("water where I'm standing" via per-zone BLE proxies)
 - [#41](https://github.com/jphein/esp32c6-watch/issues/41) — **Laundry**: LG ThinQ → HA + machine-done notifications on the wrist
 - [#42](https://github.com/jphein/esp32c6-watch/issues/42) — **Cam viewer**: bridge-transcoded RGB565 stills, socket→GRAM streaming, doorbell jump
