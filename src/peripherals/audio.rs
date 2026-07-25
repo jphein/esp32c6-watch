@@ -1,5 +1,7 @@
-// ES8311 Audio codec - proper init from Waveshare C reference
-// + I2S DMA playback via public write_dma()
+// ES8311 Audio codec (speaker DAC — the mics are on the ES7210) - proper init
+// from the Waveshare C reference. Playback data rides the shared I2S TX ring
+// (audio_out/silent_clock_task, #23); this driver only sequences codec power:
+// unmute() before the amp rises, shutdown() after it drops (see service_amp).
 
 use embedded_hal::i2c::I2c;
 
@@ -173,21 +175,6 @@ impl<I: I2c> Es8311<I> {
     pub fn is_initialized(&self) -> bool { self.initialized }
 }
 
-/// Fill a buffer with a square wave beep (stereo 16-bit LE).
-pub fn fill_beep_buffer(buf: &mut [u8], freq_hz: u32, sample_rate: u32, duration_ms: u32) -> usize {
-    let total_samples = (sample_rate * duration_ms / 1000) as usize;
-    let period = if freq_hz > 0 { sample_rate / freq_hz } else { 1 };
-    let half = period / 2;
-    let amplitude: i16 = 10000;
-    let mut pos = 0;
-    for i in 0..total_samples {
-        if pos + 4 > buf.len() { break; }
-        let phase = (i as u32) % period;
-        let sample = if phase < half { amplitude } else { -amplitude };
-        let bytes = sample.to_le_bytes();
-        buf[pos] = bytes[0]; buf[pos + 1] = bytes[1]; // L
-        buf[pos + 2] = bytes[0]; buf[pos + 3] = bytes[1]; // R
-        pos += 4;
-    }
-    pos
-}
+// fill_beep_buffer (stereo square-wave synth) retired in v0.8.5: SFX are now
+// synthesized MONO via mic-dsp (fill_tone_mono_s16le / fill_click_mono_s16le,
+// host-unit-tested) and expanded to stereo by the audio_out feeder (#23).

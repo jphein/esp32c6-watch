@@ -22,11 +22,23 @@ const REC_LEN_V2: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 2;
 /// + page + units survive the upgrade; the first save rewrites it as v3 in place.
 const MAGIC_V3: [u8; 6] = *b"SWCFG3";
 const REC_LEN_V3: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 2;
+/// v4 record (#46, BLE bit): v3 + one RADIOS FLAGS byte (offset 109), appended
+/// before the checksum. Only bit 0 (BLE-on-at-boot) is defined; bits 1..7 are
+/// RESERVED for the coordinated #44/#45/#46 persistence migration (mesh/WiFi/
+/// mic-gain etc.) so those can land in this same byte WITHOUT another magic
+/// bump. Older records still load (flags default 0 = BLE off, the pre-v4
+/// behavior); the first save rewrites v4 in place.
+const MAGIC_V4: [u8; 6] = *b"SWCFG4";
+const REC_LEN_V4: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 1 + 2;
 
 /// Units flags bit 0: 24-hour clock (CFG `U` value `..|24`).
 const UNITS_CLK_24H: u8 = 0x01;
 /// Units flags bit 1: temperature in Fahrenheit (CFG `U` value `F|..`).
 const UNITS_TEMP_F: u8 = 0x02;
+
+/// Radios flags bit 0 (#46): start BLE advertising at boot (persisted toggle —
+/// keeps the Bermuda/HA room-tracking registration alive across OTA reboots).
+const RADIO_BLE_ON: u8 = 0x01;
 
 pub struct WatchConfig {
     pub node_id: u8,
@@ -41,6 +53,9 @@ pub struct WatchConfig {
     pub units_clk_24h: bool,
     /// Active theme scheme: 0 Midnight · 1 Paper · 2 Amber · 3 Violet.
     pub theme: u8,
+    /// Start BLE advertising at boot (#46 BLE bit — persisted watchface
+    /// toggle; radios flags bit 0). Default false = the pre-v4 behavior.
+    pub ble_on: bool,
 }
 
 impl Default for WatchConfig {
@@ -58,6 +73,7 @@ impl Default for WatchConfig {
             // v1/v2 records (which lack the theme byte and take this default);
             // an explicit picker choice persists as v3 and wins.
             theme: 2,
+            ble_on: false,
         }
     }
 }
@@ -67,15 +83,18 @@ fn checksum(buf: &[u8]) -> u16 {
 }
 
 pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
-    let mut buf = [0u8; REC_LEN_V3];
+    let mut buf = [0u8; REC_LEN_V4];
     flash.read(offset, &mut buf).ok()?;
-    // v2plus = has default_page + units (v2 & v3); v3 = also has the theme byte.
-    let (rec_len, v2plus, v3) = if buf[..6] == MAGIC_V3 {
-        (REC_LEN_V3, true, true)
+    // v2plus = has default_page + units (v2+); v3plus = also the theme byte;
+    // v4 = also the radios flags byte.
+    let (rec_len, v2plus, v3plus, v4) = if buf[..6] == MAGIC_V4 {
+        (REC_LEN_V4, true, true, true)
+    } else if buf[..6] == MAGIC_V3 {
+        (REC_LEN_V3, true, true, false)
     } else if buf[..6] == MAGIC_V2 {
-        (REC_LEN_V2, true, false)
+        (REC_LEN_V2, true, false, false)
     } else if buf[..6] == MAGIC_V1 {
-        (REC_LEN_V1, false, false)
+        (REC_LEN_V1, false, false, false)
     } else {
         return None;
     };
@@ -108,7 +127,12 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
             defaults.units_clk_24h,
         )
     };
-    let theme = if v3 { buf[108].min(3) } else { defaults.theme };
+    let theme = if v3plus { buf[108].min(3) } else { defaults.theme };
+    let ble_on = if v4 {
+        buf[109] & RADIO_BLE_ON != 0
+    } else {
+        defaults.ble_on
+    };
     Some(WatchConfig {
         node_id,
         brightness,
@@ -118,12 +142,13 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
         units_temp_f,
         units_clk_24h,
         theme,
+        ble_on,
     })
 }
 
 pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
-    let mut buf = [0u8; REC_LEN_V3];
-    buf[..6].copy_from_slice(&MAGIC_V3);
+    let mut buf = [0u8; REC_LEN_V4];
+    buf[..6].copy_from_slice(&MAGIC_V4);
     buf[6] = cfg.node_id;
     buf[7] = cfg.brightness;
     let sb = cfg.ssid.as_bytes();
@@ -136,7 +161,9 @@ pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Res
     buf[107] = (if cfg.units_clk_24h { UNITS_CLK_24H } else { 0 })
         | (if cfg.units_temp_f { UNITS_TEMP_F } else { 0 });
     buf[108] = cfg.theme.min(3);
-    let sum = checksum(&buf[..REC_LEN_V3 - 2]);
-    buf[REC_LEN_V3 - 2..].copy_from_slice(&sum.to_le_bytes());
+    // Radios flags (v4): bit 0 = BLE; bits 1..7 reserved (see MAGIC_V4 docs).
+    buf[109] = if cfg.ble_on { RADIO_BLE_ON } else { 0 };
+    let sum = checksum(&buf[..REC_LEN_V4 - 2]);
+    buf[REC_LEN_V4 - 2..].copy_from_slice(&sum.to_le_bytes());
     flash.write(offset, &buf).map_err(|_| ())
 }
