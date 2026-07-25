@@ -128,8 +128,18 @@ pub const CLICK_LEN: usize = 192 * 2;
 /// ("tick"), 0.5 ms linear attack, peak ~9000 (≈ −11 dBFS — subtle on the tiny
 /// speaker). Mono s16le at `sample_rate`; returns MONO bytes written.
 pub fn fill_click_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
+    fill_click_with_peak(buf, sample_rate, 9000.0)
+}
+
+/// The every-touch tick (#49): the SAME 12 ms 1.8 kHz decaying "tick" as
+/// [`fill_click_mono_s16le`] but QUIETER (peak ~6000 ≈ −15 dBFS) — texture,
+/// not notification, when it plays on every tap instead of one opt-in control.
+pub fn fill_tick_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
+    fill_click_with_peak(buf, sample_rate, 6000.0)
+}
+
+fn fill_click_with_peak(buf: &mut [u8], sample_rate: u32, peak: f32) -> usize {
     const FREQ_HZ: f32 = 1800.0;
-    const PEAK: f32 = 9000.0;
     let total = ((sample_rate as usize * 12 / 1000).min(buf.len() / 2)).max(0);
     let attack = (sample_rate as usize / 2000).max(1); // 0.5 ms
     let tau = sample_rate as f32 * 0.003; // 3 ms decay constant
@@ -137,7 +147,7 @@ pub fn fill_click_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
     for i in 0..total {
         let env = libm::expf(-(i as f32) / tau)
             * if i < attack { i as f32 / attack as f32 } else { 1.0 };
-        let s = (PEAK * env * libm::sinf(w * i as f32)) as i16;
+        let s = (peak * env * libm::sinf(w * i as f32)) as i16;
         let b = s.to_le_bytes();
         buf[2 * i] = b[0];
         buf[2 * i + 1] = b[1];

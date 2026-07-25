@@ -1,4 +1,4 @@
-import { Theme, PeerRow } from "theme.slint";
+import { Theme, PeerRow, WifiNet } from "theme.slint";
 import { RadioDot, IconButton } from "controls.slint";
 import { ClockPage } from "clock.slint";
 import { SensorsPage } from "sensors.slint";
@@ -14,6 +14,7 @@ import { LightsOverlay } from "lights.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
+import { SettingsHub } from "settings.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -21,7 +22,7 @@ import { ThemeOverlay } from "theme_overlay.slint";
 // and pushes them into `launcher-tiles` (page-major, 9 slots per page).
 // `Theme` is re-exported too so Rust can drive the scheme selector via
 // `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
-export { PeerRow, ClimateCard, LauncherTile, Theme }
+export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -158,6 +159,27 @@ export component WatchShell inherits Window {
     // flash persistence (the tile also sets Theme.scheme directly for instant
     // preview). Right-swipe / chevron closes.
     in-out property <bool> theme-open: false;
+    // Settings hub (v0.9.0, #49): the scene-resident Settings overlay. Paged
+    // (swipe up/down in handle_touch); `net-view` selects the NETWORK
+    // sub-views (0 pages · 1 scan picker · 2 keyboard) and is RUST-OWNED —
+    // Slint only emits intents. The kb-* strings are display-only: Rust owns
+    // the text buffer, masks it, and windows the tail.
+    in-out property <bool> settings-open: false;
+    in-out property <int> settings-page: 0;
+    in property <int> net-view: 0;
+    in property <bool> touch-sound-on: true;
+    in property <bool> mesh-enabled: false;
+    in property <bool> wifi-intent: false;
+    in property <int> node-id: 0;
+    in property <string> ota-status: "";
+    in property <string> net-current: "";
+    in property <int> net-status: 0;  // 0 idle · 1 connecting · 2 connected · 3 failed
+    in property <bool> net-scanning: false;
+    in property <[WifiNet]> wifi-nets: [];
+    in property <string> kb-title: "";
+    in property <string> kb-context: "";
+    in property <string> kb-text: "";
+    in property <bool> kb-plain: false;
     // Gesture hints (wake shimmer): armed by Rust at each wake-to-bright seam
     // (ShellUi::hint_wake) and sequenced there — bloom-in → hold → fade-out →
     // destroy — on the loop's render clock; Slint only draws. `hint-sides` /
@@ -193,6 +215,18 @@ export component WatchShell inherits Window {
     callback mic-gain-down();      // Sound app − : lower digital mic gain
     callback mic-gain-up();        // Sound app + : raise digital mic gain
     callback theme-changed(int);   // Theme picker → new scheme index (Rust persists)
+    // Settings hub (v0.9.0): toggle + OTA + WiFi-flow intents, drained by the loop.
+    callback touch-sound-tap();    // flip + persist the every-touch tick
+    callback settings-ota-tap();   // UPDATE FIRMWARE (raises WiFi, queues OTA)
+    callback net-open();           // choose-network / rescan → Rust scans, view 1
+    callback net-pick(int);        // picker row index → password kb (or connect if open)
+    callback net-manual();         // hidden network → keyboard for the SSID
+    callback net-back();           // sub-view back (chevron / right-swipe)
+    callback kb-key(string);       // one character
+    callback kb-bksp-down();       // backspace edge — Rust deletes + repeats
+    callback kb-bksp-up();
+    callback kb-eye();             // show/hide password
+    callback kb-done();            // commit field (SSID → password → connect)
 
     in-out property <float> brightness: 0.8;
 
@@ -569,6 +603,55 @@ export component WatchShell inherits Window {
         width: 100%; height: 100%;
         changed(n) => { root.theme-changed(n); }
         close => { root.theme-open = false; }
+    }
+
+    // ==================== Settings hub (v0.9.0) ====================
+    if root.settings-open: SettingsHub {
+        width: 100%; height: 100%;
+        page <=> root.settings-page;
+        net-view: root.net-view;
+        touch-sound: root.touch-sound-on;
+        gain-db: root.mic-gain-db;
+        brightness <=> root.brightness;
+        ble-on: root.ble-on;
+        mesh-on: root.mesh-enabled;
+        wifi-intent: root.wifi-intent;
+        wifi-live: root.wifi-on;
+        net-current: root.net-current;
+        net-status: root.net-status;
+        scanning: root.net-scanning;
+        nets: root.wifi-nets;
+        kb-title: root.kb-title;
+        kb-context: root.kb-context;
+        kb-text: root.kb-text;
+        kb-plain: root.kb-plain;
+        sigil: root.sigil-text;
+        fw: root.fw-text;
+        node-id: root.node-id;
+        ota-status: root.ota-status;
+        toggle-touch-sound => { root.touch-sound-tap(); }
+        gain-down => { root.mic-gain-down(); }
+        gain-up => { root.mic-gain-up(); }
+        brightness-changed(f) => { root.brightness-changed(f); }
+        // Radio toggles reuse the chrome dots' callbacks — existing
+        // semantics + toasts, one drain in the loop.
+        ble-tap => { root.ble-tap(); }
+        mesh-tap => { root.mesh-tap(); }
+        wifi-tap => { root.wifi-tap(); }
+        net-open => { root.net-open(); }
+        net-rescan => { root.net-open(); }
+        net-pick(i) => { root.net-pick(i); }
+        net-manual => { root.net-manual(); }
+        nav-back => { root.net-back(); }
+        // Chevron close at view 0: clear the flag directly (same as
+        // Theme/Voice/Sound); reconcile_overlay picks it up.
+        close => { root.settings-open = false; }
+        ota-tap => { root.settings-ota-tap(); }
+        kb-key(k) => { root.kb-key(k); }
+        kb-bksp-down => { root.kb-bksp-down(); }
+        kb-bksp-up => { root.kb-bksp-up(); }
+        kb-eye => { root.kb-eye(); }
+        kb-done => { root.kb-done(); }
     }
 
     // ==================== AOD overlay ====================

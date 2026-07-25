@@ -1,0 +1,226 @@
+import { Theme } from "theme.slint";
+
+// Scene-resident on-screen keyboard (v0.9.0 Settings overhaul — replaces the
+// framebuffer T9). Compact QWERTY for the 410px panel: three glyph rows + a
+// mode row, four layers (abc / ABC / 123 / #+=) covering real password
+// character sets. 36x48 keys with 4px gutters — slightly under the 44px
+// touch-target floor, accepted for a keyboard (the row pitch keeps vertical
+// separation at 52px and the pressed invert makes hits unambiguous).
+//
+// Feedback contract (design spec §3/§5): the key under the finger inverts to
+// solid accent with on-accent ink — a hard 1-frame swap, NO `animate` (at the
+// sw renderer's 6-11fps a tween is 0-1 wasted frames). The every-touch tick
+// (#49) is played by the Rust tap hook, not per-key.
+//
+// Rust owns the TEXT: keys only emit intent (`key(string)` / `bksp-*` /
+// `done()`); the loop assembles the buffer, masks it, and pushes the display
+// string back. Backspace emits down/up edges (pointer-event) so the loop can
+// auto-repeat while held — the 16ms touch-held tick makes that responsive.
+
+// One character key. Pressed = FULL INVERT (Recipe C's boldest 1-frame delta).
+component Key inherits Rectangle {
+    in property <string> glyph;
+    in property <length> glyph-size: 20px;
+    callback hit(string);
+
+    border-radius: 8px;
+    background: ta.pressed ? Theme.accent : Theme.panel;
+    border-width: 1px;
+    border-color: ta.pressed ? Theme.accent : Theme.line;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.glyph;
+        color: ta.pressed ? Theme.on-accent : Theme.ink;
+        font-size: root.glyph-size;
+        font-weight: 600;
+    }
+    ta := TouchArea { clicked => { root.hit(root.glyph); } }
+}
+
+// A mode key (shift / layer switch): label instead of a glyph payload, and a
+// persistent ACTIVE state (Recipe E: selected ≠ pressed) for caps lock.
+component ModeKey inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <length> label-size: 15px;
+    callback hit();
+
+    border-radius: 8px;
+    background: root.active ? Theme.accent
+        : (ta.pressed ? Theme.accent-bg : Theme.track);
+    border-width: 1px;
+    border-color: root.active || ta.pressed ? Theme.accent : Theme.line;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.label;
+        color: root.active ? Theme.on-accent : Theme.soft;
+        font-size: root.label-size;
+        font-weight: 700;
+    }
+    ta := TouchArea { clicked => { root.hit(); } }
+}
+
+export component KeyboardPane {
+    callback key(string);   // one character (space = " ")
+    callback bksp-down();   // finger ON backspace — Rust deletes + auto-repeats
+    callback bksp-up();     // finger off — stop the repeat
+    callback done();        // ✓ — commit the field
+
+    // 0 abc · 1 ABC (sticky shift) · 2 123 · 3 #+=. Local UI state: layer
+    // switching never round-trips to Rust.
+    property <int> layer: 0;
+
+    height: 204px;
+
+    property <[string]> r0: root.layer == 0
+        ? ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]
+        : root.layer == 1
+        ? ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"]
+        : root.layer == 2
+        ? ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+        : ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="];
+    property <[string]> r1: root.layer == 0
+        ? ["a", "s", "d", "f", "g", "h", "j", "k", "l"]
+        : root.layer == 1
+        ? ["A", "S", "D", "F", "G", "H", "J", "K", "L"]
+        : root.layer == 2
+        ? ["-", "/", ":", ";", "(", ")", "$", "&", "@"]
+        : ["_", "\\", "|", "~", "<", ">", "$", "&", "@"];
+    // Rows 2 of the symbol layers are shared (the common password punctuation).
+    property <[string]> r2: root.layer == 0
+        ? ["z", "x", "c", "v", "b", "n", "m"]
+        : root.layer == 1
+        ? ["Z", "X", "C", "V", "B", "N", "M"]
+        : [".", ",", "?", "!", "'", "\"", ";"];
+
+    // --- row 0: 10 keys ---
+    Rectangle {
+        x: (parent.width - 10 * 36px - 9 * 4px) / 2;
+        y: 0;
+        width: 10 * 36px + 9 * 4px;
+        height: 48px;
+        for k[i] in root.r0: Key {
+            x: i * 40px; y: 0; width: 36px; height: 48px;
+            glyph: k;
+            hit(g) => { root.key(g); }
+        }
+    }
+
+    // --- row 1: 9 keys ---
+    Rectangle {
+        x: (parent.width - 9 * 36px - 8 * 4px) / 2;
+        y: 52px;
+        width: 9 * 36px + 8 * 4px;
+        height: 48px;
+        for k[i] in root.r1: Key {
+            x: i * 40px; y: 0; width: 36px; height: 48px;
+            glyph: k;
+            hit(g) => { root.key(g); }
+        }
+    }
+
+    // --- row 2: shift/symbols + 7 keys + backspace ---
+    Rectangle {
+        x: (parent.width - (2 * 54px + 7 * 36px + 8 * 4px)) / 2;
+        y: 104px;
+        width: 2 * 54px + 7 * 36px + 8 * 4px;
+        height: 48px;
+
+        // Shift on the letter layers (sticky: ↑ locks caps until tapped again);
+        // 123 ↔ #+= switch on the symbol layers.
+        ModeKey {
+            x: 0; y: 0; width: 54px; height: 48px;
+            label: root.layer <= 1 ? "\u{2191}" : (root.layer == 2 ? "#+=" : "123");
+            label-size: root.layer <= 1 ? 20px : 14px;
+            active: root.layer == 1;
+            hit => {
+                root.layer = root.layer == 0 ? 1
+                    : root.layer == 1 ? 0
+                    : root.layer == 2 ? 3 : 2;
+            }
+        }
+        for k[i] in root.r2: Key {
+            x: 58px + i * 40px; y: 0; width: 36px; height: 48px;
+            glyph: k;
+            hit(g) => { root.key(g); }
+        }
+        // Backspace: down/up edges, not clicked — Rust deletes one char on the
+        // down edge and auto-repeats while held (16ms held-tick cadence).
+        bksp := Rectangle {
+            x: parent.width - 54px; y: 0; width: 54px; height: 48px;
+            border-radius: 8px;
+            background: bta.pressed ? Theme.warn : Theme.track;
+            border-width: 1px;
+            border-color: bta.pressed ? Theme.warn : Theme.line;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "\u{2190}";
+                color: bta.pressed ? Theme.on-accent : Theme.soft;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            bta := TouchArea {
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        root.bksp-down();
+                    }
+                    if (ev.kind == PointerEventKind.up
+                        || ev.kind == PointerEventKind.cancel) {
+                        root.bksp-up();
+                    }
+                }
+            }
+        }
+    }
+
+    // --- row 3: layer switch + space + done ---
+    Rectangle {
+        x: (parent.width - (70px + 4px + 190px + 4px + 70px)) / 2;
+        y: 156px;
+        width: 70px + 4px + 190px + 4px + 70px;
+        height: 48px;
+
+        ModeKey {
+            x: 0; y: 0; width: 70px; height: 48px;
+            label: root.layer <= 1 ? "?123" : "abc";
+            label-size: 15px;
+            hit => { root.layer = root.layer <= 1 ? 2 : 0; }
+        }
+        Key {
+            x: 74px; y: 0; width: 190px; height: 48px;
+            glyph: " ";
+            hit(g) => { root.key(g); }
+            // Space bar affordance drawn over the (blank) glyph.
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height - 14px;
+                width: 60px; height: 4px; border-radius: 2px;
+                background: Theme.dim;
+            }
+        }
+        // Done = commit. Solid-accent CTA at rest (it's THE action); pressed
+        // is the reverse invert (accent-bg + accent glyph) — same 1-frame
+        // boldness as the character keys, unmistakably "held".
+        done-key := Rectangle {
+            x: parent.width - 70px; y: 0; width: 70px; height: 48px;
+            border-radius: 8px;
+            background: dta.pressed ? Theme.accent-bg : Theme.accent;
+            border-width: 1px;
+            border-color: Theme.accent;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "\u{2713}";
+                color: dta.pressed ? Theme.accent : Theme.on-accent;
+                font-size: 22px;
+                font-weight: 700;
+            }
+            dta := TouchArea { clicked => { root.done(); } }
+        }
+    }
+}

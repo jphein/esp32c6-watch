@@ -117,8 +117,8 @@ pub static REGISTRY: &[AppDescriptor] = &[
     AppDescriptor { state: AppState::Tetris,     name: "Tetris",      icon_id: 3,  accent: 0x00d0f0, section: Games,  kind: Framebuffer, flags: AppFlags::SUSPEND }, // idx 3
     AppDescriptor { state: AppState::Flappy,     name: "Flappy Bird", icon_id: 4,  accent: 0xffffff, section: Games,  kind: Framebuffer, flags: AppFlags::SUSPEND }, // idx 4
     AppDescriptor { state: AppState::Maze,       name: "Maze (Tilt)", icon_id: 5,  accent: 0x8090ff, section: Games,  kind: Framebuffer, flags: AppFlags::SUSPEND }, // idx 5
-    // --- SYSTEM Settings (framebuffer) --------------------------------------
-    AppDescriptor { state: AppState::Settings,   name: "Settings",    icon_id: 6,  accent: 0xc0ffc0, section: System, kind: Framebuffer, flags: AppFlags::SUSPEND }, // idx 6
+    // --- SYSTEM Settings hub (v0.9.0: scene-resident overlay, was fb) -------
+    AppDescriptor { state: AppState::Settings,   name: "Settings",    icon_id: 6,  accent: 0xc0ffc0, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 6
     // --- Overlays -----------------------------------------------------------
     AppDescriptor { state: AppState::Wled,       name: "WLED",        icon_id: 9,  accent: 0xffd166, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 7
     AppDescriptor { state: AppState::Hunt,       name: "Hunt",        icon_id: 10, accent: 0xff7a3d, section: Games,  kind: Overlay,     flags: AppFlags::NONE },    // idx 8

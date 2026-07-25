@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "esp32c6-watch"
-version = "0.8.5"
+version = "0.9.0"
 dependencies = [
  "climate-model",
  "critical-section",

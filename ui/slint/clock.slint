@@ -38,7 +38,8 @@ export component ClockPage {
             y: (parent.height - self.height) / 2;
             text: root.date-text;
             color: Theme.soft;
-            font-size: 19px;
+            // 20px, NOT 19 (glyph-set consolidation, v0.9.0 ROM squeeze).
+            font-size: 20px;
             letter-spacing: 2px;
         }
     }

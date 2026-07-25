@@ -50,6 +50,15 @@ pub fn brightness_raw(frac: f32) -> u8 {
 /// starting here are slider drags, not page switches.
 pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
+/// Settings-hub section pages (ui/slint/settings.slint `titles` order).
+pub const SETTINGS_PAGE_COUNT: i32 = 5;
+/// The DISPLAY page's index — the one hosting the hub's brightness slider.
+const HUB_PAGE_DISPLAY: i32 = 1;
+/// y-band of the Settings hub's brightness slider (settings.slint DISPLAY
+/// page: slider at absolute y 180..220, padded for finger slop): swipes
+/// starting here are slider drags, not page flips / back-navigation.
+const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = 170..=240;
+
 /// Wake gesture-hint choreography, in ms after [`ShellUi::hint_wake`] arms it.
 /// The strips are created invisible with the wake frame (so that frame stays
 /// cheap), bloom in at BLOOM, start fading at FADE, and are destroyed at KILL
@@ -99,6 +108,10 @@ const OVERLAYS: &[Overlay] = &[
     Overlay { state: AppState::Voice, is_open: WatchShell::get_voice_open, set_open: WatchShell::set_voice_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Sound, is_open: WatchShell::get_mic_open, set_open: WatchShell::set_mic_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Theme, is_open: WatchShell::get_theme_open, set_open: WatchShell::set_theme_open, close: OverlayClose::Flag },
+    // Settings hub (v0.9.0): listed for the mirror/reconcile plumbing; its
+    // Right-swipe never reaches this table's close arm — handle_touch routes
+    // hub swipes (page flips + sub-view back) in a dedicated branch first.
+    Overlay { state: AppState::Settings, is_open: WatchShell::get_settings_open, set_open: WatchShell::set_settings_open, close: OverlayClose::Flag },
 ];
 
 #[derive(Default)]
@@ -143,6 +156,29 @@ pub struct ShellRequests {
     /// tile sets `Theme.scheme` directly for instant preview; this cell is
     /// drained by the loop to persist the choice to flash (config.rs v3).
     pub theme: Cell<Option<i32>>,
+    /// Settings hub (v0.9.0): touch-sound toggle (flip + persist).
+    pub touch_sound_toggle: Cell<bool>,
+    /// Settings hub: UPDATE FIRMWARE tap (the old fb Settings OTA request).
+    pub settings_ota: Cell<bool>,
+    /// NETWORK flow: trigger a scan (choose-network + rescan share it); the
+    /// loop raises picker view 1, paints "Scanning…", then scans inline.
+    pub wifi_scan: Cell<bool>,
+    /// NETWORK flow: picker row index tapped (into the loop's scan list).
+    pub wifi_pick: Cell<Option<i32>>,
+    /// NETWORK flow: "Other network…" — manual SSID entry via the keyboard.
+    pub wifi_manual: Cell<bool>,
+    /// NETWORK flow: back out of a sub-view (chevron / right-swipe). The loop
+    /// owns the view transitions (2→1→0) + keyboard-state cleanup.
+    pub net_back: Cell<bool>,
+    /// Keyboard: one character per tap (space = " "). Rust owns the buffer.
+    pub kb_key: Cell<Option<SharedString>>,
+    /// Keyboard: backspace finger-down/up edges (Rust deletes + auto-repeats).
+    pub kb_bksp_down: Cell<bool>,
+    pub kb_bksp_up: Cell<bool>,
+    /// Keyboard: show/hide-password eye toggle.
+    pub kb_eye: Cell<bool>,
+    /// Keyboard: ✓ — commit the field (SSID stage → password stage → connect).
+    pub kb_done: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -164,6 +200,9 @@ pub struct ShellUi {
     /// Sound meter (#28) scrolling waveform: one f32 per 16 ms window, in [0,1],
     /// swapped in place by push_mic_waveform (same long-lived pattern).
     waveform_model: Rc<VecModel<f32>>,
+    /// Settings-hub NETWORK picker rows, swapped in place by set_wifi_nets
+    /// (same long-lived pattern as mesh_model).
+    wifi_model: Rc<VecModel<WifiNet>>,
     line_buf: Vec<Rgb565Pixel>,
     scratch: Vec<u16>,
     touch_down: bool,
@@ -197,7 +236,8 @@ impl ShellUi {
         let mesh_model: Rc<VecModel<PeerRow>> = Rc::new(VecModel::default());
         let climate_cards: Rc<VecModel<ClimateCard>> = Rc::new(VecModel::default());
         let waveform_model: Rc<VecModel<f32>> = Rc::new(VecModel::default());
-        let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model);
+        let wifi_model: Rc<VecModel<WifiNet>> = Rc::new(VecModel::default());
+        let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model, &wifi_model);
         // First frame under ReusedBuffer must be a full paint (the panel just
         // showed fill_screen(BLACK); the renderer has no prior frame to diff
         // against). Slint already dirties everything on first show, but request it
@@ -211,6 +251,7 @@ impl ShellUi {
             mesh_model,
             climate_cards,
             waveform_model,
+            wifi_model,
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
             touch_down: false,
@@ -247,7 +288,13 @@ impl ShellUi {
         if self.ui.is_some() {
             return;
         }
-        let ui = build_scene(&self.req, &self.mesh_model, &self.climate_cards, &self.waveform_model);
+        let ui = build_scene(
+            &self.req,
+            &self.mesh_model,
+            &self.climate_cards,
+            &self.waveform_model,
+            &self.wifi_model,
+        );
         ui.set_current_page(self.saved_page);
         // A fresh scene resets the Theme global to scheme 0; restore the active
         // scheme so a game exit doesn't snap the watch back to Midnight.
@@ -306,9 +353,11 @@ impl ShellUi {
             // at x ≈ -1 and slam brightness to the floor. Taps and slider
             // drags keep the normal release at last_pos. The task-9 hardware
             // gate verifies this gesture behavior.
-            let slider_drag = !ui.get_launcher_open()
+            let slider_drag = (!ui.get_launcher_open()
+                && !ui.get_settings_open()
                 && ui.get_current_page() == PAGE_POWER
-                && SLIDER_BAND.contains(&swipe_start_y);
+                && SLIDER_BAND.contains(&swipe_start_y))
+                || hub_slider_drag(ui, swipe_start_y);
             // (The old launcher-scroll exclusion is gone with the Flickable: a
             // vertical swipe in the paged launcher is a page FLIP — navigation —
             // so the off-window release below correctly suppresses a stray tile
@@ -332,6 +381,35 @@ impl ShellUi {
         }
 
         if let Some(direction) = swipe {
+            // Settings hub first (it is in OVERLAYS only for mirror/reconcile):
+            // swipe up/down flips its section pages (clamped, launcher idiom);
+            // Right backs out of a NETWORK sub-view via the net_back CELL (the
+            // loop owns the view transitions + keyboard cleanup) or closes the
+            // hub at view 0. Swipes starting on the DISPLAY page's brightness
+            // slider are drags — excluded entirely.
+            if ui.get_settings_open() {
+                if !hub_slider_drag(ui, swipe_start_y) {
+                    match direction {
+                        SwipeDirection::Right => {
+                            if ui.get_net_view() > 0 {
+                                self.req.net_back.set(true);
+                            } else {
+                                ui.set_settings_open(false);
+                            }
+                        }
+                        SwipeDirection::Up if ui.get_net_view() == 0 => {
+                            ui.set_settings_page(
+                                (ui.get_settings_page() + 1).min(SETTINGS_PAGE_COUNT - 1),
+                            );
+                        }
+                        SwipeDirection::Down if ui.get_net_view() == 0 => {
+                            ui.set_settings_page((ui.get_settings_page() - 1).max(0));
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
             // Overlays are full-screen over the scene, so whichever is open
             // swallows ALL nav swipes (no paging behind it) and a Right-swipe
             // closes it. Table-driven (`OVERLAYS`, in check order): stateless
@@ -888,6 +966,111 @@ impl ShellUi {
         ui.set_theme_open(open);
     }
 
+    // === Settings hub (v0.9.0, #49) ===
+
+    /// Raise/lower the Settings hub. Opening resets to the first section page
+    /// (the sub-view is reset by the loop via [`set_net_view`], which owns it).
+    pub fn set_settings_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        if open {
+            ui.set_settings_page(0);
+        }
+        ui.set_settings_open(open);
+    }
+
+    /// NETWORK sub-view: 0 hub pages · 1 scan picker · 2 keyboard. RUST-OWNED —
+    /// the only writer; Slint reads it and emits back/pick/done intents.
+    pub fn set_net_view(&self, view: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_net_view(view.clamp(0, 2));
+    }
+
+    /// Persisted every-touch tick gate (#49) shown on the SOUND page.
+    pub fn set_touch_sound(&self, on: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_touch_sound_on(on);
+    }
+
+    /// Mesh TOGGLE state for the RADIOS page (distinct from the chrome dot,
+    /// which lights on live peer count).
+    pub fn set_mesh_enabled(&self, on: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_mesh_enabled(on);
+    }
+
+    /// Persisted WiFi INTENT (auto vs forced-off) for the RADIOS page; the
+    /// live association state rides the existing `wifi-on` chrome property.
+    pub fn set_wifi_intent(&self, auto: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_wifi_intent(auto);
+    }
+
+    /// Mesh node id for the SYSTEM page (sigil-arbitrated at boot).
+    pub fn set_node_id(&self, id: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_node_id(id);
+    }
+
+    /// One-line OTA status under UPDATE FIRMWARE ("" hides it) — the port of
+    /// the old fb Settings status line.
+    pub fn set_ota_status(&self, text: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_ota_status(SharedString::from(text));
+    }
+
+    /// Currently-configured SSID for the NETWORK page ("" = not configured).
+    pub fn set_net_current(&self, ssid: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_net_current(SharedString::from(ssid));
+    }
+
+    /// NETWORK connect feedback: 0 idle · 1 connecting · 2 connected · 3 failed.
+    pub fn set_net_status(&self, status: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_net_status(status);
+    }
+
+    /// Picker scanning state ("Scanning…" vs the row list).
+    pub fn set_net_scanning(&self, scanning: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_net_scanning(scanning);
+    }
+
+    /// Push the scanned-network rows (already dedup'd + strength-sorted by the
+    /// loop; capped there to the picker's 6 visible rows). The RSSI→bars
+    /// bucketing is UI-layer mapping, so it lives here like set_hunt's.
+    pub fn set_wifi_nets(&self, rows: &[(heapless::String<32>, i8, bool)]) {
+        if self.ui.is_none() {
+            return;
+        }
+        let nets: Vec<WifiNet> = rows
+            .iter()
+            .map(|(ssid, rssi, secured)| WifiNet {
+                ssid: SharedString::from(ssid.as_str()),
+                bars: match *rssi {
+                    r if r >= -50 => 4,
+                    r if r >= -60 => 3,
+                    r if r >= -70 => 2,
+                    r if r >= -80 => 1,
+                    _ => 0,
+                },
+                secured: *secured,
+            })
+            .collect();
+        self.wifi_model.set_vec(nets);
+    }
+
+    /// Keyboard display state: Rust owns the buffer — this pushes the title
+    /// ("PASSWORD" / "NETWORK NAME"), the context line (SSID), the ALREADY
+    /// masked + tail-windowed display text, and the eye state.
+    pub fn set_kb(&self, title: &str, context: &str, text: &str, plain: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_kb_title(SharedString::from(title));
+        ui.set_kb_context(SharedString::from(context));
+        ui.set_kb_text(SharedString::from(text));
+        ui.set_kb_plain(plain);
+    }
+
     /// SoundLevel meter (#28): current dBFS + peak-hold, both in [-60, 0].
     pub fn set_mic_level(&self, dbfs: f32, peak: f32) {
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -1016,6 +1199,7 @@ fn build_scene(
     mesh_model: &Rc<VecModel<PeerRow>>,
     climate_cards: &Rc<VecModel<ClimateCard>>,
     waveform_model: &Rc<VecModel<f32>>,
+    wifi_model: &Rc<VecModel<WifiNet>>,
 ) -> WatchShell {
     let ui = WatchShell::new().expect("failed to create WatchShell");
     {
@@ -1095,6 +1279,40 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_mic_gain_down(move || r.mic_gain_down.set(true));
+
+        // Settings hub (v0.9.0): toggles + OTA + the WiFi scan/creds flow.
+        let r = req.clone();
+        ui.on_touch_sound_tap(move || r.touch_sound_toggle.set(true));
+
+        let r = req.clone();
+        ui.on_settings_ota_tap(move || r.settings_ota.set(true));
+
+        let r = req.clone();
+        ui.on_net_open(move || r.wifi_scan.set(true));
+
+        let r = req.clone();
+        ui.on_net_pick(move |i| r.wifi_pick.set(Some(i)));
+
+        let r = req.clone();
+        ui.on_net_manual(move || r.wifi_manual.set(true));
+
+        let r = req.clone();
+        ui.on_net_back(move || r.net_back.set(true));
+
+        let r = req.clone();
+        ui.on_kb_key(move |k| r.kb_key.set(Some(k)));
+
+        let r = req.clone();
+        ui.on_kb_bksp_down(move || r.kb_bksp_down.set(true));
+
+        let r = req.clone();
+        ui.on_kb_bksp_up(move || r.kb_bksp_up.set(true));
+
+        let r = req.clone();
+        ui.on_kb_eye(move || r.kb_eye.set(true));
+
+        let r = req.clone();
+        ui.on_kb_done(move || r.kb_done.set(true));
     }
     {
         // Theme picker: the tile already set Theme.scheme (instant preview); this
@@ -1105,6 +1323,7 @@ fn build_scene(
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
     ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
+    ui.set_wifi_nets(ModelRc::from(wifi_model.clone()));
     // Launcher pages are built once from the app registry (single source of
     // truth) — static per boot, so plain VecModels the scene owns are enough.
     // (The old Flickable + content-height plumbing is gone with the paged
@@ -1168,6 +1387,18 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
 /// 0xRRGGBB -> Slint opaque color.
 fn color_from_rgb(rgb: u32) -> slint::Color {
     slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// True when a swipe starting at `start_y` grabbed the Settings hub's
+/// brightness slider (DISPLAY page, hub view 0): it must be treated as a
+/// slider DRAG — no page flip / back-nav, and the release stays on-window so
+/// the grabbed TouchArea sees the real final position (same rationale as the
+/// power page's SLIDER_BAND).
+fn hub_slider_drag(ui: &WatchShell, start_y: u16) -> bool {
+    ui.get_settings_open()
+        && ui.get_net_view() == 0
+        && ui.get_settings_page() == HUB_PAGE_DISPLAY
+        && HUB_SLIDER_BAND.contains(&start_y)
 }
 
 fn weather_label(code: u8) -> &'static str {
