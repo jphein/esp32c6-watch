@@ -1,0 +1,220 @@
+import { Theme, PageTitle } from "theme.slint";
+import { BackChevron, PillButton } from "controls.slint";
+
+// Room lights screen (#39) — one press lights the room you're in. Standalone
+// overlay, scene-resident like Climate/Energy (no framebuffer). Pure
+// presentation: HA resolves the room; the Rust loop owns the MQTT session and
+// pushes the parsed retained state here. The hero button publishes `toggle`;
+// the pill pair publishes explicit `on`/`off`.
+//
+// === Rust↔Slint contract (ShellUi::set_lights) ===
+//   in  property <string> area         // resolved room name ("" until known)
+//   in  property <int> on-count        // lights on in the area
+//   in  property <int> total-count     // lights in the area
+//   in  property <int> status          // 0 finding (no state yet) · 1 ok
+//                                      // · 2 no_presence · 3 error
+//   in  property <int> pending         // 0 idle · 1 sent (awaiting HA's
+//                                      // republish) · 2 no-reply hint
+//   callback cmd(int)                  // 0 toggle · 1 on · 2 off
+//   callback closed()                  // back-chevron / right-swipe → mesh
+//
+// Feedback contract (design spec §3/§8): every state change is a hard 1-frame
+// token swap — no `animate`, no time-based pulse (a spinner at 6-11 fps
+// stutters and pins the CPU). The optimistic "sent" state is a static accent
+// ring + caption, cleared by the next state frame or the loop's 5s timeout.
+export component LightsOverlay {
+    in property <string> area: "";
+    in property <int> on-count: 0;
+    in property <int> total-count: 0;
+    in property <int> status: 0;
+    in property <int> pending: 0;
+    callback cmd(int);
+    callback closed();
+
+    // The room is lit (drives the warm hero + glow).
+    property <bool> lit: root.status == 1 && root.on-count > 0;
+    // Room resolution is degraded — subdue the hero, keep it actionable
+    // (HA falls back to default behavior on `toggle`).
+    property <bool> subdued: root.status != 1;
+
+    // Hero geometry (shared by button, glow halos, sent ring, hit area).
+    property <length> hero: 200px;
+    property <length> cx: root.width / 2;
+    property <length> cy: 226px;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    PageTitle { title: "LIGHTS"; }
+
+    // Back chevron — shared canonical placement (controls.slint).
+    BackChevron { clicked => { root.closed(); } }
+
+    // ---------------- warm glow halo (room lit) ----------------
+    // Two static alpha-graded warm rings — the AMOLED "glow" without a
+    // gradient (near-black gradients band on this renderer) or motion.
+    if root.lit: Rectangle {
+        width: root.hero + 52px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: Theme.warm.with-alpha(0.10);
+    }
+    if root.lit: Rectangle {
+        width: root.hero + 24px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: Theme.warm.with-alpha(0.20);
+    }
+
+    // ---------------- optimistic "sent" ring ----------------
+    // Command in flight: a crisp accent ring blooms around the hero (1-frame
+    // swap in, 1-frame swap out when HA's republish lands or the loop times
+    // out). Static by design — see the header note on motion.
+    if root.pending == 1: Rectangle {
+        width: root.hero + 36px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        border-color: Theme.accent;
+    }
+
+    // ---------------- hero toggle button ----------------
+    button := Rectangle {
+        width: root.hero; height: root.hero;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+
+        // Pressed = FULL INVERT to solid accent (Recipe C on a circle, the
+        // boldest 1-frame delta). At rest: warm-filled while the room is lit,
+        // cool outline while dark, muted line-border while degraded.
+        background: ta.pressed ? Theme.accent
+            : (root.lit ? Theme.warm : Theme.panel);
+        border-width: 3px;
+        border-color: ta.pressed ? Theme.accent
+            : (root.lit ? Theme.warm
+            : (root.subdued ? Theme.line : Theme.accent2));
+        opacity: (root.subdued && !ta.pressed) ? 0.6 : 1.0;
+
+        // Bulb glyph ink: dark on the bright pressed/lit fills (palette
+        // contract: on-accent reads on accent AND warm in all 4 schemes).
+        property <color> g: (ta.pressed || root.lit) ? Theme.on-accent : Theme.soft;
+
+        // Globe — filled when lit/pressed, outline when dark.
+        if ta.pressed || root.lit: Rectangle {
+            x: 68px; y: 42px; width: 64px; height: 64px; border-radius: 32px;
+            background: button.g;
+            Rectangle { // filament pip, bright on the dark globe
+                x: 26px; y: 26px; width: 12px; height: 12px; border-radius: 6px;
+                background: Theme.warm;
+            }
+        }
+        if !ta.pressed && !root.lit: Rectangle {
+            x: 68px; y: 42px; width: 64px; height: 64px; border-radius: 32px;
+            border-width: 5px; border-color: button.g;
+            Rectangle { // dormant filament
+                x: 27px; y: 27px; width: 10px; height: 10px; border-radius: 5px;
+                background: button.g;
+            }
+        }
+        // Rays — only while the room is lit: light leaving the bulb.
+        if root.lit || ta.pressed: Rectangle {
+            x: 97px; y: 16px; width: 6px; height: 16px; border-radius: 3px;
+            background: button.g.with-alpha(0.75);
+        }
+        if root.lit || ta.pressed: Rectangle {
+            x: 38px; y: 71px; width: 16px; height: 6px; border-radius: 3px;
+            background: button.g.with-alpha(0.75);
+        }
+        if root.lit || ta.pressed: Rectangle {
+            x: 146px; y: 71px; width: 16px; height: 6px; border-radius: 3px;
+            background: button.g.with-alpha(0.75);
+        }
+        // Screw base under the globe, alpha-tapered.
+        Rectangle {
+            x: 85px; y: 114px; width: 30px; height: 6px; border-radius: 2px;
+            background: button.g.with-alpha(0.85);
+        }
+        Rectangle {
+            x: 89px; y: 124px; width: 22px; height: 5px; border-radius: 2px;
+            background: button.g.with-alpha(0.6);
+        }
+        Rectangle {
+            x: 93px; y: 133px; width: 14px; height: 4px; border-radius: 2px;
+            background: button.g.with-alpha(0.4);
+        }
+        // Action word inside the hero, under the bulb.
+        Text {
+            x: (parent.width - self.width) / 2; y: 152px;
+            text: root.lit ? "LIGHTS ON" : "TAP TO LIGHT";
+            color: button.g.with-alpha(0.9);
+            font-size: 14px; font-weight: 700; letter-spacing: 2px;
+        }
+
+        ta := TouchArea { clicked => { root.cmd(0); } }
+    }
+
+    // ---------------- room name ----------------
+    if root.status == 0: Text {
+        x: (parent.width - self.width) / 2; y: 348px;
+        text: "Finding your room\u{2026}";
+        color: Theme.dim; font-size: 24px; letter-spacing: 1px;
+    }
+    if root.status == 1: Text {
+        x: 44px; y: 344px;
+        width: parent.width - 88px;
+        horizontal-alignment: center; overflow: elide;
+        text: root.area == "" ? "\u{2014}" : root.area;
+        color: Theme.ink; font-size: 28px; font-weight: 700;
+    }
+    if root.status == 2: Text {
+        x: (parent.width - self.width) / 2; y: 348px;
+        text: "No room presence";
+        color: Theme.soft; font-size: 24px; font-weight: 600;
+    }
+    if root.status == 3: Text {
+        x: 44px; y: 344px;
+        width: parent.width - 88px;
+        horizontal-alignment: center; overflow: elide;
+        text: root.area == "" ? "Lights" : root.area;
+        color: Theme.soft; font-size: 28px; font-weight: 700;
+    }
+
+    // ---------------- caption / feedback line ----------------
+    // One line, priority: sent > no-reply > per-status detail.
+    Text {
+        x: (parent.width - self.width) / 2; y: 388px;
+        text: root.pending == 1 ? "sending\u{2026}"
+            : (root.pending == 2 ? "no reply \u{2014} try again"
+            : (root.status == 0 ? "connecting to Home Assistant"
+            : (root.status == 2 ? "toggle uses home defaults"
+            : (root.status == 3 ? "Home Assistant error"
+            : (root.total-count == 0 ? "no lights in this room"
+            : "\{root.on-count} of \{root.total-count} lights on")))));
+        color: root.pending == 1 ? Theme.accent
+            : ((root.pending == 2 || root.status == 3) ? Theme.warn
+            : ((root.status == 1 && root.lit) ? Theme.warm
+            : (root.status == 0 ? Theme.faint : Theme.dim)));
+        font-size: 15px; letter-spacing: 1px;
+    }
+    // Aurora shimmer under the "finding" line (static duo-tone, echoes the
+    // wake-hint strips; replaced by the caption's pending states above).
+    if root.status == 0 && root.pending == 0: Rectangle {
+        x: (parent.width - self.width) / 2; y: 411px;
+        width: 64px; height: 3px; border-radius: 1.5px;
+        background: Theme.accent2.with-alpha(0.5);
+    }
+    if root.status == 0 && root.pending == 0: Rectangle {
+        x: (parent.width - self.width) / 2; y: 417px;
+        width: 104px; height: 4px; border-radius: 2px;
+        background: Theme.accent.with-alpha(0.7);
+    }
+
+    // ---------------- explicit ON / OFF pills ----------------
+    // For when toggle isn't what you want (Recipe D, shared PillButton:
+    // pressed = invert to solid accent with on-accent text).
+    HorizontalLayout {
+        x: (parent.width - 226px) / 2; y: 424px;
+        width: 226px; height: 52px; spacing: 18px;
+        PillButton { text: "ON";  clicked => { root.cmd(1); } }
+        PillButton { text: "OFF"; clicked => { root.cmd(2); } }
+    }
+}

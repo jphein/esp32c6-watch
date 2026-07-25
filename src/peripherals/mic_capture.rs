@@ -10,8 +10,10 @@
 //!
 //! The I2S RX peripheral + DMA ring are peripheral-owned, so MC5 constructs them
 //! in main.rs and spawns [`mic_capture_task`] (see the module docs / hand-off
-//! snippet). TX (beep) stays blocking-mode and untouched — RX uses the blocking
-//! circular API polled from the task, so no I2S mode change is needed.
+//! snippet). RX uses the blocking circular API polled from the task. The TX
+//! side lives in [`silent_clock_task`]: the always-running full-duplex clock
+//! master, which since v0.8.5 doubles as the playback seam (`audio_out`,
+//! issue #23) — SFX samples are substituted into its circular ring.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, Ordering};
 
@@ -92,26 +94,127 @@ pub const GAIN_STEPS_DB: [u8; 7] = [0, 3, 6, 9, 12, 15, 18];
 pub static CLOCK_REARM: AtomicBool = AtomicBool::new(false);
 pub static RX_REARM: AtomicBool = AtomicBool::new(false);
 
-/// Shared-clock generator: a continuous SILENT circular TX. TX is the I2S master
-/// (`signal_loopback`), so this free-runs BCLK/WS and lets the ES8311 ADC clock
-/// data onto ASDOUT while RX slaves to it. Owns `i2s_tx`; re-arms on
+/// Session poll cadence: how often the ring is topped up while a clip plays.
+/// Descriptors complete every 16 ms; 4 ms keeps the substitution responsive
+/// with wide margin against `Late` (needs a > 48 ms stall to lose the ring).
+const PUSH_POLL_MS: u64 = 4;
+
+/// Shared-clock generator + playback seam: a continuous circular TX that is
+/// SILENT except while a queued SFX clip plays (issue #23). TX is the I2S
+/// master (`signal_loopback`), so this free-runs BCLK/WS and lets the mic ADC
+/// clock data onto ASDOUT while RX slaves to it. Owns `i2s_tx`; re-arms on
 /// [`CLOCK_REARM`] (see its docs) so the clock survives AOD light sleep.
+///
+/// # Playback mechanics (why sessions re-arm the transfer)
+///
+/// esp-hal 1.1.1's `DmaTransferTxCircular` push-state has a one-way trap: the
+/// C6 GDMA runs the circular chain with `check_owner=false` (the ring loops in
+/// HARDWARE forever — the clock physically cannot stop) but `auto_write_back=
+/// true`, so consumed descriptors flip to CPU-owned. Only `push()` flips them
+/// back — and once ALL descriptors are CPU-owned (one un-pushed ring lap,
+/// i.e. always after ~48 ms of idle), `available()`/`push()` return
+/// `DmaError::Late` forever. Pushing into the long-idle transfer is therefore
+/// impossible by construction, and keeping the state alive by pushing silence
+/// nonstop would let any executor stall > one ring lap (heavy Slint render,
+/// blocking flash op) poison the state mid-capture.
+///
+/// So the task idles HANDS-OFF — exactly the proven pre-v0.8.5 behavior, no
+/// `available()` polling, the DMA replays the (all-zero) ring — and each
+/// playback session opens with a deliberate drop + `write_dma_circular`
+/// re-arm to reset the push-state. That re-arm is the same sub-millisecond
+/// stop/start the AOD [`CLOCK_REARM`] recovery has always used, and it lands
+/// inside the half-duplex window: `audio_out::play_pcm` sets
+/// [`audio_out::PLAYBACK_ACTIVE`] before the session opens, so the mic is
+/// already discarding. The ring is all-silence whenever idle (the feeder's
+/// tail scrubs it — see `audio_out`), so the fresh transfer replays silence.
+///
+/// During a session the loop polls every [`PUSH_POLL_MS`] and tops the ring
+/// up via [`audio_out::PlaybackFeeder`]: clip samples (mono → stereo) while
+/// staged, silence otherwise. Any `Late`/DMA error mid-session aborts the
+/// clip and re-arms — the mic clock always comes back.
 #[embassy_executor::task]
-pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, silence: &'static [u8]) {
+pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, ring: &'static [u8]) {
+    use crate::peripherals::audio_out::{self, PlaybackFeeder};
+
+    let mut feeder = PlaybackFeeder::new();
+    // A clip chunk received during idle-wait; opens a session on the NEXT
+    // (fresh) transfer armed at the top of the loop.
+    let mut pending: Option<audio_out::PcmChunk> = None;
     loop {
-        let xfer = match i2s_tx.write_dma_circular(&silence) {
+        let mut xfer = match i2s_tx.write_dma_circular(&ring) {
             Ok(x) => x,
             Err(_) => {
                 Timer::after(Duration::from_millis(50)).await;
                 continue;
             }
         };
-        // Hold the clock running until a re-arm is requested (post light-sleep).
-        while !CLOCK_REARM.swap(false, Ordering::Relaxed) {
-            Timer::after(Duration::from_millis(100)).await;
+        // === Playback session (fresh transfer → clean push-state) ===
+        if let Some(first) = pending.take() {
+            feeder.begin(first);
+            let clean = loop {
+                if CLOCK_REARM.swap(false, Ordering::Relaxed) {
+                    break false; // light-sleep gated the clock mid-clip
+                }
+                if !top_up(&mut xfer, &mut feeder) {
+                    break false; // Late/DMA error (executor stalled > ring)
+                }
+                if feeder.is_idle() {
+                    break true; // clip + tail pushed; ring scrubbed to silence
+                }
+                Timer::after(Duration::from_millis(PUSH_POLL_MS)).await;
+            };
+            if !clean {
+                feeder.abort();
+                drop(xfer); // stop the poisoned/stalled transfer …
+                Timer::after(Duration::from_millis(2)).await;
+                continue; // … and re-arm a fresh clock immediately
+            }
         }
-        drop(xfer); // stop the stalled transfer; the outer loop re-arms a fresh one
+        // === Idle: hands off the running transfer (see doc-comment) ===
+        // The DMA loops the silent ring in hardware; wake on the next queued
+        // clip (instant) or a CLOCK_REARM (polled) — both re-arm the transfer.
+        match select(audio_out::next_clip(), rearm_requested()).await {
+            Either::First(chunk) => pending = Some(chunk),
+            Either::Second(()) => {}
+        }
+        drop(xfer); // stop the stalled/stale transfer; the outer loop re-arms
         Timer::after(Duration::from_millis(2)).await;
+    }
+}
+
+/// Resolves when [`CLOCK_REARM`] is raised (post light-sleep), consuming it.
+async fn rearm_requested() {
+    while !CLOCK_REARM.swap(false, Ordering::Relaxed) {
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
+/// Push everything the DMA has consumed back into the circular TX ring —
+/// clip samples while the feeder has them staged, silence otherwise. Returns
+/// false on a DMA error (`Late` after an executor stall — caller re-arms).
+///
+/// `available()` grows in whole ring-descriptor units (`STEREO_CHUNK`), so
+/// the stage buffer drains it in ≤ one-descriptor slices; `& !3` guards whole
+/// stereo frames. Plain fn (not async) so the 1 KB stage stays off the
+/// statically-allocated task future.
+fn top_up(
+    xfer: &mut esp_hal::dma::DmaTransferTxCircular<'_, I2sTx<'static, Blocking>>,
+    feeder: &mut crate::peripherals::audio_out::PlaybackFeeder,
+) -> bool {
+    let mut stage = [0u8; STEREO_CHUNK];
+    loop {
+        let avail = match xfer.available() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        let n = avail.min(STEREO_CHUNK) & !3;
+        if n == 0 {
+            return true;
+        }
+        feeder.fill_stereo(&mut stage[..n]);
+        if xfer.push(&stage[..n]).is_err() {
+            return false;
+        }
     }
 }
 
@@ -220,8 +323,12 @@ pub async fn mic_capture_task(
                 Ok(n) => n,
                 Err(_) => break, // BufferTooSmall can't happen (popbuf = ring); a Late → re-arm
             };
-            if !RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed) {
-                continue; // idle: popped = drained + re-armed; just discard
+            // Half-duplex (#23): while a clip plays, the mic would only hear
+            // the speaker (no AEC on the C6) — discard the windows outright.
+            if crate::peripherals::audio_out::PLAYBACK_ACTIVE.load(Ordering::Relaxed)
+                || (!RECORDING.load(Ordering::Relaxed) && !METER.load(Ordering::Relaxed))
+            {
+                continue; // idle/suppressed: popped = drained + re-armed; discard
             }
             let mut off = 0;
             while off + STEREO_CHUNK <= n {

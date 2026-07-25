@@ -95,6 +95,7 @@ const OVERLAYS: &[Overlay] = &[
     Overlay { state: AppState::Hunt, is_open: WatchShell::get_hunt_open, set_open: WatchShell::set_hunt_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Energy, is_open: WatchShell::get_energy_open, set_open: WatchShell::set_energy_open, close: OverlayClose::Cell(|r| r.energy_close.set(true)) },
     Overlay { state: AppState::Climate, is_open: WatchShell::get_climate_open, set_open: WatchShell::set_climate_open, close: OverlayClose::Cell(|r| r.climate_closed.set(true)) },
+    Overlay { state: AppState::Lights, is_open: WatchShell::get_lights_open, set_open: WatchShell::set_lights_open, close: OverlayClose::Cell(|r| r.lights_closed.set(true)) },
     Overlay { state: AppState::Voice, is_open: WatchShell::get_voice_open, set_open: WatchShell::set_voice_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Sound, is_open: WatchShell::get_mic_open, set_open: WatchShell::set_mic_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Theme, is_open: WatchShell::get_theme_open, set_open: WatchShell::set_theme_open, close: OverlayClose::Flag },
@@ -124,6 +125,12 @@ pub struct ShellRequests {
     pub climate_set_temp: Cell<Option<(i32, f32)>>,
     pub climate_set_mode: Cell<Option<(i32, i32)>>,
     pub climate_closed: Cell<bool>,
+    /// Lights (#39): a tapped command (0 toggle · 1 on · 2 off), drained by the
+    /// loop into a `ClimateCmd::Lights` publish on the shared HA session;
+    /// `lights_closed` is the back-chevron / right-swipe (cell, not flag, so
+    /// the loop also releases the WiFi hold).
+    pub lights_cmd: Cell<Option<i32>>,
+    pub lights_closed: Cell<bool>,
     /// Voice PTT (#42): `pressed` is the finger-down that starts capture (drained
     /// by the loop when app_state == Voice). `released` is advisory — the loop's
     /// release watcher keys off the physical touch INT pin, since the Slint
@@ -807,6 +814,24 @@ impl ShellUi {
         ui.set_climate_conn(conn);
     }
 
+    pub fn set_lights_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_lights_open(open);
+    }
+
+    /// Push the room-lights snapshot (#39) to the Lights overlay.
+    /// `status`: 0 finding (no state yet / connecting) · 1 ok · 2 no_presence ·
+    /// 3 error. `pending`: 0 idle · 1 sent (cmd in flight, awaiting HA's
+    /// republish) · 2 no-reply hint. Only called while the screen is open.
+    pub fn set_lights(&self, area: &str, on: u8, total: u8, status: i32, pending: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_lights_area(SharedString::from(area));
+        ui.set_lights_on_count(on as i32);
+        ui.set_lights_total(total as i32);
+        ui.set_lights_status(status);
+        ui.set_lights_pending(pending);
+    }
+
     pub fn set_voice_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_voice_open(open);
@@ -1052,6 +1077,12 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_climate_closed(move || r.climate_closed.set(true));
+
+        let r = req.clone();
+        ui.on_lights_cmd(move |a| r.lights_cmd.set(Some(a)));
+
+        let r = req.clone();
+        ui.on_lights_closed(move || r.lights_closed.set(true));
 
         let r = req.clone();
         ui.on_voice_ptt_pressed(move || r.voice_ptt_pressed.set(true));

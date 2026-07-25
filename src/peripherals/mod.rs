@@ -1,4 +1,7 @@
 pub mod audio;
+// #23 shared I2S TX playback seam: play_pcm/busy + the feeder that substitutes
+// SFX samples into silent_clock_task's always-running circular ring.
+pub mod audio_out;
 pub mod ble;
 // ES7210 4-ch ADC — the actual microphone codec on this board (mics wired to it,
 // SDOUT1 -> GPIO21; ES8311 is speaker-DAC only). Must be I2C-inited for capture.

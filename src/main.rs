@@ -74,7 +74,8 @@ use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::net::voice_stt;
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
-use crate::peripherals::audio::{fill_beep_buffer, Es8311};
+use crate::peripherals::audio::Es8311;
+use crate::peripherals::audio_out;
 use crate::peripherals::es7210::Es7210;
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
@@ -124,6 +125,7 @@ async fn climate_task(
     stack: embassy_net::Stack<'static>,
     state: &'static crate::net::mqtt_climate::ClimateStateMutex,
     energy: &'static crate::net::mqtt_climate::EnergyStateMutex,
+    lights: &'static crate::net::mqtt_climate::LightsStateMutex,
     cmd_rx: crate::net::mqtt_climate::ClimateCmdReceiver,
     open: &'static crate::net::mqtt_climate::CloseSignal,
     close: &'static crate::net::mqtt_climate::CloseSignal,
@@ -131,9 +133,11 @@ async fn climate_task(
 ) {
     loop {
         open.wait().await;
-        // One session feeds BOTH the Climate + Energy screens (shared CONNECT).
-        if let Err(e) =
-            crate::net::mqtt_climate::run_climate_session(stack, state, energy, cmd_rx, close).await
+        // One session feeds the Climate + Energy + Lights screens (shared CONNECT).
+        if let Err(e) = crate::net::mqtt_climate::run_climate_session(
+            stack, state, energy, lights, cmd_rx, close,
+        )
+        .await
         {
             println!("[CLIM] session ended: {e}");
             // Reconnect backoff. main.rs re-signals `open` as soon as `done` clears
@@ -373,6 +377,14 @@ fn page_scr_name(page: i32) -> &'static str {
     }
 }
 
+/// Optimistic "sent" tracking for the Lights hero (#39): stamped when a command
+/// publish is queued; cleared when the retained state's `seq` moves past
+/// `seq_at_send` (HA republishes after acting) or after a 5s no-reply timeout.
+struct LightsPending {
+    sent_at: Instant,
+    seq_at_send: u32,
+}
+
 /// Optimistic-setpoint tracking for the Climate detail (oracle-t9 C4/C5/E2).
 /// Holds the user's pending absolute target so the UI can reflect a ±tap
 /// instantly (C4), the MQTT publish can be debounced ~400ms after the last tap
@@ -577,10 +589,11 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Speaker amp enable (GPIO6). CRITICAL: keep LOW before the ES8311 is
     // initialized and muted below — a floating I2S line through an enabled
-    // amp produces loud white noise. For the mic-capture verify build the beep
-    // is disabled, so this stays LOW for the whole session (SAFE — never blasts).
-    // Bound (not `_`) so the Output guard holds the pin LOW for the program life.
-    let _amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    // amp produces loud white noise. From v0.8.5 the pin is driven by
+    // audio_out::service_amp (per main-loop tick + inline after each
+    // play_pcm): HIGH only while a queued SFX clip is in flight, LOW + codec
+    // shutdown otherwise — power + pop discipline (#23).
+    let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
 
     // === I2C bus (AXP2101 + FT3168 + PCF85063 + QMI8658) ===
     let i2c = I2c::new(
@@ -692,8 +705,10 @@ async fn main(_spawner: Spawner) -> ! {
     // 2. Init codec (codec init leaves DAC powered but no input yet)
     // 3. Immediately shut the codec down again
     // 4. Init I2S bus
-    // Only when we actually beep: unmute codec -> raise amp -> write DMA ->
-    // lower amp -> mute
+    // Playback (#23) then rides the always-running silent-clock TX ring:
+    // play_pcm queues a clip -> service_amp unmutes codec + raises amp ->
+    // the clock task substitutes the samples into the ring -> feeder tail
+    // ends -> service_amp lowers amp + shuts the codec down again.
     println!("[AUDIO] Init codec...");
     let mut audio_codec = Es8311::new(RefCellDevice::new(&i2c_ref));
     match audio_codec.init() {
@@ -725,10 +740,10 @@ async fn main(_spawner: Spawner) -> ! {
     // TX is the I2S MASTER: it drives the shared BCLK(GPIO20)/WS(GPIO22) + MCLK. A
     // continuous SILENT circular TX (below) keeps them free-running so the ES8311 ADC
     // clocks data onto ASDOUT; the RX slaves to this clock via signal_loopback (internal).
-    // A circular TX needs EXACTLY descriptor_count() descriptors for its silence buffer.
-    const TX_SILENCE_LEN: usize = 3 * mic_capture::STEREO_CHUNK; // 3072 bytes → 3 descriptors
+    // A circular TX needs EXACTLY descriptor_count() descriptors for its ring buffer.
+    const TX_RING_LEN: usize = audio_out::TX_RING_LEN; // 3072 bytes → 3 descriptors
     const TX_CIRC_DESCS: usize =
-        esp_hal::dma::descriptor_count(TX_SILENCE_LEN, esp_hal::dma::CHUNK_SIZE, true);
+        esp_hal::dma::descriptor_count(TX_RING_LEN, esp_hal::dma::CHUNK_SIZE, true);
     static I2S_TX_DESC: StaticCell<[DmaDescriptor; TX_CIRC_DESCS]> = StaticCell::new();
     let mut i2s_tx = i2s_periph
         .i2s_tx
@@ -771,23 +786,27 @@ async fn main(_spawner: Spawner) -> ! {
     );
     println!("[AUDIO] I2S RX (mic) ready on GPIO21 (DIN <- ES8311 ASDOUT)");
 
-    // === Continuous SILENT full-duplex TX — the clock generator ===
-    // The ES8311 ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
+    // === Continuous full-duplex TX — the clock generator + playback ring ===
+    // The mic ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
     // I2S MASTER, our TX must free-run those shared clocks continuously; RX slaves to
-    // them (signal_loopback). We stream a ring of ZEROS forever: the shared BCLK/WS keep
-    // toggling, the ADC keeps clocking real mic data into the RX DMA, and NOTHING audible
-    // ever reaches the amp (amp GPIO6 is held LOW; the data is silence anyway). This is
-    // the SAFE clock source — no tone, no risk of blasting.
-    static TX_SILENCE: StaticCell<[u8; TX_SILENCE_LEN]> = StaticCell::new();
-    let tx_silence: &'static [u8] = TX_SILENCE.init([0u8; TX_SILENCE_LEN]);
-    // Silent-TX clock in a dedicated task that re-arms on CLOCK_REARM (AOD light sleep
-    // clock-gates I2S; the task restarts the DMA after each wake). This produces the
+    // them (signal_loopback). We stream this ring forever: the shared BCLK/WS keep
+    // toggling and the ADC keeps clocking real mic data into the RX DMA. The ring is
+    // ZEROS except while a queued SFX clip plays (#23): the clock task substitutes
+    // clip samples via DmaTransferTxCircular::push, and the feeder's tail scrubs the
+    // ring back to all-silence before the amp drops — idle is exactly the proven
+    // silent-clock behavior (amp GPIO6 LOW, data all-zero; no tone, no blasting).
+    static TX_RING: StaticCell<[u8; TX_RING_LEN]> = StaticCell::new();
+    let tx_ring: &'static [u8] = TX_RING.init([0u8; TX_RING_LEN]);
+    // Clock + playback task; re-arms on CLOCK_REARM (AOD light sleep clock-gates
+    // I2S; the task restarts the DMA after each wake) and per playback session
+    // (see silent_clock_task docs: esp-hal's circular push-state goes Late after
+    // any idle lap, so each session opens on a fresh transfer). This produces the
     // shared MCLK/BCLK/WS the ES7210 mic ADC (I2S slave) needs.
     _spawner.spawn(
-        mic_capture::silent_clock_task(i2s_tx, tx_silence)
+        mic_capture::silent_clock_task(i2s_tx, tx_ring)
             .expect("silent_clock_task token"),
     );
-    println!("[AUDIO] I2S TX silent clock task spawned (full-duplex master, re-arms after sleep)");
+    println!("[AUDIO] I2S TX clock+playback task spawned (full-duplex master, re-arms after sleep)");
 
     // === ES7210 mic ADC — the ACTUAL microphone codec ===
     // The mics are wired to the ES7210 (SDOUT1 -> GPIO21), NOT the ES8311. It MUST be
@@ -815,16 +834,29 @@ async fn main(_spawner: Spawner) -> ! {
         Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
     }
 
-    // Pre-generate beep sound (800Hz, 50ms, stereo 16-bit @ 16kHz = 3200 bytes)
-    static BEEP_BUF: StaticCell<[u8; 4000]> = StaticCell::new();
-    let beep_storage = BEEP_BUF.init([0u8; 4000]);
-    let beep_len = fill_beep_buffer(beep_storage, 800, 16000, 50);
-    // Beep buffer kept generated (harmless static) but unused in this verify build —
-    // i2s_tx is consumed by the continuous silent full-duplex TX above, so the snake
-    // "food eaten" beep is disabled here (see below). Restore beeps via the shared TX
-    // stream in v0.6.1.
-    let _beep_buf: &'static [u8] = &beep_storage[..beep_len];
-    println!("[AUDIO] I2S OK ({} bytes beep buf, playback disabled for mic verify)", beep_len);
+    // Pre-synthesize the SFX clips (#23) — MONO 16 kHz s16le, the play_pcm
+    // format; the feeder duplicates L/R into the stereo TX ring. Both come
+    // from mic-dsp (host-unit-tested synth):
+    //  - Snake food beep: 800 Hz / 50 ms sine, 2 ms attack/release ramps.
+    //  - UI tap click: 12 ms decaying 1.8 kHz "tick" (launcher launch +
+    //    UPDATE FIRMWARE — opt-in per control, subtle by design).
+    static BEEP_PCM: StaticCell<[u8; 1600]> = StaticCell::new();
+    let beep_pcm: &'static [u8] = {
+        let buf = BEEP_PCM.init([0u8; 1600]);
+        let n = mic_dsp::fill_tone_mono_s16le(buf, 16_000, 800, 50, 12_000, 2);
+        &buf[..n]
+    };
+    static CLICK_PCM: StaticCell<[u8; mic_dsp::CLICK_LEN]> = StaticCell::new();
+    let click_pcm: &'static [u8] = {
+        let buf = CLICK_PCM.init([0u8; mic_dsp::CLICK_LEN]);
+        let n = mic_dsp::fill_click_mono_s16le(buf, 16_000);
+        &buf[..n]
+    };
+    println!(
+        "[AUDIO] SFX ready (beep {} B, click {} B mono) — playback via shared TX ring",
+        beep_pcm.len(),
+        click_pcm.len()
+    );
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
     let mut boot_button = Input::new(
@@ -943,6 +975,7 @@ async fn main(_spawner: Spawner) -> ! {
     // (holds WiFi while the Climate screen is open); main.rs drives it via the
     // open/close signals, reads the shared ClimateState for the UI each tick, and
     // releases the WiFi hold on `done` (both Ok + Err arms — see climate_task).
+    static LIGHTS_STATE: StaticCell<crate::net::mqtt_climate::LightsStateMutex> = StaticCell::new();
     static CLIMATE_STATE: StaticCell<crate::net::mqtt_climate::ClimateStateMutex> =
         StaticCell::new();
     static ENERGY_STATE: StaticCell<crate::net::mqtt_climate::EnergyStateMutex> = StaticCell::new();
@@ -957,6 +990,10 @@ async fn main(_spawner: Spawner) -> ! {
     let climate_energy: &'static crate::net::mqtt_climate::EnergyStateMutex = ENERGY_STATE.init(
         embassy_sync::mutex::Mutex::new(crate::net::mqtt_climate::EnergyState::default()),
     );
+    // Lights (#39): the room-lights snapshot rides the same session.
+    let lights_state: &'static crate::net::mqtt_climate::LightsStateMutex = LIGHTS_STATE.init(
+        embassy_sync::mutex::Mutex::new(crate::net::mqtt_climate::LightsState::new()),
+    );
     let climate_cmds: &'static crate::net::mqtt_climate::ClimateCmdChannel =
         CLIMATE_CMDS.init(embassy_sync::channel::Channel::new());
     let climate_open: &'static crate::net::mqtt_climate::CloseSignal =
@@ -970,6 +1007,7 @@ async fn main(_spawner: Spawner) -> ! {
             stack,
             climate_state,
             climate_energy,
+            lights_state,
             climate_cmds.receiver(),
             climate_open,
             climate_close,
@@ -1099,6 +1137,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut climate_running = false;
     // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
     let mut climate_pending: Option<ClimatePending> = None;
+    // #39 Lights: screen-open flag (holds WiFi via the shared session, like
+    // climate/energy), the optimistic "sent" tracker, and the transient
+    // no-reply hint deadline (shown ~2.5s after a 5s reply timeout).
+    let mut lights_active = false;
+    let mut lights_pending: Option<LightsPending> = None;
+    let mut lights_noreply_until: Option<Instant> = None;
     // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
@@ -1135,7 +1179,19 @@ async fn main(_spawner: Spawner) -> ! {
     let mut next_ntp_attempt = Instant::now();
     let mut wifi_toggle_request = false;
     let mut last_wifi_idle_check = Instant::now();
-    let mut ble_on = false;
+    // #46 (BLE bit): restore the persisted BLE toggle (config v4) so BLE-on —
+    // and with it the stable-address Bermuda registration (#47) — survives
+    // reboots and OTAs. The parked trouble host starts within ~250 ms.
+    let mut ble_on = watch_cfg.ble_on;
+    if ble_on {
+        crate::peripherals::ble::BLE_START_REQUEST
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        power_stats.ble_on = true;
+        println!(
+            "[BLE] restored ON from config (persisted toggle, '{}')",
+            net::sigil::get().sigil.as_str()
+        );
+    }
     let mut ble_toggle_request = false;
     let mut settings_connect_pending = false;
     let mut wifi_connect_attempts: u8 = 0;
@@ -1197,10 +1253,12 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(30)
         } else if screen_state == 1 {
             // AOD: wake often enough that the minute flip never looks stuck.
-            // debug-console builds skip AOD light-sleep (the raise detector runs
-            // on THIS tick instead of the 700ms sleep-poll), so match its cadence
-            // there; release builds keep the lazy 5s (the sleep block self-paces).
-            if cfg!(feature = "debug-console") {
+            // debug-console builds AND BLE-on release builds skip AOD
+            // light-sleep (the raise detector runs on THIS tick instead of the
+            // 700ms sleep-poll), so match the sleep-poll cadence there; only a
+            // sleeping release build keeps the lazy 5s (the sleep block
+            // self-paces at 700ms).
+            if cfg!(feature = "debug-console") || ble_on {
                 Duration::from_millis(700)
             } else {
                 Duration::from_secs(5)
@@ -1221,6 +1279,7 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Hunt
                 | AppState::Energy
                 | AppState::Climate
+                | AppState::Lights
                 | AppState::Voice
                 | AppState::Theme => {
                     // Slint animations (launcher slide, flings) need frame pacing;
@@ -1274,7 +1333,15 @@ async fn main(_spawner: Spawner) -> ! {
         // out, esp-hal's own sleep-entry calibration would too and `sleep_light`
         // would panic with a divide-by-zero (esp32c6.rs:665) — skip light sleep
         // on such units the same way (logged once at boot).
-        if screen_state == 1 && !cfg!(feature = "debug-console") && sleep_cal_ok {
+        // `!ble_on` (v0.8.7 hotfix): entering `sleep_light` with the BLE
+        // controller active LOCKS UP the chip (frozen screen, dead USB —
+        // observed on both watches the day BLE-on could first survive to an
+        // idle: v0.8.6's toggle persistence). Also matches intent: BLE-on
+        // means "be trackable" (#37/#39 room presence) and adverts can't be
+        // sent from light sleep anyway — use the tick-idle AOD path instead
+        // (same as debug-console builds). Battery tradeoff is the user's,
+        // via the BLE toggle.
+        if screen_state == 1 && !cfg!(feature = "debug-console") && sleep_cal_ok && !ble_on {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass)
             // + WRIST-RAISE wake (polling): park the HP core in light sleep
             // instead of WFI-idling. Wake on a short poll timer OR touch (GPIO15)
@@ -1484,6 +1551,13 @@ async fn main(_spawner: Spawner) -> ! {
                 now + Duration::from_secs(180)
             };
         }
+
+        // === Audio out: amp + codec sequencing (#23) ===
+        // Edge-triggered and cheap (I2C only on a change). The play_pcm call
+        // sites also invoke this inline for a same-tick amp raise; this
+        // per-tick pass guarantees the DROP side (and any missed raise) even
+        // when the queueing code path bails early.
+        audio_out::service_amp(&mut amp_en, &mut audio_codec);
 
         // === Touch ===
         // No swipe-preview animation on the C6: the full-frame RGB565
@@ -2122,14 +2196,18 @@ async fn main(_spawner: Spawner) -> ! {
         // as the per-device sigil (#34, e.g. "eldritch-lantern") and serves
         // the Battery GATT service. The trouble
         // host owns the controller from then on and cannot be torn down at
-        // runtime, so "off" requires a reboot; later presses just log that.
+        // runtime, so "off" requires a reboot. Presses while running flip the
+        // PERSISTED intent instead (#46): the next boot honors it — press,
+        // reboot, BLE stays off; press again before rebooting to keep it on.
         // (The old raw-HCI scan/device-discovery logging was dropped: the
         // scanner would drive the central role against the same
         // single-connection peripheral host.)
         if ble_toggle_request {
             ble_toggle_request = false;
+            let persist_intent;
             if !ble_on {
                 ble_on = true;
+                persist_intent = true;
                 crate::peripherals::ble::BLE_START_REQUEST
                     .store(true, core::sync::atomic::Ordering::Relaxed);
                 println!(
@@ -2137,7 +2215,25 @@ async fn main(_spawner: Spawner) -> ! {
                     net::sigil::get().sigil.as_str()
                 );
             } else {
-                println!("[BLE] host can't be stopped at runtime - reboot to disable");
+                persist_intent = !watch_cfg.ble_on;
+                println!(
+                    "[BLE] host can't be stopped at runtime - persisted {} for next boot",
+                    if persist_intent { "ON" } else { "OFF (reboot to disable)" }
+                );
+            }
+            // Persist the toggle (#46 BLE bit, config v4) — edge-triggered
+            // like the page/units/theme saves.
+            if watch_cfg.ble_on != persist_intent {
+                watch_cfg.ble_on = persist_intent;
+                if let Some(off) = config_offset {
+                    match peripherals::config::save(&mut flash, off, &watch_cfg) {
+                        Ok(()) => println!(
+                            "[CFG] ble_on={} saved to flash",
+                            watch_cfg.ble_on
+                        ),
+                        Err(()) => println!("[CFG] ble_on save failed"),
+                    }
+                }
             }
             power_stats.ble_on = ble_on;
         }
@@ -2173,6 +2269,7 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Hunt
             | AppState::Energy
             | AppState::Climate
+            | AppState::Lights
             | AppState::Voice
             | AppState::Sound
             | AppState::Theme => {
@@ -2187,6 +2284,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Hunt
                         | AppState::Energy
                         | AppState::Climate
+                        | AppState::Lights
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
@@ -2338,12 +2436,24 @@ async fn main(_spawner: Spawner) -> ! {
                         app_state = AppState::Watchface;
                     }
                 }
+                // Lights back-chevron / right-swipe → dismiss + stop wanting the
+                // session (same cell-close pattern as Climate so the WiFi hold is
+                // released below, never stranded).
+                if shell.req.lights_closed.take() {
+                    lights_pending = None; // optimistic state doesn't outlive the screen
+                    lights_noreply_until = None;
+                    lights_active = false;
+                    shell.set_lights_open(false);
+                    if app_state == AppState::Lights {
+                        app_state = AppState::Watchface;
+                    }
+                }
                 // WiFi hold + session start/stop, keyed on "either screen open".
                 // When both close, releasing the hold returns the watch to mesh —
                 // the unconditional restore (oracle-t10 inv b): however the session
                 // ended (Ok close or Err), closing the screen(s) frees WiFi, so it
                 // can never be stranded held.
-                let climate_session_want = climate_active || energy_active;
+                let climate_session_want = climate_active || energy_active || lights_active;
                 // Voice also needs WiFi (STT upload) but NOT the MQTT session, so it
                 // widens the WiFi HOLD without touching the session start/stop. Keyed
                 // on app_state==Voice: leaving the screen drops it out of wifi_want →
@@ -2492,6 +2602,72 @@ async fn main(_spawner: Spawner) -> ! {
                         es.charging,
                     );
                     shell.set_energy_conn(conn);
+                }
+
+                // Lights screen (#39): route hero/pill commands + push the
+                // room snapshot from the shared session.
+                if app_state == AppState::Lights {
+                    // A tap queues one command publish (toggle/on/off) and arms
+                    // the optimistic "sent" flash. `seq_at_send` pins the state
+                    // frame we already had, so ANY later frame (even an identical
+                    // payload — HA republishes after acting) resolves the flash.
+                    if let Some(a) = shell.req.lights_cmd.take() {
+                        let action = match a {
+                            1 => crate::net::mqtt_climate::LightsAction::On,
+                            2 => crate::net::mqtt_climate::LightsAction::Off,
+                            _ => crate::net::mqtt_climate::LightsAction::Toggle,
+                        };
+                        let seq_now = lights_state.lock().await.seq;
+                        if climate_cmds
+                            .sender()
+                            .try_send(crate::net::mqtt_climate::ClimateCmd::Lights(action))
+                            .is_ok()
+                        {
+                            lights_pending = Some(LightsPending {
+                                sent_at: Instant::now(),
+                                seq_at_send: seq_now,
+                            });
+                            lights_noreply_until = None; // a fresh send clears the hint
+                        }
+                    }
+
+                    let ls = lights_state.lock().await;
+                    // Resolve the optimistic flash: HA's republish landed (seq
+                    // moved) → clear; 5s with no reply → revert + transient hint.
+                    if let Some(p) = lights_pending.as_ref() {
+                        if ls.seq != p.seq_at_send {
+                            lights_pending = None;
+                        } else if Instant::now().duration_since(p.sent_at)
+                            >= Duration::from_secs(5)
+                        {
+                            lights_pending = None;
+                            lights_noreply_until =
+                                Some(Instant::now() + Duration::from_millis(2500));
+                        }
+                    }
+                    let pending = if lights_pending.is_some() {
+                        1
+                    } else if lights_noreply_until.is_some_and(|t| Instant::now() < t) {
+                        2
+                    } else {
+                        lights_noreply_until = None;
+                        0
+                    };
+                    // status: 0 finding (no state yet / connecting) · 1 ok ·
+                    // 2 no_presence · 3 error — the UI maps 0 to the
+                    // "Finding your room…" shimmer.
+                    let status = if !ls.has_data() {
+                        0
+                    } else {
+                        match ls.status {
+                            crate::net::mqtt_climate::LightsStatus::Ok => 1,
+                            crate::net::mqtt_climate::LightsStatus::NoPresence => 2,
+                            crate::net::mqtt_climate::LightsStatus::Error => 3,
+                        }
+                    };
+                    shell.set_lights(ls.area.as_str(), ls.on, ls.total, status, pending);
+                } else {
+                    let _ = shell.req.lights_cmd.take();
                 }
 
                 // Voice push-to-talk: on the finger-down Slint reported
@@ -2826,6 +3002,12 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
+                    // Launcher tile tap-click (#23): the one-frame pressed
+                    // state gets a subtle audible companion. Inline service =
+                    // same-tick amp raise (the clip itself starts ≥ one ring
+                    // of driven silence later — pop insurance).
+                    audio_out::play_pcm(click_pcm);
+                    audio_out::service_amp(&mut amp_en, &mut audio_codec);
                     shell.set_launcher_open(false);
                     if target == AppState::Wled {
                         // WLED is a Slint overlay, not a framebuffer app: it renders
@@ -2870,6 +3052,20 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         wifi_on_request = true;
                         app_state = AppState::Climate;
+                    } else if target == AppState::Lights {
+                        // Lights (#39): raise the overlay + hold WiFi, riding the
+                        // shared HA MQTT session exactly like Climate. The session
+                        // task starts once WiFi associates (session block above);
+                        // released on close (both chevron-cell + right-swipe paths).
+                        lights_pending = None;
+                        lights_noreply_until = None;
+                        shell.set_lights_open(true);
+                        lights_active = true;
+                        if !wifi_on_request {
+                            session_holds_wifi = true; // we're raising the hold
+                        }
+                        wifi_on_request = true;
+                        app_state = AppState::Lights;
                     } else if target == AppState::Voice {
                         // Voice-to-text (#42): a Slint overlay (scene-resident, no
                         // fb). Open in idle; the PTT flow below drives capture +
@@ -2999,6 +3195,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Hunt
                         | AppState::Energy
                         | AppState::Climate
+                        | AppState::Lights
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
@@ -3095,6 +3292,11 @@ async fn main(_spawner: Spawner) -> ! {
                     // WiFi…", and the pending arm below proceeds automatically once
                     // associated + DHCP'd (25s timeout). One tap end-to-end.
                     if settings_app.take_ota_request() {
+                        // UPDATE FIRMWARE tap-click (#23) — audible ack for the
+                        // highest-stakes button; plays out long before the
+                        // download's blocking flash ops begin.
+                        audio_out::play_pcm(click_pcm);
+                        audio_out::service_amp(&mut amp_en, &mut audio_codec);
                         if !crate::net::ota_http::URL_SET {
                             println!("[OTA] tap: no OTA_URL baked into this build");
                             settings_app.ota_status = "No OTA URL in build";
@@ -3168,12 +3370,16 @@ async fn main(_spawner: Spawner) -> ! {
                         continue;
                     }
                 };
-                let (exit, _sfx) =
+                let (exit, sfx) =
                     run_fb_app(app, &input, fb_ref, &mut display, now, &mut next_flush);
-                // Snake food-eat beep (Sfx::Beep) is disabled in this build: i2s_tx is
-                // owned by the continuous silent full-duplex TX (mic_capture::silent_clock_task)
-                // that clocks the ES7210 mic ADC, so it can't also drive one-shot beeps here.
-                // The effect is dropped (_sfx). TODO(v0.6.1): route beeps through the shared TX.
+                // Snake food-eat beep — restored in v0.8.5 (#23): queued onto
+                // the shared TX ring (the clock task substitutes the samples;
+                // the mic clock never stops). Dead since the mic work made the
+                // continuous silent TX the full-duplex clock master.
+                if let Some(Sfx::Beep) = sfx {
+                    audio_out::play_pcm(beep_pcm);
+                    audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                }
                 // Exit (app-signalled or boot-button) returns to the launcher.
                 // Normalized: Snake used to drop to the watchface (P3 fix — every
                 // game now exits consistently to the launcher).

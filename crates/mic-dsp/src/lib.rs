@@ -1,7 +1,9 @@
-//! Pure DSP for the watch mic sound-level meter.
+//! Pure audio DSP for the watch: mic sound-level metering (RMS → dBFS) plus
+//! the playback-side format conversion + SFX synthesis for the shared I2S TX
+//! seam (`audio_out`, issue #23).
 //!
 //! `no_std`, no hardware / esp-hal deps → host-unit-testable. Uses `libm` for
-//! sqrt/log10 so the code is identical on the riscv32 target and under
+//! sqrt/log10/sin so the code is identical on the riscv32 target and under
 //! `cargo test` on the host.
 
 #![no_std]
@@ -59,4 +61,86 @@ pub fn peak_abs(samples: &[i16]) -> u16 {
     } else {
         peak as u16
     }
+}
+
+// === Playback-side helpers (shared I2S TX seam, issue #23) ====================
+//
+// The watch's project-standard PCM format is MONO 16 kHz s16le (STT, HA
+// speaker, bridge). The I2S TX ring runs 16 kHz 16-bit STEREO
+// (Data16Channel16), so playback duplicates each mono sample into L/R.
+
+/// Expand mono s16le PCM into interleaved stereo s16le (L = R = mono sample).
+///
+/// Consumes whole samples only: a trailing odd byte in `mono` is ignored, and
+/// conversion stops early if `out` can't fit another 4-byte frame. Returns the
+/// number of STEREO bytes written (always a multiple of 4).
+pub fn mono_to_stereo_le(mono: &[u8], out: &mut [u8]) -> usize {
+    let frames = (mono.len() / 2).min(out.len() / 4);
+    for i in 0..frames {
+        let lo = mono[2 * i];
+        let hi = mono[2 * i + 1];
+        out[4 * i] = lo;
+        out[4 * i + 1] = hi;
+        out[4 * i + 2] = lo;
+        out[4 * i + 3] = hi;
+    }
+    frames * 4
+}
+
+/// Synthesize a mono s16le sine tone with linear attack/release ramps.
+///
+/// `ramp_ms` of linear fade-in and fade-out (pop insurance on the speaker amp)
+/// is applied inside the `duration_ms` window; it is clamped so the two ramps
+/// never overlap. Writes at most `buf.len()` bytes (whole samples) and returns
+/// the number of MONO bytes written.
+pub fn fill_tone_mono_s16le(
+    buf: &mut [u8],
+    sample_rate: u32,
+    freq_hz: u32,
+    duration_ms: u32,
+    amplitude: i16,
+    ramp_ms: u32,
+) -> usize {
+    let total = ((sample_rate * duration_ms / 1000) as usize).min(buf.len() / 2);
+    let ramp = ((sample_rate * ramp_ms / 1000) as usize).min(total / 2);
+    let w = 2.0 * core::f32::consts::PI * freq_hz as f32 / sample_rate as f32;
+    for i in 0..total {
+        let mut a = amplitude as f32 * libm::sinf(w * i as f32);
+        if ramp > 0 {
+            if i < ramp {
+                a *= i as f32 / ramp as f32;
+            } else if i >= total - ramp {
+                a *= (total - 1 - i) as f32 / ramp as f32;
+            }
+        }
+        let s = a as i16; // |a| <= amplitude by construction
+        let b = s.to_le_bytes();
+        buf[2 * i] = b[0];
+        buf[2 * i + 1] = b[1];
+    }
+    total * 2
+}
+
+/// Length of the UI tap-click clip in mono BYTES at 16 kHz (12 ms).
+pub const CLICK_LEN: usize = 192 * 2;
+
+/// Synthesize the UI tap-click: a 12 ms exponentially-decaying 1.8 kHz sine
+/// ("tick"), 0.5 ms linear attack, peak ~9000 (≈ −11 dBFS — subtle on the tiny
+/// speaker). Mono s16le at `sample_rate`; returns MONO bytes written.
+pub fn fill_click_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
+    const FREQ_HZ: f32 = 1800.0;
+    const PEAK: f32 = 9000.0;
+    let total = ((sample_rate as usize * 12 / 1000).min(buf.len() / 2)).max(0);
+    let attack = (sample_rate as usize / 2000).max(1); // 0.5 ms
+    let tau = sample_rate as f32 * 0.003; // 3 ms decay constant
+    let w = 2.0 * core::f32::consts::PI * FREQ_HZ / sample_rate as f32;
+    for i in 0..total {
+        let env = libm::expf(-(i as f32) / tau)
+            * if i < attack { i as f32 / attack as f32 } else { 1.0 };
+        let s = (PEAK * env * libm::sinf(w * i as f32)) as i16;
+        let b = s.to_le_bytes();
+        buf[2 * i] = b[0];
+        buf[2 * i + 1] = b[1];
+    }
+    total * 2
 }
