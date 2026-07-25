@@ -127,9 +127,10 @@ pub static REGISTRY: &[AppDescriptor] = &[
     AppDescriptor { state: AppState::Voice,      name: "Voice",       icon_id: 7,  accent: 0xa78bfa, section: Audio,  kind: Overlay,     flags: AppFlags::WIFI },    // idx 11
     AppDescriptor { state: AppState::Sound,      name: "Sound",       icon_id: 8,  accent: 0x4fd6ff, section: Audio,  kind: Overlay,     flags: AppFlags::NONE },    // idx 12
     AppDescriptor { state: AppState::Theme,      name: "Theme",       icon_id: 13, accent: 0xa78bfa, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 13
+    AppDescriptor { state: AppState::Lights,     name: "Lights",      icon_id: 14, accent: 0xffb454, section: System, kind: Overlay,     flags: AppFlags::WIFI },    // idx 14
 ];
 
-/// Look up a launchable app's descriptor by state (linear scan, ≤13 entries).
+/// Look up a launchable app's descriptor by state (linear scan, ≤15 entries).
 /// `None` for non-launchable states (Watchface / Launcher / Mp3Player / SmartHome).
 pub fn descriptor(state: AppState) -> Option<&'static AppDescriptor> {
     REGISTRY.iter().find(|d| d.state == state)

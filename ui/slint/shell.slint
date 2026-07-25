@@ -10,6 +10,7 @@ import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
+import { LightsOverlay } from "lights.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
@@ -127,6 +128,14 @@ export component WatchShell inherits Window {
     in property <[ClimateCard]> climate-cards;
     in property <int> climate-conn: 0;   // 0 disconnected · 1 connecting · 2 live
     in-out property <int> climate-selected: -1;
+    // Lights overlay (#39): room name + counts from the retained HA state topic,
+    // pushed each tick by ShellUi::set_lights while the screen is open.
+    in-out property <bool> lights-open: false;
+    in property <string> lights-area: "";
+    in property <int> lights-on-count: 0;
+    in property <int> lights-total: 0;
+    in property <int> lights-status: 0;  // 0 finding · 1 ok · 2 no_presence · 3 error
+    in property <int> lights-pending: 0; // 0 idle · 1 sent · 2 no-reply hint
     // Voice-to-text overlay (#42, push-to-talk). State/level/transcript pushed
     // from the Rust loop; the PTT button emits pressed/released, driven by
     // physical touch (release detected off the INT pin while the loop streams).
@@ -177,6 +186,8 @@ export component WatchShell inherits Window {
     callback climate-set-temp(int, float); // (card-id, new setpoint)
     callback climate-set-mode(int, int);   // (card-id, hvac-mode 0..5)
     callback climate-closed();             // back-chevron / right-swipe → mesh
+    callback lights-cmd(int);              // 0 toggle · 1 on · 2 off → MQTT publish
+    callback lights-closed();              // back-chevron / right-swipe → mesh
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
     callback mic-gain-down();      // Sound app − : lower digital mic gain
@@ -507,6 +518,20 @@ export component WatchShell inherits Window {
         set-temp(id, t) => { root.climate-set-temp(id, t); }
         set-mode(id, m) => { root.climate-set-mode(id, m); }
         closed => { root.climate-closed(); }
+    }
+
+    // ==================== Lights overlay (#39) ====================
+    if root.lights-open: LightsOverlay {
+        width: 100%; height: 100%;
+        area: root.lights-area;
+        on-count: root.lights-on-count;
+        total-count: root.lights-total;
+        status: root.lights-status;
+        pending: root.lights-pending;
+        cmd(a) => { root.lights-cmd(a); }
+        // Close via a request cell (like climate/energy) so the main loop also
+        // releases the WiFi hold — a direct flag-clear would strand it.
+        closed => { root.lights-closed(); }
     }
 
     // ==================== Voice overlay ====================

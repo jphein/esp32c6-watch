@@ -112,4 +112,11 @@ pub enum AppState {
     /// WiFi); the tap sets `Theme.scheme` for instant preview and emits
     /// `theme-changed` for flash persistence. Right-swipe closes.
     Theme,
+    /// Room lights (#39) — a Slint overlay: one press lights the room you're in.
+    /// Publishes `toggle`/`on`/`off` to `watch/<sigil>/lights/cmd`; HA resolves
+    /// the room (the watch stays floor-plan-dumb) and republishes the retained
+    /// `watch/<sigil>/lights/state` (`AREA|<name>|<on>/<total>|<status>`).
+    /// Rides the shared HA MQTT session like Climate/Energy (WiFi held while
+    /// open, released on close).
+    Lights,
 }

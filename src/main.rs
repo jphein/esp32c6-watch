@@ -125,6 +125,7 @@ async fn climate_task(
     stack: embassy_net::Stack<'static>,
     state: &'static crate::net::mqtt_climate::ClimateStateMutex,
     energy: &'static crate::net::mqtt_climate::EnergyStateMutex,
+    lights: &'static crate::net::mqtt_climate::LightsStateMutex,
     cmd_rx: crate::net::mqtt_climate::ClimateCmdReceiver,
     open: &'static crate::net::mqtt_climate::CloseSignal,
     close: &'static crate::net::mqtt_climate::CloseSignal,
@@ -132,9 +133,11 @@ async fn climate_task(
 ) {
     loop {
         open.wait().await;
-        // One session feeds BOTH the Climate + Energy screens (shared CONNECT).
-        if let Err(e) =
-            crate::net::mqtt_climate::run_climate_session(stack, state, energy, cmd_rx, close).await
+        // One session feeds the Climate + Energy + Lights screens (shared CONNECT).
+        if let Err(e) = crate::net::mqtt_climate::run_climate_session(
+            stack, state, energy, lights, cmd_rx, close,
+        )
+        .await
         {
             println!("[CLIM] session ended: {e}");
             // Reconnect backoff. main.rs re-signals `open` as soon as `done` clears
@@ -372,6 +375,14 @@ fn page_scr_name(page: i32) -> &'static str {
         4 => "MESH",
         _ => "CLOCK",
     }
+}
+
+/// Optimistic "sent" tracking for the Lights hero (#39): stamped when a command
+/// publish is queued; cleared when the retained state's `seq` moves past
+/// `seq_at_send` (HA republishes after acting) or after a 5s no-reply timeout.
+struct LightsPending {
+    sent_at: Instant,
+    seq_at_send: u32,
 }
 
 /// Optimistic-setpoint tracking for the Climate detail (oracle-t9 C4/C5/E2).
@@ -964,6 +975,7 @@ async fn main(_spawner: Spawner) -> ! {
     // (holds WiFi while the Climate screen is open); main.rs drives it via the
     // open/close signals, reads the shared ClimateState for the UI each tick, and
     // releases the WiFi hold on `done` (both Ok + Err arms — see climate_task).
+    static LIGHTS_STATE: StaticCell<crate::net::mqtt_climate::LightsStateMutex> = StaticCell::new();
     static CLIMATE_STATE: StaticCell<crate::net::mqtt_climate::ClimateStateMutex> =
         StaticCell::new();
     static ENERGY_STATE: StaticCell<crate::net::mqtt_climate::EnergyStateMutex> = StaticCell::new();
@@ -978,6 +990,10 @@ async fn main(_spawner: Spawner) -> ! {
     let climate_energy: &'static crate::net::mqtt_climate::EnergyStateMutex = ENERGY_STATE.init(
         embassy_sync::mutex::Mutex::new(crate::net::mqtt_climate::EnergyState::default()),
     );
+    // Lights (#39): the room-lights snapshot rides the same session.
+    let lights_state: &'static crate::net::mqtt_climate::LightsStateMutex = LIGHTS_STATE.init(
+        embassy_sync::mutex::Mutex::new(crate::net::mqtt_climate::LightsState::new()),
+    );
     let climate_cmds: &'static crate::net::mqtt_climate::ClimateCmdChannel =
         CLIMATE_CMDS.init(embassy_sync::channel::Channel::new());
     let climate_open: &'static crate::net::mqtt_climate::CloseSignal =
@@ -991,6 +1007,7 @@ async fn main(_spawner: Spawner) -> ! {
             stack,
             climate_state,
             climate_energy,
+            lights_state,
             climate_cmds.receiver(),
             climate_open,
             climate_close,
@@ -1120,6 +1137,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut climate_running = false;
     // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
     let mut climate_pending: Option<ClimatePending> = None;
+    // #39 Lights: screen-open flag (holds WiFi via the shared session, like
+    // climate/energy), the optimistic "sent" tracker, and the transient
+    // no-reply hint deadline (shown ~2.5s after a 5s reply timeout).
+    let mut lights_active = false;
+    let mut lights_pending: Option<LightsPending> = None;
+    let mut lights_noreply_until: Option<Instant> = None;
     // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
@@ -1254,6 +1277,7 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Hunt
                 | AppState::Energy
                 | AppState::Climate
+                | AppState::Lights
                 | AppState::Voice
                 | AppState::Theme => {
                     // Slint animations (launcher slide, flings) need frame pacing;
@@ -2235,6 +2259,7 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Hunt
             | AppState::Energy
             | AppState::Climate
+            | AppState::Lights
             | AppState::Voice
             | AppState::Sound
             | AppState::Theme => {
@@ -2249,6 +2274,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Hunt
                         | AppState::Energy
                         | AppState::Climate
+                        | AppState::Lights
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
@@ -2400,12 +2426,24 @@ async fn main(_spawner: Spawner) -> ! {
                         app_state = AppState::Watchface;
                     }
                 }
+                // Lights back-chevron / right-swipe → dismiss + stop wanting the
+                // session (same cell-close pattern as Climate so the WiFi hold is
+                // released below, never stranded).
+                if shell.req.lights_closed.take() {
+                    lights_pending = None; // optimistic state doesn't outlive the screen
+                    lights_noreply_until = None;
+                    lights_active = false;
+                    shell.set_lights_open(false);
+                    if app_state == AppState::Lights {
+                        app_state = AppState::Watchface;
+                    }
+                }
                 // WiFi hold + session start/stop, keyed on "either screen open".
                 // When both close, releasing the hold returns the watch to mesh —
                 // the unconditional restore (oracle-t10 inv b): however the session
                 // ended (Ok close or Err), closing the screen(s) frees WiFi, so it
                 // can never be stranded held.
-                let climate_session_want = climate_active || energy_active;
+                let climate_session_want = climate_active || energy_active || lights_active;
                 // Voice also needs WiFi (STT upload) but NOT the MQTT session, so it
                 // widens the WiFi HOLD without touching the session start/stop. Keyed
                 // on app_state==Voice: leaving the screen drops it out of wifi_want →
@@ -2554,6 +2592,72 @@ async fn main(_spawner: Spawner) -> ! {
                         es.charging,
                     );
                     shell.set_energy_conn(conn);
+                }
+
+                // Lights screen (#39): route hero/pill commands + push the
+                // room snapshot from the shared session.
+                if app_state == AppState::Lights {
+                    // A tap queues one command publish (toggle/on/off) and arms
+                    // the optimistic "sent" flash. `seq_at_send` pins the state
+                    // frame we already had, so ANY later frame (even an identical
+                    // payload — HA republishes after acting) resolves the flash.
+                    if let Some(a) = shell.req.lights_cmd.take() {
+                        let action = match a {
+                            1 => crate::net::mqtt_climate::LightsAction::On,
+                            2 => crate::net::mqtt_climate::LightsAction::Off,
+                            _ => crate::net::mqtt_climate::LightsAction::Toggle,
+                        };
+                        let seq_now = lights_state.lock().await.seq;
+                        if climate_cmds
+                            .sender()
+                            .try_send(crate::net::mqtt_climate::ClimateCmd::Lights(action))
+                            .is_ok()
+                        {
+                            lights_pending = Some(LightsPending {
+                                sent_at: Instant::now(),
+                                seq_at_send: seq_now,
+                            });
+                            lights_noreply_until = None; // a fresh send clears the hint
+                        }
+                    }
+
+                    let ls = lights_state.lock().await;
+                    // Resolve the optimistic flash: HA's republish landed (seq
+                    // moved) → clear; 5s with no reply → revert + transient hint.
+                    if let Some(p) = lights_pending.as_ref() {
+                        if ls.seq != p.seq_at_send {
+                            lights_pending = None;
+                        } else if Instant::now().duration_since(p.sent_at)
+                            >= Duration::from_secs(5)
+                        {
+                            lights_pending = None;
+                            lights_noreply_until =
+                                Some(Instant::now() + Duration::from_millis(2500));
+                        }
+                    }
+                    let pending = if lights_pending.is_some() {
+                        1
+                    } else if lights_noreply_until.is_some_and(|t| Instant::now() < t) {
+                        2
+                    } else {
+                        lights_noreply_until = None;
+                        0
+                    };
+                    // status: 0 finding (no state yet / connecting) · 1 ok ·
+                    // 2 no_presence · 3 error — the UI maps 0 to the
+                    // "Finding your room…" shimmer.
+                    let status = if !ls.has_data() {
+                        0
+                    } else {
+                        match ls.status {
+                            crate::net::mqtt_climate::LightsStatus::Ok => 1,
+                            crate::net::mqtt_climate::LightsStatus::NoPresence => 2,
+                            crate::net::mqtt_climate::LightsStatus::Error => 3,
+                        }
+                    };
+                    shell.set_lights(ls.area.as_str(), ls.on, ls.total, status, pending);
+                } else {
+                    let _ = shell.req.lights_cmd.take();
                 }
 
                 // Voice push-to-talk: on the finger-down Slint reported
@@ -2938,6 +3042,20 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         wifi_on_request = true;
                         app_state = AppState::Climate;
+                    } else if target == AppState::Lights {
+                        // Lights (#39): raise the overlay + hold WiFi, riding the
+                        // shared HA MQTT session exactly like Climate. The session
+                        // task starts once WiFi associates (session block above);
+                        // released on close (both chevron-cell + right-swipe paths).
+                        lights_pending = None;
+                        lights_noreply_until = None;
+                        shell.set_lights_open(true);
+                        lights_active = true;
+                        if !wifi_on_request {
+                            session_holds_wifi = true; // we're raising the hold
+                        }
+                        wifi_on_request = true;
+                        app_state = AppState::Lights;
                     } else if target == AppState::Voice {
                         // Voice-to-text (#42): a Slint overlay (scene-resident, no
                         // fb). Open in idle; the PTT flow below drives capture +
@@ -3067,6 +3185,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Hunt
                         | AppState::Energy
                         | AppState::Climate
+                        | AppState::Lights
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
