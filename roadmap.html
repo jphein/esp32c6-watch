@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap — esp32c6-watch · shipped timeline & open issues</title>
+<meta name="description" content="The esp32c6-watch roadmap — a shipped-release timeline from v0.2.0 through v0.8.4 (the two-watch fleet), plus the open issue tracker grouped into six themes: gesture shell & UI, audio pipeline, the fleet, Home Assistant, platform & tooling, and the radio frontier. Every open item links to its GitHub issue.">
+<meta name="theme-color" content="#000000">
+<meta property="og:title" content="esp32c6-watch — Roadmap (v0.8.4)">
+<meta property="og:description" content="Shipped from v0.2.0 → v0.8.4, and where the watch goes next — six themed groups of open issues, each linking to GitHub. Mirrors the issue tracker.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/fonts.css">
+<style>
+/* ============================ TOKENS (shared with index) ============================ */
+:root{
+  --bg:#000000; --bg2:#05070d; --panel:#0a1120; --panel-2:#0d1626;
+  --ink:#f2f5ff; --soft:#9fb4d8; --dim:#6b7794; --faint:#39435c;
+  --accent:#35e0b0; --accent2:#3a7bd5; --warn:#ff5566; --warm:#ffd166;
+  --line:#1a2540; --line-2:#141d33;
+  --hero-grad:linear-gradient(155deg,#140b2e 0%,#000000 52%,#002733 100%);
+  --card-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 24px 48px -28px rgba(0,0,0,.9);
+  --glow:0 0 42px -8px rgba(53,224,176,.55);
+  --font-display:'Chakra Petch','Segoe UI',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+  --font-body:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --maxw:1180px;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#eaeef6; --bg2:#f4f6fb; --panel:#ffffff; --panel-2:#f2f5fb;
+    --ink:#0e1524; --soft:#33436a; --dim:#5c688a; --faint:#a6b0c7;
+    --accent:#0c9b74; --accent2:#2a5cae; --warn:#d23a4c; --warm:#b9791a;
+    --line:#dde3ef; --line-2:#e7ebf5;
+    --hero-grad:linear-gradient(155deg,#e9e6fb 0%,#f4f6fb 50%,#dff1ee 100%);
+    --card-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 20px 40px -30px rgba(20,40,80,.35);
+    --glow:0 0 42px -12px rgba(12,155,116,.4);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#eaeef6; --bg2:#f4f6fb; --panel:#ffffff; --panel-2:#f2f5fb;
+  --ink:#0e1524; --soft:#33436a; --dim:#5c688a; --faint:#a6b0c7;
+  --accent:#0c9b74; --accent2:#2a5cae; --warn:#d23a4c; --warm:#b9791a;
+  --line:#dde3ef; --line-2:#e7ebf5;
+  --hero-grad:linear-gradient(155deg,#e9e6fb 0%,#f4f6fb 50%,#dff1ee 100%);
+  --card-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 20px 40px -30px rgba(20,40,80,.35);
+  --glow:0 0 42px -12px rgba(12,155,116,.4);
+}
+
+/* ============================ BASE ============================ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:var(--font-body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; overflow-x:hidden;
+}
+h1,h2,h3,h4{font-family:var(--font-display); font-weight:600; line-height:1.08; letter-spacing:-.01em; margin:0}
+a{color:inherit; text-decoration:none}
+p{margin:0 0 1em}
+.mono{font-family:var(--font-mono)}
+::selection{background:rgba(53,224,176,.28); color:var(--ink)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:6px}
+svg{max-width:100%}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 26px}
+.eyebrow{font-family:var(--font-mono); font-size:12.5px; letter-spacing:.28em; text-transform:uppercase; color:var(--accent); font-weight:500}
+
+/* faint grain, same as index */
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+}
+main{position:relative; z-index:1}
+
+/* ============================ NAV (shared with index) ============================ */
+header.nav{
+  position:sticky; top:0; z-index:50;
+  backdrop-filter:blur(14px) saturate(140%); -webkit-backdrop-filter:blur(14px) saturate(140%);
+  background:color-mix(in srgb, var(--bg) 74%, transparent);
+  border-bottom:1px solid var(--line);
+}
+.nav-in{display:flex; align-items:center; gap:24px; height:64px; max-width:var(--maxw); margin:0 auto; padding:0 26px}
+.brand{display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:700; letter-spacing:-.01em; font-size:18px}
+.brand svg{width:26px; height:26px; filter:drop-shadow(0 0 10px rgba(53,224,176,.5))}
+.brand b{color:var(--accent); font-weight:700}
+.nav-links{display:flex; gap:26px; margin-left:auto; font-size:14.5px; font-family:var(--font-mono); letter-spacing:.02em}
+.nav-links a{color:var(--soft); transition:color .18s}
+.nav-links a:hover{color:var(--ink)}
+.nav-links a.here{color:var(--accent)}
+.nav-actions{display:flex; align-items:center; gap:10px; margin-left:8px}
+.icon-btn{display:grid; place-items:center; width:38px; height:38px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--soft); cursor:pointer; transition:.18s}
+.icon-btn:hover{color:var(--ink); border-color:var(--accent); box-shadow:var(--glow)}
+.icon-btn svg{width:18px; height:18px}
+.gh-btn{display:inline-flex; align-items:center; gap:8px; height:38px; padding:0 15px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--ink); font-family:var(--font-mono); font-size:13.5px; transition:.18s; white-space:nowrap}
+.gh-btn:hover{border-color:var(--accent); box-shadow:var(--glow)}
+.gh-btn svg{width:17px;height:17px}
+@media (max-width:920px){.nav-links{display:none}}
+:root[data-theme="light"] .ic-moon,:root:not([data-theme="dark"]) .ic-moon{display:none}
+:root[data-theme="light"] .ic-sun,:root:not([data-theme="dark"]) .ic-sun{display:block}
+.ic-sun{display:none}
+@media (prefers-color-scheme: light){:root:not([data-theme]) .ic-sun{display:block}:root:not([data-theme]) .ic-moon{display:none}}
+:root[data-theme="dark"] .ic-moon{display:block}
+:root[data-theme="dark"] .ic-sun{display:none}
+
+/* ============================ HERO ============================ */
+.hero{background:var(--hero-grad); border-bottom:1px solid var(--line); position:relative; overflow:hidden}
+.hero::after{content:""; position:absolute; inset:0; pointer-events:none;
+  background:radial-gradient(120% 90% at 82% 0%, transparent 45%, var(--bg) 100%), linear-gradient(180deg,transparent 62%, var(--bg) 100%)}
+.hero-in{position:relative; z-index:1; max-width:var(--maxw); margin:0 auto; padding:78px 26px 66px}
+.hero h1{font-size:clamp(38px,6vw,64px); font-weight:700; letter-spacing:-.02em; margin:16px 0 0; font-family:var(--font-mono)}
+.hero .lede{color:var(--soft); font-size:19px; max-width:62ch; margin:20px 0 0}
+.hero .lede a{color:var(--accent)} .hero .lede a:hover{text-decoration:underline}
+.jump{display:flex; flex-wrap:wrap; gap:10px; margin-top:30px}
+.jump a{display:inline-flex; align-items:center; gap:8px; padding:9px 15px; border:1px solid var(--line); border-radius:99px; background:color-mix(in srgb,var(--panel) 65%, transparent); font-family:var(--font-mono); font-size:13px; color:var(--soft); transition:.18s}
+.jump a:hover{color:var(--ink); border-color:var(--accent); box-shadow:var(--glow)}
+.jump a .e{font-size:14px; line-height:1}
+
+/* ============================ SECTION ============================ */
+.section{padding:78px 0 70px; position:relative}
+.section + .section{border-top:1px solid var(--line)}
+.section.alt{background:var(--bg2)}
+.section-head{max-width:740px; margin-bottom:46px}
+.section-head h2{font-size:clamp(28px,4.4vw,44px); margin:12px 0 14px}
+.section-head p{color:var(--soft); font-size:17px; margin:0}
+
+/* ============================ SHIPPED TIMELINE ============================ */
+.timeline{position:relative; margin-top:10px}
+.timeline::before{content:""; position:absolute; left:7px; top:10px; bottom:12px; width:2px;
+  background:linear-gradient(180deg,var(--accent) 0%, var(--accent2) 55%, var(--warm) 100%); opacity:.45}
+.tl{position:relative; padding:0 0 30px 40px}
+.tl:last-child{padding-bottom:0}
+.tl .dot{position:absolute; left:0; top:4px; width:16px; height:16px; border-radius:50%;
+  background:var(--bg); border:3px solid var(--accent2); box-shadow:0 0 0 4px var(--bg)}
+.tl .head{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap}
+.tl .ver{font-family:var(--font-mono); font-size:15px; font-weight:600; color:var(--accent2); letter-spacing:.01em}
+.tl .cap{font-family:var(--font-display); font-weight:600; font-size:16px; color:var(--ink)}
+.tl .txt{color:var(--soft); font-size:15px; margin-top:6px; max-width:78ch}
+.tl .txt a{color:var(--accent)} .tl .txt a:hover{text-decoration:underline}
+.tl .txt .mono{color:var(--ink)}
+/* the current headline release */
+.tl.now .dot{background:var(--warm); border-color:var(--warm); box-shadow:0 0 0 4px var(--bg), 0 0 20px -2px var(--warm)}
+.tl.now .ver{color:var(--warm)}
+.tl.now .badge{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--warm);
+  border:1px solid color-mix(in srgb,var(--warm) 45%, transparent); border-radius:99px; padding:3px 9px}
+.tl .fleet-names{display:inline-flex; gap:7px; flex-wrap:wrap; margin-top:9px}
+.tl .fleet-names span{font-family:var(--font-mono); font-size:12px; color:var(--warm);
+  border:1px solid color-mix(in srgb,var(--warm) 38%, transparent); background:color-mix(in srgb,var(--warm) 10%, transparent);
+  border-radius:99px; padding:4px 11px}
+
+/* ============================ ROADMAP GROUPS ============================ */
+.legend{display:flex; flex-wrap:wrap; gap:16px 22px; margin:-24px 0 38px; font-family:var(--font-mono); font-size:12.5px; color:var(--dim)}
+.legend span{display:inline-flex; align-items:center; gap:8px}
+.legend i{width:10px;height:10px;border-radius:3px; display:block}
+.groups{display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:20px; align-items:start}
+.rg{--ga:var(--accent); background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:24px 24px 12px; box-shadow:var(--card-shadow); position:relative; overflow:hidden; transition:.2s}
+.rg:hover{border-color:color-mix(in srgb,var(--ga) 42%, var(--line))}
+.rg::before{content:""; position:absolute; inset:0 auto 0 0; width:3px; background:var(--ga); opacity:.55}
+.rg.flag{grid-column:1 / -1; border-color:color-mix(in srgb,var(--ga) 45%, var(--line));
+  background:radial-gradient(130% 130% at 100% 0%, color-mix(in srgb,var(--ga) 12%, transparent), transparent 58%), var(--panel)}
+.rg-head{display:flex; align-items:center; gap:13px; margin-bottom:6px}
+.rg-head .emo{width:42px; height:42px; flex:0 0 42px; display:grid; place-items:center; font-size:20px; border-radius:12px;
+  background:color-mix(in srgb,var(--ga) 15%, transparent); border:1px solid color-mix(in srgb,var(--ga) 34%, transparent)}
+.rg-head h3{font-size:19.5px; letter-spacing:0}
+.rg-head .cnt{margin-left:auto; font-family:var(--font-mono); font-size:11.5px; color:var(--dim); letter-spacing:.08em; white-space:nowrap}
+.rg.flag .rg-head h3{font-size:22px}
+.rg-sub{color:var(--dim); font-size:13.5px; margin:0 0 6px 55px}
+.rg.flag .rg-sub{margin-left:0; color:var(--soft); font-size:15px; max-width:70ch; margin-bottom:14px}
+.iss-list{display:flex; flex-direction:column}
+.iss{display:flex; gap:13px; align-items:flex-start; padding:13px 6px; border-top:1px solid var(--line-2); transition:.15s; border-radius:8px}
+.iss:first-child{border-top:1px solid var(--line)}
+.iss:hover{background:color-mix(in srgb,var(--ga) 7%, transparent)}
+.iss .nums{display:flex; gap:5px; flex:0 0 auto; padding-top:1px}
+.iss .num{font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--ga);
+  border:1px solid color-mix(in srgb,var(--ga) 40%, transparent); border-radius:7px; padding:2px 8px; white-space:nowrap; transition:.15s}
+.iss:hover .num{background:color-mix(in srgb,var(--ga) 15%, transparent)}
+a.num:hover{background:color-mix(in srgb,var(--ga) 26%, transparent)}
+div.iss:hover{background:color-mix(in srgb,var(--ga) 7%, transparent)}
+.iss .txt{font-size:14.5px; color:var(--soft); line-height:1.5}
+.iss .txt b{color:var(--ink); font-weight:600}
+.iss .epic{font-family:var(--font-mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--warm); margin-right:6px}
+.rg.flag .iss .txt{font-size:15px}
+.rg.flag .iss-list{columns:2; column-gap:34px}
+.rg.flag .iss{break-inside:avoid}
+@media (max-width:720px){.rg.flag .iss-list{columns:1}}
+
+/* ============================ FOOTER ============================ */
+footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 60px; position:relative; z-index:1}
+.foot-in{max-width:var(--maxw); margin:0 auto; padding:0 26px; display:flex; flex-wrap:wrap; gap:16px; justify-content:space-between; align-items:center}
+.foot-in .b{display:flex; align-items:center; gap:11px; font-family:var(--font-display); font-weight:700; font-size:18px}
+.foot-in .b svg{width:26px;height:26px} .foot-in .b b{color:var(--accent)}
+.foot-links{display:flex; flex-wrap:wrap; gap:20px; font-family:var(--font-mono); font-size:13px}
+.foot-links a{color:var(--soft); transition:.15s} .foot-links a:hover{color:var(--accent)}
+.foot-note{max-width:var(--maxw); margin:30px auto 0; padding:20px 26px 0; border-top:1px solid var(--line); font-family:var(--font-mono); font-size:12.5px; color:var(--dim)}
+
+/* reveal on scroll */
+.reveal{opacity:0; transform:translateY(20px); transition:opacity .6s cubic-bezier(.2,.7,.2,1), transform .6s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1; transform:none}
+@media (prefers-reduced-motion: reduce){.reveal{opacity:1; transform:none; transition:none}}
+</style>
+</head>
+<body>
+
+<!-- ============================ NAV ============================ -->
+<header class="nav">
+  <div class="nav-in">
+    <a class="brand" href="index.html" aria-label="esp32c6-watch home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><use href="#logo"/></svg>
+      <span>esp32<b>c6</b>-watch</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="index.html">Overview</a>
+      <a href="index.html#features">Features</a>
+      <a href="hardware.html">Hardware</a>
+      <a href="theme-preview.html">Themes</a>
+      <a href="roadmap.html" class="here" aria-current="page">Roadmap</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="themeToggle" aria-label="Toggle color theme" title="Toggle theme">
+        <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+        <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>
+      </button>
+      <a class="gh-btn" href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12a11.5 11.5 0 0 0 7.9 10.9c.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5A11.5 11.5 0 0 0 23.5 12C23.5 5.7 18.3.5 12 .5Z"/></svg>
+        Issues
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============================ HERO ============================ -->
+<header class="hero">
+  <div class="hero-in">
+    <div class="eyebrow">Roadmap</div>
+    <h1>Shipped, and where it's going.</h1>
+    <p class="lede">The roadmap lives in the <a href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">issue tracker</a> — this page mirrors it. A shipped-release timeline from the first Slint shell through the <b style="color:var(--ink)">two-watch fleet</b>, then every open issue grouped into six themes. Each open item links straight to its GitHub issue.</p>
+    <nav class="jump" aria-label="Jump to">
+      <a href="#shipped"><span class="e">✅</span> Shipped</a>
+      <a href="#gesture"><span class="e">🧭</span> Gesture &amp; UI</a>
+      <a href="#audio"><span class="e">🔊</span> Audio</a>
+      <a href="#fleet"><span class="e">⌚</span> Fleet</a>
+      <a href="#ha"><span class="e">🏠</span> Home Assistant</a>
+      <a href="#platform"><span class="e">🔧</span> Platform</a>
+      <a href="#radio"><span class="e">📡</span> Radio</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ============================ SHIPPED TIMELINE ============================ -->
+<section class="section" id="shipped">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">✅ Shipped</div>
+      <h2>The release timeline</h2>
+      <p>Every tagged release, newest at the bottom — the line the firmware has actually walked, from a booting Slint shell to a self-updating fleet of two.</p>
+    </div>
+
+    <div class="timeline reveal">
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.2.0</span><span class="cap">Slint UI shell</span></div>
+        <p class="txt">The 5-page carousel, launcher, AOD, and the Mesh Familiar — on-demand framebuffer, SMOLv1 mesh, six games, weather, pedometer, BLE, the OTA A/B layout, and <span class="mono">defmt-rtt</span> debug.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.4.0</span><span class="cap">Sleep, sensors &amp; testable crates</span></div>
+        <p class="txt">Light-sleep AOD, the WLED WiZmote remote, an RSSI treasure hunt, a home-energy screen, die-temperature, and host-tested <span class="mono">no_std</span> workspace crates.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.6.0</span><span class="cap">Voice &amp; audio arrive</span></div>
+        <p class="txt">Voice push-to-talk over a LAN STT gateway, speaker playback, a wave of touch-responsiveness + launcher fixes, and the AUDIO launcher section.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.7.0</span><span class="cap">The mic, themes &amp; Home Assistant</span></div>
+        <p class="txt">The <b class="mono" style="color:var(--ink)">working mic</b> (<a href="https://github.com/jphein/esp32c6-watch/issues/7" target="_blank" rel="noopener">#7</a> — mics live on a separate <span class="mono">ES7210</span> ADC; driver + ALDO1 rail), real on-glass speech-to-text, mic gain control, the plugin/app registry, the 4-scheme theme system, and the <span class="mono">esp32c6_watch</span> Home Assistant component (climate/energy + a <span class="mono">media_player</span> speaker queue).</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.8.0</span><span class="cap">Touch feedback &amp; the paged launcher</span></div>
+        <p class="txt">The touch-feedback overhaul (shared <span class="mono">controls.slint</span>, bold pressed states on ~52 targets, ≥44&nbsp;px hit areas), the paged 3×3 launcher, partial rendering v2 (<a href="https://github.com/jphein/esp32c6-watch/issues/18" target="_blank" rel="noopener">#18</a>), wrist-raise wake, an IMU step-counter fix, an AXP2101 charger profile, the UI test automator, and the CO5300 panel confirmed (<a href="https://github.com/jphein/esp32c6-watch/issues/17" target="_blank" rel="noopener">#17</a>).</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.8.1</span><span class="cap">AOD never-panic</span></div>
+        <p class="txt">The AOD light-sleep panic fix (<a href="https://github.com/jphein/esp32c6-watch/issues/43" target="_blank" rel="noopener">#43</a>: esp-hal <span class="mono">RC_FAST</span> calibration ticks + a never-panic gate) — caught in the field by the second watch.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.8.2</span><span class="cap">Aurora wake gesture hints</span></div>
+        <p class="txt">Duo-tone aurora wake gesture hints — a soft teal-and-blue edge sweep that shows which way the gestures go, then fades as you touch. Reduced-motion aware, tuned per theme.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.8.3</span><span class="cap">Reliable zero-touch OTA</span></div>
+        <p class="txt">Zero-touch OTA made dependable (<a href="https://github.com/jphein/esp32c6-watch/issues/25" target="_blank" rel="noopener">#25</a>, validated end-to-end): pull <em>and</em> push (retained MQTT announce + monotonic build gate, <span class="mono">tools/ota_push.sh</span>), retry that survives link drops, and mesh suppression during updates.</p>
+      </div>
+      <div class="tl now">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.8.4</span><span class="cap">The Fleet</span><span class="badge">latest</span></div>
+        <p class="txt">Per-device sigil identity (<a href="https://github.com/jphein/esp32c6-watch/issues/34" target="_blank" rel="noopener">#34</a>) from the efuse MAC: MAC-derived mesh node ids, per-watch MQTT client ids + OTA topics (<span class="mono">ota_push.sh --target&nbsp;&lt;sigil&gt;</span>), and sigil BLE advertising. The first release to land on both watches fully zero-touch over the air.</p>
+        <div class="fleet-names"><span>⌚ eldritch-lantern · #122</span><span>⌚ mythic-throne · #236</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ OPEN ROADMAP ============================ -->
+<section class="section alt" id="open">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">🧭 Open</div>
+      <h2>What's next</h2>
+      <p>The open issue tracker, grouped into six themes. Every item is a live GitHub issue — click the number to open it.</p>
+    </div>
+
+    <div class="legend reveal">
+      <span><i style="background:var(--accent)"></i>UI &amp; interaction</span>
+      <span><i style="background:var(--accent2)"></i>system &amp; platform</span>
+      <span><i style="background:var(--warm)"></i>fleet &amp; radio</span>
+      <span style="color:var(--warm)"><b class="mono" style="font-size:10px;letter-spacing:.14em">EPIC</b> multi-issue effort</span>
+    </div>
+
+    <div class="groups">
+
+      <!-- FLEET — marquee, full width -->
+      <article class="rg flag reveal" id="fleet" style="--ga:var(--warm)">
+        <div class="rg-head">
+          <span class="emo" aria-hidden="true">⌚⌚</span>
+          <h3>Fleet (two watches)</h3>
+          <span class="cnt">4 open</span>
+        </div>
+        <p class="rg-sub">Now that there are two, they can find each other, ping each other, and pull firmware from each other. The sigil identity from v0.8.4 is the foundation everything here builds on.</p>
+        <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/35" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#35</span></span>
+            <span class="txt"><b>Watch-to-watch ping</b> — hero button + full-screen pulse, sigil-identified, over the mesh</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/37" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#37</span></span>
+            <span class="txt"><b>Super Find</b> — multi-radio watch finder (mesh + BLE + HA + WiFi + 802.15.4 + LoRa fusion, Find-My scream mode)</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/38" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#38</span></span>
+            <span class="txt"><b>Meshtastic BLE client</b> — GPS, LoRa messaging, nodes list</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/36" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#36</span></span>
+            <span class="txt"><span class="epic">Epic</span><b>smol parity</b> — peer-sourced mesh OTA, RELAY/CFG downlink, mesh multiplayer games</span></a>
+        </div>
+      </article>
+
+      <!-- GESTURE SHELL & UI -->
+      <article class="rg reveal" id="gesture" style="--ga:var(--accent)">
+        <div class="rg-head">
+          <span class="emo" aria-hidden="true">🧭</span>
+          <h3>Gesture shell &amp; UI</h3>
+          <span class="cnt">5 open</span>
+        </div>
+        <p class="rg-sub">Edge gestures, a notification shade, and the polish that makes the shell feel inevitable.</p>
+        <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/29" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#29</span></span>
+            <span class="txt"><b>Bottom-edge swipe-up</b> to open the app launcher</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/31" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#31</span></span>
+            <span class="txt"><b>Session manager</b> — background apps, corner badge, bottom-hold alt-tab switcher</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/32" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#32</span></span>
+            <span class="txt"><b>Notification shade</b> — top-edge swipe-down; HA messages over MQTT + system events</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/28" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#28</span></span>
+            <span class="txt"><b>AOD pixel-shift</b> (burn-in) + typography token sweep</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/10" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#10</span></span>
+            <span class="txt"><b>Emoji-expression face</b> (vendor parity)</span></a>
+        </div>
+      </article>
+
+      <!-- AUDIO PIPELINE -->
+      <article class="rg reveal" id="audio" style="--ga:var(--accent2)">
+        <div class="rg-head">
+          <span class="emo" aria-hidden="true">🔊</span>
+          <h3>Audio pipeline</h3>
+          <span class="cnt">7 open</span>
+        </div>
+        <p class="rg-sub">Restore the TX playback seam, then climb it — from UI beeps to a music player to a full spoken-conversation loop.</p>
+        <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/23" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#23</span></span>
+            <span class="txt"><b>Shared I²S TX playback seam</b> — restore beeps/UI sounds; the base for everything below</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#30</span></span>
+            <span class="txt"><b>Real FFT spectrum analyzer</b> in the Sound app</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/33" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#33</span></span>
+            <span class="txt"><b>Music player</b> — Navidrome/Subsonic client + internet radio (KVMR) via a LAN PCM bridge</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/11" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#11</span></span>
+            <span class="txt"><b>TTS playback</b> — the watch speaks replies</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/12" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#12</span></span>
+            <span class="txt"><b>LLM conversation turn</b> (STT → LLM → TTS)</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/13" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#13</span></span>
+            <span class="txt"><b>On-device wake word</b> (ESP-SR WakeNet FFI)</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/14" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#14</span></span>
+            <span class="txt"><b>Cloud MCP device-control tool server</b> (with the LLM)</span></a>
+        </div>
+      </article>
+
+      <!-- HOME ASSISTANT -->
+      <article class="rg reveal" id="ha" style="--ga:var(--accent)">
+        <div class="rg-head">
+          <span class="emo" aria-hidden="true">🏠</span>
+          <h3>Home Assistant</h3>
+          <span class="cnt">5 open</span>
+        </div>
+        <p class="rg-sub">Turn the watch into a wrist-worn control surface for the house — lights, water, laundry, cameras.</p>
+        <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/24" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#24</span></span>
+            <span class="txt"><b>Deploy + verify the HA component</b> — firmware announce-poller (speaker end-to-end)</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/39" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#39</span></span>
+            <span class="txt"><b>Light button</b> — room-aware light control via Bermuda BLE presence</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/40" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#40</span></span>
+            <span class="txt"><b>Watering plugin</b> — sprinkler zones with countdowns + auto-off safety (“water where I'm standing” via per-zone BLE proxies)</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/41" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#41</span></span>
+            <span class="txt"><b>Laundry</b> — LG ThinQ → HA + machine-done notifications on the wrist</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/42" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#42</span></span>
+            <span class="txt"><b>Cam viewer</b> — bridge-transcoded RGB565 stills, socket→GRAM streaming, doorbell jump</span></a>
+        </div>
+      </article>
+
+      <!-- PLATFORM & TOOLING -->
+      <article class="rg reveal" id="platform" style="--ga:var(--accent2)">
+        <div class="rg-head">
+          <span class="emo" aria-hidden="true">🔧</span>
+          <h3>Platform &amp; tooling</h3>
+          <span class="cnt">6 open</span>
+        </div>
+        <p class="rg-sub">Provisioning, flash-slot safety, wedge recovery, and the on-glass verifies that keep the hardware honest.</p>
+        <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/22" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#22</span></span>
+            <span class="txt"><b>Restore press-once PTT</b> — auto-retry latch when WiFi comes up</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/15" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#15</span></span>
+            <span class="txt"><b>Wi-Fi provisioning</b> — SoftAP captive portal</span></a>
+          <div class="iss">
+            <span class="nums"><a class="num" href="https://github.com/jphein/esp32c6-watch/issues/16" target="_blank" rel="noopener">#16</a><a class="num" href="https://github.com/jphein/esp32c6-watch/issues/26" target="_blank" rel="noopener">#26</a></span>
+            <span class="txt"><b>On-glass verifies</b> — charger profile, steps, wrist-raise tuning</span></div>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/20" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#20</span></span>
+            <span class="txt"><b>USB-flash slot-trap tooling</b> — bare <span class="mono">espflash flash</span> writes the slot the bootloader isn't booting</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/21" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#21</span></span>
+            <span class="txt"><b>USB-JTAG wedge auto-recovery</b> script</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/19" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#19</span></span>
+            <span class="txt"><b>Rust + Embassy ESP32-C3/C6 ecosystem survey</b> (prior art)</span></a>
+        </div>
+      </article>
+
+      <!-- RADIO FRONTIER -->
+      <article class="rg reveal" id="radio" style="--ga:var(--warm)">
+        <div class="rg-head">
+          <span class="emo" aria-hidden="true">📡</span>
+          <h3>Radio frontier</h3>
+          <span class="cnt">2 open</span>
+        </div>
+        <p class="rg-sub">The C6's native 802.15.4 radio — still dark, and the biggest untapped surface on the chip.</p>
+        <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/2" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#2</span></span>
+            <span class="txt"><b>802.15.4 radio enablement</b> — single-image WiFi + Zigbee/Thread</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/1" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#1</span></span>
+            <span class="txt"><b>Radio Scan v2</b> — 802.15.4-2015 frame parsing (Thread/Zigbee PAN IDs, channels, RSSI)</span></a>
+        </div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============================ FOOTER ============================ -->
+<footer>
+  <div class="foot-in">
+    <div class="b"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#logo"/></svg><span>esp32<b>c6</b>-watch</span></div>
+    <div class="foot-links">
+      <a href="index.html">← Overview</a>
+      <a href="hardware.html">Hardware</a>
+      <a href="theme-preview.html">Themes</a>
+      <a href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">Issues ↗</a>
+      <a href="https://github.com/jphein/esp32c6-watch/blob/main/README.md" target="_blank" rel="noopener">README ↗</a>
+      <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+  <div class="foot-note">Roadmap mirrors the GitHub issue tracker · shipped through <b class="mono" style="color:var(--soft)">v0.8.4</b> — the two-watch fleet · dual-licensed MIT OR Apache-2.0</div>
+</footer>
+
+<!-- shared logo symbol -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="logo" viewBox="0 0 64 64">
+    <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a7bd5"/><stop offset="1" stop-color="#35e0b0"/></linearGradient></defs>
+    <rect x="14" y="6" width="36" height="52" rx="13" fill="#000"/>
+    <rect x="14" y="6" width="36" height="52" rx="13" fill="none" stroke="url(#lg)" stroke-width="2.5"/>
+    <g stroke="#35e0b0" stroke-width="1.6" opacity="0.55" stroke-linecap="round"><line x1="32" y1="32" x2="22" y2="19"/><line x1="32" y1="32" x2="43" y2="21"/><line x1="32" y1="32" x2="24" y2="45"/><line x1="32" y1="32" x2="42" y2="44"/></g>
+    <g fill="#3a7bd5"><circle cx="22" cy="19" r="2.6"/><circle cx="43" cy="21" r="2.6"/><circle cx="24" cy="45" r="2.6"/><circle cx="42" cy="44" r="2.6"/></g>
+    <circle cx="32" cy="32" r="5.4" fill="#35e0b0"/>
+    <circle cx="32" cy="32" r="9.5" fill="none" stroke="#35e0b0" stroke-width="1.4" opacity="0.6"/>
+  </symbol>
+</svg>
+
+<script>
+/* ---------- theme toggle (defaults to system, remembers override) ---------- */
+(function(){
+  var root=document.documentElement, KEY='c6w-theme';
+  try{var saved=localStorage.getItem(KEY); if(saved==='light'||saved==='dark') root.setAttribute('data-theme',saved);}catch(e){}
+  var btn=document.getElementById('themeToggle');
+  if(btn) btn.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    if(!cur){ cur = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; }
+    var next = cur==='dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme',next);
+    try{localStorage.setItem(KEY,next);}catch(e){}
+  });
+})();
+
+/* ---------- scroll reveal ---------- */
+(function(){
+  var els=document.querySelectorAll('.reveal');
+  if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in');});return;}
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target);} });
+  },{threshold:0.08, rootMargin:'0px 0px -6% 0px'});
+  els.forEach(function(e){io.observe(e);});
+})();
+</script>
+</body>
+</html>
