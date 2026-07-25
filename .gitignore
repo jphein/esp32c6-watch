@@ -1,3 +1,4 @@
 target/
 .cargo/config.toml
 .claude/
+__pycache__/
