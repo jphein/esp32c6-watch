@@ -2057,7 +2057,13 @@ async fn main(_spawner: Spawner) -> ! {
         // RECONNECTING WiFi (observed on watch #2: mesh pin → link lost → the
         // MQTT/OTA window never stabilizes). The update owns the radio until it
         // completes or gives up; the mesh re-pins on the next tick after.
-        if radio_started && !wifi_connected && !mesh_channel_pinned && ota_pending_since.is_none() {
+        // The pin yields to ANY active WiFi intent (`wifi_on_request`), not just a
+        // pending OTA: pinning ch6 between association attempts drops auth frames
+        // on other channels — observed on mythic-throne (mesh persisted ON) as
+        // AuthenticationExpired at -61dBm and 1-network scans, masquerading as
+        // dead RX hardware for two days. WiFi-wanted beats mesh; mesh gets the
+        // radio back in the steady state after the burst completes.
+        if radio_started && !wifi_connected && !mesh_channel_pinned && ota_pending_since.is_none() && !wifi_on_request {
             match esp_now.set_channel(crate::net::smol_mesh::MESH_CHANNEL) {
                 Ok(()) => {
                     mesh_channel_pinned = true;
@@ -2089,7 +2095,7 @@ async fn main(_spawner: Spawner) -> ! {
                         esp_radio::esp_now::Error::PeerExists,
                     )) => {
                         esp_now_peer_added = true;
-                        println!("[MESH] up as node id042");
+                        println!("[MESH] up as node id{node_id:03}");
                     }
                     Err(e) => println!("[MESH] add_peer failed: {e:?}"),
                 }
