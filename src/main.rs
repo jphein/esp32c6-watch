@@ -1253,10 +1253,12 @@ async fn main(_spawner: Spawner) -> ! {
             Duration::from_secs(30)
         } else if screen_state == 1 {
             // AOD: wake often enough that the minute flip never looks stuck.
-            // debug-console builds skip AOD light-sleep (the raise detector runs
-            // on THIS tick instead of the 700ms sleep-poll), so match its cadence
-            // there; release builds keep the lazy 5s (the sleep block self-paces).
-            if cfg!(feature = "debug-console") {
+            // debug-console builds AND BLE-on release builds skip AOD
+            // light-sleep (the raise detector runs on THIS tick instead of the
+            // 700ms sleep-poll), so match the sleep-poll cadence there; only a
+            // sleeping release build keeps the lazy 5s (the sleep block
+            // self-paces at 700ms).
+            if cfg!(feature = "debug-console") || ble_on {
                 Duration::from_millis(700)
             } else {
                 Duration::from_secs(5)
@@ -1331,7 +1333,15 @@ async fn main(_spawner: Spawner) -> ! {
         // out, esp-hal's own sleep-entry calibration would too and `sleep_light`
         // would panic with a divide-by-zero (esp32c6.rs:665) — skip light sleep
         // on such units the same way (logged once at boot).
-        if screen_state == 1 && !cfg!(feature = "debug-console") && sleep_cal_ok {
+        // `!ble_on` (v0.8.7 hotfix): entering `sleep_light` with the BLE
+        // controller active LOCKS UP the chip (frozen screen, dead USB —
+        // observed on both watches the day BLE-on could first survive to an
+        // idle: v0.8.6's toggle persistence). Also matches intent: BLE-on
+        // means "be trackable" (#37/#39 room presence) and adverts can't be
+        // sent from light sleep anyway — use the tick-idle AOD path instead
+        // (same as debug-console builds). Battery tradeoff is the user's,
+        // via the BLE toggle.
+        if screen_state == 1 && !cfg!(feature = "debug-console") && sleep_cal_ok && !ble_on {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass)
             // + WRIST-RAISE wake (polling): park the HP core in light sleep
             // instead of WFI-idling. Wake on a short poll timer OR touch (GPIO15)
