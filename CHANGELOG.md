@@ -121,6 +121,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
   speaker playback fixed, touch responsiveness (non-blocking DMA flush),
   launcher scroll fix + AUDIO section, Dependabot, esp-rs stack current.
 
+## [0.5.1] — 2026-07-20
+
+- **Stack-floor guardrail**: a boot-time check on the SRAM the linker leaves between
+  `_bss_end` and `_stack_start`, so a future heap bump can't silently eat the stack
+  again (the failure mode that forced v0.5.0's heap trim).
+- **Climate/energy polish**: setpoints apply optimistically and any unsent change is
+  flushed when the screen closes; Energy gates on a live connection instead of
+  rendering `-1` placeholders; the climate roster is published on connect.
+- Shared `BackChevron` component + 72 px setpoint steppers — uniform 78×64 back
+  targets across climate/energy/wled/hunt; one-off colours moved onto theme tokens;
+  Node-RED bridge onboarding notes (`ha-bridge/ONBOARDING.md`).
+- `climate-model` golden vectors gain the `set:null` and heat_cool-only Auto-bit cases.
+
+## [0.5.0] — 2026-07-20
+
+- **Home Assistant climate control** — a bidirectional MQTT climate session
+  (`src/net/mqtt_climate.rs`) drives real thermostats from the wrist: a Climate list
+  screen plus a per-device detail overlay (setpoint steppers, mode picker), with
+  `crates/climate-model` as the pure `no_std` state core — host-tested against golden
+  vectors, including panic-safety on untrusted device names. Design spec:
+  `docs/superpowers/specs/2026-07-20-ha-climate-control-design.md`.
+- **The home-energy screen goes live** — v0.4.0's placeholder now shows real
+  battery/solar/grid values over MQTT (`battery_pct` / `solar_w` / `grid_w` /
+  `charging`, availability via LWT, null-safe parsing).
+- **Node-RED bridges** (`ha-bridge/`): climate command/state + energy flows, with
+  capability-aware `auto` ↔ `heat_cool` mapping so HA-native strings go on the wire
+  rather than pre-encoded ints.
+- **Main heap 240 KB → 228 KB, to _grow_ the stack.** On the C6 the stack is whatever
+  the linker leaves between `_bss_end` and `_stack_start`, so shrinking the heap is
+  what grows the stack — the root cause of the radio-path crash under the new climate
+  session. (The reclaimed pool sits above the stack and can't help.)
+- `crates/finder` — pure `no_std` nearest-peer range/proximity meter.
+
 ## [0.4.0] — 2026-07-20
 
 The feature-integration wave: light-sleep power lands as the default, and four
