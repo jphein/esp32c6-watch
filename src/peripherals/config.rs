@@ -6,7 +6,17 @@
 //! esp-storage's `Storage` impl handles the read-modify-write erase.
 
 use embedded_storage::{ReadStorage, Storage};
+use esp_println::println;
 use esp_storage::FlashStorage;
+
+/// Byte offset of the BACKUP record slot inside the `config` partition (64KB —
+/// the record itself is ~112B at the start). One flash sector (4KB) past the
+/// primary so the two live in independent erase units: `save` rewrites primary
+/// then backup, so at every instant at least one slot holds a valid record. A
+/// freeze/power-loss mid-erase (the single-copy hole: one bad save wiped WiFi
+/// creds + theme + the BLE boot bit in one stroke) now costs at most ONE save
+/// of history, never the whole config.
+const BACKUP_SLOT: u32 = 0x1000;
 
 /// v1 record: node id, brightness, WiFi creds.
 const MAGIC_V1: [u8; 6] = *b"SWCFG1";
@@ -82,7 +92,21 @@ fn checksum(buf: &[u8]) -> u16 {
     buf.iter().map(|&b| b as u16).fold(0u16, u16::wrapping_add)
 }
 
+/// Load the config: primary slot first, then the backup mirror (a torn primary
+/// write — freeze/power-loss mid-save — falls back to the previous save's
+/// values instead of factory defaults). The next `save` re-heals both slots.
 pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
+    if let Some(cfg) = load_slot(flash, offset) {
+        return Some(cfg);
+    }
+    let fallback = load_slot(flash, offset + BACKUP_SLOT);
+    if fallback.is_some() {
+        println!("[CFG] primary record invalid - recovered from backup slot");
+    }
+    fallback
+}
+
+fn load_slot(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
     let mut buf = [0u8; REC_LEN_V4];
     flash.read(offset, &mut buf).ok()?;
     // v2plus = has default_page + units (v2+); v3plus = also the theme byte;
@@ -146,7 +170,21 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
     })
 }
 
+/// Save the config to BOTH slots, primary first. Ordering is the atomicity:
+/// while the primary sector is being erased/rewritten the backup still holds
+/// the previous valid record, and vice versa — a freeze at any point leaves at
+/// least one loadable slot. `Ok` = the primary landed; the backup mirror is
+/// best-effort (its failure is logged, not fatal — the primary already holds
+/// the new record).
 pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
+    let res = save_slot(flash, offset, cfg);
+    if res.is_ok() && save_slot(flash, offset + BACKUP_SLOT, cfg).is_err() {
+        println!("[CFG] backup-slot mirror write failed (primary OK)");
+    }
+    res
+}
+
+fn save_slot(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
     let mut buf = [0u8; REC_LEN_V4];
     buf[..6].copy_from_slice(&MAGIC_V4);
     buf[6] = cfg.node_id;
