@@ -1,4 +1,5 @@
-//! Bidirectional MQTT 3.1.1 session for Home Assistant climate + energy.
+//! Bidirectional MQTT 3.1.1 session for Home Assistant climate + energy +
+//! room lights (#39).
 //!
 //! Companion to [`crate::net::mqtt_ha`] (which stays a fire-and-forget publish
 //! burst for telemetry). This module holds an **open, long-lived** session for
@@ -59,6 +60,7 @@ use crate::net::mqtt_ha::{
     write_all, BROKER, PKT_CAP,
 };
 use climate_model::{ClimateState, HvacMode};
+use embassy_sync::lazy_lock::LazyLock;
 
 use embassy_futures::select::{select4, Either4};
 use embassy_net::{tcp::TcpSocket, Stack};
@@ -148,20 +150,100 @@ impl Default for EnergyState {
 /// Shared energy snapshot — session replaces it, the Energy screen reads it.
 pub type EnergyStateMutex = Mutex<CriticalSectionRawMutex, EnergyState>;
 
-/// A command the UI queues for the session to PUBLISH to
-/// `watch/climate/<obj>/set`. `HvacMode` is `climate-model`'s own enum (no
-/// parallel type — carried straight through to `encode_set_mode`).
+// --- Lights (#39): room-aware light control --------------------------------
+
+/// Max area-name length carried in a lights state frame ("Living Room" etc.).
+/// Anything longer is truncated at a char boundary — display-only data.
+pub const LIGHTS_AREA_CAP: usize = 32;
+
+/// HA-reported room-resolution status from the retained
+/// `watch/<sigil>/lights/state` payload (4th field).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightsStatus {
+    /// Presence resolved to an area; counts are live.
+    Ok,
+    /// No room presence — HA falls back to its default behavior on `toggle`.
+    NoPresence,
+    /// HA-side error (also the defensive mapping for an unknown status word).
+    Error,
+}
+
+/// Live room-lights snapshot consumed from the RETAINED
+/// `watch/<sigil>/lights/state` topic. Payload contract (HA side, #39):
+/// `AREA|<area name>|<lights on>/<total>|<ok|no_presence|error>`
+/// e.g. `AREA|Living Room|3/5|ok`. Same Mutex pattern as [`EnergyState`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightsState {
+    /// Resolved area name ("" until the first frame).
+    pub area: String<LIGHTS_AREA_CAP>,
+    /// Lights currently on in the area.
+    pub on: u8,
+    /// Total lights in the area.
+    pub total: u8,
+    /// Room-resolution status.
+    pub status: LightsStatus,
+    /// Bumped on EVERY accepted state frame (even an identical payload — HA
+    /// republishes after acting on a command). The Lights UI's optimistic
+    /// "sent" flash clears when this moves past the value seen at send time.
+    /// 0 = nothing received yet.
+    pub seq: u32,
+}
+
+impl LightsState {
+    pub const fn new() -> Self {
+        Self {
+            area: String::new(),
+            on: 0,
+            total: 0,
+            status: LightsStatus::Error,
+            seq: 0,
+        }
+    }
+
+    /// True once at least one state frame has landed (UI "finding your room…"
+    /// vs live gate).
+    pub fn has_data(&self) -> bool {
+        self.seq > 0
+    }
+}
+
+impl Default for LightsState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Shared lights snapshot — session replaces it, the Lights screen reads it.
+pub type LightsStateMutex = Mutex<CriticalSectionRawMutex, LightsState>;
+
+/// A lights command the UI queues; published to `watch/<sigil>/lights/cmd`
+/// (NOT retained). HA resolves which room's lights it applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightsAction {
+    Toggle,
+    On,
+    Off,
+}
+
+impl LightsAction {
+    pub const fn payload(self) -> &'static str {
+        match self {
+            LightsAction::Toggle => "toggle",
+            LightsAction::On => "on",
+            LightsAction::Off => "off",
+        }
+    }
+}
+
+/// A command the UI queues for the session to PUBLISH. Climate setpoint/mode
+/// go to `watch/climate/<obj>/set` (`HvacMode` is `climate-model`'s own enum —
+/// no parallel type); lights actions (#39) go to `watch/<sigil>/lights/cmd`
+/// riding the SAME session/channel, so the Lights screen reuses the whole
+/// connect/keepalive/backoff machinery.
 pub enum ClimateCmd {
     SetTemp { obj: ObjId, temp: f32 },
     SetMode { obj: ObjId, mode: HvacMode },
-}
-
-impl ClimateCmd {
-    fn obj(&self) -> &str {
-        match self {
-            ClimateCmd::SetTemp { obj, .. } | ClimateCmd::SetMode { obj, .. } => obj.as_str(),
-        }
-    }
+    Lights(LightsAction),
 }
 
 // --- session tunables -------------------------------------------------------
@@ -223,6 +305,36 @@ const SET_SUFFIX: &str = "/set";
 /// `SET_PREFIX` + max obj id + `SET_SUFFIX`, rounded up.
 const TOPIC_CAP: usize = 96;
 
+// Lights (#39) topics are per-device (`watch/<sigil>/lights/...`, like the
+// per-watch OTA topic) so two watches never shadow each other's rooms.
+// Built ONCE (LazyLock over the cached sigil identity, same pattern as
+// `sigil::IDENTITY`) — `classify_topic` runs per inbound PUBLISH and must not
+// re-assemble strings.
+/// `watch/` (6) + sigil (≤20) + `/lights/state` (13) = ≤39.
+const LIGHTS_TOPIC_CAP: usize = 48;
+
+struct LightsTopics {
+    /// `watch/<sigil>/lights/cmd` — command publishes (NOT retained).
+    cmd: String<LIGHTS_TOPIC_CAP>,
+    /// `watch/<sigil>/lights/state` — retained state, subscribed.
+    state: String<LIGHTS_TOPIC_CAP>,
+}
+
+static LIGHTS_TOPICS: LazyLock<LightsTopics> = LazyLock::new(|| {
+    let build = |suffix: &str| {
+        let mut t: String<LIGHTS_TOPIC_CAP> = String::new();
+        // Infallible by the cap math above; bounded regardless.
+        let _ = t.push_str("watch/");
+        let _ = t.push_str(crate::net::sigil::get().sigil.as_str());
+        let _ = t.push_str(suffix);
+        t
+    };
+    LightsTopics {
+        cmd: build("/lights/cmd"),
+        state: build("/lights/state"),
+    }
+});
+
 // --- public entry point -----------------------------------------------------
 
 /// Run one bidirectional climate session until [`close`] fires or an error /
@@ -241,12 +353,15 @@ const TOPIC_CAP: usize = 96;
 /// - `stack`   — the (already-associated) embassy-net stack; WiFi must be up.
 /// - `state`   — shared climate roster; upserted as climate state PUBLISHes arrive.
 /// - `energy`  — shared [`EnergyState`]; replaced as `watch/energy/state` arrives.
-/// - `cmd_rx`  — UI → session command queue (setpoint/mode; Climate only).
+/// - `lights`  — shared [`LightsState`] (#39); replaced (seq-bumped) as the
+///   retained `watch/<sigil>/lights/state` arrives.
+/// - `cmd_rx`  — UI → session command queue (climate setpoint/mode + lights).
 /// - `close`   — fire to request a clean session shutdown.
 pub async fn run_climate_session(
     stack: Stack<'static>,
     state: &'static ClimateStateMutex,
     energy: &'static EnergyStateMutex,
+    lights: &'static LightsStateMutex,
     cmd_rx: ClimateCmdReceiver,
     close: &'static CloseSignal,
 ) -> Result<(), Error> {
@@ -322,7 +437,7 @@ pub async fn run_climate_session(
                     Err(_) => return Err("frame read timeout"),
                 };
                 match type_byte & 0xF0 {
-                    0x30 => handle_publish(type_byte, &inbuf[..n], state, energy).await,
+                    0x30 => handle_publish(type_byte, &inbuf[..n], state, energy, lights).await,
                     0xD0 => {} // PINGRESP — last_rx already refreshed above
                     _ => {}    // unexpected control packet — ignore
                 }
@@ -381,6 +496,9 @@ async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
         ENERGY_AVAIL_TOPIC,
         crate::net::ota_http::ANNOUNCE_TOPIC,
         crate::net::sigil::get().ota_topic.as_str(),
+        // Lights (#39): the retained per-device room-lights snapshot, delivered
+        // on every (re)subscribe like the OTA announce above.
+        LIGHTS_TOPICS.get().state.as_str(),
     ];
 
     // remaining length = 2 (packet id) + sum(2-byte len + topic + 1-byte QoS)
@@ -427,6 +545,7 @@ async fn handle_publish(
     body: &[u8],
     state: &ClimateStateMutex,
     energy: &EnergyStateMutex,
+    lights: &LightsStateMutex,
 ) {
     if body.len() < 2 {
         return;
@@ -482,6 +601,18 @@ async fn handle_publish(
             // Push-OTA: gate (BUILD_EPOCH monotonicity) + post for main.rs.
             crate::net::ota_http::handle_announce(payload);
         }
+        Some(TopicKind::LightsState) => {
+            // Lights (#39): wholesale replace, seq bumped on EVERY accepted
+            // frame — HA republishes after acting on a command, and even an
+            // identical payload must clear the UI's optimistic "sent" flash.
+            if let Some(mut next) = parse_lights(payload) {
+                let mut guard = lights.lock().await;
+                next.seq = guard.seq.wrapping_add(1).max(1);
+                *guard = next;
+            }
+            // parse_lights == None (malformed / empty retained-clear) -> keep
+            // the last-known snapshot.
+        }
         None => {} // not one of our topics — ignore
     }
 }
@@ -492,6 +623,7 @@ enum TopicKind<'a> {
     EnergyAvail,
     Roster,
     OtaAnnounce,
+    LightsState,
 }
 
 /// Classify an inbound topic. Bounded, UTF-8 checked, no panic.
@@ -511,6 +643,9 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
     if t == ENERGY_AVAIL_TOPIC {
         return Some(TopicKind::EnergyAvail);
     }
+    if t == LIGHTS_TOPICS.get().state.as_str() {
+        return Some(TopicKind::LightsState);
+    }
     let mid = t.strip_prefix(STATE_PREFIX)?.strip_suffix(STATE_SUFFIX)?;
     if mid.is_empty() || mid.contains('/') {
         return None; // "+" matches exactly one level
@@ -521,21 +656,33 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
 // --- outbound command PUBLISH ----------------------------------------------
 
 async fn send_command(socket: &mut TcpSocket<'_>, cmd: &ClimateCmd) -> Result<(), Error> {
-    let mut topic: String<TOPIC_CAP> = String::new();
-    topic.push_str(SET_PREFIX).map_err(|_| "cmd topic too long")?;
-    topic.push_str(cmd.obj()).map_err(|_| "cmd topic too long")?;
-    topic.push_str(SET_SUFFIX).map_err(|_| "cmd topic too long")?;
-
     match cmd {
-        ClimateCmd::SetTemp { temp, .. } => {
+        ClimateCmd::SetTemp { obj, temp } => {
+            let topic = climate_set_topic(obj)?;
             let payload = climate_model::encode_set_temp(*temp);
             publish(socket, &topic, payload.as_bytes(), false).await
         }
-        ClimateCmd::SetMode { mode, .. } => {
+        ClimateCmd::SetMode { obj, mode } => {
+            let topic = climate_set_topic(obj)?;
             let payload = climate_model::encode_set_mode(*mode);
             publish(socket, &topic, payload.as_bytes(), false).await
         }
+        // Lights (#39): `toggle`|`on`|`off` to the per-device cmd topic,
+        // NOT retained (a command is an event, not state).
+        ClimateCmd::Lights(action) => {
+            let topic = &LIGHTS_TOPICS.get().cmd;
+            publish(socket, topic, action.payload().as_bytes(), false).await
+        }
     }
+}
+
+/// `watch/climate/<obj>/set` — the climate command topic for one entity.
+fn climate_set_topic(obj: &str) -> Result<String<TOPIC_CAP>, Error> {
+    let mut topic: String<TOPIC_CAP> = String::new();
+    topic.push_str(SET_PREFIX).map_err(|_| "cmd topic too long")?;
+    topic.push_str(obj).map_err(|_| "cmd topic too long")?;
+    topic.push_str(SET_SUFFIX).map_err(|_| "cmd topic too long")?;
+    Ok(topic)
 }
 
 // --- inbound frame reading (new; mqtt_ha has no decode path) ----------------
@@ -629,6 +776,62 @@ pub fn parse_energy(bytes: &[u8]) -> Option<EnergyState> {
         grid_w,
         charging,
         online: false, // caller preserves the real value from the avail LWT
+    })
+}
+
+// --- lights payload parsing (#39) -------------------------------------------
+
+/// Parse a retained `watch/<sigil>/lights/state` payload into a [`LightsState`]
+/// (with `seq` left at 0 — the caller owns the bump).
+///
+/// Contract (agreed with the HA side, #39):
+/// `AREA|<area name>|<lights on>/<total>|<ok|no_presence|error>`
+/// e.g. `AREA|Living Room|3/5|ok`.
+///
+/// Untrusted network input, same discipline as [`parse_energy`]: bounded,
+/// panic-free, checked operations only. Returns `None` (caller keeps the
+/// last-known snapshot) on empty / non-UTF-8 / wrong tag / missing fields /
+/// unparseable counts. A too-long area name is truncated at a char boundary
+/// (display-only); an unknown status word maps to [`LightsStatus::Error`]
+/// (defensive — the UI subdues the screen rather than lying "ok").
+pub fn parse_lights(bytes: &[u8]) -> Option<LightsState> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let s = core::str::from_utf8(bytes).ok()?;
+    let mut fields = s.split('|');
+    if fields.next()? != "AREA" {
+        return None;
+    }
+    let area_raw = fields.next()?.trim();
+    let counts = fields.next()?.trim();
+    let status_word = fields.next()?.trim();
+
+    let (on_s, total_s) = counts.split_once('/')?;
+    let on: u8 = on_s.trim().parse().ok()?;
+    let total: u8 = total_s.trim().parse().ok()?;
+
+    let status = match status_word {
+        "ok" => LightsStatus::Ok,
+        "no_presence" => LightsStatus::NoPresence,
+        _ => LightsStatus::Error, // includes the contract's "error"
+    };
+
+    // Truncating, char-boundary-safe copy into the bounded name.
+    let mut area: String<LIGHTS_AREA_CAP> = String::new();
+    for c in area_raw.chars() {
+        if area.push(c).is_err() {
+            break;
+        }
+    }
+
+    Some(LightsState {
+        area,
+        // Defensive clamp: never display "6/5 lights on".
+        on: on.min(total),
+        total,
+        status,
+        seq: 0, // caller bumps from the previous snapshot
     })
 }
 

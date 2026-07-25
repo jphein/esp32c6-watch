@@ -145,6 +145,20 @@ component AppIcon {
         Rectangle { x: 4px;  y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.5); }
         Rectangle { x: 25px; y: 25px; width: 17px; height: 17px; border-radius: 4px; background: root.tint.with-alpha(0.3); }
     }
+    // 14 — Lights (#39): a GLOWING bulb — filled globe with radiating ticks
+    // (distinct from WLED's plain bulb, id 9) + tapering screw base.
+    if root.id == 14: Rectangle {
+        Rectangle { x: 14px; y: 10px; width: 18px; height: 18px; border-radius: 9px; background: root.tint;
+            Rectangle { x: 6px; y: 6px; width: 5px; height: 5px; border-radius: 2.5px; background: Theme.on-accent; } }
+        Rectangle { x: 21px; y: 1px;  width: 4px;  height: 6px; border-radius: 2px; background: root.tint.with-alpha(0.8); }  // ray up
+        Rectangle { x: 4px;  y: 17px; width: 7px;  height: 4px; border-radius: 2px; background: root.tint.with-alpha(0.8); }  // ray left
+        Rectangle { x: 35px; y: 17px; width: 7px;  height: 4px; border-radius: 2px; background: root.tint.with-alpha(0.8); }  // ray right
+        Rectangle { x: 8px;  y: 4px;  width: 5px;  height: 5px; border-radius: 2.5px; background: root.tint.with-alpha(0.55); } // spark NW
+        Rectangle { x: 33px; y: 4px;  width: 5px;  height: 5px; border-radius: 2.5px; background: root.tint.with-alpha(0.55); } // spark NE
+        Rectangle { x: 17px; y: 29px; width: 12px; height: 4px; border-radius: 1px; background: root.tint.with-alpha(0.7); }
+        Rectangle { x: 19px; y: 34px; width: 8px;  height: 3px; border-radius: 1px; background: root.tint.with-alpha(0.5); }
+        Rectangle { x: 20px; y: 38px; width: 6px;  height: 3px; border-radius: 1px; background: root.tint.with-alpha(0.4); }
+    }
 }
 
 // One app tile: icon over label, sized for the 3x3 page grid (114x108).
