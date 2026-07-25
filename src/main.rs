@@ -61,7 +61,6 @@ use static_cell::StaticCell;
 use crate::apps::flappy::FlappyGame;
 use crate::apps::game2048::Game2048;
 use crate::apps::maze::MazeGame;
-use crate::apps::settings::SettingsApp;
 use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
@@ -1073,9 +1072,6 @@ async fn main(_spawner: Spawner) -> ! {
     let mut tetris_game = TetrisGame::new();
     let mut flappy_game = FlappyGame::new();
     let mut maze_game = MazeGame::new();
-    let mut settings_app = SettingsApp::new();
-    let mut last_touch_y: u16 = 0;
-    let mut last_touch_x: u16 = 0;
     let mut accel = (0.0f32, 0.0f32, 0.0f32);
     let mut gyro_data = (0i16, 0i16, 0i16);
     let mut imu_temp: i16 = 250;
@@ -1249,7 +1245,38 @@ async fn main(_spawner: Spawner) -> ! {
         println!("[MESH] restored ON from config (persisted toggle)");
     }
     // Touch sound (#49): the persisted every-tap tick gate. Default ON.
-    let touch_sound = watch_cfg.touch_sound;
+    let mut touch_sound = watch_cfg.touch_sound;
+
+    // === Settings hub (v0.9.0, #49) — NETWORK flow state ===
+    // The hub is scene-resident (no framebuffer); the WiFi creds flow is
+    // scan-first: picker rows come from `scan_list` (dedup'd, strength-sorted,
+    // capped to the picker's 6 rows), the keyboard edits ONE field at a time
+    // (Rust owns the buffer; Slint displays what push_kb sends).
+    #[derive(Clone, Copy, PartialEq)]
+    enum NetEdit {
+        None,
+        Ssid,
+        Pass,
+    }
+    // (ssid, secured) per picker row — pick index == model index.
+    let mut scan_list: heapless::Vec<(heapless::String<32>, bool), 6> = heapless::Vec::new();
+    let mut net_view: i32 = 0; // 0 hub pages · 1 picker · 2 keyboard (Rust-owned)
+    let mut net_edit = NetEdit::None;
+    let mut net_status: i32 = 0; // 0 idle · 1 connecting · 2 connected · 3 failed
+    let mut pending_ssid: heapless::String<32> = heapless::String::new();
+    let mut kb_buf: heapless::String<64> = heapless::String::new();
+    let mut kb_plain = false; // show-password eye
+    let mut kb_bksp_held = false;
+    let mut kb_bksp_next = Instant::now();
+    // OTA status line (SYSTEM page), the port of the old fb Settings field:
+    // `&'static` so ota_http's error strings drop straight in.
+    let mut ota_status_text: &'static str = "";
+    // Boot pushes for the hub's static-ish rows (also re-pushed on scene resume).
+    shell.set_node_id(node_id as i32);
+    shell.set_touch_sound(touch_sound);
+    shell.set_mesh_enabled(mesh_enabled);
+    shell.set_wifi_intent(!watch_cfg.wifi_off);
+    shell.set_net_current(watch_cfg.ssid.as_str());
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
@@ -1320,7 +1347,8 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Climate
                 | AppState::Lights
                 | AppState::Voice
-                | AppState::Theme => {
+                | AppState::Theme
+                | AppState::Settings => {
                     // Slint animations (launcher slide, flings) need frame pacing;
                     // otherwise pace by the visible page's live-data cadence.
                     if app_state == AppState::Hunt {
@@ -1348,7 +1376,6 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                     }
                 }
-                AppState::Settings => Duration::from_millis(100),
                 _ => Duration::from_millis(33),
             }
         };
@@ -1622,10 +1649,6 @@ async fn main(_spawner: Spawner) -> ! {
         if touch_active {
             if let Ok((point, event)) = touch.poll() {
                 touch_point = point;
-                if let Some(tp) = point {
-                    last_touch_x = tp.x;
-                    last_touch_y = tp.y;
-                }
                 if let Some(swipe) = event {
                     swipe_event = Some(swipe.direction);
                     swipe_start_y = swipe.start_y;
@@ -1651,10 +1674,6 @@ async fn main(_spawner: Spawner) -> ! {
                         swipe_start_y = start_y;
                         if tap {
                             tap_event = true;
-                        }
-                        if let Some(p) = point {
-                            last_touch_x = p.x;
-                            last_touch_y = p.y;
                         }
                     }
                     debug_console::Inject::Launch(idx) => {
@@ -1770,6 +1789,7 @@ async fn main(_spawner: Spawner) -> ! {
                         _ => println!("[CFG] wifi_off save failed"),
                     }
                 }
+                shell.set_wifi_intent(!watch_cfg.wifi_off);
             } else {
                 // No stored SSID: the STA can't associate, so a toggle can't do
                 // anything. Surface it (reuse the RAM-busy toast) instead of a
@@ -1826,8 +1846,9 @@ async fn main(_spawner: Spawner) -> ! {
                         wifi_connect_attempts = 0;
                         wifi_connected = true;
                         if settings_connect_pending {
-                            settings_app.wifi_state =
-                                crate::peripherals::wifi::WifiState::Connected;
+                            // Hub NETWORK page feedback: connected.
+                            net_status = 2;
+                            shell.set_net_status(net_status);
                             settings_connect_pending = false;
                         }
                         // NTP happens from the main loop once DHCP lands.
@@ -1848,8 +1869,9 @@ async fn main(_spawner: Spawner) -> ! {
                             wifi_connect_attempts = 0;
                             wifi_on_request = false;
                             if settings_connect_pending {
-                                settings_app.wifi_state =
-                                    crate::peripherals::wifi::WifiState::Error;
+                                // Hub NETWORK page feedback: failed.
+                                net_status = 3;
+                                shell.set_net_status(net_status);
                                 settings_connect_pending = false;
                             }
                         }
@@ -1934,28 +1956,23 @@ async fn main(_spawner: Spawner) -> ! {
         if let Some(t0) = ota_pending_since {
             if wifi_connected && stack.config_v4().is_some() {
                 ota_pending_since = None;
-                settings_app.ota_status = "Updating\u{2026}";
-                // Paint before the blocking download: Settings via its fb when
-                // open. Scene-resident screens already show the "Updating
-                // firmware…" toast (set when the trigger queued, one tick ago) —
-                // no point re-setting it here, the scene can't repaint again
-                // before the download blocks this loop.
+                ota_status_text = "Updating\u{2026}";
+                shell.set_ota_status(ota_status_text);
+                // Paint before the blocking download: the Settings hub is
+                // scene-resident now, so one shell render shows the status
+                // line. Other screens already show the "Updating firmware…"
+                // toast (set when the trigger queued, one tick ago).
                 if app_state == AppState::Settings {
-                    if let Some(fb_ref) = fb.as_mut() {
-                        settings_app.render(fb_ref);
-                        fb_ref.flush(&mut display);
-                    }
+                    shell.render(&mut display);
                 }
                 let url = ota_push_url.take();
                 match crate::net::ota_http::ota_update(stack, &mut flash, url.as_deref()).await {
                     Ok(()) => {
                         println!("[OTA] staged - rebooting to apply");
-                        settings_app.ota_status = "Staged \u{2013} rebooting";
+                        ota_status_text = "Staged \u{2013} rebooting";
+                        shell.set_ota_status(ota_status_text);
                         if app_state == AppState::Settings {
-                            if let Some(fb_ref) = fb.as_mut() {
-                                settings_app.render(fb_ref);
-                                fb_ref.flush(&mut display);
-                            }
+                            shell.render(&mut display);
                             Timer::after(Duration::from_millis(1200)).await;
                         }
                         esp_hal::system::software_reset();
@@ -1974,12 +1991,14 @@ async fn main(_spawner: Spawner) -> ! {
                             ota_push_url = url;
                             wifi_on_request = true;
                             ota_pending_since = Some(Instant::now());
-                            settings_app.ota_status = "Retrying update\u{2026}";
+                            ota_status_text = "Retrying update\u{2026}";
+                            shell.set_ota_status(ota_status_text);
                             shell.set_toast("Update retrying\u{2026}");
                             toast_until = Instant::now() + Duration::from_secs(20);
                             toast_active = true;
                         } else {
-                            settings_app.ota_status = e;
+                            ota_status_text = e;
+                            shell.set_ota_status(ota_status_text);
                             let mut msg: heapless::String<64> = heapless::String::new();
                             let _ = msg.push_str("Update failed: ");
                             let _ = msg.push_str(e);
@@ -1997,7 +2016,8 @@ async fn main(_spawner: Spawner) -> ! {
                 ota_pending_since = None;
                 ota_push_url = None;
                 println!("[OTA] WiFi didn't come up within 45s - giving up");
-                settings_app.ota_status = "WiFi failed \u{2014} tap to retry";
+                ota_status_text = "WiFi failed \u{2014} tap to retry";
+                shell.set_ota_status(ota_status_text);
                 shell.set_toast("Update failed: WiFi");
                 toast_until = now + Duration::from_secs(5);
                 toast_active = true;
@@ -2021,7 +2041,8 @@ async fn main(_spawner: Spawner) -> ! {
                 println!("[OTA] push: build {} queued (zero-touch)", ann.build);
                 ota_push_url = ann.url;
                 ota_attempts = 0;
-                settings_app.ota_status = "Updating\u{2026}";
+                ota_status_text = "Updating\u{2026}";
+                shell.set_ota_status(ota_status_text);
                 shell.set_toast("Updating firmware\u{2026}");
                 toast_until = now + Duration::from_secs(30);
                 toast_active = true;
@@ -2367,7 +2388,8 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Lights
             | AppState::Voice
             | AppState::Sound
-            | AppState::Theme => {
+            | AppState::Theme
+            | AppState::Settings => {
                 // Just came back from an app that painted straight to the panel
                 // (bypassing Slint) — force one full repaint so we don't sit on a
                 // stale game frame that Slint thinks is still valid.
@@ -2383,6 +2405,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
+                        | AppState::Settings
                 ) {
                     // Returning from a game: the Slint scene was dropped on launch
                     // to free heap for the framebuffer. Recreate it, then re-push
@@ -2404,6 +2427,17 @@ async fn main(_spawner: Spawner) -> ! {
                     // static "idle"/20MHz) so the power row isn't blank after a
                     // scene recreate (wisp's review — same lost-on-recreate class).
                     shell.set_lp_core("idle", 20);
+                    // Settings-hub state (same lost-on-recreate class): the hub
+                    // reads these whenever it next opens; a fresh scene resets
+                    // them all to component defaults.
+                    shell.set_node_id(node_id as i32);
+                    shell.set_touch_sound(touch_sound);
+                    shell.set_mesh_enabled(mesh_enabled);
+                    shell.set_wifi_intent(!watch_cfg.wifi_off);
+                    shell.set_net_current(watch_cfg.ssid.as_str());
+                    shell.set_net_status(net_status);
+                    shell.set_ota_status(ota_status_text);
+                    shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
                     if let Some((t, c)) = last_weather {
                         shell.set_weather(Some(t), c);
                     }
@@ -3104,6 +3138,274 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                     }
                 }
+                // === Settings hub drains (v0.9.0, #49) ===
+                // Touch-sound toggle: flip + persist (edge-triggered, mirror
+                // save). The switch visual IS the feedback — no toast.
+                if shell.req.touch_sound_toggle.take() {
+                    touch_sound = !touch_sound;
+                    shell.set_touch_sound(touch_sound);
+                    if watch_cfg.touch_sound != touch_sound {
+                        watch_cfg.touch_sound = touch_sound;
+                        match config_offset
+                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                        {
+                            Some(Ok(())) => {
+                                println!("[CFG] touch_sound={touch_sound} saved to flash")
+                            }
+                            _ => println!("[CFG] touch_sound save failed"),
+                        }
+                    }
+                }
+                // UPDATE FIRMWARE (SYSTEM page): the old fb Settings OTA
+                // request, same semantics — SELF-SERVE WiFi (the tap raises it;
+                // the hoisted pending executor runs the download once ready).
+                if shell.req.settings_ota.take() {
+                    if !crate::net::ota_http::URL_SET {
+                        println!("[OTA] tap: no OTA_URL baked into this build");
+                        ota_status_text = "No OTA URL in build";
+                    } else if wifi_connected && stack.config_v4().is_some() {
+                        println!("[OTA] tap: WiFi ready - updating now");
+                        ota_push_url = None; // tap = the baked OTA_URL
+                        ota_pending_since = Some(now);
+                        ota_status_text = "Updating\u{2026}";
+                    } else {
+                        println!("[OTA] tap: raising WiFi for update");
+                        ota_status_text = "Connecting WiFi\u{2026}";
+                        ota_push_url = None; // tap = the baked OTA_URL
+                        ota_attempts = 0;
+                        wifi_on_request = true;
+                        ota_pending_since = Some(now);
+                    }
+                    shell.set_ota_status(ota_status_text);
+                }
+
+                // === NETWORK flow: scan → pick → password → connect ===
+                // A connect can be triggered by two paths this tick (an OPEN
+                // network pick, or ✓ on the password) — one shared arm below.
+                let mut net_connect = false;
+                // Scan trigger (choose-network + rescan): raise the picker and
+                // paint the "Scanning…" frame FIRST — the scan blocks this loop
+                // for a couple of seconds (user-initiated, like OTA).
+                if shell.req.wifi_scan.take() {
+                    net_view = 1;
+                    shell.set_net_view(net_view);
+                    shell.set_net_scanning(true);
+                    shell.render(&mut display);
+                    // The scan needs the STA radio; start it exactly like the
+                    // mesh toggle does (set_config starts the PHY, no connect).
+                    if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
+                        let _ = wifi_controller
+                            .set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
+                        radio_started = true;
+                    }
+                    scan_list.clear();
+                    if radio_started {
+                        match wifi_controller
+                            .scan_async(&esp_radio::wifi::scan::ScanConfig::default())
+                            .await
+                        {
+                            Ok(aps) => {
+                                // Dedup by SSID keeping the best RSSI (multi-AP
+                                // networks collapse to one row), then sort by
+                                // strength and cap to the picker's 6 rows.
+                                let mut rows: heapless::Vec<
+                                    (heapless::String<32>, i8, bool),
+                                    12,
+                                > = heapless::Vec::new();
+                                for ap in aps.iter() {
+                                    let ssid = ap.ssid.as_str();
+                                    if ssid.is_empty() {
+                                        continue; // hidden — the manual row covers these
+                                    }
+                                    let secured = ap.auth_method
+                                        != Some(esp_radio::wifi::AuthenticationMethod::None);
+                                    if let Some(row) =
+                                        rows.iter_mut().find(|r| r.0.as_str() == ssid)
+                                    {
+                                        if ap.signal_strength > row.1 {
+                                            row.1 = ap.signal_strength;
+                                            row.2 = secured;
+                                        }
+                                    } else if !rows.is_full() {
+                                        let mut s: heapless::String<32> =
+                                            heapless::String::new();
+                                        let _ = s.push_str(ssid);
+                                        let _ = rows.push((s, ap.signal_strength, secured));
+                                    }
+                                }
+                                rows.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                                let top = &rows[..rows.len().min(6)];
+                                for r in top {
+                                    let _ = scan_list.push((r.0.clone(), r.2));
+                                }
+                                shell.set_wifi_nets(top);
+                                println!(
+                                    "[NET] scan: {} networks ({} shown)",
+                                    rows.len(),
+                                    top.len()
+                                );
+                            }
+                            Err(e) => {
+                                println!("[NET] scan failed: {e:?}");
+                                shell.set_wifi_nets(&[]);
+                            }
+                        }
+                    } else {
+                        shell.set_wifi_nets(&[]);
+                    }
+                    shell.set_net_scanning(false);
+                }
+                // Picker row tapped: secured → password keyboard; OPEN network
+                // → connect right away with an empty password.
+                if let Some(i) = shell.req.wifi_pick.take() {
+                    if let Some((ssid, secured)) = scan_list.get(i as usize) {
+                        pending_ssid.clear();
+                        let _ = pending_ssid.push_str(ssid.as_str());
+                        kb_buf.clear();
+                        kb_plain = false;
+                        if *secured {
+                            net_edit = NetEdit::Pass;
+                            net_view = 2;
+                            shell.set_net_view(net_view);
+                            push_kb(&shell, false, pending_ssid.as_str(), "", kb_plain);
+                        } else {
+                            net_connect = true;
+                        }
+                    }
+                }
+                // Hidden network: keyboard for the SSID first, then password.
+                if shell.req.wifi_manual.take() {
+                    net_edit = NetEdit::Ssid;
+                    pending_ssid.clear();
+                    kb_buf.clear();
+                    kb_plain = false;
+                    net_view = 2;
+                    shell.set_net_view(net_view);
+                    push_kb(&shell, true, "", "", kb_plain);
+                }
+                // Keyboard: Rust owns the buffer; keys are one char each.
+                if let Some(k) = shell.req.kb_key.take() {
+                    let cap = if net_edit == NetEdit::Ssid { 32 } else { 64 };
+                    if kb_buf.len() + k.len() <= cap {
+                        let _ = kb_buf.push_str(k.as_str());
+                    }
+                    push_kb(
+                        &shell,
+                        net_edit == NetEdit::Ssid,
+                        pending_ssid.as_str(),
+                        kb_buf.as_str(),
+                        kb_plain,
+                    );
+                }
+                // Backspace: one delete on the DOWN edge, then auto-repeat
+                // while held (the touch-held 16ms tick paces the repeats).
+                if shell.req.kb_bksp_down.take() {
+                    kb_bksp_held = true;
+                    let _ = kb_buf.pop();
+                    push_kb(
+                        &shell,
+                        net_edit == NetEdit::Ssid,
+                        pending_ssid.as_str(),
+                        kb_buf.as_str(),
+                        kb_plain,
+                    );
+                    kb_bksp_next = Instant::now() + Duration::from_millis(420);
+                }
+                if shell.req.kb_bksp_up.take() {
+                    kb_bksp_held = false;
+                }
+                if kb_bksp_held && net_view == 2 && Instant::now() >= kb_bksp_next {
+                    if kb_buf.pop().is_some() {
+                        push_kb(
+                            &shell,
+                            net_edit == NetEdit::Ssid,
+                            pending_ssid.as_str(),
+                            kb_buf.as_str(),
+                            kb_plain,
+                        );
+                    }
+                    kb_bksp_next = Instant::now() + Duration::from_millis(110);
+                }
+                // Show/hide-password eye.
+                if shell.req.kb_eye.take() {
+                    kb_plain = !kb_plain;
+                    push_kb(
+                        &shell,
+                        net_edit == NetEdit::Ssid,
+                        pending_ssid.as_str(),
+                        kb_buf.as_str(),
+                        kb_plain,
+                    );
+                }
+                // ✓ commit: SSID stage advances to the password; password
+                // stage connects (empty password allowed — open networks).
+                if shell.req.kb_done.take() {
+                    match net_edit {
+                        NetEdit::Ssid => {
+                            if !kb_buf.is_empty() {
+                                pending_ssid.clear();
+                                let _ = pending_ssid.push_str(kb_buf.as_str());
+                                net_edit = NetEdit::Pass;
+                                kb_buf.clear();
+                                kb_plain = false;
+                                push_kb(&shell, false, pending_ssid.as_str(), "", kb_plain);
+                            }
+                        }
+                        NetEdit::Pass => net_connect = true,
+                        NetEdit::None => {}
+                    }
+                }
+                // Back out of a sub-view (chevron / right-swipe): keyboard →
+                // picker (buffer dropped), picker → hub pages. Rust owns the
+                // transitions so keyboard state can never fork from the view.
+                if shell.req.net_back.take() {
+                    if net_view == 2 {
+                        net_edit = NetEdit::None;
+                        kb_buf.clear();
+                        kb_bksp_held = false;
+                        net_view = 1;
+                    } else if net_view == 1 {
+                        net_view = 0;
+                    }
+                    shell.set_net_view(net_view);
+                }
+                // Shared connect arm: persist + (re)connect — the old fb
+                // Settings CONNECT machinery, verbatim semantics.
+                if net_connect {
+                    watch_cfg.ssid.clear();
+                    let _ = watch_cfg.ssid.push_str(pending_ssid.as_str());
+                    watch_cfg.pass.clear();
+                    let _ = watch_cfg.pass.push_str(kb_buf.as_str());
+                    // Connecting IS wifi intent — clear a forced-off bit in
+                    // the same (single) save as the creds.
+                    watch_cfg.wifi_off = false;
+                    match config_offset
+                        .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                    {
+                        Some(Ok(())) => println!("[CFG] credentials saved to flash"),
+                        _ => println!("[CFG] save failed"),
+                    }
+                    station_config = esp_radio::wifi::Config::Station(
+                        StationConfig::default()
+                            .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
+                            .with_password(watch_cfg.pass.as_str().into()),
+                    );
+                    wifi_has_creds = !watch_cfg.ssid.is_empty();
+                    radio_started = false;
+                    wifi_connected = false;
+                    ntp_synced = false;
+                    wifi_on_request = true;
+                    settings_connect_pending = true;
+                    net_status = 1;
+                    net_edit = NetEdit::None;
+                    kb_buf.clear();
+                    net_view = 0;
+                    shell.set_net_view(net_view);
+                    shell.set_net_status(net_status);
+                    shell.set_net_current(watch_cfg.ssid.as_str());
+                    shell.set_wifi_intent(true);
+                }
+
                 if shell.req.wifi_toggle.take() {
                     wifi_toggle_request = true;
                 }
@@ -3144,6 +3446,7 @@ async fn main(_spawner: Spawner) -> ! {
                             _ => println!("[CFG] mesh_on save failed"),
                         }
                     }
+                    shell.set_mesh_enabled(mesh_enabled);
                 }
                 if shell.req.cpu_cycle.take() {
                     // Mirror the old WatchFace::cycle_cpu ladder: 80 -> 160 -> 240.
@@ -3272,6 +3575,29 @@ async fn main(_spawner: Spawner) -> ! {
                         // Right-swipe closes via the OVERLAYS table (Flag close).
                         shell.set_theme_open(true);
                         app_state = AppState::Theme;
+                    } else if target == AppState::Settings {
+                        // Settings hub (v0.9.0, #49): a Slint overlay — the
+                        // scene-resident successor of the fb Settings app.
+                        // Push fresh state (the guards elsewhere only push on
+                        // change), reset the NETWORK sub-view, and raise it.
+                        net_view = 0;
+                        net_edit = NetEdit::None;
+                        kb_buf.clear();
+                        kb_plain = false;
+                        kb_bksp_held = false;
+                        if net_status != 1 {
+                            // Not mid-connect: reflect the live association.
+                            net_status = if wifi_connected { 2 } else { 0 };
+                        }
+                        shell.set_net_view(net_view);
+                        shell.set_net_status(net_status);
+                        shell.set_net_current(watch_cfg.ssid.as_str());
+                        shell.set_touch_sound(touch_sound);
+                        shell.set_mesh_enabled(mesh_enabled);
+                        shell.set_wifi_intent(!watch_cfg.wifi_off);
+                        shell.set_ota_status(ota_status_text);
+                        shell.set_settings_open(true);
+                        app_state = AppState::Settings;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It fits alongside the resident Slint
@@ -3370,6 +3696,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
+                        | AppState::Settings
                 ) {
                     if screen_state >= 2 {
                         // Time the shell render — the responsiveness metric the
@@ -3400,94 +3727,23 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
 
-            // === Framebuffer apps (games + Settings) ===
+            // === Framebuffer apps (games) ===
             // ONE generic arm for every app whose registry `kind` is Framebuffer.
             // The per-game arms collapsed into `run_fb_app` (update -> drain sfx ->
             // render+flush on the app's own `dirty`/`min_flush_ms`). Peripheral
             // service that can't live behind the trait stays keyed on the state
-            // (Flappy's INT-touch, Settings' cred-save); WorldSnake's ESP-NOW feed
-            // already runs in the per-tick net section above.
+            // (Flappy's INT-touch); WorldSnake's ESP-NOW feed already runs in the
+            // per-tick net section above. (Settings left this arm in v0.9.0: the
+            // hub is a scene-resident overlay; its cred/OTA service moved to the
+            // Slint-arm drains above.)
             s if crate::apps::registry::is_framebuffer(s) => {
                 let Some(fb_ref) = fb.as_mut() else {
                     app_state = AppState::Watchface;
                     continue;
                 };
 
-                // Settings: CONNECT persists creds to flash + (re)starts WiFi.
-                // Kept keyed on the state (flash + radio service), at the same
-                // point as the old Settings arm — behavior-preserving.
-                if s == AppState::Settings {
-                    use crate::peripherals::wifi::WifiState;
-                    if settings_app.wifi_state == WifiState::Connecting && !settings_connect_pending
-                    {
-                        let ssid = settings_app.wifi_config.ssid_str();
-                        if ssid.is_empty() {
-                            settings_app.wifi_state = WifiState::Error;
-                        } else {
-                            watch_cfg.ssid.clear();
-                            let _ = watch_cfg.ssid.push_str(ssid);
-                            watch_cfg.pass.clear();
-                            let pw = core::str::from_utf8(
-                                &settings_app.wifi_config.password
-                                    [..settings_app.wifi_config.pass_len],
-                            )
-                            .unwrap_or("");
-                            let _ = watch_cfg.pass.push_str(pw);
-                            match config_offset
-                                .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                            {
-                                Some(Ok(())) => println!("[CFG] credentials saved to flash"),
-                                _ => println!("[CFG] save failed"),
-                            }
-                            station_config = esp_radio::wifi::Config::Station(
-                                StationConfig::default()
-                                    .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
-                                    .with_password(watch_cfg.pass.as_str().into()),
-                            );
-                            wifi_has_creds = true;
-                            radio_started = false;
-                            wifi_connected = false;
-                            ntp_synced = false;
-                            wifi_on_request = true;
-                            settings_connect_pending = true;
-                        }
-                    }
-
-                    // Update firmware (OTA). One-tick handshake: the on-glass tap
-                    // set `ota_requested` in the app's update() last tick; take it
-                    // here. SELF-SERVE WiFi: the single-radio time-share drops WiFi
-                    // after the boot burst, so "Connect WiFi first" was the near-
-                    // guaranteed (and near-invisible) outcome of every tap — JP's
-                    // "no feedback" bug. Now the tap itself RAISES WiFi (same
-                    // wifi_on_request knob the boot burst uses), shows "Connecting
-                    // WiFi…", and the pending arm below proceeds automatically once
-                    // associated + DHCP'd (25s timeout). One tap end-to-end.
-                    if settings_app.take_ota_request() {
-                        // Tap-click: covered by the hoisted every-touch tick (#49).
-                        if !crate::net::ota_http::URL_SET {
-                            println!("[OTA] tap: no OTA_URL baked into this build");
-                            settings_app.ota_status = "No OTA URL in build";
-                        } else if wifi_connected && stack.config_v4().is_some() {
-                            println!("[OTA] tap: WiFi ready - updating now");
-                            ota_push_url = None; // tap = the baked OTA_URL
-                            ota_pending_since = Some(now);
-                        } else {
-                            println!("[OTA] tap: raising WiFi for update");
-                            settings_app.ota_status = "Connecting WiFi\u{2026}";
-                            ota_push_url = None; // tap = the baked OTA_URL
-                            ota_attempts = 0;
-                            wifi_on_request = true;
-                            ota_pending_since = Some(now);
-                        }
-                        // The download itself runs in the hoisted per-tick "OTA
-                        // pending executor" (shared with push-OTA announces) —
-                        // it paints this app's status via the fb when ready.
-                    }
-                }
-
                 // Per-app input shaping: Flappy reads the touch INT for a reliable
-                // held-to-flap signal; Settings taps use the last-known coords (the
-                // tap frame's point may already be None on lift); games ignore touch.
+                // held-to-flap signal; games otherwise ignore touch coords.
                 let touch = match s {
                     AppState::Flappy => {
                         if touch_int.is_low() {
@@ -3500,11 +3756,6 @@ async fn main(_spawner: Spawner) -> ! {
                             None
                         }
                     }
-                    AppState::Settings => Some(crate::peripherals::touch::TouchPoint {
-                        x: last_touch_x,
-                        y: last_touch_y,
-                        fingers: 1,
-                    }),
                     _ => None,
                 };
                 let input = AppInput {
@@ -3528,7 +3779,6 @@ async fn main(_spawner: Spawner) -> ! {
                     AppState::Tetris => &mut tetris_game,
                     AppState::Flappy => &mut flappy_game,
                     AppState::Maze => &mut maze_game,
-                    AppState::Settings => &mut settings_app,
                     // is_framebuffer(s) already gated this arm; anything else is a
                     // registry/enum mismatch — bail to the watchface.
                     _ => {
@@ -3614,6 +3864,29 @@ fn run_fb_app(
         *next_flush = now + Duration::from_millis(app.min_flush_ms() as u64);
     }
     (false, sfx)
+}
+
+/// Push the Settings-hub keyboard display state (v0.9.0 NETWORK flow). Rust
+/// owns the text buffer; this derives what the glass shows: the stage title,
+/// the context line (SSID being joined / "hidden network"), and the display
+/// text — MASKED for passwords (unless the eye is open) and TAIL-WINDOWED to
+/// the last 24 chars so the caret end (where typing happens) is always
+/// visible. The keyboard only emits ASCII, so per-char masking is safe.
+fn push_kb(shell: &ShellUi, edit_ssid: bool, ssid: &str, buf: &str, plain: bool) {
+    let (title, context) = if edit_ssid {
+        ("NETWORK NAME", "hidden network")
+    } else {
+        ("PASSWORD", ssid)
+    };
+    let mut disp: heapless::String<80> = heapless::String::new();
+    let n = buf.chars().count();
+    if n > 24 {
+        let _ = disp.push('\u{2026}');
+    }
+    for c in buf.chars().skip(n.saturating_sub(24)) {
+        let _ = disp.push(if edit_ssid || plain { c } else { '*' });
+    }
+    shell.set_kb(title, context, disp.as_str(), plain);
 }
 
 /// Map a WLED page action id (see ui/slint/wled.slint) to a WiZmote button.

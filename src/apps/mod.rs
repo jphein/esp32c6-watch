@@ -9,7 +9,6 @@ pub mod game2048;
 pub mod tetris;
 pub mod flappy;
 pub mod maze;
-pub mod settings;
 pub mod registry;
 
 /// Input state passed to apps each frame

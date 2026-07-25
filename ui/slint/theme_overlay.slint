@@ -43,7 +43,8 @@ component SchemeTile {
         // sample time / date / steps — the text tiers
         Text { x: 16px; y: 16px; text: "10:42"; color: q.ink; font-size: 30px; font-weight: 700; }
         Text { x: 16px; y: 58px; text: "TUE 21 JUL"; color: q.soft; font-size: 13px; letter-spacing: 1px; }
-        Text { x: 16px; y: 78px; text: "4,280 STEPS"; color: q.dim; font-size: 11px; letter-spacing: 1px; }
+        // 12px, NOT 11 (glyph-set consolidation, v0.9.0 ROM squeeze).
+        Text { x: 16px; y: 78px; text: "4,280 STEPS"; color: q.dim; font-size: 12px; letter-spacing: 1px; }
         // accent gradient bar (the minute-progress / brand cue)
         Rectangle {
             x: 16px; y: 100px;
