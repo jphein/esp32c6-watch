@@ -30,13 +30,13 @@ The renderer streams two-line RGB565 strips (~1.6 KB) straight to panel GRAM, so
 - **SMOLv1 ESP-NOW mesh** — routerless fleet networking (`HELLO`/`ACK`/`TIME`/`CFG`/`RELAY` frames). Loop-free time authority: the watch runs its own NTP and both adopts time from and serves it to the fleet.
 - **Seven-app launcher** — six `embedded-graphics` games (Snake, World Snake, 2048, Tetris, Flappy Bird, a tilt-controlled Maze) plus an on-device **Settings** app with a T9 keyboard for entering WiFi credentials at runtime.
 - **Connectivity** — WiFi STA with NTP, a BLE GATT server ([`trouble-host`](https://github.com/embassy-rs/trouble)), MQTT → Home Assistant, and a live **weather** fetch.
-- **Voice & audio** — an **AUDIO** launcher section (Voice / Sound tiles). **Voice push-to-talk** streams held-button capture over WiFi to a LAN STT gateway (gated on WiFi + DHCP ready), and speaker **playback** (beep) is audible. *Live mic capture from the ES7210 is [in progress](#status--roadmap).*
+- **Voice & audio** — an **AUDIO** launcher section (Voice / Sound tiles). **Voice push-to-talk** streams live ES7210 mic capture over WiFi to a LAN STT gateway and shows the transcript on-glass; the **Sound** app is a live dB meter + waveform with a digital gain stepper.
 - **Pedometer** — hardware step counting on the QMI8658 IMU's dedicated engine (keeps counting while the IMU is otherwise idle).
 - **Power management** — CPU clock control, live per-subsystem current estimation, battery monitoring, and a brightness slider.
 - **OTA updates** — HTTP over-the-air firmware into an A/B partition layout.
 - **`defmt-rtt` debug** — feature-gated structured logging over an RTT channel (probe-rs), off by default.
 
-*Also landing (in progress):* a **multi-theme system** — 4 schemes (Midnight / Paper / Amber / Violet) plus a runtime picker — and a **plugin/app registry** that makes each launcher app a single registration. See [Status & roadmap](#status--roadmap).
+*Plus:* a **4-scheme theme system** (Midnight / Paper / **Amber** default / Violet) with an on-glass picker, a **plugin/app registry** (each launcher app is a single registration), **pressed-state touch feedback on every control**, a **paged 3×3 launcher**, **wake gesture hints**, **wrist-raise wake**, and a per-device **sigil identity** derived from the efuse MAC (this fleet: `eldritch-lantern` & `mythic-throne`).
 
 Radios (WiFi/BLE) are **off at boot** and toggled from the watchface.
 
@@ -121,15 +121,66 @@ Core stack: `esp-hal` ~1.1 · `esp-rtos` 0.3 · `esp-radio` 0.18 (wifi/ble/coex/
 
 ## Status & roadmap
 
-- ✅ **Shipped (through v0.6.0):**
-  - *v0.2.0* — Slint UI shell (5-page carousel, launcher, AOD, Mesh Familiar), on-demand framebuffer, SMOLv1 mesh, games, weather, pedometer, BLE, OTA, `defmt-rtt` debug.
-  - *v0.4.0* — light-sleep AOD, WLED WiZmote remote, RSSI treasure-hunt game, home-energy screen, C6 die-temperature, workspace split into host-tested `no_std` crates.
-  - *v0.6.0* — **voice push-to-talk** (WiFi-ready-gated capture streamed to a LAN STT gateway), **speaker playback** fixed (beep audible), **touch responsiveness** (non-blocking DMA panel flush un-starves touch), launcher scroll fix + an **AUDIO** launcher section (Voice / Sound tiles), Dependabot, and the esp-rs stack on the latest stable.
-- 🚧 **In progress:**
-  - **Mic capture** — a live dB meter / voice capture fed by the **ES7210** 4-channel mic ADC over I²S RX. The ES7210 driver is being implemented (the ADC needs its own I²C init before it drives `SDOUT1`); the ES8311 handles playback only.
-  - **Multi-theme system** — 4 schemes (Midnight / Paper / Amber / Violet) with a runtime picker (`feat/theme-system`; a live preview is on the [showcase site](https://jphein.github.io/esp32c6-watch/theme-preview.html)).
-  - **Plugin / app registry** — a single-registration source of truth for launcher apps ([PR #9](https://github.com/jphein/esp32c6-watch/pull/9)).
-- 🔭 **Planned:** **Radio Scan** — a passive 802.15.4 monitor (Zigbee/Thread PAN IDs, channels, RSSI) as a dedicated mode that tears the mesh down first, since all three radios share one PHY.
+The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch/issues) — every item below links to its issue.
+
+### ✅ Shipped
+
+- *v0.2.0* — Slint UI shell (5-page carousel, launcher, AOD, Mesh Familiar), on-demand framebuffer, SMOLv1 mesh, six games, weather, pedometer, BLE, OTA A/B layout, `defmt-rtt` debug.
+- *v0.4.0* — light-sleep AOD, WLED WiZmote remote, RSSI treasure hunt, home-energy screen, die-temperature, host-tested `no_std` workspace crates.
+- *v0.6.0* — voice push-to-talk (LAN STT gateway), speaker playback, touch-responsiveness + launcher fixes, AUDIO launcher section.
+- *v0.7.0* — **working mic** ([#7](https://github.com/jphein/esp32c6-watch/issues/7): the mics are on a separate **ES7210** ADC — driver + ALDO1 power rail), real on-glass **speech-to-text**, mic gain control, **plugin/app registry**, **4-scheme theme system**, the `esp32c6_watch` **Home Assistant component** (climate/energy + a `media_player` speaker queue).
+- *v0.8.0* — **touch-feedback overhaul** (shared `controls.slint` library, bold pressed states on ~52 targets, ≥44 px hit areas), **paged 3×3 launcher**, **partial rendering v2** ([#18](https://github.com/jphein/esp32c6-watch/issues/18): vendored renderer, even-aligned dirty regions), **wrist-raise wake**, IMU step-counter fix, AXP2101 charger profile, **UI test automator** (serial debug console + `tools/ui_test.py`), CO5300 panel confirmed ([#17](https://github.com/jphein/esp32c6-watch/issues/17)).
+- *v0.8.1* — AOD light-sleep panic fix ([#43](https://github.com/jphein/esp32c6-watch/issues/43): esp-hal RC_FAST calibration ticks + a never-panic gate).
+- *v0.8.2* — duo-tone **aurora wake gesture hints**.
+- *v0.8.3* — **reliable zero-touch OTA** ([#25](https://github.com/jphein/esp32c6-watch/issues/25) validated end-to-end): pull *and* push (retained MQTT announce + monotonic build gate, `tools/ota_push.sh`), retry that survives link drops, mesh suppression during updates.
+- *v0.8.4* — **per-device sigil identity** ([#34](https://github.com/jphein/esp32c6-watch/issues/34)) from the efuse MAC: `eldritch-lantern` & `mythic-throne`, MAC-derived mesh node ids, per-watch MQTT client ids + OTA topics (`ota_push.sh --target <sigil>`), sigil BLE advertising.
+
+### 🧭 Gesture shell & UI
+
+- [#29](https://github.com/jphein/esp32c6-watch/issues/29) — Bottom-edge swipe-up to open the app launcher
+- [#31](https://github.com/jphein/esp32c6-watch/issues/31) — Session manager: background apps, corner badge, bottom-hold **alt-tab switcher**
+- [#32](https://github.com/jphein/esp32c6-watch/issues/32) — **Notification shade**: top-edge swipe-down; HA messages over MQTT + system events
+- [#28](https://github.com/jphein/esp32c6-watch/issues/28) — AOD pixel-shift (burn-in) + typography token sweep
+- [#10](https://github.com/jphein/esp32c6-watch/issues/10) — Emoji-expression face (vendor parity)
+
+### 🔊 Audio pipeline
+
+- [#23](https://github.com/jphein/esp32c6-watch/issues/23) — Shared I²S TX playback seam (restore beeps/UI sounds; the base for everything below)
+- [#30](https://github.com/jphein/esp32c6-watch/issues/30) — Real **FFT spectrum analyzer** in the Sound app
+- [#33](https://github.com/jphein/esp32c6-watch/issues/33) — **Music player**: Navidrome/Subsonic client + internet radio (KVMR) via a LAN PCM bridge
+- [#11](https://github.com/jphein/esp32c6-watch/issues/11) — TTS playback — the watch speaks replies
+- [#12](https://github.com/jphein/esp32c6-watch/issues/12) — LLM conversation turn (STT → LLM → TTS)
+- [#13](https://github.com/jphein/esp32c6-watch/issues/13) — On-device wake word (ESP-SR WakeNet FFI)
+- [#14](https://github.com/jphein/esp32c6-watch/issues/14) — Cloud MCP device-control tool server (with the LLM)
+
+### ⌚⌚ Fleet (two watches)
+
+- [#35](https://github.com/jphein/esp32c6-watch/issues/35) — **Watch-to-watch ping**: hero button + full-screen pulse, sigil-identified, over the mesh
+- [#37](https://github.com/jphein/esp32c6-watch/issues/37) — **Super Find**: multi-radio watch finder (mesh + BLE + HA + WiFi + 802.15.4 + LoRa fusion, Find-My scream mode)
+- [#38](https://github.com/jphein/esp32c6-watch/issues/38) — **Meshtastic BLE client**: GPS, LoRa messaging, nodes list
+- [#36](https://github.com/jphein/esp32c6-watch/issues/36) — *Epic:* smol parity — peer-sourced mesh OTA, RELAY/CFG downlink, mesh multiplayer games
+
+### 🏠 Home Assistant
+
+- [#24](https://github.com/jphein/esp32c6-watch/issues/24) — Deploy + verify the HA component; firmware announce-poller (**speaker end-to-end**)
+- [#39](https://github.com/jphein/esp32c6-watch/issues/39) — **Light button**: room-aware light control via Bermuda BLE presence
+- [#40](https://github.com/jphein/esp32c6-watch/issues/40) — **Watering plugin**: sprinkler zones with countdowns + auto-off safety ("water where I'm standing" via per-zone BLE proxies)
+- [#41](https://github.com/jphein/esp32c6-watch/issues/41) — **Laundry**: LG ThinQ → HA + machine-done notifications on the wrist
+- [#42](https://github.com/jphein/esp32c6-watch/issues/42) — **Cam viewer**: bridge-transcoded RGB565 stills, socket→GRAM streaming, doorbell jump
+
+### 🔧 Platform & tooling
+
+- [#22](https://github.com/jphein/esp32c6-watch/issues/22) — Restore press-once PTT (auto-retry latch when WiFi comes up)
+- [#15](https://github.com/jphein/esp32c6-watch/issues/15) — Wi-Fi provisioning — SoftAP captive portal
+- [#16](https://github.com/jphein/esp32c6-watch/issues/16) / [#26](https://github.com/jphein/esp32c6-watch/issues/26) — On-glass verifies: charger profile, steps, wrist-raise tuning
+- [#20](https://github.com/jphein/esp32c6-watch/issues/20) — USB-flash slot-trap tooling (bare `espflash flash` writes the slot the bootloader isn't booting)
+- [#21](https://github.com/jphein/esp32c6-watch/issues/21) — USB-JTAG wedge auto-recovery script
+- [#19](https://github.com/jphein/esp32c6-watch/issues/19) — Rust + Embassy ESP32-C3/C6 ecosystem survey (prior art)
+
+### 📡 Radio frontier
+
+- [#2](https://github.com/jphein/esp32c6-watch/issues/2) — 802.15.4 radio enablement (single-image WiFi + Zigbee/Thread)
+- [#1](https://github.com/jphein/esp32c6-watch/issues/1) — Radio Scan v2: 802.15.4-2015 frame parsing (Thread/Zigbee PAN IDs, channels, RSSI)
 
 ## Credits
 
