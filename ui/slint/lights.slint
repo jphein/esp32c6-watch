@@ -156,26 +156,26 @@ export component LightsOverlay {
     if root.status == 0: Text {
         x: (parent.width - self.width) / 2; y: 348px;
         text: "Finding your room\u{2026}";
-        color: Theme.dim; font-size: 24px; letter-spacing: 1px;
+        color: Theme.dim; font-size: 22px; letter-spacing: 1px;
     }
     if root.status == 1: Text {
         x: 44px; y: 344px;
         width: parent.width - 88px;
         horizontal-alignment: center; overflow: elide;
         text: root.area == "" ? "\u{2014}" : root.area;
-        color: Theme.ink; font-size: 28px; font-weight: 700;
+        color: Theme.ink; font-size: 30px; font-weight: 700;
     }
     if root.status == 2: Text {
         x: (parent.width - self.width) / 2; y: 348px;
         text: "No room presence";
-        color: Theme.soft; font-size: 24px; font-weight: 600;
+        color: Theme.soft; font-size: 22px; font-weight: 600;
     }
     if root.status == 3: Text {
         x: 44px; y: 344px;
         width: parent.width - 88px;
         horizontal-alignment: center; overflow: elide;
         text: root.area == "" ? "Lights" : root.area;
-        color: Theme.soft; font-size: 28px; font-weight: 700;
+        color: Theme.soft; font-size: 30px; font-weight: 700;
     }
 
     // ---------------- caption / feedback line ----------------

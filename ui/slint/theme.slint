@@ -153,7 +153,11 @@ export global Theme {
     // Named sizes so screens stop inventing their own. Weights/tracking stay at
     // the call site (Slint has no composite text style); the SIZE is the token.
     out property <length> t-display: 84px; // AOD & meter hero numerals
-    out property <length> t-hero: 76px;    // current temp / dBFS heroes
+    // t-hero == t-display since the v0.9.0 ROM squeeze: every DISTINCT
+    // font-size embeds a whole pre-rendered glyph set (~160KB at this size),
+    // so the hero tier rides the display tier's glyphs. Don't split them
+    // again without checking `espflash save-image` against the 4MB slot.
+    out property <length> t-hero: 84px;    // current temp / dBFS heroes
     out property <length> t-title: 26px;   // PageTitle
     out property <length> t-value: 22px;   // StatRow values
     out property <length> t-body: 17px;    // tile labels, body copy

@@ -177,11 +177,13 @@ export component ClimateOverlay {
             text: root.cards[root.di].name;
             color: Theme.soft; font-size: 20px; letter-spacing: 1px;
         }
-        // hero current temp + action
+        // hero current temp + action. 84px, NOT 76: glyph-set consolidation
+        // round 2 (v0.9.0 ROM squeeze) — 84px already exists (AOD/meter
+        // heroes) and a distinct 76px set costs ~160KB of ROM.
         Text {
             x: (parent.width - self.width) / 2; y: 132px;
             text: root.cards[root.di].cur + root.cards[root.di].unit;
-            color: Theme.ink; font-size: 76px; font-weight: 700;
+            color: Theme.ink; font-size: 84px; font-weight: 700;
         }
         Text {
             x: (parent.width - self.width) / 2; y: 224px;
