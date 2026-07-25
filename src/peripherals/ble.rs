@@ -48,6 +48,27 @@ fn device_name() -> &'static str {
     crate::net::sigil::get().sigil.as_str()
 }
 
+/// Deterministic per-device BLE address (#47): a STATIC RANDOM address
+/// derived from the factory efuse base MAC — the same address on every boot,
+/// so HA/Bermuda room-tracking registrations survive reboots and OTAs.
+///
+/// Replaces a HARDCODED fleet-shared constant (`C6:83:1E:E3:5A:42`), which was
+/// worse than per-boot random: both watches advertised the SAME address, so a
+/// scanner tracking one watch could silently follow the other.
+///
+/// Derivation (documented for HA-side prediction):
+///   display address = efuse MAC with its two most significant bits forced to
+///   `0b11` (the BLE static-random requirement, Core Spec Vol 6 Part B §1.3):
+///     `addr[0] = mac[0] | 0xC0`, `addr[1..6] = mac[1..6]` (MSB-first).
+///   trouble's `Address::random` takes the bytes LSB-first, hence the reversal
+///   below (empirically anchored: `[0x42,…,0xc6]` scanned as `C6:83:1E:E3:5A:42`).
+/// Fleet: efuse `98:A3:16:A7:2F:E4` → BLE `D8:A3:16:A7:2F:E4` (eldritch-lantern)
+///        efuse `98:A3:16:A5:A7:F8` → BLE `D8:A3:16:A5:A7:F8` (mythic-throne)
+fn stable_address() -> Address {
+    let mac = crate::net::sigil::get().mac; // efuse base MAC, MSB-first
+    Address::random([mac[5], mac[4], mac[3], mac[2], mac[1], mac[0] | 0xC0])
+}
+
 /// Max number of concurrent connections.
 const CONNECTIONS_MAX: usize = 1;
 /// Max number of L2CAP channels (signal + ATT).
@@ -80,8 +101,9 @@ pub async fn ble_host_task(controller: WatchController) {
         Timer::after(Duration::from_millis(250)).await;
     }
 
-    // Static random address (top two bits of the MSB must be 1).
-    let address = Address::random([0x42, 0x5a, 0xe3, 0x1e, 0x83, 0xc6]);
+    // Deterministic static-random address from the efuse MAC (#47) — stable
+    // across reboots/OTAs so the Bermuda registration holds.
+    let address = stable_address();
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
     let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
@@ -101,7 +123,11 @@ pub async fn ble_host_task(controller: WatchController) {
             return;
         }
     };
-    println!("[BLE] host up, advertising as '{}'", device_name());
+    println!(
+        "[BLE] host up, advertising as '{}' at stable addr {} (#47)",
+        device_name(),
+        address
+    );
 
     // The host runner must run alongside everything else, forever.
     let host_fut = async {

@@ -17,6 +17,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
   Restored consumers: the Snake food beep (dead since the mic work) plus a
   subtle tap-click on launcher tile launches and UPDATE FIRMWARE. SFX synths
   live in `mic-dsp` (host-unit-tested); debug console gains `beep`.
+- **Stable BLE address** (#47): the advertised address is now a static-random
+  address derived from the efuse MAC (top two bits forced per the BLE spec —
+  `eldritch-lantern` → `D8:A3:16:A7:2F:E4`, `mythic-throne` →
+  `D8:A3:16:A5:A7:F8`), replacing a *hardcoded fleet-shared* constant that made
+  both watches advertise the same MAC. HA/Bermuda room-tracking registrations
+  now survive reboots and OTAs.
+- **BLE toggle persists** (#46, BLE bit shipped early): config record v4 adds a
+  radios-flags byte (bit 0 = BLE-on-at-boot; bits 1–7 reserved for the
+  coordinated #44/#45/#46 migration). BLE-on now survives reboots/OTAs; while
+  the host is running (it can't stop at runtime), further presses flip the
+  persisted intent, so "press, then reboot" turns it off.
 
 ## [0.8.4] — 2026-07-24
 

@@ -1156,7 +1156,19 @@ async fn main(_spawner: Spawner) -> ! {
     let mut next_ntp_attempt = Instant::now();
     let mut wifi_toggle_request = false;
     let mut last_wifi_idle_check = Instant::now();
-    let mut ble_on = false;
+    // #46 (BLE bit): restore the persisted BLE toggle (config v4) so BLE-on —
+    // and with it the stable-address Bermuda registration (#47) — survives
+    // reboots and OTAs. The parked trouble host starts within ~250 ms.
+    let mut ble_on = watch_cfg.ble_on;
+    if ble_on {
+        crate::peripherals::ble::BLE_START_REQUEST
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        power_stats.ble_on = true;
+        println!(
+            "[BLE] restored ON from config (persisted toggle, '{}')",
+            net::sigil::get().sigil.as_str()
+        );
+    }
     let mut ble_toggle_request = false;
     let mut settings_connect_pending = false;
     let mut wifi_connect_attempts: u8 = 0;
@@ -2150,14 +2162,18 @@ async fn main(_spawner: Spawner) -> ! {
         // as the per-device sigil (#34, e.g. "eldritch-lantern") and serves
         // the Battery GATT service. The trouble
         // host owns the controller from then on and cannot be torn down at
-        // runtime, so "off" requires a reboot; later presses just log that.
+        // runtime, so "off" requires a reboot. Presses while running flip the
+        // PERSISTED intent instead (#46): the next boot honors it — press,
+        // reboot, BLE stays off; press again before rebooting to keep it on.
         // (The old raw-HCI scan/device-discovery logging was dropped: the
         // scanner would drive the central role against the same
         // single-connection peripheral host.)
         if ble_toggle_request {
             ble_toggle_request = false;
+            let persist_intent;
             if !ble_on {
                 ble_on = true;
+                persist_intent = true;
                 crate::peripherals::ble::BLE_START_REQUEST
                     .store(true, core::sync::atomic::Ordering::Relaxed);
                 println!(
@@ -2165,7 +2181,25 @@ async fn main(_spawner: Spawner) -> ! {
                     net::sigil::get().sigil.as_str()
                 );
             } else {
-                println!("[BLE] host can't be stopped at runtime - reboot to disable");
+                persist_intent = !watch_cfg.ble_on;
+                println!(
+                    "[BLE] host can't be stopped at runtime - persisted {} for next boot",
+                    if persist_intent { "ON" } else { "OFF (reboot to disable)" }
+                );
+            }
+            // Persist the toggle (#46 BLE bit, config v4) — edge-triggered
+            // like the page/units/theme saves.
+            if watch_cfg.ble_on != persist_intent {
+                watch_cfg.ble_on = persist_intent;
+                if let Some(off) = config_offset {
+                    match peripherals::config::save(&mut flash, off, &watch_cfg) {
+                        Ok(()) => println!(
+                            "[CFG] ble_on={} saved to flash",
+                            watch_cfg.ble_on
+                        ),
+                        Err(()) => println!("[CFG] ble_on save failed"),
+                    }
+                }
             }
             power_stats.ble_on = ble_on;
         }
