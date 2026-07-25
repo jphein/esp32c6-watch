@@ -29,10 +29,8 @@ use core::cell::RefCell;
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-// select3 for the normal build; the debug-console build uses select4 (adds the
-// synthetic-input wake) fully-qualified at the call site.
-#[cfg(not(feature = "debug-console"))]
-use embassy_futures::select::select3;
+// Both build variants use fully-qualified embassy_futures::select at the main
+// wake point (the debug-console build nests select for the synthetic-input wake).
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::RgbColor;
@@ -131,24 +129,43 @@ async fn climate_task(
     close: &'static crate::net::mqtt_climate::CloseSignal,
     done: &'static crate::net::mqtt_climate::CloseSignal,
 ) {
+    // Consecutive-error counter for progressive backoff: the FIRST failure of a
+    // screen visit retries fast (a cold open races DHCP/route settling — a 10s
+    // flat pause here was most of the "Finding your room… forever" feel), while
+    // repeat failures back off to the storm-safe 10s.
+    let mut consec_errs: u32 = 0;
     loop {
         open.wait().await;
         // One session feeds the Climate + Energy + Lights screens (shared CONNECT).
-        if let Err(e) = crate::net::mqtt_climate::run_climate_session(
+        let res = crate::net::mqtt_climate::run_climate_session(
             stack, state, energy, lights, cmd_rx, close,
         )
-        .await
-        {
-            println!("[CLIM] session ended: {e}");
-            // Reconnect backoff. main.rs re-signals `open` as soon as `done` clears
-            // `climate_running` (session_want && wifi_connected && !running). With a
-            // broker the watch can't reach (e.g. VLAN-6 mosquitto firewalled off the
-            // roam VLAN-11), the session now fails `tcp connect` in ~2s — so without
-            // a pause here `open` would re-fire every ~2s: a tight reconnect storm
-            // that keeps WiFi held (mesh starved) and pins the radio. Hold `done`
-            // back so retries pace at ~10s and the radio is free for the mesh in
-            // between. Only on the Err path — a clean close signals `done` at once.
-            embassy_time::Timer::after(embassy_time::Duration::from_secs(10)).await;
+        .await;
+        // Phase is owned here (the only caller): DOWN on every exit path —
+        // BEFORE the backoff sleep — so a press during the backoff window is
+        // rejected with feedback instead of queueing a stale replay
+        // (see SESSION_PHASE docs).
+        crate::net::mqtt_climate::SESSION_PHASE.store(
+            crate::net::mqtt_climate::PHASE_DOWN,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        match res {
+            Ok(()) => consec_errs = 0,
+            Err(e) => {
+                consec_errs = consec_errs.saturating_add(1);
+                // Reconnect backoff. main.rs re-signals `open` as soon as `done` clears
+                // `climate_running` (session_want && wifi_connected && !running). With a
+                // broker the watch can't reach (e.g. VLAN-6 mosquitto firewalled off the
+                // roam VLAN-11), the session fails `tcp connect` in ~2s — so without
+                // a pause here `open` would re-fire every ~2s: a tight reconnect storm
+                // that keeps WiFi held (mesh starved) and pins the radio. Progressive:
+                // 2s on the first failure (transient boot/DHCP races recover fast),
+                // 10s from the second on (real outages stay storm-safe). Only on the
+                // Err path — a clean close signals `done` at once.
+                let backoff = if consec_errs == 1 { 2 } else { 10 };
+                println!("[CLIM] session ended: {e} (retry in {backoff}s)");
+                embassy_time::Timer::after(embassy_time::Duration::from_secs(backoff)).await;
+            }
         }
         done.signal(()); // fires on Ok AND Err → main restores mesh unconditionally
     }
@@ -1143,6 +1160,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut lights_active = false;
     let mut lights_pending: Option<LightsPending> = None;
     let mut lights_noreply_until: Option<Instant> = None;
+    // [LAT] "Finding your room…" duration: stamped on screen-open, consumed
+    // (printed) on the first rendered state frame.
+    let mut lights_opened_at: Option<Instant> = None;
     // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
@@ -1437,22 +1457,32 @@ async fn main(_spawner: Spawner) -> ! {
                 real_wake
             );
         } else {
-            // debug-console adds a 4th wake source (a queued synthetic-input
+            // debug-console adds a wake source (a queued synthetic-input
             // command) so the console drives the loop without waiting out the
             // idle tick. Zero cost when nothing is queued.
+            //
+            // Both variants also select STATE_WAKE: an accepted MQTT state
+            // frame (climate/energy/lights) repaints on the next executor pass
+            // instead of sitting in the shared mutex for up to a full idle tick
+            // (1s on the HA screens — the biggest firmware-side term of the
+            // press→render round trip). Coalescing Signal: bursts wake once.
             #[cfg(feature = "debug-console")]
+            let _ = embassy_futures::select::select(
+                embassy_futures::select::select4(
+                    Timer::after(tick),
+                    touch_int.wait_for_falling_edge(),
+                    boot_button.wait_for_falling_edge(),
+                    debug_console::wait_inject(),
+                ),
+                crate::net::mqtt_climate::STATE_WAKE.wait(),
+            )
+            .await;
+            #[cfg(not(feature = "debug-console"))]
             let _ = embassy_futures::select::select4(
                 Timer::after(tick),
                 touch_int.wait_for_falling_edge(),
                 boot_button.wait_for_falling_edge(),
-                debug_console::wait_inject(),
-            )
-            .await;
-            #[cfg(not(feature = "debug-console"))]
-            let _ = select3(
-                Timer::after(tick),
-                touch_int.wait_for_falling_edge(),
-                boot_button.wait_for_falling_edge(),
+                crate::net::mqtt_climate::STATE_WAKE.wait(),
             )
             .await;
 
@@ -2220,6 +2250,18 @@ async fn main(_spawner: Spawner) -> ! {
                     "[BLE] host can't be stopped at runtime - persisted {} for next boot",
                     if persist_intent { "ON" } else { "OFF (reboot to disable)" }
                 );
+                // On-glass feedback (#46 follow-up): while the host is running,
+                // a press flips ONLY the persisted boot intent — the dot keeps
+                // showing the runtime state (still ON), so without this toast a
+                // stray second tap silently disarmed BLE-at-boot and the toggle
+                // "didn't survive" the next reset. Make the divergence visible.
+                shell.set_toast(if persist_intent {
+                    "BLE: stays on"
+                } else {
+                    "BLE: off after reboot"
+                });
+                toast_active = true;
+                toast_until = Instant::now() + Duration::from_secs(3);
             }
             // Persist the toggle (#46 BLE bit, config v4) — edge-triggered
             // like the page/units/theme saves.
@@ -2442,6 +2484,7 @@ async fn main(_spawner: Spawner) -> ! {
                 if shell.req.lights_closed.take() {
                     lights_pending = None; // optimistic state doesn't outlive the screen
                     lights_noreply_until = None;
+                    lights_opened_at = None;
                     lights_active = false;
                     shell.set_lights_open(false);
                     if app_state == AppState::Lights {
@@ -2461,7 +2504,17 @@ async fn main(_spawner: Spawner) -> ! {
                 let wifi_want = climate_session_want || app_state == AppState::Voice;
                 if wifi_want {
                     wifi_on_request = true;
-                    if climate_session_want && wifi_connected && !climate_running {
+                    // DHCP gate (config_v4): association alone is NOT a usable
+                    // stack — signalling `open` before the lease lands made the
+                    // first TCP connect fail instantly (no route), which put a
+                    // cold screen-open into the reconnect backoff. That single
+                    // race was ~10s of "Finding your room…" on an otherwise
+                    // healthy LAN. Voice (below) and OTA already gate this way.
+                    if climate_session_want
+                        && wifi_connected
+                        && stack.config_v4().is_some()
+                        && !climate_running
+                    {
                         climate_open.signal(());
                         climate_running = true;
                     }
@@ -2583,13 +2636,20 @@ async fn main(_spawner: Spawner) -> ! {
                 // conn-state: 0 ready · 1 connecting · 2 unreachable (HA LWT offline).
                 if app_state == AppState::Energy {
                     let es = climate_energy.lock().await;
+                    // conn precedence (energy-conn-gate fix): "HA unreachable"
+                    // only when the avail LWT has actually SAID `offline` this
+                    // boot (avail_seen && !online). A missing avail topic —
+                    // bridge flow not deployed / retained LWT lost — used to
+                    // hard-fail the screen as "unreachable" even while live
+                    // state frames were rendering-ready. Now: no avail info +
+                    // no data = "connecting"; no avail info + data = live.
                     let conn = if !climate_running {
                         1
-                    } else if !es.online {
+                    } else if es.avail_seen && !es.online {
                         2
                     } else if !es.has_data() {
-                        // Session up + LWT online, but no EnergyState frame yet:
-                        // stay "connecting" so the UI shows that instead of the
+                        // Session up, but no EnergyState frame yet: stay
+                        // "connecting" so the UI shows that instead of the
                         // -1% sentinel that battery_pct=None maps to below (luna #1).
                         1
                     } else {
@@ -2617,25 +2677,60 @@ async fn main(_spawner: Spawner) -> ! {
                             2 => crate::net::mqtt_climate::LightsAction::Off,
                             _ => crate::net::mqtt_climate::LightsAction::Toggle,
                         };
+                        // Session-phase gate: only queue while the session is UP
+                        // or actively CONNECTING (a press during the open
+                        // handshake is seconds old at delivery — fine). A press
+                        // while the session is DOWN (reconnect backoff, WiFi
+                        // drop) used to queue silently and REPLAY at the next
+                        // connect — lights flipping on their own many seconds
+                        // later. Reject it with the no-reply hint instead.
+                        let phase = crate::net::mqtt_climate::SESSION_PHASE
+                            .load(core::sync::atomic::Ordering::Relaxed);
                         let seq_now = lights_state.lock().await.seq;
-                        if climate_cmds
-                            .sender()
-                            .try_send(crate::net::mqtt_climate::ClimateCmd::Lights(action))
-                            .is_ok()
+                        if phase != crate::net::mqtt_climate::PHASE_DOWN
+                            && climate_cmds
+                                .sender()
+                                .try_send(crate::net::mqtt_climate::ClimateCmd::Lights(action))
+                                .is_ok()
                         {
+                            println!(
+                                "[LAT] lights cmd queued t={}ms",
+                                Instant::now().as_millis()
+                            );
                             lights_pending = Some(LightsPending {
                                 sent_at: Instant::now(),
                                 seq_at_send: seq_now,
                             });
                             lights_noreply_until = None; // a fresh send clears the hint
+                        } else {
+                            // Immediate, honest feedback: "no reply — try again"
+                            // (pending=2) rather than a fake "sending…" that
+                            // can't complete.
+                            lights_pending = None;
+                            lights_noreply_until =
+                                Some(Instant::now() + Duration::from_millis(2500));
                         }
                     }
 
                     let ls = lights_state.lock().await;
+                    // First state frame after this screen-open: the "Finding
+                    // your room…" duration, measured to the render tick.
+                    if ls.has_data() {
+                        if let Some(t) = lights_opened_at.take() {
+                            println!(
+                                "[LAT] lights open->first-state {}ms",
+                                Instant::now().duration_since(t).as_millis()
+                            );
+                        }
+                    }
                     // Resolve the optimistic flash: HA's republish landed (seq
                     // moved) → clear; 5s with no reply → revert + transient hint.
                     if let Some(p) = lights_pending.as_ref() {
                         if ls.seq != p.seq_at_send {
+                            println!(
+                                "[LAT] lights press->state-render {}ms (render tick)",
+                                Instant::now().duration_since(p.sent_at).as_millis()
+                            );
                             lights_pending = None;
                         } else if Instant::now().duration_since(p.sent_at)
                             >= Duration::from_secs(5)
@@ -3059,6 +3154,7 @@ async fn main(_spawner: Spawner) -> ! {
                         // released on close (both chevron-cell + right-swipe paths).
                         lights_pending = None;
                         lights_noreply_until = None;
+                        lights_opened_at = Some(Instant::now()); // [LAT] open->first-state
                         shell.set_lights_open(true);
                         lights_active = true;
                         if !wifi_on_request {

@@ -98,6 +98,25 @@ pub type ClimateCmdSender = Sender<'static, CriticalSectionRawMutex, ClimateCmd,
 /// Screen-close signal — fire it to end the session with a clean DISCONNECT.
 pub type CloseSignal = Signal<CriticalSectionRawMutex, ()>;
 
+/// Fires after every ACCEPTED inbound state update (climate upsert, energy
+/// replace, avail flip, lights frame). The main loop selects on it so a state
+/// arrival repaints on the NEXT executor pass instead of waiting out the idle
+/// tick (up to 1s on the Lights/Climate screens) — the press→render round trip
+/// loses its biggest firmware-side term. Coalescing by design (Signal, not a
+/// channel): a burst of retained frames on subscribe wakes one repaint.
+pub static STATE_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Session phase for UI gating: 0 = down (incl. reconnect backoff) · 1 = TCP/
+/// handshake in flight · 2 = up (SUBACK'd). Main gates command *acceptance* on
+/// this so a press during a broker outage is rejected with visible feedback
+/// instead of silently queueing and replaying a stale toggle at the next
+/// reconnect (the "lights flip on their own seconds later" bug class).
+pub static SESSION_PHASE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub const PHASE_DOWN: u8 = 0;
+pub const PHASE_CONNECTING: u8 = 1;
+pub const PHASE_UP: u8 = 2;
+
 /// Live HA energy snapshot consumed from retained `watch/energy/state` (v0.4.1).
 /// Small, `Copy`, behind the same [`Mutex`] pattern as [`ClimateState`]. Numeric
 /// fields are `Option` so the UI can distinguish "no data yet" from a real 0.
@@ -121,6 +140,12 @@ pub struct EnergyState {
     /// HA/bridge reachable per the `watch/energy/avail` LWT. `false` → the UI
     /// shows "HA unreachable" (conn-state = 2) over the last-known values.
     pub online: bool,
+    /// True once ANY `watch/energy/avail` frame has been received this boot.
+    /// Distinguishes "the bridge said offline" (show *HA unreachable*) from
+    /// "no avail topic exists at all" (bridge never deployed / LWT retained
+    /// message lost) — in the latter case live data should still render
+    /// instead of a false-negative "HA unreachable" (#energy-conn-gate).
+    pub avail_seen: bool,
 }
 
 impl EnergyState {
@@ -131,6 +156,7 @@ impl EnergyState {
             grid_w: None,
             charging: false,
             online: false,
+            avail_seen: false,
         }
     }
 
@@ -366,6 +392,13 @@ pub async fn run_climate_session(
     close: &'static CloseSignal,
 ) -> Result<(), Error> {
     let (ip, port) = parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?;
+    let t_start = Instant::now();
+    SESSION_PHASE.store(PHASE_CONNECTING, core::sync::atomic::Ordering::Relaxed);
+    // Drop commands queued during a PREVIOUS failed attempt / backoff window:
+    // replaying a stale `toggle` seconds later flips lights the user isn't
+    // expecting. Main gates sends on SESSION_PHASE, so the only survivors here
+    // are the ones from the race window around a session death — drop them.
+    while cmd_rx.try_receive().is_ok() {}
 
     let mut rx_buf = [0u8; 1024];
     let mut tx_buf = [0u8; 1024];
@@ -403,7 +436,11 @@ pub async fn run_climate_session(
 
     // SUBSCRIBE watch/climate/+/state + watch/climate/roster (QoS 0) -> SUBACK.
     subscribe(&mut socket).await?;
-    println!("[CLIM] session up (subscribed)");
+    SESSION_PHASE.store(PHASE_UP, core::sync::atomic::Ordering::Relaxed);
+    println!(
+        "[CLIM] session up (subscribed) [LAT] connect+handshake={}ms",
+        (Instant::now() - t_start).as_millis()
+    );
 
     // Persistent phase: drop the handshake idle timeout so idle awaits (waiting
     // for the next state change) don't abort. From here, deadlines are explicit
@@ -571,6 +608,8 @@ async fn handle_publish(
             if let Some(entity) = climate_model::parse_state(payload) {
                 let mut guard = state.lock().await;
                 guard.upsert(obj, entity);
+                drop(guard);
+                STATE_WAKE.signal(());
             }
             // parse_state == None (malformed / empty retained-clear) -> skip.
         }
@@ -581,13 +620,20 @@ async fn handle_publish(
                 // carry it across the wholesale replace so a fresh state frame
                 // can't spuriously clear "HA unreachable".
                 next.online = guard.online;
+                next.avail_seen = guard.avail_seen;
                 *guard = next;
+                drop(guard);
+                STATE_WAKE.signal(());
             }
             // parse_energy == None (malformed / empty) -> keep last-known state.
         }
         Some(TopicKind::EnergyAvail) => {
             if let Some(online) = parse_avail(payload) {
-                energy.lock().await.online = online;
+                let mut guard = energy.lock().await;
+                guard.online = online;
+                guard.avail_seen = true;
+                drop(guard);
+                STATE_WAKE.signal(());
             }
             // Unrecognized avail payload -> leave the flag unchanged.
         }
@@ -608,7 +654,15 @@ async fn handle_publish(
             if let Some(mut next) = parse_lights(payload) {
                 let mut guard = lights.lock().await;
                 next.seq = guard.seq.wrapping_add(1).max(1);
+                let seq = next.seq;
                 *guard = next;
+                drop(guard);
+                println!(
+                    "[LAT] lights state rx seq={} t={}ms",
+                    seq,
+                    Instant::now().as_millis()
+                );
+                STATE_WAKE.signal(());
             }
             // parse_lights == None (malformed / empty retained-clear) -> keep
             // the last-known snapshot.
@@ -671,7 +725,13 @@ async fn send_command(socket: &mut TcpSocket<'_>, cmd: &ClimateCmd) -> Result<()
         // NOT retained (a command is an event, not state).
         ClimateCmd::Lights(action) => {
             let topic = &LIGHTS_TOPICS.get().cmd;
-            publish(socket, topic, action.payload().as_bytes(), false).await
+            let res = publish(socket, topic, action.payload().as_bytes(), false).await;
+            println!(
+                "[LAT] lights cmd '{}' published t={}ms",
+                action.payload(),
+                Instant::now().as_millis()
+            );
+            res
         }
     }
 }
@@ -775,7 +835,8 @@ pub fn parse_energy(bytes: &[u8]) -> Option<EnergyState> {
         solar_w,
         grid_w,
         charging,
-        online: false, // caller preserves the real value from the avail LWT
+        online: false,     // caller preserves the real value from the avail LWT
+        avail_seen: false, // caller preserves this too (owned by the avail arm)
     })
 }
 
