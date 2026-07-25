@@ -29,6 +29,9 @@
 //!   - `home`             — return to the watchface
 //!   - `state`            — print AppState + key UI flags
 //!   - `perf`             — print the last-N render-frame durations (µs)
+//!   - `beep`             — play the 800 Hz/50 ms test tone on the shared TX
+//!                          ring (#23) — validates playback AND that the mic
+//!                          still captures afterwards (run `launch` Sound next)
 //!   - `ping` / `help`
 
 use core::cell::RefCell;
@@ -320,9 +323,21 @@ fn handle_line(bytes: &[u8]) {
             );
         }
         "perf" => report_perf(),
+        "beep" => {
+            // On-glass playback probe (#23): synthesize the Snake beep on the
+            // stack and queue it. The amp rises via the main loop's per-tick
+            // service_amp — no shared peripherals needed from this task. A
+            // no-op input frame is queued too: it wakes the (possibly 1 Hz /
+            // parked) main loop immediately, so the amp raise is prompt.
+            let mut buf = [0u8; 1600];
+            let n = mic_dsp::fill_tone_mono_s16le(&mut buf, 16_000, 800, 50, 12_000, 2);
+            let queued = crate::peripherals::audio_out::play_pcm(&buf[..n]);
+            let _ = queue(Inject::Touch { point: None, swipe: None, start_y: 0, tap: false });
+            println!("[DBGCON] ok beep ({} of {} B queued)", queued, n);
+        }
         "ping" => println!("[DBGCON] ok pong"),
         "help" => println!(
-            "[DBGCON] cmds: tap <x> <y> | swipe up|down|left|right | launch <idx> | home | state | perf | ping"
+            "[DBGCON] cmds: tap <x> <y> | swipe up|down|left|right | launch <idx> | home | state | perf | beep | ping"
         ),
         _ => println!("[DBGCON] err unknown: {}", cmd),
     }

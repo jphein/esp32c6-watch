@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.5] — 2026-07-24
+
+- **Sound is back — shared I2S TX playback seam** (#23): SFX play by substituting
+  samples into the always-running silent-clock TX ring (the full-duplex master
+  whose BCLK/WS clocks the ES7210 mic), so the mic clock never stops for a beep.
+  New `audio_out` module: `play_pcm()` takes project-standard mono 16 kHz s16le
+  (queued non-blocking, remainder rejected when full), a feeder expands to the
+  ring's stereo, and the speaker amp (GPIO6) + ES8311 power up only while a clip
+  is in flight (pops triple-guarded: synth ramps, driven-silence lead-in, tail
+  pad). Half-duplex: capture windows are discarded while playing (no AEC).
+  Restored consumers: the Snake food beep (dead since the mic work) plus a
+  subtle tap-click on launcher tile launches and UPDATE FIRMWARE. SFX synths
+  live in `mic-dsp` (host-unit-tested); debug console gains `beep`.
+
 ## [0.8.4] — 2026-07-24
 
 - **Per-device sigil identity** (#34) derived from the efuse MAC via smol's pinned

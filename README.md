@@ -134,6 +134,7 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 - *v0.8.2* — duo-tone **aurora wake gesture hints**.
 - *v0.8.3* — **reliable zero-touch OTA** ([#25](https://github.com/jphein/esp32c6-watch/issues/25) validated end-to-end): pull *and* push (retained MQTT announce + monotonic build gate, `tools/ota_push.sh`), retry that survives link drops, mesh suppression during updates.
 - *v0.8.4* — **per-device sigil identity** ([#34](https://github.com/jphein/esp32c6-watch/issues/34)) from the efuse MAC: `eldritch-lantern` & `mythic-throne`, MAC-derived mesh node ids, per-watch MQTT client ids + OTA topics (`ota_push.sh --target <sigil>`), sigil BLE advertising.
+- *v0.8.5* — **sound restored: shared I²S TX playback seam** ([#23](https://github.com/jphein/esp32c6-watch/issues/23)): `audio_out::play_pcm()` (mono 16 kHz s16le) substitutes samples into the always-running silent-clock ring — the mic's clock master never stops for a beep; amp+codec power only while a clip plays; half-duplex capture gate; Snake food beep + launcher/UPDATE-FIRMWARE tap-clicks; `beep` console probe.
 
 ### 🧭 Gesture shell & UI
 
@@ -145,7 +146,8 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 
 ### 🔊 Audio pipeline
 
-- [#23](https://github.com/jphein/esp32c6-watch/issues/23) — Shared I²S TX playback seam (restore beeps/UI sounds; the base for everything below)
+*(the base of this section — the shared I²S TX playback seam, [#23](https://github.com/jphein/esp32c6-watch/issues/23) — shipped in v0.8.5: `audio_out::play_pcm()`)*
+
 - [#30](https://github.com/jphein/esp32c6-watch/issues/30) — Real **FFT spectrum analyzer** in the Sound app
 - [#33](https://github.com/jphein/esp32c6-watch/issues/33) — **Music player**: Navidrome/Subsonic client + internet radio (KVMR) via a LAN PCM bridge
 - [#11](https://github.com/jphein/esp32c6-watch/issues/11) — TTS playback — the watch speaks replies
