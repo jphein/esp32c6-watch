@@ -49,6 +49,7 @@ pyserial is missing.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
@@ -72,11 +73,28 @@ PANEL = 412  # square AMOLED, logical px
 # Serial transport (pyserial, with a stdlib termios fallback)
 # --------------------------------------------------------------------------- #
 class _Port:
-    """Line-oriented serial wrapper. Prefers pyserial; falls back to raw tty."""
+    """Line-oriented transport wrapper: serial (pyserial, or a raw termios
+    tty when pyserial is missing) or TCP (`tcp://host:port` — the WiFi debug
+    channel, same line protocol; see docs/debugging.md).
 
-    def __init__(self, dev: str, timeout: float):
+    TCP sessions send `auth <token>` as their first line when a token is
+    given — the firmware debug server drops unauthenticated connections."""
+
+    def __init__(self, dev: str, timeout: float, token: str | None = None):
         self.timeout = timeout
         self._buf = b""
+        if dev.startswith("tcp://") or (":" in dev and not dev.startswith("/")):
+            import socket
+
+            hostport = dev[len("tcp://"):] if dev.startswith("tcp://") else dev
+            host, _, port = hostport.partition(":")
+            self._sock = socket.create_connection(
+                (host, int(port or 5555)), timeout=max(timeout, 3.0))
+            self._sock.settimeout(0.05)
+            self._mode = "tcp"
+            if token:
+                self._sock.sendall(f"auth {token}\n".encode())
+            return
         try:
             import serial  # type: ignore
 
@@ -102,6 +120,8 @@ class _Port:
         self._buf = b""
         if self._mode == "pyserial":
             self._ser.reset_input_buffer()
+        elif self._mode == "tcp":
+            pass  # dropping buffered socket data would race the server
         else:
             import os
 
@@ -116,6 +136,8 @@ class _Port:
         if self._mode == "pyserial":
             self._ser.write(data)
             self._ser.flush()
+        elif self._mode == "tcp":
+            self._sock.sendall(data)
         else:
             import os
 
@@ -124,6 +146,17 @@ class _Port:
     def _read_some(self) -> bytes:
         if self._mode == "pyserial":
             return self._ser.read(256)
+        if self._mode == "tcp":
+            import socket
+
+            try:
+                data = self._sock.recv(256)
+            except socket.timeout:
+                return b""
+            if data == b"":
+                raise ConnectionError(
+                    "debug link closed by the watch (auth reject / stop)")
+            return data
         import os
         import select
 
@@ -150,6 +183,8 @@ class _Port:
     def close(self) -> None:
         if self._mode == "pyserial":
             self._ser.close()
+        elif self._mode == "tcp":
+            self._sock.close()
         else:
             import os
 
@@ -163,8 +198,9 @@ class Watch:
     """Drive + measure the watch UI over the debug console."""
 
     def __init__(self, dev: str = "/dev/ttyACM3", timeout: float = 2.0,
-                 settle: float = 0.20, verbose: bool = False):
-        self.port = _Port(dev, timeout)
+                 settle: float = 0.20, verbose: bool = False,
+                 token: str | None = None):
+        self.port = _Port(dev, timeout, token=token)
         self.timeout = timeout
         self.settle = settle          # UI settle time after an input command
         self.verbose = verbose
@@ -467,7 +503,13 @@ def run_lights(w: Watch, wait_state: float = 20.0, wait_reply: float = 12.0) -> 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="esp32c6-watch UI test automator (host driver)")
-    ap.add_argument("--port", default="/dev/ttyACM3", help="serial device (default /dev/ttyACM3)")
+    ap.add_argument("--port", default="/dev/ttyACM3",
+                    help="serial device (default /dev/ttyACM3) or tcp://host:port "
+                         "(the WiFi debug channel; prefer `watchctl console/test` "
+                         "which resolves ports by sigil)")
+    ap.add_argument("--token", default=os.environ.get("WATCH_DEBUG_TOKEN"),
+                    help="WiFi debug shared secret (env WATCH_DEBUG_TOKEN); "
+                         "sent as `auth <token>` on TCP connect")
     ap.add_argument("--timeout", type=float, default=2.0, help="per-command reply timeout (s)")
     ap.add_argument("--settle", type=float, default=0.20, help="UI settle delay after input (s)")
     ap.add_argument("-v", "--verbose", action="store_true", help="echo every serial line read")
@@ -478,7 +520,8 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        w = Watch(args.port, timeout=args.timeout, settle=args.settle, verbose=args.verbose)
+        w = Watch(args.port, timeout=args.timeout, settle=args.settle,
+                  verbose=args.verbose, token=args.token)
     except Exception as e:  # noqa: BLE001
         print(f"could not open {args.port}: {e}", file=sys.stderr)
         return 2
@@ -497,6 +540,11 @@ def main() -> int:
         if args.mode == "lights":
             return run_lights(w)
         return run_suite(w)
+    except ConnectionError as e:
+        # TCP transport: the debug server dropped us (bad/missing token,
+        # server stop) — report cleanly instead of a traceback.
+        print(f"debug link: {e}", file=sys.stderr)
+        return 2
     finally:
         w.close()
 
