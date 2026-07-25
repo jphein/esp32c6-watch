@@ -863,16 +863,20 @@ async fn main(_spawner: Spawner) -> ! {
         let n = mic_dsp::fill_tone_mono_s16le(buf, 16_000, 800, 50, 12_000, 2);
         &buf[..n]
     };
-    static CLICK_PCM: StaticCell<[u8; mic_dsp::CLICK_LEN]> = StaticCell::new();
-    let click_pcm: &'static [u8] = {
-        let buf = CLICK_PCM.init([0u8; mic_dsp::CLICK_LEN]);
-        let n = mic_dsp::fill_click_mono_s16le(buf, 16_000);
+    // Every-touch tick (#49, v0.9.0): the same 12 ms 1.8 kHz "tick" as the old
+    // opt-in click but QUIETER (peak ~6000 ≈ −15 dBFS) — played by the ONE
+    // hoisted tap hook below on every tap, so it must read as texture, not
+    // notification. Gated on the persisted `touch_sound` flag.
+    static TICK_PCM: StaticCell<[u8; mic_dsp::CLICK_LEN]> = StaticCell::new();
+    let tick_pcm: &'static [u8] = {
+        let buf = TICK_PCM.init([0u8; mic_dsp::CLICK_LEN]);
+        let n = mic_dsp::fill_tick_mono_s16le(buf, 16_000);
         &buf[..n]
     };
     println!(
-        "[AUDIO] SFX ready (beep {} B, click {} B mono) — playback via shared TX ring",
+        "[AUDIO] SFX ready (beep {} B, tick {} B mono) — playback via shared TX ring",
         beep_pcm.len(),
-        click_pcm.len()
+        tick_pcm.len()
     );
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
@@ -1139,9 +1143,10 @@ async fn main(_spawner: Spawner) -> ! {
     let mut was_touching = false;
 
     // Radio state (user intent vs. actual radio state, per the S3 design).
-    // DEBUG: auto-enable WiFi at boot while we diagnose the connect issue,
-    // so no watchface tap is needed. Revert to `false` once stable.
-    let mut wifi_on_request = wifi_has_creds;
+    // Auto-connect boot burst (NTP/MQTT/weather) when creds exist — unless the
+    // user persisted the WiFi intent as FORCED-OFF (config v5 wifi bit, #46):
+    // then the watch boots radio-quiet and WiFi only rises on demand.
+    let mut wifi_on_request = wifi_has_creds && !watch_cfg.wifi_off;
     // #58: Climate session lifecycle. climate_active holds WiFi while the screen
     // is open (cleared on session return); climate_running gates the one-shot
     // open-signal so the session spawns once per screen visit.
@@ -1169,9 +1174,11 @@ async fn main(_spawner: Spawner) -> ! {
     // Digital mic-gain index into mic_capture::GAIN_STEPS_* (Sound-app −/+ stepper).
     // Default 0 dB: the ES7210 analog PGA (36 dB) + the now-explicit ALDO1 mic rail
     // already give a strong, clean level; digital gain adds NO SNR (it amplifies noise
-    // equally) and was turning residual hiss into audible static. Bump on the Sound app
-    // only if a specific room needs it. (Runtime-only until config reconciliation.)
-    let mut gain_idx: usize = 0;
+    // equally) and was turning residual hiss into audible static. Restored from the
+    // persisted config (v5 mic-gain byte, #46) — clamped in case a downgrade shrank
+    // the table; each stepper change re-persists it (edge-triggered, below).
+    let mut gain_idx: usize =
+        (watch_cfg.mic_gain as usize).min(mic_capture::GAIN_STEPS_Q8.len() - 1);
     mic_capture::MIC_GAIN_Q8.store(
         mic_capture::GAIN_STEPS_Q8[gain_idx],
         core::sync::atomic::Ordering::Relaxed,
@@ -1230,7 +1237,19 @@ async fn main(_spawner: Spawner) -> ! {
     // radio only comes up when mesh is turned on). Toggling ON starts the radio
     // (below) then the ESP-NOW tick/rx/familiar run; OFF pauses the tick (peer
     // stays registered, radio stays up — a tick-level pause, not a teardown).
-    let mut mesh_enabled = false;
+    // Restored from the persisted toggle (config v5 mesh bit, #46) like ble_on;
+    // an ON restore starts the STA radio exactly as the toggle-on path does —
+    // creds NOT required (set_config starts the PHY without connecting).
+    let mut mesh_enabled = watch_cfg.mesh_on;
+    if mesh_enabled {
+        if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
+            let _ = wifi_controller.set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
+            radio_started = true;
+        }
+        println!("[MESH] restored ON from config (persisted toggle)");
+    }
+    // Touch sound (#49): the persisted every-tap tick gate. Default ON.
+    let touch_sound = watch_cfg.touch_sound;
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
@@ -1736,6 +1755,21 @@ async fn main(_spawner: Spawner) -> ! {
             if wifi_has_creds {
                 wifi_on_request = !wifi_on_request;
                 println!("[WIFI] toggled -> {}", if wifi_on_request { "ON" } else { "OFF" });
+                // Persist the WiFi INTENT (#46 wifi bit, config v5): only the
+                // USER toggle writes it — the automatic drops (NTP burst done,
+                // idle timeout, session close) leave the persisted "auto"
+                // intent alone, so this stays edge-triggered and flash-cheap.
+                if watch_cfg.wifi_off != !wifi_on_request {
+                    watch_cfg.wifi_off = !wifi_on_request;
+                    match config_offset
+                        .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                    {
+                        Some(Ok(())) => {
+                            println!("[CFG] wifi_off={} saved to flash", watch_cfg.wifi_off)
+                        }
+                        _ => println!("[CFG] wifi_off save failed"),
+                    }
+                }
             } else {
                 // No stored SSID: the STA can't associate, so a toggle can't do
                 // anything. Surface it (reuse the RAM-busy toast) instead of a
@@ -2294,6 +2328,25 @@ async fn main(_spawner: Spawner) -> ! {
         // (AOD) falls through — the shell arm renders it minute-gated below.
         if screen_state == 0 {
             continue;
+        }
+
+        // === Every-touch tick (#49, v0.9.0) ===
+        // ONE hoisted hook for BOTH dispatch families below — the Slint shell
+        // (tap_event → shell.handle_touch) and the framebuffer apps (AppInput.tap
+        // in run_fb_app's caller) — never per-widget. Taps only: swipe/drag
+        // frames classify as directional (not Tap) and never set tap_event, and
+        // AOD wake-touches don't reach the poll. Skipped while a clip is already
+        // in flight (audio_out::busy) and during a PTT hold (RECORDING — the mic
+        // half-duplex gate would eat it anyway). Inline service_amp = same-tick
+        // amp raise; the clip still starts ≥ one ring of driven silence later
+        // (pop insurance, see audio_out).
+        if tap_event
+            && touch_sound
+            && !audio_out::busy()
+            && !mic_capture::RECORDING.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            audio_out::play_pcm(tick_pcm);
+            audio_out::service_amp(&mut amp_en, &mut audio_codec);
         }
 
         // === App state machine ===
@@ -3022,6 +3075,19 @@ async fn main(_spawner: Spawner) -> ! {
                     );
                     shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
                     shell.request_redraw();
+                    // Persist the step (#46 mic-gain byte, config v5) — edge-
+                    // triggered; a rail-clamped repeat tap doesn't wear flash.
+                    if watch_cfg.mic_gain != gain_idx as u8 {
+                        watch_cfg.mic_gain = gain_idx as u8;
+                        match config_offset
+                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                        {
+                            Some(Ok(())) => {
+                                println!("[CFG] mic_gain={} saved to flash", watch_cfg.mic_gain)
+                            }
+                            _ => println!("[CFG] mic_gain save failed"),
+                        }
+                    }
                 }
                 if let Some(scheme) = shell.req.theme.take() {
                     // The picker already set Theme.scheme for instant preview;
@@ -3065,6 +3131,19 @@ async fn main(_spawner: Spawner) -> ! {
                         last_mesh_peers = 0;
                     }
                     println!("[MESH] toggled -> {}", if mesh_enabled { "ON" } else { "OFF" });
+                    // Persist the toggle (#46 mesh bit, config v5) — edge-
+                    // triggered like the BLE/theme saves.
+                    if watch_cfg.mesh_on != mesh_enabled {
+                        watch_cfg.mesh_on = mesh_enabled;
+                        match config_offset
+                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
+                        {
+                            Some(Ok(())) => {
+                                println!("[CFG] mesh_on={} saved to flash", watch_cfg.mesh_on)
+                            }
+                            _ => println!("[CFG] mesh_on save failed"),
+                        }
+                    }
                 }
                 if shell.req.cpu_cycle.take() {
                     // Mirror the old WatchFace::cycle_cpu ladder: 80 -> 160 -> 240.
@@ -3097,12 +3176,8 @@ async fn main(_spawner: Spawner) -> ! {
                     esp_hal::system::software_reset();
                 }
                 if let Some(target) = shell.req.launch.take() {
-                    // Launcher tile tap-click (#23): the one-frame pressed
-                    // state gets a subtle audible companion. Inline service =
-                    // same-tick amp raise (the clip itself starts ≥ one ring
-                    // of driven silence later — pop insurance).
-                    audio_out::play_pcm(click_pcm);
-                    audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                    // Launch tap-click: covered by the hoisted every-touch tick
+                    // (#49) — the old per-control click here would double up.
                     shell.set_launcher_open(false);
                     if target == AppState::Wled {
                         // WLED is a Slint overlay, not a framebuffer app: it renders
@@ -3388,11 +3463,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // WiFi…", and the pending arm below proceeds automatically once
                     // associated + DHCP'd (25s timeout). One tap end-to-end.
                     if settings_app.take_ota_request() {
-                        // UPDATE FIRMWARE tap-click (#23) — audible ack for the
-                        // highest-stakes button; plays out long before the
-                        // download's blocking flash ops begin.
-                        audio_out::play_pcm(click_pcm);
-                        audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                        // Tap-click: covered by the hoisted every-touch tick (#49).
                         if !crate::net::ota_http::URL_SET {
                             println!("[OTA] tap: no OTA_URL baked into this build");
                             settings_app.ota_status = "No OTA URL in build";
