@@ -115,3 +115,17 @@ rewrites the DEFAULT factory-only table**, destroying the A/B OTA layout
 project must pass `--partition-table partitions.csv`. OTA updates
 (`/watch/announce` or the Settings button) never touch the table — only USB
 flashes can break it.
+
+## Targeted (per-watch) push
+
+Every watch derives a **sigil identity** from its efuse MAC (v0.8.4+) and
+subscribes to its own topic alongside the fleet one:
+
+```
+tools/ota_push.sh                          # fleet: watch/ota/announce (all watches)
+tools/ota_push.sh --target mythic-throne   # one watch: watch/mythic-throne/ota
+```
+
+Current fleet: `eldritch-lantern` (98:A3:16:A7:2F:E4) and `mythic-throne`
+(98:A3:16:A5:A7:F8). A watch's sigil is on its System page and in the
+`[SIGIL]` boot log line.

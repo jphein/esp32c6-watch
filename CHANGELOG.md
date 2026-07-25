@@ -4,6 +4,79 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.4] — 2026-07-24
+
+- **Per-device sigil identity** (#34) derived from the efuse MAC via smol's pinned
+  `no_std` sigil corpus (`crates/sigil-id`): this fleet is **eldritch-lantern**
+  (node 122) and **mythic-throne** (node 236). MAC-derived mesh node ids retire the
+  shared node-42 default; per-device MQTT client ids end session-takeover evictions;
+  per-watch OTA topics (`watch/<sigil>/ota`, `tools/ota_push.sh --target <sigil>`);
+  the BLE advertisement carries the sigil. First release delivered fully zero-touch
+  over the air.
+
+## [0.8.3] — 2026-07-24
+
+- **Reliable zero-touch OTA**: failed attempts re-arm (3×) with the loop unblocked
+  between tries so WiFi can reconnect; the ESP-NOW channel pin is suppressed while
+  an update is pending (it was stealing the radio from the reconnecting WiFi);
+  stall margin 10s→20s, WiFi window 25s→45s. Push-OTA validated end-to-end (#25).
+
+## [0.8.2] — 2026-07-23
+
+- **Aurora wake gesture hints**: duo-tone edge shimmers + chevron echoes bloom for
+  ~3s on wake (tap / wrist-raise / boot), hinting the page carousel and swipe-up
+  launcher; theme-tokened across all four schemes; per-gesture seen-it latches.
+
+## [0.8.1] — 2026-07-23
+
+- **AOD light-sleep panic fix** (#43): esp-hal 1.1.1's in-sleep RC_FAST calibration
+  silently returns 0 when the PCR REF_TICK divider isn't programmed → div-by-zero
+  at sleep entry (deterministic on a factory-fresh unit). Boot-time
+  `rtc_sleep_cal_init()` programs the FOSC gates + tick config, seeds STORE1, and
+  dry-runs the calibration; AOD light-sleep is gated on the probe and can no longer
+  panic (failed-cal units tick-idle instead).
+
+## [0.8.0] — 2026-07-23
+
+- **Touch-feedback overhaul**: shared `ui/slint/controls.slint` component library —
+  bold one-frame pressed states on ~52 touch targets, ≥44 px hit areas, per-scheme
+  pressed tokens; live finger-down feedback in the Settings app + T9 keyboard.
+- **Paged launcher**: 3×3 grid, one section per page (AUDIO/GAMES/SYSTEM), instant
+  flips — replaces the continuous scroll (unfixably janky at software-render rates).
+- **Partial rendering v2** (#18): vendored `i-slint-renderer-software` with
+  even-grid dirty regions + a pair-exact flusher; steady frames ~18–29 ms
+  (was 90–170 ms), no strip artifacts.
+- **OTA both directions**: one-tap self-serve updates (the Settings button raises
+  WiFi itself, 5-minute budget, per-phase error strings) and **push OTA** via a
+  retained MQTT announce + monotonic `OTA_BUILD` gate (`tools/ota_push.sh`).
+- **Wrist-raise wake** (accel-poll tilt detection; QMI8658 INT isn't wired),
+  QMI8658 endianness fix (step counter + un-corrupted IMU reads), CTRL9 handshake
+  hardening, AXP2101 charger profile (4.1 V / 400 mA), Amber default theme.
+- **UI test automator**: `debug-console` feature — drive taps/swipes/launches and
+  read per-frame render timings over the USB-Serial-JTAG (`tools/ui_test.py`).
+- Panel confirmed CO5300 (#17); even-alignment flush quirk documented.
+
+## [0.7.0] — 2026-07-22
+
+- **The mic works** (#7): the microphones are on a separate **ES7210** 4-channel
+  ADC (the ES8311 is playback-only) — new driver + boot init + explicit AXP2101
+  ALDO1 mic rail. Voice push-to-talk transcribes for real (LAN bridge → Azure STT);
+  Sound app gains a live meter, waveform, and digital gain stepper.
+- **Plugin/app registry**: every launcher app is a single registration
+  (`src/apps/registry.rs`), object-safe `App` trait, data-driven launcher.
+- **Theme system**: 4 schemes (Midnight / Paper / Amber / Violet) + on-glass picker,
+  persisted in the config record.
+- **Home Assistant component** (`ha/custom_components/esp32c6_watch/`):
+  climate/energy HTTP API + a `media_player` speaker with a transcoded-PCM
+  announce queue. MQTT retained as the primary climate/telemetry transport.
+- A/B OTA partition layout adopted on-device; deploy docs (`docs/ota-deploy.md`).
+
+## [0.6.0] — 2026-07-21
+
+- Voice push-to-talk (WiFi-ready-gated capture streamed to a LAN STT gateway),
+  speaker playback fixed, touch responsiveness (non-blocking DMA flush),
+  launcher scroll fix + AUDIO section, Dependabot, esp-rs stack current.
+
 ## [0.4.0] — 2026-07-20
 
 The feature-integration wave: light-sleep power lands as the default, and four
