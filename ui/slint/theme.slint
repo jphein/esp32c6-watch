@@ -26,6 +26,15 @@ export struct ScanChannel {
     peak: float,       // peak-hold marker height, 0..1
 }
 
+// One scanned WiFi network row for the Settings hub's NETWORK picker
+// (v0.9.0). Rust dedups multi-AP SSIDs (keeping the best RSSI), sorts by
+// strength, and maps RSSI onto the 0..4 `bars` buckets before pushing.
+export struct WifiNet {
+    ssid: string,
+    bars: int,         // 0..4 signal-strength buckets
+    secured: bool,     // any auth method (padlock glyph)
+}
+
 // One complete color scheme: 21 tokens. Field order mirrors the token roles —
 // background → text tiers → brand → surfaces → state → one-off fills → pressed
 // feedback. Exported so the Theme-picker overlay can render each scheme's OWN
