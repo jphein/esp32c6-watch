@@ -121,7 +121,7 @@ footer a{color:var(--soft)}
   <h2>Core specification</h2>
   <p class="lede">The headline numbers, drawn from the Waveshare product data, the board schematic, and the firmware's own board map.</p>
   <div class="grid g4">
-    <div class="card"><div class="k">SoC</div><div class="v">ESP32-C6</div><div class="d">32-bit RISC-V @ up to 160 MHz · 512 KB HP SRAM + 16 KB LP SRAM</div></div>
+    <div class="card"><div class="k">SoC</div><div class="v">ESP32-C6</div><div class="d">32-bit RISC-V @ up to 160 MHz · 512 KB HP SRAM + 16 KB LP SRAM · <b>no PSRAM</b> — every framebuffer and radio stack shares that one region</div></div>
     <div class="card"><div class="k">Wireless</div><div class="v">WiFi 6 · BT 5 LE</div><div class="d">2.4 GHz Wi-Fi 6 + Bluetooth 5 (LE) + 802.15.4 Thread / Zigbee</div></div>
     <div class="card"><div class="k">Flash</div><div class="v">16 MB</div><div class="d">External SPI NOR (reported by the 2nd-stage bootloader)</div></div>
     <div class="card"><div class="k">Display</div><div class="v">2.06″ AMOLED</div><div class="d">410 × 502 px · RGB565 · CO5300 driver · QSPI</div></div>
@@ -149,7 +149,7 @@ footer a{color:var(--soft)}
     <li><b>USB-C</b> — native USB-Serial-JTAG (flash, log & debug over one cable)</li>
     <li><b>Expansion pads</b> — VBUS, 3V3, BAT, UART (TX/RX) and spare GPIO</li>
     <li><b>Buttons</b> — BOOT (GPIO9) and PWR / reset</li>
-    <li><b>OTA-ready flash layout</b> — factory + OTA partitions on the 16 MB flash</li>
+    <li><b>A/B OTA flash layout</b> — two 4 MB app slots (<span class="bus">ota_0</span> / <span class="bus">ota_1</span>) plus NVS, otadata and a 64 KB config partition on the 16 MB flash — no factory partition, so an update always writes the slot it isn't running from</li>
   </ul>
 </div></section>
 
