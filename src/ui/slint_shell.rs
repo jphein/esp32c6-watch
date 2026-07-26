@@ -1333,9 +1333,21 @@ impl ShellUi {
     /// modal would be dishonest — idle with a modal up goes dark like any
     /// non-clock page.
     pub fn modal_open(&self) -> bool {
-        self.ui
-            .as_ref()
-            .is_some_and(|ui| ui.get_switcher_open() || ui.get_shade_open())
+        self.modal_kind() != 0
+    }
+
+    /// Which shell-level modal is up: 0 none · 1 switcher · 2 shade. Feeds
+    /// the debug-console `state modal=` field (#54 swallow evidence — modals
+    /// ride app_state == Watchface, so `app` alone can't show them).
+    pub fn modal_kind(&self) -> u8 {
+        let Some(ui) = self.ui.as_ref() else { return 0 };
+        if ui.get_switcher_open() {
+            1
+        } else if ui.get_shade_open() {
+            2
+        } else {
+            0
+        }
     }
 
     /// Suspended-session count → the watchface status-cluster chip

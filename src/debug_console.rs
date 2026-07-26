@@ -127,6 +127,10 @@ pub struct UiState {
     pub wifi: bool,
     pub ble: bool,
     pub mesh_peers: u8,
+    /// Shell-level modal (#54 swallow evidence): 0 none · 1 switcher ·
+    /// 2 shade. Modals ride app_state == Watchface, so `app` alone can't
+    /// tell the automator whether one is open (or got closed by a leak).
+    pub modal: u8,
 }
 
 impl UiState {
@@ -138,6 +142,7 @@ impl UiState {
             wifi: false,
             ble: false,
             mesh_peers: 0,
+            modal: 0,
         }
     }
 }
@@ -325,21 +330,27 @@ fn handle_line(bytes: &[u8]) {
             match dir {
                 Some(d) => {
                     // Navigation is driven by the swipe arg alone (no press
-                    // frame needed). start_y at screen centre avoids the
-                    // power-page brightness-slider band.
+                    // frame needed). Optional trailing start_y drives the
+                    // edge-zone gestures (#29/#32: ≥427 bottom, ≤75 top);
+                    // default 206 = mid-screen, clear of the power-page
+                    // brightness-slider band AND both edge zones.
+                    let start_y = it
+                        .next()
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .unwrap_or(206);
                     let f = Inject::Touch {
                         point: None,
                         swipe: Some(d),
-                        start_y: 206,
+                        start_y,
                         tap: false,
                     };
                     if queue(f) {
-                        println!("[DBGCON] ok swipe {}", dir_name(d));
+                        println!("[DBGCON] ok swipe {} y={}", dir_name(d), start_y);
                     } else {
                         println!("[DBGCON] err queue-full");
                     }
                 }
-                None => println!("[DBGCON] err usage: swipe up|down|left|right"),
+                None => println!("[DBGCON] err usage: swipe up|down|left|right [start_y]"),
             }
         }
         "launch" => match it.next().and_then(|v| v.parse::<usize>().ok()) {
@@ -365,14 +376,15 @@ fn handle_line(bytes: &[u8]) {
         "state" => {
             let s = critical_section::with(|cs| *UI_STATE.borrow(cs).borrow());
             println!(
-                "[DBGCON] state app={:?} page={} launcher={} screen={} wifi={} ble={} mesh={}",
+                "[DBGCON] state app={:?} page={} launcher={} screen={} wifi={} ble={} mesh={} modal={}",
                 s.app,
                 s.page,
                 (s.app == AppState::Launcher) as u8,
                 s.screen_state,
                 s.wifi as u8,
                 s.ble as u8,
-                s.mesh_peers
+                s.mesh_peers,
+                s.modal
             );
         }
         "perf" => report_perf(),

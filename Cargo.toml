@@ -6,7 +6,7 @@ exclude = ["crates/i-slint-renderer-software"]
 
 [package]
 name = "esp32c6-watch"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -111,6 +111,9 @@ heapless = "0.9"
 u8g2-fonts = "0.8.0"
 
 # Local workspace crates (smol-port). Pure-logic, no_std, host-unit-tested.
+# #55: write-range guard math for GuardedFlash (the FlashMutex wrapper) —
+# refuses any flash write whose erase footprint hits the booted app slot.
+flash-guard = { path = "crates/flash-guard" }
 wled-wizmote = { path = "crates/wled-wizmote" }
 rssi = { path = "crates/rssi" }
 hunt = { path = "crates/hunt" }
