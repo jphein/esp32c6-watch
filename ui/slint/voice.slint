@@ -53,9 +53,10 @@ export component VoicePage {
         letter-spacing: 1px;
     }
 
-    // connecting — WiFi is coming up (radio is time-shared with the mesh); the
-    // button is not actionable yet. Flips to idle ("Hold to talk") once the link
-    // + DHCP land, driven from the Rust loop.
+    // connecting — WiFi is coming up (radio is time-shared with the mesh).
+    // #22 press-once: the press is LATCHED — keep holding and the capture
+    // auto-fires the moment the link + DHCP land (release cancels back to
+    // idle); driven from the Rust loop's voice latch.
     if root.voice-state == 5: Text {
         x: (parent.width - self.width) / 2;
         y: 200px;
@@ -196,7 +197,7 @@ export component VoicePage {
         y: 452px;
         text: root.voice-state == 1 ? "release to send"
             : (root.voice-state == 2 ? ""
-            : (root.voice-state == 5 ? "waiting for Wi-Fi"
+            : (root.voice-state == 5 ? "keep holding \u{2014} listens when ready"
             : (root.voice-state == 3 ? "hold to talk again"
             : (root.voice-state == 4 ? "hold to retry" : "press \u{0026} hold"))));
         color: Theme.dim;

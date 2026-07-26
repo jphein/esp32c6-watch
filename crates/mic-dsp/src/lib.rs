@@ -143,6 +143,54 @@ pub fn fill_tick_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
     fill_click_with_peak(buf, sample_rate, 6000.0)
 }
 
+/// Length of the watch-ping receiver chime in mono BYTES at 16 kHz (300 ms).
+pub const PING_CHIME_LEN: usize = 4800 * 2;
+
+/// Synthesize the watch-to-watch ping chime (#35): a pleasant rising two-tone
+/// "din-ding" — E5 (659 Hz) answered by B5 (988 Hz), a perfect fifth up, each
+/// note a struck sine (fast linear attack, exponential decay) with a slight
+/// legato overlap. ~300 ms total; a 10 ms master fade-out guarantees a
+/// pop-free tail (amp-release insurance, same discipline as the click/beep).
+/// Mono s16le at `sample_rate`; returns MONO bytes written. Distinct on the
+/// tiny speaker from both the 12 ms tap tick and the 50 ms snake beep.
+pub fn fill_ping_chime_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
+    /// One struck note: (start ms, length ms, freq Hz, peak, decay tau ms).
+    const NOTES: [(u32, u32, f32, f32, f32); 2] = [
+        (0, 150, 659.0, 11_000.0, 55.0),   // E5
+        (120, 180, 988.0, 12_000.0, 70.0), // B5 — enters as E5 decays
+    ];
+    const TOTAL_MS: u32 = 300;
+    const ATTACK_MS: f32 = 6.0;
+    const FADE_MS: u32 = 10;
+
+    let sr = sample_rate as f32;
+    let total = ((sample_rate * TOTAL_MS / 1000) as usize).min(buf.len() / 2);
+    let fade = ((sample_rate * FADE_MS / 1000) as usize).min(total);
+    let attack = (sr * ATTACK_MS / 1000.0).max(1.0);
+    for i in 0..total {
+        let mut a = 0.0f32;
+        for (start_ms, len_ms, freq, peak, tau_ms) in NOTES {
+            let s0 = (sample_rate * start_ms / 1000) as usize;
+            let len = (sample_rate * len_ms / 1000) as usize;
+            if i < s0 || i >= s0 + len {
+                continue;
+            }
+            let t = (i - s0) as f32;
+            let env = libm::expf(-t / (sr * tau_ms / 1000.0)) * (t / attack).min(1.0);
+            let w = 2.0 * core::f32::consts::PI * freq / sr;
+            a += peak * env * libm::sinf(w * t);
+        }
+        if i >= total - fade {
+            a *= (total - 1 - i) as f32 / fade as f32; // master fade-out
+        }
+        let s = a.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let b = s.to_le_bytes();
+        buf[2 * i] = b[0];
+        buf[2 * i + 1] = b[1];
+    }
+    total * 2
+}
+
 fn fill_click_with_peak(buf: &mut [u8], sample_rate: u32, peak: f32) -> usize {
     const FREQ_HZ: f32 = 1800.0;
     let total = ((sample_rate as usize * 12 / 1000).min(buf.len() / 2)).max(0);

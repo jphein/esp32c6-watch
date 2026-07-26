@@ -20,6 +20,11 @@
 //!   CFG      "SMOLv1 CFG NNN<KEY><value>"            gw→leaf, target 255 = all
 //!   RELAY    "SMOLv1 RELAY NNN MMMMM F C " + chunk   leaf uplink, ~15s, ≤4 frags
 //!   RELAYACK "SMOLv1 RELAYACK MMMMM BBB"             gw→leaf unicast frag bitmap
+//!
+//! Watch-originated additions (#35, flagged for smol upstreaming — #36):
+//!
+//!   PING     "SMOLv1 PING NNN SSSSS"                 broadcast greeting
+//!   PINGACK  "SMOLv1 PINGACK NNN SSSSS"              unicast delivery confirm
 //! fleet. FAM frames (the Mesh Familiar, #57) are decoded here and routed to
 //! [`crate::net::familiar`] via [`MeshEvent::Fam`]. Frames the watch doesn't
 //! speak yet (SNK, RELAY, CFG, ...) are counted and ignored — hearing them
@@ -42,6 +47,21 @@ const RELAY_PREFIX: &[u8] = b"SMOLv1 RELAY ";
 /// Gateway's unicast received-fragment bitmap: + "MMMMM BBB".
 const RELAYACK_PREFIX: &[u8] = b"SMOLv1 RELAYACK ";
 
+// ⚠️ COORDINATE-WITH-SMOL (#36): the two frame types below are WATCH-ORIGINATED
+// additions to the SMOLv1 wire — they do not exist in smol's mode.rs/wire.rs
+// yet. Flagged here for upstreaming; if smol adopts different prefixes, these
+// two constants (and nothing else) change. Layout follows the fleet's ASCII
+// conventions exactly (3-digit id via write_id, 5-digit seq via write_u5).
+// Non-watch fleet members that don't speak them already count + ignore them
+// via the SMOL_PREFIX fallthrough (proof of life preserved).
+//
+/// Watch-to-watch greeting (#35): "SMOLv1 PING NNN SSSSS" — NNN = the
+/// SENDER's node id, SSSSS = the sender's seq. Broadcast (2-watch fleet).
+const PING_PREFIX: &[u8] = b"SMOLv1 PING ";
+/// Delivery confirmation (#35): "SMOLv1 PINGACK NNN SSSSS" — NNN = the
+/// ACKER's node id, SSSSS echoes the ping's seq. Unicast back to the pinger.
+const PINGACK_PREFIX: &[u8] = b"SMOLv1 PINGACK ";
+
 /// CFG broadcast target sentinel — a fleet-global config (e.g. units).
 const CFG_TARGET_ALL: u8 = 255;
 /// Max CFG value bytes (mode.rs CFG_VALUE_MAX).
@@ -63,7 +83,8 @@ const RELAY_MAX_TRIES: u8 = 3;
 /// The smol default TIME-SHARE mesh channel (mode.rs ESP_NOW_FIXED_CHANNEL).
 pub const MESH_CHANNEL: u8 = 6;
 /// Peer link decays after this much silence (protocol.md PEER_STALE_MS).
-const PEER_STALE_MS: u64 = 3000;
+/// Pub since #35: the ping hero resolves its target from live roster rows.
+pub const PEER_STALE_MS: u64 = 3000;
 /// HELLO/TIME cadence.
 pub const TICK_MS: u64 = 2000;
 
@@ -117,6 +138,15 @@ pub enum MeshEvent {
     /// A decoded SMOLv1 FAM frame (+ its RSSI, which weights the familiar's
     /// orphan-takeover stagger). Route to `FamState::ingest`.
     Fam { frame: FamFrame, rssi: i32 },
+    /// A watch-to-watch PING for us (#35). The PINGACK reply has already been
+    /// unicast by `handle_rx` (delivery confirmation is protocol-level, like
+    /// HELLO→ACK); the caller owns the greeting choreography — pulse, chime,
+    /// wake, dedup. `mac` is the sender's source address, for the sigil
+    /// fallback when `from_id` is outside the known fleet.
+    Ping { from_id: u8, seq: u16, mac: [u8; 6] },
+    /// A PINGACK answering one of OUR pings (#35): `from_id` is the ACKER,
+    /// `seq` echoes the ping it confirms ("delivered to <sigil>").
+    PingAck { from_id: u8, seq: u16, mac: [u8; 6] },
 }
 
 /// A leaf's single outstanding RELAY message (mode.rs RelayTx): retained so
@@ -257,6 +287,30 @@ fn encode_relay(src_id: u8, msgid: u16, frag: u8, count: u8, chunk: &[u8], out: 
     let len = chunk.len().min(RELAY_CHUNK);
     out[n..n + len].copy_from_slice(&chunk[..len]);
     n + len
+}
+
+/// Encode a "PREFIX NNN SSSSS" ping-family frame (#35) into `out`; returns the
+/// total length (prefix + 3-digit id + ' ' + 5-digit seq). `out` must hold
+/// `prefix.len() + 9` bytes — both call sites size for the longer PINGACK.
+fn encode_ping_frame(prefix: &[u8], id: u8, seq: u16, out: &mut [u8]) -> usize {
+    let mut n = prefix.len();
+    out[..n].copy_from_slice(prefix);
+    write_id(id, &mut out[n..]);
+    n += 3;
+    out[n] = b' ';
+    n += 1;
+    write_u5(seq as u32, &mut out[n..]);
+    n + 5
+}
+
+/// Parse a ping-family "NNN SSSSS" tail into `(id, seq)` (#35).
+fn parse_ping_rest(rest: &[u8]) -> Option<(u8, u16)> {
+    if rest.len() < 9 {
+        return None;
+    }
+    let id = parse_id(&rest[0..3])?;
+    let seq = u16::try_from(parse_u5(&rest[4..9])?).ok()?;
+    Some((id, seq))
 }
 
 /// Parse a RELAYACK "MMMMM BBB" tail into `(msgid, bitmap)` (wire.rs
@@ -593,6 +647,19 @@ impl SmolMesh {
         self.relay_tx.last_ms = now_ms;
     }
 
+    /// Broadcast a watch-to-watch PING (#35): "SMOLv1 PING NNN SSSSS" with OUR
+    /// node id + the caller's seq. Broadcast is deliberate (2-watch fleet —
+    /// and a fleet-wide greeting is the charming failure mode); delivery
+    /// confirmation comes back as a unicast PINGACK ([`MeshEvent::PingAck`]).
+    pub fn send_ping(&mut self, esp_now: &mut EspNow<'_>, seq: u16) {
+        let mut buf = [0u8; 24]; // PINGACK-sized; PING uses 21
+        let n = encode_ping_frame(PING_PREFIX, self.id, seq, &mut buf);
+        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]) {
+            let _ = w.wait();
+        }
+        println!("[MESH] ping sent (seq {seq})");
+    }
+
     /// Handle one received ESP-NOW payload.
     /// Broadcast a SMOLv1 FAM frame (heartbeat/handoff) for the familiar
     /// state machine. Fixed 29-byte binary frame, fleet wire format.
@@ -713,6 +780,29 @@ impl SmolMesh {
                 }
             }
             return None;
+        }
+        // #35 watch-to-watch ping. PINGACK first: "SMOLv1 PING " (trailing
+        // space) can never prefix a PINGACK frame, but checking the more
+        // specific type first keeps the pair robust against future editing.
+        if let Some(rest) = data.strip_prefix(PINGACK_PREFIX) {
+            let (from_id, seq) = parse_ping_rest(rest)?;
+            self.upsert_peer(src, Some(from_id), now_ms, rssi);
+            return Some(MeshEvent::PingAck { from_id, seq, mac: src });
+        }
+        if let Some(rest) = data.strip_prefix(PING_PREFIX) {
+            let (from_id, seq) = parse_ping_rest(rest)?;
+            self.upsert_peer(src, Some(from_id), now_ms, rssi);
+            // Confirm delivery at the protocol level (the HELLO→ACK idiom):
+            // unicast a PINGACK with OUR id echoing the ping's seq, even when
+            // the caller ends up deduping the greeting choreography.
+            Self::ensure_unicast_peer(esp_now, src);
+            let mut ack = [0u8; 24];
+            let n = encode_ping_frame(PINGACK_PREFIX, self.id, seq, &mut ack);
+            if let Ok(w) = esp_now.send(&src, &ack[..n]) {
+                let _ = w.wait();
+            }
+            println!("[MESH] ping from id{from_id} (seq {seq}) - acked");
+            return Some(MeshEvent::Ping { from_id, seq, mac: src });
         }
         if data.starts_with(FAM_PREFIX) {
             if let Some(f) = parse_fam(data) {
