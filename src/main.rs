@@ -546,9 +546,14 @@ async fn main(_spawner: Spawner) -> ! {
     // gap-stack 51.6KB→37.9KB — under the 46KB guardrail (would fire at boot; the
     // #59 stack-floor tripwire caught it at measure-time). Trim the MAIN pool
     // 228KB→214KB to lower _bss_end ~14KB → stack back to ~51.6KB (v0.5.1 glass-
-    // proven). 214KB still leaves ~54KB spare above the 51KB fb (#35 intact); the
-    // reclaimed pool + reviewed mic buffers are untouched.
-    esp_alloc::heap_allocator!(size: 214 * 1024);
+    // proven). #53's net_task .bss (+5.6KB) thinned the gap to 46.9KB and the
+    // CONSOLIDATED shell (power menu + switcher + shade + spectrum) overflowed
+    // the guard during WatchShell::new — caught by the wrong-creds acceptance
+    // boot. Trimmed further 214→198KB (gap ≈ 63KB): scene-build peak clears
+    // with margin; heap keeps ~38KB spare above the 51KB fb need (#35 gets the
+    // RAM-busy toast fallback if squeezed). Real fix on the books: box the
+    // session/voice socket buffers out of .bss.
+    esp_alloc::heap_allocator!(size: 198 * 1024);
     // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
     // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
     // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
