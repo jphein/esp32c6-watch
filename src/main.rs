@@ -1330,6 +1330,26 @@ async fn main(_spawner: Spawner) -> ! {
     // reboots via the OTA arm) or this deadline, whichever comes first.
     let mut reboot_deadline: Option<Instant> = None;
 
+    // =========================================================================
+    // REALTIME BUDGET (#53): >10 ms of blocking in any arm of this loop IS A
+    // BUG. The loop is the UI — render and touch share it — so a stalled arm
+    // is a frozen watch. WiFi connect/scan, the boot burst (NTP/MQTT/weather)
+    // and OTA downloads live in net_task; MQTT sessions in climate_task; mic
+    // capture in its own task. Talk to them via channels/signals and render
+    // from their published state — NEVER await radio or sockets here.
+    //
+    // Documented exemptions (each measured, none silent):
+    //   - full-frame Slint renders: 90–170 ms hard floor on this panel;
+    //     tracked per frame via debug_console::record_frame (`perf`).
+    //   - flash config saves: ~ms-scale sector programs; the XIP stall is
+    //     physics (cache off while programming), kept rare + edge-triggered.
+    //   - voice PTT: parks the loop for the hold BY DESIGN (finger on glass,
+    //     dedicated screen); flagged via debug_console::arm_exempt.
+    //   - wake/interaction one-offs: display_on settle (20 ms), boot-button
+    //     debounce (200 ms) — deliberate interaction latencies.
+    // Enforcement: debug-console builds time every loop body (ArmTimer RAII,
+    // continue-paths included); `perf` reports arm_max_us / arm_over10ms.
+    // =========================================================================
     loop {
         let touch_held = touch_int.is_low();
         let button_held = boot_button.is_low();
@@ -1590,6 +1610,12 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
         }
+
+        // Loop-body watchdog (#53): times this iteration from wake to loop
+        // tail via RAII drop — every `continue` path included. Reported by
+        // the console `perf` command as arm_max_us / arm_over10ms.
+        #[cfg(feature = "debug-console")]
+        let _arm_timer = debug_console::ArmTimer::start();
 
         let now = Instant::now();
         let dt_ms = (now - last_frame).as_millis() as u32;
@@ -3048,6 +3074,13 @@ async fn main(_spawner: Spawner) -> ! {
 
                     // Ensure the gate is down (belt-and-suspenders).
                     mic_capture::RECORDING.store(false, Ordering::Relaxed);
+
+                    // The PTT hold parks this loop for the whole utterance BY
+                    // DESIGN (see the budget banner at the loop head) — keep
+                    // it out of the arm watchdog so `perf` regressions stay
+                    // signal, not noise.
+                    #[cfg(feature = "debug-console")]
+                    debug_console::arm_exempt();
 
                     match result {
                         Ok(t) if !t.is_empty() => {
