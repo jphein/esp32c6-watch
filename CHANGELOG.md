@@ -24,8 +24,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
   off. The receiver wakes AOD/dim to bright, blooms a full-screen accent-ring pulse
   carrying the sender's sigil, and plays a ~300 ms rising E5→B5 two-tone chime; with the
   panel fully off or a game holding the framebuffer it gets the chime plus a shade card.
-- `mythic-throne` took this release **over the air, zero-touch** — the payoff for
-  #53's net_task, #55's slot guard and #57's roaming landing together.
+- `mythic-throne` took this release **over the air, zero-touch** — the first such
+  self-update since the v0.10.1 flash-safety fix, and the payoff for #53's net_task,
+  #55's slot guard and #57's roaming landing together. (The genuine first was v0.8.4:
+  pre-#50, otadata still resolved correctly and zero-touch worked — #55 only turned
+  fatal once #50 moved the slots.)
 - Image 4.26 MB with a 2.0 MB slot margin (#50's grow paying off); stack 63 KB.
 
 ## [0.10.1] — 2026-07-26
