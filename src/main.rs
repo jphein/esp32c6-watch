@@ -444,6 +444,30 @@ fn log_heap(tag: &str) {
 /// so a stale `R` can never reboot-loop the watch.
 const REBOOT_DEBOUNCE_MS: u64 = 10_000;
 
+/// The one `FlashStorage`, shared between the main loop (config saves, OTA
+/// mark-valid) and the OTA download (#53: moving into `net_task`). An async
+/// mutex locked **per operation** — one config save, one 4 KB OTA chunk write —
+/// never across a whole download, so a config save during an OTA waits at most
+/// one sector program, and an OTA never waits on more than one save.
+pub type FlashMutex = embassy_sync::mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    esp_storage::FlashStorage<'static>,
+>;
+
+/// Persist the config record through the shared flash mutex. Returns whether
+/// the save happened (offset known + write OK); callers own their log lines so
+/// the per-site messages stay grep-identical to the pre-mutex code.
+async fn cfg_save(
+    flash: &'static FlashMutex,
+    offset: Option<u32>,
+    cfg: &peripherals::config::WatchConfig,
+) -> bool {
+    match offset {
+        Some(off) => peripherals::config::save(&mut *flash.lock().await, off, cfg).is_ok(),
+        None => false,
+    }
+}
+
 /// One-shot SNTP query; sets the RTC and returns the Unix time.
 async fn ntp_sync(
     stack: embassy_net::Stack<'static>,
@@ -960,6 +984,9 @@ async fn main(_spawner: Spawner) -> ! {
         watch_cfg.node_id,
         watch_cfg.ssid.as_str()
     );
+    // Boot reads above used the raw handle; everything from here shares it.
+    static FLASH_MUTEX: StaticCell<FlashMutex> = StaticCell::new();
+    let flash: &'static FlashMutex = FLASH_MUTEX.init(embassy_sync::mutex::Mutex::new(flash));
     // SIGIL IDENTITY (#34): config node id 42 is the never-explicitly-chosen
     // default on every watch (a fleet-wide mesh collision, observed breaking
     // MQTT windows) — treat it as the "unset" sentinel and fall back to the
@@ -1913,13 +1940,10 @@ async fn main(_spawner: Spawner) -> ! {
                 // intent alone, so this stays edge-triggered and flash-cheap.
                 if watch_cfg.wifi_off != !wifi_on_request {
                     watch_cfg.wifi_off = !wifi_on_request;
-                    match config_offset
-                        .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                    {
-                        Some(Ok(())) => {
-                            println!("[CFG] wifi_off={} saved to flash", watch_cfg.wifi_off)
-                        }
-                        _ => println!("[CFG] wifi_off save failed"),
+                    if cfg_save(flash, config_offset, &watch_cfg).await {
+                        println!("[CFG] wifi_off={} saved to flash", watch_cfg.wifi_off)
+                    } else {
+                        println!("[CFG] wifi_off save failed")
                     }
                 }
                 shell.set_wifi_intent(!watch_cfg.wifi_off);
@@ -2081,7 +2105,7 @@ async fn main(_spawner: Spawner) -> ! {
         // revert it on the next boot. WiFi-independent (a credential-less watch
         // still confirms a good image) and one-shot regardless of outcome.
         if !ota_marked_valid && now.duration_since(boot_instant) >= OTA_HEALTHY_UPTIME {
-            if let Err(e) = crate::net::ota_http::mark_valid_if_pending(&mut flash) {
+            if let Err(e) = crate::net::ota_http::mark_valid_if_pending(&mut *flash.lock().await) {
                 println!("[OTA] mark-valid failed: {e}");
             }
             ota_marked_valid = true;
@@ -2109,7 +2133,7 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.render(&mut display);
                 }
                 let url = ota_push_url.take();
-                match crate::net::ota_http::ota_update(stack, &mut flash, url.as_deref()).await {
+                match crate::net::ota_http::ota_update(stack, flash, url.as_deref()).await {
                     Ok(()) => {
                         println!("[OTA] staged - rebooting to apply");
                         ota_status_text = "Staged \u{2013} rebooting";
@@ -2364,13 +2388,10 @@ async fn main(_spawner: Spawner) -> ! {
                             shell.set_page(page as i32);
                             if watch_cfg.default_page != page {
                                 watch_cfg.default_page = page;
-                                match config_offset.map(|off| {
-                                    peripherals::config::save(&mut flash, off, &watch_cfg)
-                                }) {
-                                    Some(Ok(())) => {
-                                        println!("[CFG] default page {page} saved")
-                                    }
-                                    _ => println!("[CFG] save failed"),
+                                if cfg_save(flash, config_offset, &watch_cfg).await {
+                                    println!("[CFG] default page {page} saved")
+                                } else {
+                                    println!("[CFG] save failed")
                                 }
                             }
                         }
@@ -2381,11 +2402,10 @@ async fn main(_spawner: Spawner) -> ! {
                             {
                                 watch_cfg.units_temp_f = temp_f;
                                 watch_cfg.units_clk_24h = clk_24h;
-                                match config_offset.map(|off| {
-                                    peripherals::config::save(&mut flash, off, &watch_cfg)
-                                }) {
-                                    Some(Ok(())) => println!("[CFG] units saved"),
-                                    _ => println!("[CFG] save failed"),
+                                if cfg_save(flash, config_offset, &watch_cfg).await {
+                                    println!("[CFG] units saved")
+                                } else {
+                                    println!("[CFG] save failed")
                                 }
                             }
                         }
@@ -2483,13 +2503,11 @@ async fn main(_spawner: Spawner) -> ! {
             // like the page/units/theme saves.
             if watch_cfg.ble_on != persist_intent {
                 watch_cfg.ble_on = persist_intent;
-                if let Some(off) = config_offset {
-                    match peripherals::config::save(&mut flash, off, &watch_cfg) {
-                        Ok(()) => println!(
-                            "[CFG] ble_on={} saved to flash",
-                            watch_cfg.ble_on
-                        ),
-                        Err(()) => println!("[CFG] ble_on save failed"),
+                if config_offset.is_some() {
+                    if cfg_save(flash, config_offset, &watch_cfg).await {
+                        println!("[CFG] ble_on={} saved to flash", watch_cfg.ble_on)
+                    } else {
+                        println!("[CFG] ble_on save failed")
                     }
                 }
             }
@@ -3296,13 +3314,10 @@ async fn main(_spawner: Spawner) -> ! {
                     // triggered; a rail-clamped repeat tap doesn't wear flash.
                     if watch_cfg.mic_gain != gain_idx as u8 {
                         watch_cfg.mic_gain = gain_idx as u8;
-                        match config_offset
-                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                        {
-                            Some(Ok(())) => {
-                                println!("[CFG] mic_gain={} saved to flash", watch_cfg.mic_gain)
-                            }
-                            _ => println!("[CFG] mic_gain save failed"),
+                        if cfg_save(flash, config_offset, &watch_cfg).await {
+                            println!("[CFG] mic_gain={} saved to flash", watch_cfg.mic_gain)
+                        } else {
+                            println!("[CFG] mic_gain save failed")
                         }
                     }
                 }
@@ -3313,10 +3328,11 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_scheme(scheme);
                     if watch_cfg.theme != scheme as u8 {
                         watch_cfg.theme = scheme as u8;
-                        if let Some(off) = config_offset {
-                            match peripherals::config::save(&mut flash, off, &watch_cfg) {
-                                Ok(()) => println!("[CFG] theme {} saved to flash", scheme),
-                                Err(()) => println!("[CFG] theme save failed"),
+                        if config_offset.is_some() {
+                            if cfg_save(flash, config_offset, &watch_cfg).await {
+                                println!("[CFG] theme {} saved to flash", scheme)
+                            } else {
+                                println!("[CFG] theme save failed")
                             }
                         }
                     }
@@ -3329,13 +3345,10 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_touch_sound(touch_sound);
                     if watch_cfg.touch_sound != touch_sound {
                         watch_cfg.touch_sound = touch_sound;
-                        match config_offset
-                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                        {
-                            Some(Ok(())) => {
-                                println!("[CFG] touch_sound={touch_sound} saved to flash")
-                            }
-                            _ => println!("[CFG] touch_sound save failed"),
+                        if cfg_save(flash, config_offset, &watch_cfg).await {
+                            println!("[CFG] touch_sound={touch_sound} saved to flash")
+                        } else {
+                            println!("[CFG] touch_sound save failed")
                         }
                     }
                 }
@@ -3562,11 +3575,10 @@ async fn main(_spawner: Spawner) -> ! {
                     // Connecting IS wifi intent — clear a forced-off bit in
                     // the same (single) save as the creds.
                     watch_cfg.wifi_off = false;
-                    match config_offset
-                        .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                    {
-                        Some(Ok(())) => println!("[CFG] credentials saved to flash"),
-                        _ => println!("[CFG] save failed"),
+                    if cfg_save(flash, config_offset, &watch_cfg).await {
+                        println!("[CFG] credentials saved to flash")
+                    } else {
+                        println!("[CFG] save failed")
                     }
                     station_config = esp_radio::wifi::Config::Station(
                         StationConfig::default()
@@ -3620,13 +3632,10 @@ async fn main(_spawner: Spawner) -> ! {
                     // triggered like the BLE/theme saves.
                     if watch_cfg.mesh_on != mesh_enabled {
                         watch_cfg.mesh_on = mesh_enabled;
-                        match config_offset
-                            .map(|off| peripherals::config::save(&mut flash, off, &watch_cfg))
-                        {
-                            Some(Ok(())) => {
-                                println!("[CFG] mesh_on={} saved to flash", watch_cfg.mesh_on)
-                            }
-                            _ => println!("[CFG] mesh_on save failed"),
+                        if cfg_save(flash, config_offset, &watch_cfg).await {
+                            println!("[CFG] mesh_on={} saved to flash", watch_cfg.mesh_on)
+                        } else {
+                            println!("[CFG] mesh_on save failed")
                         }
                     }
                     shell.set_mesh_enabled(mesh_enabled);
@@ -3654,7 +3663,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // try to stage an OTA update first; reboot either way.
                     if wifi_connected && crate::net::ota_http::URL_SET {
                         if let Err(e) =
-                            crate::net::ota_http::ota_update(stack, &mut flash, None).await
+                            crate::net::ota_http::ota_update(stack, flash, None).await
                         {
                             println!("[OTA] failed: {e}");
                         }
