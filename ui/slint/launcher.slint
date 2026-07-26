@@ -161,6 +161,18 @@ export component AppIcon {
         Rectangle { x: 19px; y: 34px; width: 8px;  height: 3px; border-radius: 1px; background: root.tint.with-alpha(0.5); }
         Rectangle { x: 20px; y: 38px; width: 6px;  height: 3px; border-radius: 1px; background: root.tint.with-alpha(0.4); }
     }
+    // 15 — Ping (#35): a sparkle-ripple — warm greeting radiating out. One
+    // ripple ring + a bright core + four satellite sparks at falling alpha
+    // (distinct from Hunt's concentric target, id 10: off-centre, sparks
+    // instead of rings, filled core).
+    if root.id == 15: Rectangle {
+        Rectangle { x: 6px;  y: 10px; width: 30px; height: 30px; border-radius: 15px; border-width: 3px; border-color: root.tint.with-alpha(0.6); }
+        Rectangle { x: 15px; y: 19px; width: 12px; height: 12px; border-radius: 6px;  background: root.tint; }
+        Rectangle { x: 36px; y: 4px;  width: 7px;  height: 7px;  border-radius: 3.5px; background: root.tint; }
+        Rectangle { x: 40px; y: 16px; width: 5px;  height: 5px;  border-radius: 2.5px; background: root.tint.with-alpha(0.7); }
+        Rectangle { x: 33px; y: 37px; width: 6px;  height: 6px;  border-radius: 3px;  background: root.tint.with-alpha(0.55); }
+        Rectangle { x: 41px; y: 30px; width: 4px;  height: 4px;  border-radius: 2px;  background: root.tint.with-alpha(0.4); }
+    }
 }
 
 // One app tile: icon over label, sized for the 3x3 page grid (114x108).

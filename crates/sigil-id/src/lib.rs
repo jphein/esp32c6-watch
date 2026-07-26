@@ -168,6 +168,30 @@ pub fn sigil_for_mac(mac: [u8; 6]) -> Sigil {
     sigil_for_seed(seed_from_mac(mac))
 }
 
+// --- Known-fleet node-id → sigil (issue #35, watch-to-watch ping) ------------
+
+/// The known watch fleet: `(node id, sigil)`, both derived from the efuse base
+/// MAC (id = [`node_id_from_mac`], sigil = [`sigil_for_mac`]). A hand-kept
+/// table is required because the id is a lossy XOR *fold* of the MAC — it
+/// cannot be inverted back to a seed, so id-only frames (PING/PINGACK) need
+/// this lookup to greet a peer by its TRUE per-device sigil (#34), not the
+/// unrelated id-seeded roster name. Parity with the derivation is host-tested
+/// (`fleet_node_sigils`), so a row can never silently drift from its MAC.
+pub const FLEET_NODES: &[(u8, &str)] = &[
+    (122, "eldritch-lantern"), // 98:A3:16:A7:2F:E4
+    (236, "mythic-throne"),    // 98:A3:16:A5:A7:F8
+];
+
+/// The known fleet's sigil for a mesh node id ([`FLEET_NODES`]); `None` for
+/// ids outside the fleet (callers fall back to the frame's source MAC via
+/// [`sigil_for_mac`], or to the id-seeded roster name).
+pub fn sigil_for_node(id: u8) -> Option<&'static str> {
+    FLEET_NODES
+        .iter()
+        .find(|(n, _)| *n == id)
+        .map(|(_, sigil)| *sigil)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +247,24 @@ mod tests {
                     .all(|b| b.is_ascii_lowercase() || b == b'-'));
             }
         }
+    }
+
+    /// FLEET_NODES parity (#35): every table row must match what the fleet
+    /// derivation says for its MAC — id via the XOR fold, sigil via the
+    /// MAC seed — so the hand-kept lookup can never drift from reality.
+    #[test]
+    fn fleet_node_sigils() {
+        for (mac, id, sigil) in [
+            (WATCH_A, 122u8, "eldritch-lantern"),
+            (WATCH_B, 236u8, "mythic-throne"),
+        ] {
+            assert_eq!(node_id_from_mac(mac), id);
+            assert_eq!(sigil_for_mac(mac).as_str(), sigil);
+            assert_eq!(sigil_for_node(id), Some(sigil));
+        }
+        // Off-fleet ids resolve to None (callers fall back to the MAC path).
+        assert_eq!(sigil_for_node(42), None);
+        assert_eq!(sigil_for_node(0), None);
     }
 
     /// The 0/255 remap in the node-id fold.

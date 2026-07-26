@@ -119,4 +119,9 @@ pub enum AppState {
     /// Rides the shared HA MQTT session like Climate/Energy (WiFi held while
     /// open, released on close).
     Lights,
+    /// Watch-to-watch ping (#35) — a Slint overlay: a hero button broadcasts a
+    /// SMOLv1 PING over ESP-NOW; the peer answers with a PINGACK ("delivered
+    /// to <sigil>") and blooms a full-screen greeting pulse + two-tone chime.
+    /// Mesh-dependent (no WiFi); rides the always-on ESP-NOW radio like WLED.
+    Ping,
 }

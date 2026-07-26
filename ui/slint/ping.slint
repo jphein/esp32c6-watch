@@ -1,0 +1,320 @@
+import { Theme, PageTitle } from "theme.slint";
+import { BackChevron } from "controls.slint";
+
+// Watch-to-watch ping (#35) — eldritch-lantern and mythic-throne greet each
+// other by name. Two components:
+//
+//   PingOverlay — the plugin screen: one warm hero button that broadcasts a
+//   SMOLv1 PING over ESP-NOW ("PING <sigil>" when the peer is known from mesh
+//   HELLOs, else "PING THE FLEET"). Standalone overlay, scene-resident like
+//   Lights (no framebuffer). Pure presentation: Rust owns the seq/cooldown
+//   state machine and the mesh radio; this only emits `send()`.
+//
+//   PingPulse — the receiver magic: a full-screen greeting that blooms over
+//   whatever is showing (rings expanding in the accent color + the sender's
+//   sigil in large type), armed by the Rust loop on a PING rx. Rust owns the
+//   choreography clock (ShellUi::tick_ping_pulse, the gesture-hint idiom):
+//   the pulse is CREATED dark with `lit:false` (the wake frame stays cheap)
+//   and Rust flips `lit` a beat later — the `animate` on `p` below is what
+//   expands the rings. Slint property anims only; no Rust per-frame state.
+//
+// === Rust↔Slint contract (ShellUi::set_ping / ping_pulse_show) ===
+//   PingOverlay:
+//     in  peer       // target sigil ("" until a peer is heard)
+//     in  state      // 0 idle · 1 sent (awaiting PINGACK) · 2 delivered ·
+//                    // 3 no reply (timeout, cleared with the cooldown)
+//     in  result     // the ACKER's sigil for the delivered caption
+//     in  cooling    // 3s send cooldown → the recharge sweep below the caption
+//     in  mesh-on    // mesh toggle state; off = subdued hero + settings hint
+//     callback send()    // hero tap → one PING broadcast (Rust gates cooldown)
+//     callback closed()  // back-chevron / right-swipe → watchface
+//   PingPulse:
+//     in  from       // sender sigil, large type
+//     in  lit        // ring-bloom driver (Rust-sequenced, see above)
+//     callback dismissed()  // tap anywhere → dismiss early
+//
+// Feedback contract (design spec §3/§8): every press is a hard 1-frame token
+// swap (Recipe C invert on the hero — no `animate` on press at 6-11 fps). The
+// PULSE is the sanctioned exception: a notification bloom, not press feedback,
+// driven by Slint property animation exactly like the wake-hint tweens.
+export component PingOverlay {
+    in property <string> peer: "";
+    in property <int> state: 0;
+    in property <string> result: "";
+    in property <bool> cooling: false;
+    in property <bool> mesh-on: true;
+    callback send();
+    callback closed();
+
+    // Delivered glow (drives the warm halo, the lights-lit idiom).
+    property <bool> delivered: root.state == 2;
+
+    // Hero geometry (shared by button, halos, sent ring — lights.slint's
+    // proven placement on the 410x502 round panel).
+    property <length> hero: 200px;
+    property <length> cx: root.width / 2;
+    property <length> cy: 226px;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    PageTitle { title: "PING"; }
+
+    BackChevron { clicked => { root.closed(); } }
+
+    // ---------------- delivered halo ----------------
+    // Two static alpha-graded warm rings (the AMOLED glow without a gradient
+    // or motion) — the greeting landed.
+    if root.delivered: Rectangle {
+        width: root.hero + 52px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: Theme.warm.with-alpha(0.10);
+    }
+    if root.delivered: Rectangle {
+        width: root.hero + 24px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: Theme.warm.with-alpha(0.20);
+    }
+
+    // ---------------- optimistic "sent" ring ----------------
+    // PING in flight: a crisp accent ring blooms around the hero (1-frame
+    // swap in/out — static by design, the lights pending idiom).
+    if root.state == 1: Rectangle {
+        width: root.hero + 36px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        border-color: Theme.accent;
+    }
+
+    // ---------------- hero ping button ----------------
+    button := Rectangle {
+        width: root.hero; height: root.hero;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+
+        // Pressed = FULL INVERT to solid accent (Recipe C on a circle, the
+        // boldest 1-frame delta). At rest: warm-glow fill once delivered,
+        // panel + accent edge while armed, muted line-border with the mesh off.
+        background: ta.pressed ? Theme.accent
+            : (root.delivered ? Theme.warm : Theme.panel);
+        border-width: 3px;
+        border-color: ta.pressed ? Theme.accent
+            : (root.delivered ? Theme.warm
+            : (root.mesh-on ? Theme.accent : Theme.line));
+        opacity: root.mesh-on ? 1.0 : 0.4;
+
+        // Glyph ink: dark on the bright pressed/delivered fills (palette
+        // contract: on-accent reads on accent AND warm in all 4 schemes).
+        property <color> g: (ta.pressed || root.delivered) ? Theme.on-accent : Theme.soft;
+
+        // Sparkle-ripple glyph: a warm greeting radiating outward — one ring,
+        // a bright core, and four satellite sparks (distinct from Hunt's
+        // concentric target and both bulbs).
+        Rectangle { // outer ripple ring
+            x: 64px; y: 28px; width: 72px; height: 72px; border-radius: 36px;
+            border-width: 3px; border-color: button.g.with-alpha(0.55);
+        }
+        Rectangle { // core
+            x: 88px; y: 52px; width: 24px; height: 24px; border-radius: 12px;
+            background: (ta.pressed || root.delivered) ? button.g : Theme.warm;
+        }
+        Rectangle { // spark NE
+            x: 136px; y: 24px; width: 9px; height: 9px; border-radius: 4.5px;
+            background: button.g.with-alpha(0.9);
+        }
+        Rectangle { // spark NW
+            x: 55px; y: 24px; width: 7px; height: 7px; border-radius: 3.5px;
+            background: button.g.with-alpha(0.6);
+        }
+        Rectangle { // spark SE
+            x: 141px; y: 92px; width: 6px; height: 6px; border-radius: 3px;
+            background: button.g.with-alpha(0.5);
+        }
+        // Action words inside the hero, under the glyph.
+        Text {
+            x: (parent.width - self.width) / 2; y: 112px;
+            text: root.delivered ? "DELIVERED" : "PING";
+            color: button.g;
+            font-size: 22px; font-weight: 700; letter-spacing: 3px;
+        }
+        Text {
+            x: 12px; y: 148px;
+            width: parent.width - 24px;
+            horizontal-alignment: center; overflow: elide;
+            text: !root.mesh-on ? "mesh is off"
+                : (root.peer == "" ? "THE FLEET" : root.peer);
+            color: button.g.with-alpha(0.9);
+            font-size: 15px; font-weight: 600; letter-spacing: 1px;
+        }
+
+        // Send gate: mesh must be on, and neither mid-flight nor recharging —
+        // a dead-looking press that secretly queues would be dishonest.
+        ta := TouchArea {
+            enabled: root.mesh-on && !root.cooling && root.state != 1;
+            clicked => { root.send(); }
+        }
+    }
+
+    // ---------------- target line ----------------
+    if root.mesh-on: Text {
+        x: 44px; y: 344px;
+        width: parent.width - 88px;
+        horizontal-alignment: center; overflow: elide;
+        text: root.state == 2 ? root.result
+            : (root.peer == "" ? "THE FLEET" : root.peer);
+        color: root.state == 2 ? Theme.warm : Theme.ink;
+        font-size: 30px; font-weight: 700;
+    }
+    if !root.mesh-on: Text {
+        x: (parent.width - self.width) / 2; y: 348px;
+        text: "MESH IS OFF";
+        color: Theme.soft; font-size: 22px; font-weight: 600;
+    }
+
+    // ---------------- caption / feedback line ----------------
+    // One line, priority: mesh hint > sent > delivered > no-reply > idle.
+    Text {
+        x: (parent.width - self.width) / 2; y: 388px;
+        text: !root.mesh-on ? "enable MESH in Settings \u{203a} Radios"
+            : (root.state == 1 ? "sending\u{2026}"
+            : (root.state == 2 ? "delivered \u{2713}"
+            : (root.state == 3 ? "no reply \u{2014} maybe out of range"
+            : (root.peer == "" ? "listening for the fleet\u{2026}"
+            : "\{root.peer} is in range"))));
+        color: !root.mesh-on ? Theme.warn
+            : (root.state == 1 ? Theme.accent
+            : (root.state == 2 ? Theme.warm
+            : (root.state == 3 ? Theme.dim
+            : (root.peer == "" ? Theme.faint : Theme.dim))));
+        font-size: 15px; letter-spacing: 1px;
+    }
+
+    // ---------------- cooldown recharge sweep ----------------
+    // Etiquette (3s between pings): a subtle accent2 fill sweeps the track
+    // left→right while the hero recharges. `visible:`-gated + resident (the
+    // shade.slint ROM idiom); the 2.9s width tween is a Slint property anim
+    // triggered by the `cooling` flip — Rust owns only the boolean. The
+    // reverse tween on clear runs invisibly (same accepted cost class as the
+    // wake-hint hold frames).
+    sweep := Rectangle {
+        visible: root.cooling;
+        x: (parent.width - self.width) / 2; y: 416px;
+        width: 120px; height: 4px; border-radius: 2px;
+        background: Theme.track;
+        property <float> p: root.cooling ? 1.0 : 0.0;
+        animate p { duration: 2900ms; easing: linear; }
+        Rectangle {
+            x: 0; y: 0;
+            width: parent.width * sweep.p; height: parent.height;
+            border-radius: 2px;
+            background: Theme.accent2.with-alpha(0.8);
+        }
+    }
+}
+
+// The receiver magic (#35): sender-sigil greeting over a scrim, rings
+// expanding in the accent color. Created `lit:false` (rings small + bright,
+// nothing moving on the wake frame); Rust flips `lit` on the next render
+// ticks — each flip tweens `p`, so the rings breathe out / in / out across
+// the ~4s window (ShellUi::tick_ping_pulse owns the schedule). Tap anywhere
+// dismisses early.
+export component PingPulse {
+    in property <string> from: "";
+    in property <bool> lit: false;
+    callback dismissed();
+
+    property <float> p: root.lit ? 1.0 : 0.0;
+    animate p { duration: 1100ms; easing: ease-out; }
+
+    // Ring centre — above the vertical middle so the name sits comfortably.
+    property <length> cx: root.width / 2;
+    property <length> cy: 200px;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+
+    // ---------------- expanding rings ----------------
+    // Two staggered accent rings grow from the core and thin out as they
+    // travel (opacity falls with p) — the ping crossing the air.
+    Rectangle {
+        width: 90px + root.p * 290px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        border-color: Theme.accent;
+        opacity: 0.9 - root.p * 0.65;
+    }
+    Rectangle {
+        width: 50px + root.p * 210px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 2px;
+        border-color: Theme.accent2;
+        opacity: 0.8 - root.p * 0.55;
+    }
+    // Static core halo behind the sparkle.
+    Rectangle {
+        width: 120px; height: 120px;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: 60px;
+        background: Theme.accent-bg;
+    }
+
+    // ---------------- drawn sparkle ----------------
+    // A four-point gold spark (the embedded font has no emoji — the shade's
+    // drawn-glyph rationale): two crossing capsules, a bright core, four
+    // satellite pips at falling alpha.
+    Rectangle { // vertical ray
+        x: root.cx - 3px; y: root.cy - 26px; width: 6px; height: 52px;
+        border-radius: 3px; background: Theme.warm;
+    }
+    Rectangle { // horizontal ray
+        x: root.cx - 26px; y: root.cy - 3px; width: 52px; height: 6px;
+        border-radius: 3px; background: Theme.warm;
+    }
+    Rectangle { // core
+        x: root.cx - 7px; y: root.cy - 7px; width: 14px; height: 14px;
+        border-radius: 7px; background: Theme.warm;
+    }
+    Rectangle { // pip NE
+        x: root.cx + 20px; y: root.cy - 28px; width: 8px; height: 8px;
+        border-radius: 4px; background: Theme.warm.with-alpha(0.7);
+    }
+    Rectangle { // pip SW
+        x: root.cx - 28px; y: root.cy + 20px; width: 8px; height: 8px;
+        border-radius: 4px; background: Theme.warm.with-alpha(0.7);
+    }
+    Rectangle { // pip NW
+        x: root.cx - 30px; y: root.cy - 30px; width: 6px; height: 6px;
+        border-radius: 3px; background: Theme.warm.with-alpha(0.45);
+    }
+    Rectangle { // pip SE
+        x: root.cx + 24px; y: root.cy + 24px; width: 6px; height: 6px;
+        border-radius: 3px; background: Theme.warm.with-alpha(0.45);
+    }
+
+    // ---------------- sender ----------------
+    Text {
+        x: 24px; y: 296px;
+        width: parent.width - 48px;
+        horizontal-alignment: center; overflow: elide;
+        text: root.from;
+        color: Theme.ink;
+        font-size: 30px; font-weight: 700;
+    }
+    Text {
+        x: (parent.width - self.width) / 2; y: 344px;
+        text: "pinged you";
+        color: Theme.soft;
+        font-size: 16px; letter-spacing: 2px;
+    }
+    Text {
+        x: (parent.width - self.width) / 2; y: 442px;
+        text: "tap to dismiss";
+        color: Theme.faint;
+        font-size: 13px; letter-spacing: 1px;
+    }
+
+    TouchArea { clicked => { root.dismissed(); } }
+}

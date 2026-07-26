@@ -2,8 +2,8 @@
 //! mono→stereo expansion and the SFX synths (beep tone + UI click).
 
 use mic_dsp::{
-    fill_click_mono_s16le, fill_tick_mono_s16le, fill_tone_mono_s16le, mono_to_stereo_le,
-    CLICK_LEN,
+    fill_click_mono_s16le, fill_ping_chime_mono_s16le, fill_tick_mono_s16le,
+    fill_tone_mono_s16le, mono_to_stereo_le, CLICK_LEN, PING_CHIME_LEN,
 };
 
 fn s16(buf: &[u8], i: usize) -> i16 {
@@ -132,6 +132,53 @@ fn click_decays() {
 fn tick_length() {
     let mut buf = [0u8; CLICK_LEN];
     assert_eq!(fill_tick_mono_s16le(&mut buf, 16_000), CLICK_LEN);
+}
+
+// === fill_ping_chime_mono_s16le (watch-to-watch ping, #35) ====================
+
+/// Zero-crossing count over a sample window — a cheap dominant-frequency
+/// probe: a sine at f Hz crosses zero ~2f times per second.
+fn crossings(buf: &[u8], from: usize, to: usize) -> usize {
+    (from + 1..to)
+        .filter(|&i| (s16(buf, i - 1) < 0) != (s16(buf, i) < 0))
+        .count()
+}
+
+/// The chime fills exactly PING_CHIME_LEN bytes at 16 kHz (300 ms).
+#[test]
+fn ping_chime_length() {
+    let mut buf = [0u8; PING_CHIME_LEN];
+    assert_eq!(fill_ping_chime_mono_s16le(&mut buf, 16_000), PING_CHIME_LEN);
+}
+
+/// Pop-free edges: starts at zero (linear attack) and the master fade leaves
+/// the final samples near-silent. Loud enough to notice, bounded below clip.
+#[test]
+fn ping_chime_edges_and_level() {
+    let mut buf = [0u8; PING_CHIME_LEN];
+    let n = fill_ping_chime_mono_s16le(&mut buf, 16_000);
+    let samples = n / 2;
+    assert_eq!(s16(&buf, 0), 0, "attack starts at zero");
+    let tail = (samples - 8..samples).map(|i| s16(&buf, i).unsigned_abs()).max().unwrap();
+    assert!(tail < 500, "tail should be near-silent, got {tail}");
+    let peak = (0..samples).map(|i| s16(&buf, i).unsigned_abs()).max().unwrap();
+    assert!(peak > 8_000, "chime should be clearly audible, got peak {peak}");
+    assert!(peak <= 14_000, "chime must stay pleasant, got peak {peak}");
+}
+
+/// Two-tone and RISING: the early window is dominated by E5 (~659 Hz), the
+/// late window by B5 (~988 Hz) — verified by zero-crossing rate, ±20%.
+#[test]
+fn ping_chime_rises_two_tones() {
+    let mut buf = [0u8; PING_CHIME_LEN];
+    fill_ping_chime_mono_s16le(&mut buf, 16_000);
+    // Early window 10..90 ms (note 1 alone): expect ~2 * 659 * 0.080 ≈ 105.
+    let c1 = crossings(&buf, 160, 1440);
+    // Late window 150..270 ms (note 2 dominant): ~2 * 988 * 0.120 ≈ 237.
+    let c2 = crossings(&buf, 2400, 4320);
+    assert!((84..=127).contains(&c1), "early window should ring at ~659 Hz, got {c1} crossings");
+    assert!((190..=285).contains(&c2), "late window should ring at ~988 Hz, got {c2} crossings");
+    assert!(c2 > c1, "the chime must RISE (got {c1} then {c2})");
 }
 
 /// The every-touch tick is strictly QUIETER than the launch click (texture,
