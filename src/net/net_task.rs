@@ -820,6 +820,16 @@ async fn run_scan(controller: &mut WifiController<'static>, st: &mut St) {
     let mut rows: heapless::Vec<ScanRow, SCAN_ROWS_CAP> = heapless::Vec::new();
     st.scan_seq = st.scan_seq.wrapping_add(1);
     post_scan_rows(&rows, st.scan_seq, true);
+    // #56: esp-radio 0.18's default active dwell is 10-20ms/channel — shorter
+    // than a ~100ms beacon interval, so a single sweep routinely MISSES a
+    // present AP (mythic-throne dropped "roam" from most single-pass snapshots
+    // while it was demonstrably reachable). scan_type is pub(crate) with no
+    // builder, so we can't lengthen the dwell directly; instead sweep each
+    // channel SCAN_PASSES times and merge (strongest RSSI wins) — effectively
+    // multiplying beacon-catch odds. 2 passes ≈ doubles per-AP visibility for
+    // a ~2x sweep-time cost (still a few seconds, off the hot path).
+    const SCAN_PASSES: u8 = 2;
+    for pass in 0..SCAN_PASSES {
     for ch in 1..=13u8 {
         let cfg = esp_radio::wifi::scan::ScanConfig::default().with_channel(ch);
         match controller.scan_async(&cfg).await {
@@ -853,6 +863,8 @@ async fn run_scan(controller: &mut WifiController<'static>, st: &mut St) {
             }
             Err(e) => println!("[NET] scan ch{ch} failed: {e:?}"),
         }
+    }
+    let _ = pass;
     }
     st.scanning = false;
     st.scan_seq = st.scan_seq.wrapping_add(1);
