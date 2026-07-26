@@ -17,6 +17,7 @@
 mod board;
 mod drivers;
 mod net;
+mod notify;
 mod peripherals;
 mod ui;
 mod apps;
@@ -1075,6 +1076,9 @@ async fn main(_spawner: Spawner) -> ! {
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
     let mut prev_app_state = app_state;
+    // Session manager (#31): which apps are suspended (exited with state kept),
+    // most recent first. Drives the bottom-edge-hold switcher + the badge chip.
+    let mut sessions = crate::apps::session::Sessions::new();
     let mut snake_game = SnakeGame::new();
     // World Snake shares the SMOLv1 node id so its SNK frames name us.
     let mut world_snake = WorldSnakeApp::new(node_id);
@@ -1107,6 +1111,8 @@ async fn main(_spawner: Spawner) -> ! {
     let mut aod_entry_sod: u32 = 0;
     // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
     let mut prev_fam = FamUi::default();
+    // Low-battery notification latch (#32): one warning per discharge.
+    let mut low_batt_notified = false;
     // Last pushed step count, cached so the shell can be re-populated after a
     // scene recreate (the pedometer only polls once a minute).
     let mut last_steps: u32 = 0;
@@ -1616,6 +1622,13 @@ async fn main(_spawner: Spawner) -> ! {
         // AOD minute-gated repaint has a fresh `last_dt` to compare against.
         if screen_state >= 1 && now >= next_rtc {
             if let Ok(dt) = rtc.get_time() {
+                // Feed the notification wall clock (#32): arrival stamps and
+                // age labels ride the PCF85063, not embassy-time (which AOD
+                // light-sleep freezes).
+                crate::notify::set_wall_clock(
+                    dt.day,
+                    dt.hours as u32 * 3600 + dt.minutes as u32 * 60 + dt.seconds as u32,
+                );
                 last_dt = Some(dt);
             }
             next_rtc = now + Duration::from_secs(1);
@@ -1642,6 +1655,22 @@ async fn main(_spawner: Spawner) -> ! {
                 // Feed the BLE Battery Service (read + notify).
                 crate::peripherals::ble::BATTERY_PERCENT
                     .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+                // Low-battery notification (#32): edge-triggered under 15%,
+                // re-armed at 20% or on charge — one on-wrist warning per
+                // discharge, not a nag stream.
+                if batt_pct < 15 && !charging && !low_batt_notified {
+                    low_batt_notified = true;
+                    let mut body: heapless::String<32> = heapless::String::new();
+                    use core::fmt::Write;
+                    let _ = write!(body, "{batt_pct}% - charge soon");
+                    crate::notify::push(
+                        crate::notify::Source::Battery,
+                        "Battery low",
+                        body.as_str(),
+                    );
+                } else if low_batt_notified && (charging || batt_pct >= 20) {
+                    low_batt_notified = false;
+                }
             }
             next_battery = if screen_state == 0 {
                 now + Duration::from_secs(600)
@@ -1774,6 +1803,8 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     debug_console::Inject::Home => {
                         shell.set_launcher_open(false);
+                        shell.set_switcher_open(false);
+                        shell.set_shade_open(false);
                         fb = None;
                         app_state = AppState::Watchface;
                     }
@@ -1834,7 +1865,13 @@ async fn main(_spawner: Spawner) -> ! {
             display.display_off();
             screen_state = 0;
         } else if idle_secs >= 15 && screen_state > 1 {
-            if app_state == AppState::Watchface && shell.page() == slint_shell::PAGE_CLOCK {
+            // A shell modal (switcher/shade) blocks AOD: dimming into an AOD
+            // clock OVER a modal would be dishonest — go dark like any
+            // non-clock page instead.
+            if app_state == AppState::Watchface
+                && shell.page() == slint_shell::PAGE_CLOCK
+                && !shell.modal_open()
+            {
                 display.set_brightness(0x18);
                 screen_state = 1;
                 shell.set_aod(true);
@@ -1970,6 +2007,16 @@ async fn main(_spawner: Spawner) -> ! {
                                 shell.set_net_status(net_status);
                                 settings_connect_pending = false;
                             }
+                            // Notification (#32): the give-up, on-wrist. Deduped
+                            // by source — a down AP retriggers this every WiFi
+                            // burst and must not stack a card per attempt.
+                            if !crate::notify::has_source(crate::notify::Source::Wifi) {
+                                crate::notify::push(
+                                    crate::notify::Source::Wifi,
+                                    "WiFi failed",
+                                    "3 attempts - check network",
+                                );
+                            }
                         }
                     }
                 }
@@ -2095,6 +2142,11 @@ async fn main(_spawner: Spawner) -> ! {
                         } else {
                             ota_status_text = e;
                             shell.set_ota_status(ota_status_text);
+                            // Notification (#32): the final give-up persists in
+                            // the shade after the toast fades. ("Staged" is
+                            // deliberately NOT posted — the ring is RAM and the
+                            // staged path reboots 1.2s later.)
+                            crate::notify::push(crate::notify::Source::Ota, "Update failed", e);
                             let mut msg: heapless::String<64> = heapless::String::new();
                             let _ = msg.push_str("Update failed: ");
                             let _ = msg.push_str(e);
@@ -2114,6 +2166,13 @@ async fn main(_spawner: Spawner) -> ! {
                 println!("[OTA] WiFi didn't come up within 45s - giving up");
                 ota_status_text = "WiFi failed \u{2014} tap to retry";
                 shell.set_ota_status(ota_status_text);
+                // Notification (#32): same persistence rationale as the
+                // download-failure post above.
+                crate::notify::push(
+                    crate::notify::Source::Ota,
+                    "Update failed",
+                    "WiFi didn't come up",
+                );
                 shell.set_toast("Update failed: WiFi");
                 toast_until = now + Duration::from_secs(5);
                 toast_active = true;
@@ -2529,6 +2588,13 @@ async fn main(_spawner: Spawner) -> ! {
                     // static "idle"/20MHz) so the power row isn't blank after a
                     // scene recreate (wisp's review — same lost-on-recreate class).
                     shell.set_lp_core("idle", 20);
+                    // Session badge (#31, same lost-on-recreate class) — this is
+                    // also what makes the chip appear right after a game exit
+                    // (the suspend happened while the scene was down).
+                    shell.set_suspended_count(sessions.len() as i32);
+                    // Unread badge (#32, same class): arrivals during a game
+                    // are badge-only; surface them now.
+                    shell.set_notif_unread(crate::notify::unread() as i32);
                     // Settings-hub state (same lost-on-recreate class): the hub
                     // reads these whenever it next opens; a fresh scene resets
                     // them all to component defaults.
@@ -3185,7 +3251,11 @@ async fn main(_spawner: Spawner) -> ! {
 
                 // 1Hz clock push (no-ops until the second actually ticks).
                 if let Some(dt) = last_dt.as_ref() {
-                    let _ = shell.set_time(dt);
+                    // Piggyback the shade's age refresh (#32) on the minute
+                    // flip while it's open — "5m" ticks to "6m" in place.
+                    if shell.set_time(dt) && dt.seconds == 0 && shell.shade_open() {
+                        push_shade(&shell);
+                    }
                 }
 
                 // Gyro parallax: nudge the clock face by scaled accel while the
@@ -3605,10 +3675,76 @@ async fn main(_spawner: Spawner) -> ! {
                         println!("[PKEY] poweroff write FAILED (I2C)");
                     }
                 }
+                // === App switcher (#31) ===
+                // Bottom-edge HOLD (handle_touch) or the status-cluster chip
+                // queued an open: build the session cards, then raise the
+                // overlay. Cards must exist BEFORE the scrim shows.
+                if shell.req.open_switcher.take() {
+                    push_switcher(&mut shell, &sessions);
+                    shell.set_switcher_open(true);
+                }
+                // Kill-swipe on a card: drop the session (next open runs
+                // setup()) and rebuild in place — the overlay stays up (empty
+                // state if that was the last one) so a second kill doesn't
+                // need a fresh hold gesture.
+                if let Some(idx) = shell.req.switcher_kill.take() {
+                    if let Some(state) = crate::apps::registry::launch_state(idx as usize) {
+                        sessions.kill(state);
+                        println!("[SESSION] killed {state:?} ({} left)", sessions.len());
+                    }
+                    push_switcher(&mut shell, &sessions);
+                    shell.set_suspended_count(sessions.len() as i32);
+                }
+
+                // === Notification shade (#32) ===
+                // Top-edge swipe-down (handle_touch) or the unread chip:
+                // build the cards, zero the badge, then raise the overlay.
+                if shell.req.open_shade.take() {
+                    push_shade(&shell);
+                    crate::notify::mark_read();
+                    shell.set_notif_unread(0);
+                    shell.set_shade_open(true);
+                }
+                // Per-card dismiss (X tap or Left-swipe on the card) and
+                // CLEAR ALL: ring edits + in-place rebuild, shade stays up.
+                if let Some(slot) = shell.req.notif_dismiss.take() {
+                    crate::notify::dismiss(slot as usize);
+                    push_shade(&shell);
+                }
+                if shell.req.notif_clear.take() {
+                    crate::notify::clear();
+                    push_shade(&shell);
+                    shell.set_notif_unread(0);
+                }
+                // Arrival: badge always. A FRESH arrival (not one that aged
+                // out while a game held the panel) toasts while the screen is
+                // on — never wakes it (battery: screen-off arrivals are badge-
+                // only) — or lands straight into an open shade.
+                if let Some((title, posted_ms)) = crate::notify::take_arrival() {
+                    shell.set_notif_unread(crate::notify::unread() as i32);
+                    if shell.shade_open() {
+                        push_shade(&shell);
+                        crate::notify::mark_read();
+                        shell.set_notif_unread(0);
+                    } else if screen_state >= 2
+                        && !toast_active
+                        && Instant::now().as_millis().saturating_sub(posted_ms) < 2_000
+                    {
+                        shell.set_toast(title.as_str());
+                        toast_active = true;
+                        toast_until = now + Duration::from_secs(3);
+                    }
+                }
+
                 if let Some(target) = shell.req.launch.take() {
                     // Launch tap-click: covered by the hoisted every-touch tick
                     // (#49) — the old per-control click here would double up.
                     shell.set_launcher_open(false);
+                    // A switcher-card resume arrives on this same cell; close
+                    // the overlays before dispatching (idempotent — the Slint
+                    // side already hard-cut the switcher on the tap).
+                    shell.set_switcher_open(false);
+                    shell.set_shade_open(false);
                     if target == AppState::Wled {
                         // WLED is a Slint overlay, not a framebuffer app: it renders
                         // through the resident scene, so raise the overlay in place
@@ -3745,22 +3881,50 @@ async fn main(_spawner: Spawner) -> ! {
                             Some(f) => {
                                 fb = Some(f);
                                 log_heap("app enter");
-                                // Run the SAME per-app setup the old launcher arm did
-                                // (without setup the games boot into garbage).
-                                match target {
-                                    AppState::Snake => snake_game.setup(),
-                                    AppState::WorldSnake => world_snake.setup(),
-                                    AppState::Game2048 => {
-                                        let fb = fb.as_mut().unwrap();
-                                        game_2048.setup();
-                                        game_2048.render(fb);
-                                        fb.flush(&mut display);
+                                // Session manager (#31): a suspended app RESUMES —
+                                // its state struct was kept, so setup() (the reset)
+                                // is exactly what a resume must skip. Fresh
+                                // launches (never suspended, or killed from the
+                                // switcher) run the SAME per-app setup the old
+                                // launcher arm did (without it the games boot
+                                // into garbage).
+                                let resumed = sessions.take_resume(target);
+                                if !resumed {
+                                    match target {
+                                        AppState::Snake => snake_game.setup(),
+                                        AppState::WorldSnake => world_snake.setup(),
+                                        AppState::Game2048 => game_2048.setup(),
+                                        AppState::Tetris => tetris_game.setup(),
+                                        AppState::Flappy => flappy_game.setup(),
+                                        AppState::Maze => maze_game.setup(),
+                                        AppState::Settings => {}
+                                        _ => {}
                                     }
-                                    AppState::Tetris => tetris_game.setup(),
-                                    AppState::Flappy => flappy_game.setup(),
-                                    AppState::Maze => maze_game.setup(),
-                                    AppState::Settings => {}
-                                    _ => {}
+                                }
+                                // Entry frame: event-driven apps (2048 — dirty
+                                // only on a move) would sit on a black fb until
+                                // their first input. True for a fresh 2048 (the
+                                // old inline render) and for EVERY resume: the
+                                // kept state must show NOW, not after a touch.
+                                let entry: Option<&dyn App> = match target {
+                                    AppState::Game2048 => Some(&game_2048),
+                                    _ if resumed => match target {
+                                        AppState::Snake => Some(&snake_game),
+                                        AppState::WorldSnake => Some(&world_snake),
+                                        AppState::Tetris => Some(&tetris_game),
+                                        AppState::Flappy => Some(&flappy_game),
+                                        AppState::Maze => Some(&maze_game),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(app) = entry {
+                                    let fb = fb.as_mut().unwrap();
+                                    app.render(fb);
+                                    fb.flush(&mut display);
+                                }
+                                if resumed {
+                                    println!("[SESSION] resumed {target:?}");
                                 }
                                 app_state = target;
                             }
@@ -3784,15 +3948,21 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                 }
 
-                // BOOT button toggles the launcher overlay.
+                // BOOT button toggles the launcher overlay; with a shell modal
+                // (switcher/shade) up it dismisses that first — "home".
                 if boot_button.is_low() {
-                    let opening = app_state == AppState::Watchface;
-                    shell.set_launcher_open(opening);
-                    app_state = if opening {
-                        AppState::Launcher
+                    if shell.modal_open() {
+                        shell.set_switcher_open(false);
+                        shell.set_shade_open(false);
                     } else {
-                        AppState::Watchface
-                    };
+                        let opening = app_state == AppState::Watchface;
+                        shell.set_launcher_open(opening);
+                        app_state = if opening {
+                            AppState::Launcher
+                        } else {
+                            AppState::Watchface
+                        };
+                    }
                     Timer::after(Duration::from_millis(200)).await;
                 }
 
@@ -3929,6 +4099,13 @@ async fn main(_spawner: Spawner) -> ! {
                 // game now exits consistently to the launcher).
                 let boot = boot_button.is_low();
                 if exit || boot {
+                    // Session manager (#31): every fb exit SUSPENDS — the state
+                    // struct is a main-loop local and persists, so the next
+                    // open resumes mid-game unless the switcher killed it.
+                    // (Game-over screens self-reset on tap in-app, so resuming
+                    // onto one is fine.) Badge count lands via the
+                    // resume_scene re-push in the shell arm.
+                    sessions.suspend(s);
                     app_state = AppState::Launcher;
                     fb = None;
                     println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
@@ -3991,6 +4168,34 @@ fn run_fb_app(
         *next_flush = now + Duration::from_millis(app.min_flush_ms() as u64);
     }
     (false, sfx)
+}
+
+/// Rebuild the app-switcher cards (#31) from the suspension list: registry
+/// indices, most recently suspended first. The overlay shows the first 4;
+/// the full count drives its "+N more" line.
+fn push_switcher(shell: &mut ShellUi, sessions: &crate::apps::session::Sessions) {
+    let mut rows: heapless::Vec<i32, 8> = heapless::Vec::new();
+    for st in sessions.iter() {
+        if let Some(pos) = crate::apps::registry::REGISTRY
+            .iter()
+            .position(|d| d.state == st)
+        {
+            if rows.push(pos as i32).is_err() {
+                break;
+            }
+        }
+    }
+    shell.set_switcher_cards(&rows, sessions.len());
+}
+
+/// Rebuild the notification-shade cards (#32) from the ring (newest first;
+/// the overlay shows 4, its footer counts the rest). Snapshot-then-push keeps
+/// the critical section tiny — no Slint work under the ring lock.
+fn push_shade(shell: &ShellUi) {
+    let mut buf: heapless::Vec<crate::notify::Notification, { crate::notify::CAP }> =
+        heapless::Vec::new();
+    crate::notify::snapshot(&mut buf);
+    shell.set_shade_cards(&buf);
 }
 
 /// Push the Settings-hub keyboard display state (v0.9.0 NETWORK flow). Rust

@@ -10,6 +10,7 @@ pub mod tetris;
 pub mod flappy;
 pub mod maze;
 pub mod registry;
+pub mod session;
 
 /// Input state passed to apps each frame
 pub struct AppInput {

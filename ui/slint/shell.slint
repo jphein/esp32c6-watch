@@ -16,6 +16,8 @@ import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { SettingsHub } from "settings.slint";
 import { PowerMenu } from "power_menu.slint";
+import { SwitcherOverlay } from "switcher.slint";
+import { ShadeOverlay, NotifCard } from "shade.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -23,7 +25,9 @@ import { PowerMenu } from "power_menu.slint";
 // and pushes them into `launcher-tiles` (page-major, 9 slots per page).
 // `Theme` is re-exported too so Rust can drive the scheme selector via
 // `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
-export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet, SpecBand }
+// NotifCard rides along for the same reason (slint_shell.rs builds the
+// notification-shade rows from the Rust ring).
+export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet, SpecBand, NotifCard }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -187,8 +191,23 @@ export component WatchShell inherits Window {
     // destroy — on the loop's render clock; Slint only draws. `hint-sides` /
     // `hint-up` gate the conditional edge strips below (zero cost when hidden:
     // the elements don't exist), `hints-lit` drives their opacity tween.
+    // App switcher (#31): bottom-edge HOLD overlay. Cards ride the launcher's
+    // LauncherTile struct (glyph/name/accent/registry idx), built by Rust from
+    // the session list; `suspended-count` drives the status-cluster chip.
+    in-out property <bool> switcher-open: false;
+    in property <[LauncherTile]> switcher-tiles: [];
+    in property <int> switcher-count: 0;
+    in property <int> suspended-count: 0;
+    // Notification shade (#32): top-edge swipe-down overlay. Cards built by
+    // Rust from the bounded ring; `notif-unread` drives the status-cluster
+    // chip, `notif-total` the shade's footer counts.
+    in-out property <bool> shade-open: false;
+    in property <[NotifCard]> notif-cards: [];
+    in property <int> notif-total: 0;
+    in property <int> notif-unread: 0;
     in property <bool> hint-sides: false;
     in property <bool> hint-up: false;
+    in property <bool> hint-down: false;
     in property <bool> hints-lit: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
@@ -240,6 +259,15 @@ export component WatchShell inherits Window {
     // Power menu (#48): SHUTDOWN → AXP2101 poweroff (cell drain in main.rs);
     // REBOOT reuses `reboot-tap` — the power page's proven OTA+reset drain.
     callback power-shutdown-tap();
+    // App switcher (#31): chip tap → Rust builds cards, raises the overlay;
+    // card tap → resume via the launcher's launch cell (registry idx).
+    callback open-switcher();
+    callback switcher-resume(int);
+    // Notification shade (#32): chip tap → Rust builds cards + clears the
+    // badge, raises the overlay; X/CLEAR ALL → ring edits in the loop.
+    callback open-shade();
+    callback notif-dismiss(int);
+    callback notif-clear();
 
     in-out property <float> brightness: 0.8;
 
@@ -333,18 +361,21 @@ export component WatchShell inherits Window {
 
     // ==================== gesture hints (wake shimmer) ====================
     // First-glance affordances for the shell gestures, shown ~3s after a
-    // wake-to-bright transition. Three TIGHT edge strips — deliberately NOT
+    // wake-to-bright transition. Four TIGHT edge strips — deliberately NOT
     // one full-screen container — so the opacity tween's dirty region stays
     // small under the partial renderer (frame budget). Duo-tone "aurora":
     // accent glyph/handle with an accent2 echo, alpha-graded; every color is
-    // a Theme token so all four schemes recolor it. Clock page only (swipe-up
-    // → launcher is only honest there), never in AOD, never under the
-    // launcher scrim. Chrome (dots/pills) draws over these, hence this block
-    // sits before it.
+    // a Theme token so all four schemes recolor it. Shown on EVERY watchface
+    // page since #29 — the bottom handle means "edge-swipe up → launcher",
+    // honest everywhere now — never in AOD, never under the launcher scrim.
+    // Chrome (dots/pills) draws over these, hence this block sits before it.
+    // `visible:`-gated, not `if`-gated: visible:false culls draw + input
+    // identically, without the ~3-6KB generated inner component each `if`
+    // costs (the gesture-shell ROM diet — see shade.slint's note).
 
     // Left edge: page carousel, more content behind the left bezel.
-    if root.hint-sides && !root.aod && !root.launcher-open
-        && root.current-page == 0: Rectangle {
+    Rectangle {
+        visible: root.hint-sides && !root.aod && !root.launcher-open;
         x: 0; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -365,8 +396,8 @@ export component WatchShell inherits Window {
     }
 
     // Right edge: mirror of the left strip.
-    if root.hint-sides && !root.aod && !root.launcher-open
-        && root.current-page == 0: Rectangle {
+    Rectangle {
+        visible: root.hint-sides && !root.aod && !root.launcher-open;
         x: parent.width - self.width; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -389,10 +420,11 @@ export component WatchShell inherits Window {
         }
     }
 
-    // Bottom edge: swipe up → launcher. A rising duo-tone "handle" beam,
-    // tucked under the page dots (visible dots end y473; this starts y479).
-    if root.hint-up && !root.aod && !root.launcher-open
-        && root.current-page == 0: Rectangle {
+    // Bottom edge: edge-swipe up → launcher (#29). A rising duo-tone "handle"
+    // beam hugging the edge zone (start_y ≥ 427), tucked under the page dots
+    // (visible dots end y473; this starts y479).
+    Rectangle {
+        visible: root.hint-up && !root.aod && !root.launcher-open;
         x: (parent.width - self.width) / 2; y: 474px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -406,6 +438,27 @@ export component WatchShell inherits Window {
             x: (parent.width - self.width) / 2; y: 14px;
             width: 84px; height: 5px; border-radius: 2.5px;
             background: Theme.accent.with-alpha(0.9);
+        }
+    }
+
+    // Top edge: edge-swipe down → notification shade (#32). Mirror of the
+    // bottom handle, hugging the top bezel above the radio dots' visible
+    // row (~y38); the echo "descends" toward the content.
+    Rectangle {
+        visible: root.hint-down && !root.aod && !root.launcher-open;
+        x: (parent.width - self.width) / 2; y: 2px;
+        width: 104px; height: 26px;
+        opacity: root.hints-lit ? 1.0 : 0.0;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        Rectangle { // the handle
+            x: (parent.width - self.width) / 2; y: 7px;
+            width: 84px; height: 5px; border-radius: 2.5px;
+            background: Theme.accent.with-alpha(0.9);
+        }
+        Rectangle { // echo — narrower and fainter, "descending"
+            x: (parent.width - self.width) / 2; y: 17px;
+            width: 48px; height: 4px; border-radius: 2px;
+            background: Theme.accent2.with-alpha(0.5);
         }
     }
 
@@ -493,8 +546,70 @@ export component WatchShell inherits Window {
         }
     }
 
-    // Toast (RAM-busy etc.): visible while toast-text != ""
-    if root.toast-text != "": Rectangle {
+    // ==================== status cluster (#31/#32) ====================
+    // ONE corner spot for shell badges — top-right, tucked under the battery
+    // pill (the only chrome-free corner strip). Theme-tokened; AOD-excluded
+    // (gated, and the AOD overlay paints over the chrome anyway). Chips are
+    // tappable shortcuts (Recipe B halo) and are `visible:`-gated rather
+    // than `if`-gated: chrome is resident anyway, and each `if` would cost
+    // a ~3-6KB generated inner component (see shade.slint's ROM note).
+    susp-chip := IconButton {
+        visible: root.suspended-count > 0 && !root.aod;
+        x: parent.width - self.width - Theme.safe-corner;
+        y: 64px;
+        width: 58px;
+        height: 30px;
+        clicked => { root.open-switcher(); }
+        // Stacked-cards glyph — "something's put away back there".
+        Rectangle {
+            x: 10px; y: 11px; width: 15px; height: 11px; border-radius: 3px;
+            border-width: 1px;
+            border-color: susp-chip.pressed ? Theme.accent : Theme.dim;
+        }
+        Rectangle {
+            x: 14px; y: 7px; width: 15px; height: 11px; border-radius: 3px;
+            border-width: 1px;
+            border-color: susp-chip.pressed ? Theme.accent : Theme.soft;
+            background: Theme.panel;
+        }
+        Text {
+            x: 36px;
+            y: (parent.height - self.height) / 2;
+            text: "\{root.suspended-count}";
+            color: susp-chip.pressed ? Theme.accent : Theme.soft;
+            font-size: 15px;
+            font-weight: 600;
+        }
+    }
+
+    // Unread notifications chip (#32): warm dot + count, left of the
+    // suspended chip when both show — one cluster row. Tap opens the shade.
+    unread-chip := IconButton {
+        visible: root.notif-unread > 0 && !root.aod;
+        x: parent.width - self.width - Theme.safe-corner
+            - (root.suspended-count > 0 ? 62px : 0px);
+        y: 64px;
+        width: 54px;
+        height: 30px;
+        clicked => { root.open-shade(); }
+        Rectangle {
+            x: 11px; y: 9px; width: 12px; height: 12px; border-radius: 6px;
+            background: unread-chip.pressed ? Theme.accent : Theme.warm;
+        }
+        Text {
+            x: 31px;
+            y: (parent.height - self.height) / 2;
+            text: "\{root.notif-unread}";
+            color: unread-chip.pressed ? Theme.accent : Theme.soft;
+            font-size: 15px;
+            font-weight: 600;
+        }
+    }
+
+    // Toast (RAM-busy, notification arrivals): shown while toast-text != ""
+    // (`visible:`-gated — same ROM rationale as the hint strips above).
+    Rectangle {
+        visible: root.toast-text != "";
         x: (parent.width - self.width) / 2;
         y: 420px;
         width: min(360px, toast-label.width + 40px);
@@ -681,6 +796,31 @@ export component WatchShell inherits Window {
         shutdown-tap => { root.power-shutdown-tap(); }
         // Chevron / CANCEL: clear the flag directly (Flag idiom, like Theme).
         close => { root.power-menu-open = false; }
+    }
+
+    // ==================== App switcher (#31) ====================
+    // Bottom-edge HOLD overlay. `resume` also closes it locally for an
+    // instant hard-cut; the launch drain in main.rs closes it again
+    // idempotently before dispatching the app.
+    if root.switcher-open: SwitcherOverlay {
+        width: 100%; height: 100%;
+        tiles: root.switcher-tiles;
+        count: root.switcher-count;
+        resume(i) => {
+            root.switcher-open = false;
+            root.switcher-resume(i);
+        }
+        close => { root.switcher-open = false; }
+    }
+
+    // ==================== Notification shade (#32) ====================
+    if root.shade-open: ShadeOverlay {
+        width: 100%; height: 100%;
+        cards: root.notif-cards;
+        total: root.notif-total;
+        dismiss(i) => { root.notif-dismiss(i); }
+        clear-all => { root.notif-clear(); }
+        close => { root.shade-open = false; }
     }
 
     // ==================== AOD overlay ====================
