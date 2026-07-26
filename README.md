@@ -142,6 +142,8 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 ### ✅ Shipped
 
 - *v0.2.0* — Slint UI shell (5-page carousel, launcher, AOD, Mesh Familiar), on-demand framebuffer, SMOLv1 mesh, six games, weather, pedometer, BLE, OTA A/B layout, `defmt-rtt` debug.
+- *v0.3.0* — migration tail: **AOD** rendered by the Slint shell, the **Mesh Familiar** status cluster + gyro parallax on the clock, an LP-core power row, and the **half-resolution framebuffer** (205×251 RGB332, ~51 KB, upscaled 2× on flush) that finally let games and Settings launch in *any* radio state — the full-res buffer couldn't share the C6's single SRAM region with a resident Slint scene plus the radio stacks. Mesh also decoupled from WiFi credentials (ESP-NOW needs only the STA PHY).
+- *v0.3.1* — on-glass fixes: the WiFi toggle stopped dropping taps and now toasts when credentials are missing, the WIFI/BLE/MESH hit areas grew 66×44 → 78×64 (+72 %), and the Sensors page shows step count.
 - *v0.4.0* — light-sleep AOD, WLED WiZmote remote, RSSI treasure hunt, home-energy screen, die-temperature, host-tested `no_std` workspace crates.
 - *v0.5.0* — **Home Assistant climate control**: a bidirectional MQTT climate session, a Climate list + per-device detail overlay, and `crates/climate-model` as the pure `no_std` state core; the home-energy screen goes **live** (real battery/solar/grid over MQTT) with Node-RED bridge flows (`ha-bridge/`); main heap trimmed 240 → 228 KB to grow the C6 stack.
 - *v0.5.1* — boot-time **stack-floor guardrail**, optimistic setpoints that flush on close, Energy connection gating, and a shared `BackChevron` + 72 px setpoint steppers.
@@ -163,6 +165,7 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 - [#32](https://github.com/jphein/esp32c6-watch/issues/32) — **Notification shade**: top-edge swipe-down; HA messages over MQTT + system events
 - [#28](https://github.com/jphein/esp32c6-watch/issues/28) — AOD pixel-shift (burn-in) + typography token sweep
 - [#45](https://github.com/jphein/esp32c6-watch/issues/45) — **Face Manager**: long-press the clock to pick faces, reorder/add/remove carousel pages
+- [#52](https://github.com/jphein/esp32c6-watch/issues/52) — **Complication Manager**: editable watchface slots rendering any plugin or system surface (builds on [#45](https://github.com/jphein/esp32c6-watch/issues/45))
 - [#44](https://github.com/jphein/esp32c6-watch/issues/44) — **Plugin Manager**: toggle + configure plugins on-glass, registry-driven
 - [#48](https://github.com/jphein/esp32c6-watch/issues/48) — Power-button long-press → **SHUTDOWN / REBOOT** menu (AXP2101 PWRON events)
 - [#10](https://github.com/jphein/esp32c6-watch/issues/10) — Emoji-expression face (vendor parity)
