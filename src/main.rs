@@ -1412,6 +1412,11 @@ async fn main(_spawner: Spawner) -> ! {
     // at the protocol level — see smol_mesh::handle_rx).
     let mut ping_rx_last: Option<(u8, u16)> = None;
     let mut ping_rx_gate_until: Option<Instant> = None;
+    // #58 pop-over-everything: the framebuffer app a ping SUSPENDED to take the
+    // panel for the pulse. `Some(app)` means "resume this game once the pulse
+    // ends" — the fb was freed + the Slint scene brought up so the pulse could
+    // composite; on dismiss we re-launch through #31's resume path (state kept).
+    let mut ping_resume_app: Option<AppState> = None;
 
     // === Settings hub (v0.9.0, #49) — NETWORK flow state ===
     // The hub is scene-resident (no framebuffer); the WiFi creds flow is
@@ -2560,39 +2565,83 @@ async fn main(_spawner: Spawner) -> ! {
                                 ping_rx_gate_until =
                                     Some(Instant::now() + Duration::from_secs(2));
                                 let from = ping_sigil(from_id, mac);
-                                // The chime IS the ping — it plays wherever the
-                                // greeting lands (bright, dim, AOD, mid-game).
+                                // (1) The chime IS the ping — ALWAYS play it,
+                                // wherever the greeting lands (bright, dim, AOD,
+                                // full-off, mid-game). Half-duplex is fine.
                                 audio_out::play_pcm(ping_chime_pcm);
                                 audio_out::service_amp(&mut amp_en, &mut audio_codec);
-                                if screen_state == 0 || fb.is_some() {
-                                    // Panel fully off, or a game owns it (scene
-                                    // suspended): the pulse can't land — leave a
-                                    // shade card via the notify ring instead.
-                                    let mut title: heapless::String<32> =
-                                        heapless::String::new();
+                                // (3) ALWAYS log a shade card (#58) — a persistent,
+                                // RTC-stamped record that survives the ~4s pulse.
+                                // The time in the body keeps distinct pings from
+                                // the same peer out of notify's consecutive-dup
+                                // suppression (so the unread badge bumps each ping).
+                                {
                                     use core::fmt::Write as _;
+                                    let mut title: heapless::String<
+                                        { crate::notify::TITLE_CAP },
+                                    > = heapless::String::new();
                                     let _ = write!(title, "Ping from {}", from.as_str());
+                                    let mut body: heapless::String<
+                                        { crate::notify::BODY_CAP },
+                                    > = heapless::String::new();
+                                    match last_dt.as_ref() {
+                                        Some(dt) => {
+                                            let _ = write!(
+                                                body,
+                                                "A greeting across the mesh \u{00b7} {:02}:{:02}:{:02}",
+                                                dt.hours, dt.minutes, dt.seconds
+                                            );
+                                        }
+                                        None => {
+                                            let _ = body
+                                                .push_str("A greeting across the mesh");
+                                        }
+                                    }
                                     crate::notify::push(
                                         crate::notify::Source::System,
                                         title.as_str(),
-                                        "A greeting across the mesh",
+                                        body.as_str(),
                                     );
-                                } else {
-                                    if screen_state < 3 {
-                                        // Wake to bright — the wrist-raise seam
-                                        // (the panel is already ON in AOD/dim;
-                                        // only brightness changes). No hint_wake:
-                                        // the pulse owns this wake's choreography.
-                                        display.set_brightness(brightness);
-                                        screen_state = 3;
-                                        next_flush = now;
-                                        shell.set_aod(false);
-                                        shell.request_redraw();
-                                    }
-                                    // Keep the screen up through the ~4s pulse.
-                                    last_interaction = Instant::now();
-                                    shell.ping_pulse_show(from.as_str());
                                 }
+                                // (2) Pop the pulse over EVERYTHING (#58). A
+                                // framebuffer game/app owns the panel + heap and
+                                // the Slint scene is suspended, so the pulse can't
+                                // composite over it. SUSPEND the app (state kept —
+                                // #31), free the fb, bring the scene back up, and
+                                // arm the resume: on dismiss we re-launch it right
+                                // where it was. Scene-resident overlays need none
+                                // of this — the pulse is just top-z above them.
+                                if fb.is_some() {
+                                    ping_resume_app = Some(app_state);
+                                    sessions.suspend(app_state);
+                                    fb = None; // free the ~51KB fb BEFORE the scene
+                                    shell.resume_scene(); // recreate so the pulse can draw
+                                    // The shell arm's return-from-game block
+                                    // re-pushes battery/time/radios/etc. (keyed on
+                                    // prev_app_state); resume_scene there no-ops.
+                                    app_state = AppState::Watchface;
+                                    println!(
+                                        "[PING] suspended {:?} for the pulse",
+                                        ping_resume_app
+                                    );
+                                }
+                                // Wake to bright from ANY sleep state — a ping is a
+                                // can't-miss event (#58). Panel fully off needs the
+                                // display_on() + warmup the touch-wake path uses.
+                                if screen_state < 3 {
+                                    if screen_state == 0 {
+                                        display.display_on();
+                                        Timer::after(Duration::from_millis(20)).await;
+                                    }
+                                    display.set_brightness(brightness);
+                                    screen_state = 3;
+                                    next_flush = now;
+                                    shell.set_aod(false);
+                                    shell.request_redraw();
+                                }
+                                // Keep the screen up through the ~4s pulse.
+                                last_interaction = Instant::now();
+                                shell.ping_pulse_show(from.as_str());
                                 println!(
                                     "[PING] greeting from {} (id{from_id} seq {seq})",
                                     from.as_str()
@@ -3261,6 +3310,18 @@ async fn main(_spawner: Spawner) -> ! {
                 // scene state, not just the Ping screen.
                 if shell.req.ping_pulse_tap.take() {
                     shell.ping_pulse_dismiss();
+                }
+                // #58 pop-over-everything: if a ping SUSPENDED a fb game to take
+                // the panel, resume it the instant the pulse ends (tap, swipe,
+                // OR the ~4s auto-dismiss — all observed through the one
+                // ping_pulse_active flag). Re-launch through #31's resume path
+                // (launch cell → take_resume skips setup → state preserved).
+                if let Some(app) = ping_resume_app {
+                    if !shell.ping_pulse_active() {
+                        shell.req.launch.set(Some(app));
+                        ping_resume_app = None;
+                        println!("[PING] pulse done \u{2014} resuming {app:?}");
+                    }
                 }
                 // Hero tap → one PING broadcast. The Slint gate (mesh-on +
                 // not cooling + not mid-flight) already filtered; re-verify
