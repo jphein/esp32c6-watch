@@ -324,14 +324,13 @@ export component WatchShell inherits Window {
     // one full-screen container — so the opacity tween's dirty region stays
     // small under the partial renderer (frame budget). Duo-tone "aurora":
     // accent glyph/handle with an accent2 echo, alpha-graded; every color is
-    // a Theme token so all four schemes recolor it. Clock page only (swipe-up
-    // → launcher is only honest there), never in AOD, never under the
-    // launcher scrim. Chrome (dots/pills) draws over these, hence this block
-    // sits before it.
+    // a Theme token so all four schemes recolor it. Shown on EVERY watchface
+    // page since #29 — the bottom handle means "edge-swipe up → launcher",
+    // honest everywhere now — never in AOD, never under the launcher scrim.
+    // Chrome (dots/pills) draws over these, hence this block sits before it.
 
     // Left edge: page carousel, more content behind the left bezel.
-    if root.hint-sides && !root.aod && !root.launcher-open
-        && root.current-page == 0: Rectangle {
+    if root.hint-sides && !root.aod && !root.launcher-open: Rectangle {
         x: 0; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -352,8 +351,7 @@ export component WatchShell inherits Window {
     }
 
     // Right edge: mirror of the left strip.
-    if root.hint-sides && !root.aod && !root.launcher-open
-        && root.current-page == 0: Rectangle {
+    if root.hint-sides && !root.aod && !root.launcher-open: Rectangle {
         x: parent.width - self.width; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -376,10 +374,10 @@ export component WatchShell inherits Window {
         }
     }
 
-    // Bottom edge: swipe up → launcher. A rising duo-tone "handle" beam,
-    // tucked under the page dots (visible dots end y473; this starts y479).
-    if root.hint-up && !root.aod && !root.launcher-open
-        && root.current-page == 0: Rectangle {
+    // Bottom edge: edge-swipe up → launcher (#29). A rising duo-tone "handle"
+    // beam hugging the edge zone (start_y ≥ 427), tucked under the page dots
+    // (visible dots end y473; this starts y479).
+    if root.hint-up && !root.aod && !root.launcher-open: Rectangle {
         x: (parent.width - self.width) / 2; y: 474px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;

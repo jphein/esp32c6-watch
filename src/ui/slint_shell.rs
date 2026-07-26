@@ -50,6 +50,49 @@ pub fn brightness_raw(frac: f32) -> u8 {
 /// starting here are slider drags, not page switches.
 pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
+// ==================== THE GESTURE MAP (#29 / #31 / #32) ====================
+// Single source of truth for the edge-gesture shell. Zones are judged on
+// `SwipeEvent.start_y` — the FT3168 driver already reports it (the slider
+// exclusion above uses the same field). All edge gestures act on the
+// WATCHFACE pages only: the launcher, the Settings hub, and every overlay
+// own their gestures (they swallow nav swipes first), and framebuffer games
+// never route touch through this module at all.
+//
+//   Bottom edge (start_y ≥ EDGE_BOTTOM_Y, ~85% of the 502px panel):
+//     swipe UP        → app launcher (#29), from ANY watchface page
+//     HOLD ≥ 500 ms   → app switcher (#31)
+//   Top edge (start_y ≤ EDGE_TOP_Y, ~15%):
+//     swipe DOWN      → notification shade (#32)
+//   Mid-screen: unchanged — Left/Right page the carousel, Up on the clock
+//     page still opens the launcher (the legacy affordance).
+//
+// On-face LONG-PRESS outside the bottom zone is RESERVED for the face
+// manager (#45): the hold detector arms ONLY inside the bottom edge zone.
+// Power-page corner case: the brightness slider band (330..=430) overlaps
+// the bottom zone by 4px and its exclusion is checked first — a drag that
+// close to the slider must never yank the launcher up.
+
+/// Bottom edge zone floor: `start_y >= EDGE_BOTTOM_Y` is an edge gesture
+/// (≈85% of the 502px panel height).
+pub const EDGE_BOTTOM_Y: u16 = 427;
+
+/// Bottom-edge HOLD (#31): a press that stays inside the edge zone for this
+/// long raises the app switcher.
+const HOLD_MS: u64 = 500;
+/// Finger drift that cancels a pending hold — past this it's swipe intent.
+/// Kept under the touch driver's 36px swipe threshold so a cancelled hold can
+/// still classify as the edge-swipe.
+const HOLD_SLOP_PX: u16 = 24;
+
+/// Switcher card geometry (#31) — MUST match `ui/slint/switcher.slint`:
+/// slot i spans y `CARD_TOP + i*CARD_PITCH .. + CARD_H`. A kill-swipe (Up
+/// starting on a card) maps back to its slot with [`switcher_slot`].
+const SWITCHER_CARD_TOP: u16 = 110;
+const SWITCHER_CARD_H: u16 = 84;
+const SWITCHER_CARD_PITCH: u16 = 96;
+/// Visible card slots (the suspension list may be longer; overlay shows "+N").
+const SWITCHER_CARDS: usize = 4;
+
 /// Settings-hub section pages (ui/slint/settings.slint `titles` order).
 pub const SETTINGS_PAGE_COUNT: i32 = 5;
 /// The DISPLAY page's index — the one hosting the hub's brightness slider.
@@ -472,7 +515,13 @@ impl ShellUi {
                         (ui.get_current_page() + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT),
                     )
                 }
-                SwipeDirection::Up if ui.get_current_page() == PAGE_CLOCK => {
+                // Launcher (#29): a bottom-EDGE swipe up opens it from ANY
+                // watchface page (the standard wearable gesture); a mid-screen
+                // swipe up keeps the legacy clock-page-only behavior.
+                SwipeDirection::Up
+                    if swipe_start_y >= EDGE_BOTTOM_Y
+                        || ui.get_current_page() == PAGE_CLOCK =>
+                {
                     self.hint_seen_up = true;
                     ui.set_hint_up(false);
                     ui.set_launcher_open(true)
@@ -494,13 +543,12 @@ impl ShellUi {
     /// seam (tap/button, wrist-raise, boot). Shows nothing yet — the strips
     /// are created invisible and [`tick_hints`] blooms them ~150ms later, so
     /// the wake frame itself stays hint-free. No-ops once both gestures have
-    /// been used this boot, off the clock page (swipe-up → launcher wouldn't
-    /// be honest there), or while a game holds the panel.
+    /// been used this boot, or while a game holds the panel. Armed on EVERY
+    /// watchface page since #29: the bottom handle now means "edge-swipe up →
+    /// launcher", which is honest everywhere (the sides always were — the
+    /// carousel wraps).
     pub fn hint_wake(&mut self) {
         if self.hint_seen_lr && self.hint_seen_up {
-            return;
-        }
-        if self.page() != PAGE_CLOCK {
             return;
         }
         let Some(ui) = self.ui.as_ref() else {
