@@ -129,3 +129,10 @@ tools/ota_push.sh --target mythic-throne   # one watch: watch/mythic-throne/ota
 Current fleet: `eldritch-lantern` (98:A3:16:A7:2F:E4) and `mythic-throne`
 (98:A3:16:A5:A7:F8). A watch's sigil is on its System page and in the
 `[SIGIL]` boot log line.
+
+## Partition layout v2 (#50, 2026-07-25)
+
+Slots grew 4MB → **6MB** (ota_0 @0x10000, ota_1 @0x610000, config @0xC10000).
+Deployed via a full USB flash with the new `partitions.csv` on every watch —
+**config records wiped by the move** (theme/toggles re-set once; creds are
+baked). OTA images up to ~6.2MB now fit; the ota_push gate is updated.

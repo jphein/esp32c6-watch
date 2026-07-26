@@ -16,6 +16,10 @@ pub mod mqtt_ha;
 #[allow(dead_code)]
 pub mod mqtt_climate;
 pub mod names;
+// #53 net_task: the network owner (WiFi connect machine, scan, boot burst,
+// OTA). Spawned from main.rs; commands in via `net_task::send`, state out via
+// `net_task::snapshot` + NET_WAKE.
+pub mod net_task;
 pub mod ota_http;
 // Per-device SIGIL IDENTITY from the efuse MAC (#34): name, node id,
 // per-watch OTA topic. `mac` is a logs/debug field until a consumer lands.

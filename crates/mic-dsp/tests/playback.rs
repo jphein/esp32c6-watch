@@ -1,7 +1,10 @@
 //! Host tests for the playback-side helpers (shared I2S TX seam, issue #23):
 //! mono→stereo expansion and the SFX synths (beep tone + UI click).
 
-use mic_dsp::{fill_click_mono_s16le, fill_tone_mono_s16le, mono_to_stereo_le, CLICK_LEN};
+use mic_dsp::{
+    fill_click_mono_s16le, fill_tick_mono_s16le, fill_tone_mono_s16le, mono_to_stereo_le,
+    CLICK_LEN,
+};
 
 fn s16(buf: &[u8], i: usize) -> i16 {
     i16::from_le_bytes([buf[2 * i], buf[2 * i + 1]])
@@ -120,4 +123,28 @@ fn click_decays() {
     assert!(peak_at < samples / 4, "peak should be early, at {peak_at}/{samples}");
     let tail = (samples - 8..samples).map(|i| s16(&buf, i).unsigned_abs()).max().unwrap();
     assert!(tail < 500, "tail should be near-silent, got {tail}");
+}
+
+// === fill_tick_mono_s16le (every-touch tick, #49) =============================
+
+/// The tick is the same 12 ms clip length as the click.
+#[test]
+fn tick_length() {
+    let mut buf = [0u8; CLICK_LEN];
+    assert_eq!(fill_tick_mono_s16le(&mut buf, 16_000), CLICK_LEN);
+}
+
+/// The every-touch tick is strictly QUIETER than the launch click (texture,
+/// not notification): audible, but peaking at ~6000 vs the click's ~9000.
+#[test]
+fn tick_is_quieter_than_click() {
+    let mut click = [0u8; CLICK_LEN];
+    let mut tick = [0u8; CLICK_LEN];
+    fill_click_mono_s16le(&mut click, 16_000);
+    let n = fill_tick_mono_s16le(&mut tick, 16_000);
+    let peak = |b: &[u8]| (0..n / 2).map(|i| s16(b, i).unsigned_abs()).max().unwrap();
+    let (cp, tp) = (peak(&click), peak(&tick));
+    assert!(tp > 2_500, "tick should still be audible, got peak {tp}");
+    assert!(tp <= 6_000, "tick must stay subtle, got peak {tp}");
+    assert!(tp < cp, "tick ({tp}) must be quieter than click ({cp})");
 }

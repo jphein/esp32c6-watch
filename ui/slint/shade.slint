@@ -1,0 +1,169 @@
+import { Theme } from "theme.slint";
+import { IconButton, PillButton, BackChevron } from "controls.slint";
+
+// Notification shade (#32): the top-edge swipe-DOWN overlay. Cards are built
+// by Rust from the bounded notification ring (newest first, up to 4 visible;
+// the footer says how many more are held). Interactions, routed in
+// slint_shell::handle_touch + the card callbacks:
+//   tap a card's X       → dismiss that one
+//   swipe LEFT on a card → dismiss that one
+//   CLEAR ALL pill       → empty the ring
+//   swipe Up / Right / chevron → close (the shade slides back up)
+// Card geometry is FIXED — Rust maps a dismiss-swipe's start_y back to a slot
+// with the SHADE_CARD_* constants in slint_shell.rs; keep in sync.
+//
+// ROM note: every `if` here would generate a dynamically-instantiated inner
+// component (~3-6KB of code each — measured against the 4MB OTA slot). The
+// whole overlay is already behind `if shade-open` in shell.slint, so inside
+// it we gate with `visible:` and ternary strings instead: resident-cost-free
+// while closed, and a fraction of the ROM.
+
+// One notification card's display data (ages pre-formatted by Rust).
+export struct NotifCard {
+    source: int,   // glyph tint id — matches notify::Source
+    title: string,
+    body: string,
+    age: string,
+    present: bool,
+}
+
+// Source glyph: ONE drawn bell (no bitmap, no font), tinted per source —
+// the color carries the meaning (ids = notify::Source). A single shape
+// instead of per-source variants keeps the generated code flat.
+component NotifGlyph {
+    in property <int> id;
+    // System · Battery · Ota · Wifi · Ha — all Theme tokens, scheme-aware.
+    property <[color]> tints: [Theme.soft, Theme.warn, Theme.accent2, Theme.accent, Theme.warm];
+    property <color> tint: tints[clamp(root.id, 0, 4)];
+    width: 28px;
+    height: 28px;
+
+    Rectangle { x: 7px; y: 4px; width: 14px; height: 15px; border-radius: 7px; background: root.tint; }
+    Rectangle { x: 7px; y: 13px; width: 14px; height: 6px; background: root.tint; }
+    Rectangle { x: 4px; y: 19px; width: 20px; height: 3px; border-radius: 1.5px; background: root.tint; }
+    Rectangle { x: 12px; y: 23px; width: 4px; height: 4px; border-radius: 2px; background: root.tint.with-alpha(0.7); }
+}
+
+export component ShadeOverlay {
+    // 4 fixed card slots, padded with present:false (launcher-grid idiom).
+    in property <[NotifCard]> cards: [];
+    // Total held in the ring (may exceed the 4 visible).
+    in property <int> total: 0;
+    callback dismiss(int); // card slot (== ring index, newest = 0)
+    callback clear-all();
+    callback close();
+
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 36px;
+        text: "NOTIFICATIONS";
+        color: Theme.faint;
+        font-size: 12px;
+        letter-spacing: 3px;
+    }
+    BackChevron { clicked => { root.close(); } }
+
+    // Empty state (`visible:`, ROM note above).
+    Text {
+        visible: root.total == 0;
+        x: (parent.width - self.width) / 2;
+        y: 230px;
+        text: "All clear";
+        color: Theme.dim;
+        font-size: Theme.t-body;
+    }
+    Text {
+        visible: root.total == 0;
+        x: (parent.width - self.width) / 2;
+        y: 262px;
+        text: "alerts and HA messages land here";
+        color: Theme.faint;
+        font-size: Theme.t-caption;
+    }
+
+    // Notification cards — fixed slots (y = 76 + i*92, h 84; see the
+    // SHADE_CARD_* constants in slint_shell.rs). Panel surface, glyph left,
+    // dismiss X right (44px target, Recipe B halo). Slot presence is a
+    // `visible:` gate, NOT an `if` (ROM note above).
+    for i in 4: Rectangle {
+        visible: root.cards[i].present;
+        x: 27px;
+        y: 76px + i * 92px;
+        width: 356px;
+        height: 84px;
+        border-radius: Theme.r-card;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.line;
+        NotifGlyph {
+            x: 16px;
+            y: 16px;
+            id: root.cards[i].source;
+        }
+        Text {
+            x: 58px;
+            y: 13px;
+            width: parent.width - 118px;
+            overflow: elide;
+            text: root.cards[i].title;
+            color: Theme.ink;
+            font-size: Theme.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 58px;
+            y: 38px;
+            width: parent.width - 118px;
+            height: 38px;
+            overflow: elide;
+            wrap: word-wrap;
+            text: root.cards[i].body;
+            color: Theme.soft;
+            font-size: Theme.t-label;
+        }
+        Text {
+            x: parent.width - self.width - 16px;
+            y: 58px;
+            text: root.cards[i].age;
+            color: Theme.faint;
+            font-size: Theme.t-caption;
+        }
+        x-btn := IconButton {
+            x: parent.width - self.width - 4px;
+            y: 4px;
+            width: 44px;
+            height: 44px;
+            clicked => { root.dismiss(i); }
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                text: "x";
+                color: x-btn.pressed ? Theme.accent : Theme.dim;
+                font-size: 17px;
+                font-weight: 600;
+            }
+        }
+    }
+
+    // Footer: CLEAR ALL (Recipe D pill) + overflow honesty (`visible:` +
+    // ternary string — "" when nothing overflows).
+    PillButton {
+        visible: root.total > 0;
+        x: (parent.width - self.width) / 2;
+        y: 446px;
+        width: 150px;
+        height: 40px;
+        text: "CLEAR ALL";
+        text-size: 14px;
+        clicked => { root.clear-all(); }
+    }
+    Text {
+        x: 320px;
+        y: 457px;
+        text: root.total > 4 ? "+\{root.total - 4}" : "";
+        color: Theme.faint;
+        font-size: Theme.t-caption;
+    }
+}

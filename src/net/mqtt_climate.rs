@@ -361,6 +361,31 @@ static LIGHTS_TOPICS: LazyLock<LightsTopics> = LazyLock::new(|| {
     }
 });
 
+// Notifications (#32): fleet topic + a per-device one (the OTA announce /
+// `watch/<sigil>/ota` pairing) so HA automations can target one wrist or all.
+// Payload contract: `NOTIFY|<title>|<body>` — parsed in `notify::handle_mqtt`.
+/// Fleet-wide notify topic.
+const NOTIFY_TOPIC: &str = "watch/notify";
+/// `watch/` (6) + sigil (≤20) + `/notify` (7) = ≤33.
+const NOTIFY_TOPIC_CAP: usize = 40;
+/// Notify topic pair (fleet, per-device) for subscribers: this session AND
+/// the boot-burst window (`mqtt_ha::check_ota_announce`), so a RETAINED
+/// notify is picked up on the next hourly NTP burst, not only when an HA
+/// screen opens a session.
+pub(crate) fn notify_topics() -> (&'static str, &'static str) {
+    (NOTIFY_TOPIC, NOTIFY_DEVICE_TOPIC.get().as_str())
+}
+
+/// `watch/<sigil>/notify` — per-device, built once (classify_topic runs per
+/// inbound PUBLISH and must not re-assemble strings).
+static NOTIFY_DEVICE_TOPIC: LazyLock<String<NOTIFY_TOPIC_CAP>> = LazyLock::new(|| {
+    let mut t: String<NOTIFY_TOPIC_CAP> = String::new();
+    let _ = t.push_str("watch/");
+    let _ = t.push_str(crate::net::sigil::get().sigil.as_str());
+    let _ = t.push_str("/notify");
+    t
+});
+
 // --- public entry point -----------------------------------------------------
 
 /// Run one bidirectional climate session until [`close`] fires or an error /
@@ -536,6 +561,11 @@ async fn subscribe(socket: &mut TcpSocket<'_>) -> Result<(), Error> {
         // Lights (#39): the retained per-device room-lights snapshot, delivered
         // on every (re)subscribe like the OTA announce above.
         LIGHTS_TOPICS.get().state.as_str(),
+        // Notifications (#32): fleet + per-device. Retained notifies re-deliver
+        // on every (re)subscribe; the ring's duplicate-of-newest guard
+        // (notify::push) keeps them from stacking.
+        NOTIFY_TOPIC,
+        NOTIFY_DEVICE_TOPIC.get().as_str(),
     ];
 
     // remaining length = 2 (packet id) + sum(2-byte len + topic + 1-byte QoS)
@@ -647,6 +677,13 @@ async fn handle_publish(
             // Push-OTA: gate (BUILD_EPOCH monotonicity) + post for main.rs.
             crate::net::ota_http::handle_announce(payload);
         }
+        Some(TopicKind::Notify) => {
+            // Notifications (#32): parse `NOTIFY|<title>|<body>` into the
+            // bounded ring; the main loop badges/toasts it. Wake the loop so
+            // the badge lands on the next executor pass, not the next tick.
+            crate::notify::handle_mqtt(payload);
+            STATE_WAKE.signal(());
+        }
         Some(TopicKind::LightsState) => {
             // Lights (#39): wholesale replace, seq bumped on EVERY accepted
             // frame — HA republishes after acting on a command, and even an
@@ -678,6 +715,7 @@ enum TopicKind<'a> {
     Roster,
     OtaAnnounce,
     LightsState,
+    Notify,
 }
 
 /// Classify an inbound topic. Bounded, UTF-8 checked, no panic.
@@ -699,6 +737,9 @@ fn classify_topic(topic: &[u8]) -> Option<TopicKind<'_>> {
     }
     if t == LIGHTS_TOPICS.get().state.as_str() {
         return Some(TopicKind::LightsState);
+    }
+    if t == NOTIFY_TOPIC || t == NOTIFY_DEVICE_TOPIC.get().as_str() {
+        return Some(TopicKind::Notify);
     }
     let mid = t.strip_prefix(STATE_PREFIX)?.strip_suffix(STATE_SUFFIX)?;
     if mid.is_empty() || mid.contains('/') {

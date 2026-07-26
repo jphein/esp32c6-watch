@@ -1,0 +1,531 @@
+import { Theme, WifiNet, StatRow, PageTitle } from "theme.slint";
+import { BackChevron, IconButton, PressTile, PillButton, Stepper, SliderControl } from "controls.slint";
+import { KeyboardPane } from "keyboard.slint";
+
+// ============================================================================
+// Settings hub (v0.9.0, #49) — the scene-resident successor of the old
+// framebuffer Settings app. PAGED like the launcher (hard-cut page flips, no
+// Flickable: the sw renderer runs 6-11fps): five section pages — SOUND ·
+// DISPLAY · RADIOS · NETWORK · SYSTEM — flipped by swipe up/down (routed in
+// slint_shell::handle_touch) or the indicator dots. Right-swipe / chevron
+// closes (or backs out of a NETWORK sub-view).
+//
+// The NETWORK section is a full scan-based flow in two sub-views, selected by
+// `net-view` (RUST-OWNED — Slint only emits intents, the loop drives the
+// transitions so keyboard/scan state can never fork):
+//   0 = the hub pages · 1 = scan picker · 2 = keyboard (password / manual SSID)
+//
+// Every toggle persists immediately in the Rust drain (edge-triggered mirror
+// save); the switch visual IS the feedback — no toasts (the radio toggles keep
+// their existing semantics + toasts in main.rs).
+// ============================================================================
+
+// One label + caption + switch row (Recipe A surface: the WHOLE row is the
+// finger target; pressed lights the panel to accent-bg with an accent edge —
+// hard 1-frame swap). The switch itself is display-only chrome: 56x32 track,
+// knob jumps (no animate) and inverts to on-accent on the accent track.
+component ToggleRow {
+    in property <string> label;
+    in property <string> caption;
+    in property <bool> on;
+    callback tapped();
+    height: 64px;
+
+    pt := PressTile {
+        width: 100%; height: 100%;
+        clicked => { root.tapped(); }
+
+        Text {
+            x: 18px; y: 12px;
+            text: root.label;
+            color: Theme.ink;
+            font-size: Theme.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 18px; y: 38px;
+            text: root.caption;
+            color: Theme.dim;
+            font-size: Theme.t-caption;
+        }
+        // Switch visual (right-aligned).
+        Rectangle {
+            x: parent.width - 74px;
+            y: (parent.height - 32px) / 2;
+            width: 56px; height: 32px; border-radius: 16px;
+            background: root.on ? Theme.accent : Theme.track;
+            border-width: 1px;
+            border-color: root.on || pt.pressed ? Theme.accent : Theme.line;
+            Rectangle {
+                x: root.on ? parent.width - 29px : 3px;
+                y: 3px;
+                width: 26px; height: 26px; border-radius: 13px;
+                background: root.on ? Theme.on-accent
+                    : (pt.pressed ? Theme.ink : Theme.soft);
+            }
+        }
+    }
+}
+
+// One scanned-network row: SSID + padlock + RSSI bars (Recipe A pressed state).
+component NetworkRow {
+    in property <string> ssid;
+    in property <int> bars;
+    in property <bool> secured;
+    callback pick();
+    height: 46px;
+
+    PressTile {
+        width: 100%; height: 100%;
+        clicked => { root.pick(); }
+
+        Text {
+            x: 16px;
+            y: (parent.height - self.height) / 2;
+            width: parent.width - 128px;
+            overflow: elide;
+            text: root.ssid;
+            color: Theme.ink;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        // Drawn padlock (no emoji in the embedded font budget).
+        if root.secured: Rectangle {
+            x: parent.width - 96px;
+            y: (parent.height - 17px) / 2;
+            width: 14px; height: 17px;
+            Rectangle { // shackle
+                x: 2px; y: 0; width: 10px; height: 10px;
+                border-radius: 5px; border-width: 2px; border-color: Theme.dim;
+            }
+            Rectangle { // body
+                x: 0; y: 8px; width: 14px; height: 9px;
+                border-radius: 2px; background: Theme.dim;
+            }
+        }
+        // Signal bars, ascending; lit up to `bars`.
+        Rectangle {
+            x: parent.width - 64px;
+            y: (parent.height - 20px) / 2;
+            width: 42px; height: 20px;
+            Rectangle { x: 0;    y: 12px; width: 6px; height: 8px;  border-radius: 1px;
+                background: root.bars >= 1 ? Theme.accent : Theme.line; }
+            Rectangle { x: 12px; y: 8px;  width: 6px; height: 12px; border-radius: 1px;
+                background: root.bars >= 2 ? Theme.accent : Theme.line; }
+            Rectangle { x: 24px; y: 4px;  width: 6px; height: 16px; border-radius: 1px;
+                background: root.bars >= 3 ? Theme.accent : Theme.line; }
+            Rectangle { x: 36px; y: 0;    width: 6px; height: 20px; border-radius: 1px;
+                background: root.bars >= 4 ? Theme.accent : Theme.line; }
+        }
+    }
+}
+
+export component SettingsHub {
+    // --- hub paging (Rust flips via swipe; dots flip locally) ---
+    in-out property <int> page: 0; // 0 SOUND · 1 DISPLAY · 2 RADIOS · 3 NETWORK · 4 SYSTEM
+    property <[string]> titles: ["SOUND", "DISPLAY", "RADIOS", "NETWORK", "SYSTEM"];
+    // NETWORK sub-view (RUST-OWNED): 0 hub pages · 1 picker · 2 keyboard.
+    in property <int> net-view: 0;
+
+    // --- SOUND ---
+    in property <bool> touch-sound;
+    in property <int> gain-db: 0;
+    callback toggle-touch-sound();
+    callback gain-down();
+    callback gain-up();
+
+    // --- DISPLAY ---
+    in-out property <float> brightness;
+    callback brightness-changed(float);
+
+    // --- RADIOS (persisted state in, existing tap semantics out) ---
+    in property <bool> ble-on;
+    in property <bool> mesh-on;
+    in property <bool> wifi-intent;   // persisted auto-vs-forced-off intent
+    in property <bool> wifi-live;     // live association (caption honesty)
+    callback ble-tap();
+    callback mesh-tap();
+    callback wifi-tap();
+
+    // --- NETWORK ---
+    in property <string> net-current: "";
+    in property <int> net-status: 0;  // 0 idle · 1 connecting · 2 connected · 3 failed
+    in property <bool> scanning: false;
+    in property <[WifiNet]> nets: [];
+    callback net-open();              // choose-network → Rust scans + raises view 1
+    callback net-rescan();
+    callback net-pick(int);
+    callback net-manual();            // hidden network → keyboard for the SSID
+    callback nav-back();              // sub-view chevron / right-swipe (Rust decides)
+    callback close();                 // hub chevron / right-swipe at view 0
+
+    // --- keyboard sub-view (Rust owns the text; this only displays) ---
+    in property <string> kb-title: "";
+    in property <string> kb-context: "";
+    in property <string> kb-text: "";
+    in property <bool> kb-plain: false;
+    callback kb-key(string);
+    callback kb-bksp-down();
+    callback kb-bksp-up();
+    callback kb-eye();
+    callback kb-done();
+
+    // --- SYSTEM ---
+    in property <string> sigil: "--";
+    in property <string> fw: "--";
+    in property <int> node-id: 0;
+    in property <string> ota-status: "";
+    callback ota-tap();
+
+    // Opaque backdrop — the hub fully replaces the watchface (AMOLED black on
+    // the dark schemes via the theme token).
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    // ======================= view 0 — the hub pages =======================
+    if root.net-view == 0: Rectangle {
+        width: 100%; height: 100%;
+
+        Text { // eyebrow
+            x: (parent.width - self.width) / 2;
+            y: 36px;
+            text: "SETTINGS";
+            color: Theme.faint;
+            font-size: 12px;
+            letter-spacing: 3px;
+        }
+        PageTitle { title: root.titles[root.page]; }
+        BackChevron { clicked => { root.close(); } }
+
+        // --- page 0 · SOUND ---
+        if root.page == 0: Rectangle {
+            x: 22px; y: 110px; width: 366px; height: 330px;
+
+            ToggleRow {
+                x: 0; y: 0; width: 366px;
+                label: "Touch sound";
+                caption: root.touch-sound ? "subtle tick on every tap" : "muted";
+                on: root.touch-sound;
+                tapped => { root.toggle-touch-sound(); }
+            }
+
+            // Mic gain: the Sound-app stepper, persisted. Same Recipe C
+            // steppers as the meter screen; the value between acknowledges.
+            Rectangle {
+                x: 0; y: 80px; width: 366px; height: 96px;
+                border-radius: Theme.r-card;
+                background: Theme.panel;
+                border-width: 1px; border-color: Theme.line;
+                Text {
+                    x: 18px; y: 12px;
+                    text: "MIC GAIN";
+                    color: Theme.dim; font-size: 12px; letter-spacing: 2px;
+                }
+                Stepper {
+                    x: 18px; y: 36px; width: 56px; height: 48px;
+                    glyph: "\u{2212}"; glyph-dy: -3px;
+                    clicked => { root.gain-down(); }
+                }
+                Text {
+                    x: (parent.width - self.width) / 2;
+                    y: 46px;
+                    text: "+\{root.gain-db} dB";
+                    color: Theme.ink; font-size: 22px; font-weight: 700;
+                }
+                Stepper {
+                    x: parent.width - 74px; y: 36px; width: 56px; height: 48px;
+                    glyph: "+"; glyph-dy: -3px;
+                    clicked => { root.gain-up(); }
+                }
+            }
+            Text {
+                x: 18px; y: 190px;
+                text: "digital boost \u{00b7} live meter in the Sound app";
+                color: Theme.faint; font-size: Theme.t-caption;
+            }
+        }
+
+        // --- page 1 · DISPLAY ---
+        if root.page == 1: Rectangle {
+            x: 22px; y: 110px; width: 366px; height: 330px;
+
+            Text {
+                x: 18px; y: 40px;
+                text: "BRIGHTNESS";
+                color: Theme.dim; font-size: 16px; letter-spacing: 2px;
+            }
+            // Shared SliderControl (Recipe F). Horizontal swipes starting in
+            // its band are slider drags, not page nav / back — excluded in
+            // slint_shell.rs (HUB_SLIDER_BAND, must match this geometry:
+            // absolute y 180..220).
+            SliderControl {
+                x: 18px; y: 70px; width: 330px;
+                value <=> root.brightness;
+                changed(f) => { root.brightness-changed(f); }
+            }
+            Text {
+                x: 18px; y: 130px;
+                text: "auto-dims after 8s \u{00b7} AOD after 15s";
+                color: Theme.faint; font-size: Theme.t-caption;
+            }
+        }
+
+        // --- page 2 · RADIOS ---
+        if root.page == 2: Rectangle {
+            x: 22px; y: 110px; width: 366px; height: 330px;
+
+            ToggleRow {
+                x: 0; y: 0; width: 366px;
+                label: "Bluetooth";
+                caption: root.ble-on ? "advertising \u{00b7} off after reboot" : "off";
+                on: root.ble-on;
+                tapped => { root.ble-tap(); }
+            }
+            ToggleRow {
+                x: 0; y: 76px; width: 366px;
+                label: "Mesh";
+                caption: "ESP-NOW fleet \u{00b7} familiar";
+                on: root.mesh-on;
+                tapped => { root.mesh-tap(); }
+            }
+            ToggleRow {
+                x: 0; y: 152px; width: 366px;
+                label: "WiFi";
+                caption: root.wifi-live ? "connected"
+                    : (root.wifi-intent ? "auto \u{00b7} rises on demand" : "forced off");
+                on: root.wifi-intent;
+                tapped => { root.wifi-tap(); }
+            }
+        }
+
+        // --- page 3 · NETWORK ---
+        if root.page == 3: Rectangle {
+            x: 22px; y: 110px; width: 366px; height: 330px;
+
+            Rectangle {
+                x: 0; y: 0; width: 366px; height: 92px;
+                border-radius: Theme.r-card;
+                background: Theme.panel;
+                border-width: 1px; border-color: Theme.line;
+                Text {
+                    x: 18px; y: 12px;
+                    text: "NETWORK";
+                    color: Theme.dim; font-size: 12px; letter-spacing: 2px;
+                }
+                Text {
+                    x: 18px; y: 32px;
+                    width: parent.width - 36px;
+                    overflow: elide;
+                    text: root.net-current == "" ? "not configured" : root.net-current;
+                    color: root.net-current == "" ? Theme.faint : Theme.ink;
+                    font-size: 20px; font-weight: 600;
+                }
+                Text {
+                    x: 18px; y: 62px;
+                    text: root.net-status == 1 ? "connecting\u{2026}"
+                        : root.net-status == 2 ? "connected"
+                        : root.net-status == 3 ? "connection failed"
+                        : "idle";
+                    color: root.net-status == 2 ? Theme.accent
+                        : root.net-status == 3 ? Theme.warn
+                        : root.net-status == 1 ? Theme.warm : Theme.dim;
+                    font-size: Theme.t-caption;
+                    letter-spacing: 1px;
+                }
+            }
+
+            PillButton {
+                x: (parent.width - 250px) / 2; y: 122px;
+                width: 250px; height: 44px;
+                text: "CHOOSE NETWORK";
+                text-size: 15px;
+                clicked => { root.net-open(); }
+            }
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: 182px;
+                text: "scans nearby networks";
+                color: Theme.faint; font-size: Theme.t-caption;
+            }
+        }
+
+        // --- page 4 · SYSTEM ---
+        if root.page == 4: Rectangle {
+            x: 22px; y: 104px; width: 366px; height: 336px;
+
+            VerticalLayout {
+                x: 18px; y: 0; width: 330px;
+                spacing: 4px;
+                StatRow { label: "SIGIL"; value: root.sigil; }
+                StatRow { label: "FIRMWARE"; value: root.fw; }
+                StatRow { label: "NODE"; value: "#\{root.node-id}"; }
+            }
+
+            PillButton {
+                x: (parent.width - 280px) / 2; y: 182px;
+                width: 280px; height: 44px;
+                text: "UPDATE FIRMWARE";
+                text-size: 15px;
+                clicked => { root.ota-tap(); }
+            }
+            // OTA status (connecting / updating / staged / error) — the same
+            // line the old fb Settings showed, now scene-resident.
+            if root.ota-status != "": Text {
+                x: (parent.width - self.width) / 2;
+                y: 242px;
+                text: root.ota-status;
+                color: Theme.warm;
+                font-size: 15px;
+                letter-spacing: 1px;
+            }
+        }
+
+        // Page-indicator dots (launcher idiom): tap advances, swipe flips.
+        dots := IconButton {
+            x: (parent.width - self.width) / 2;
+            y: 448px;
+            width: 160px;
+            height: 44px;
+            clicked => { root.page = mod(root.page + 1, 5); }
+            HorizontalLayout {
+                x: (parent.width - 5 * 10px - 4 * 12px) / 2;
+                y: (parent.height - 10px) / 2 - 2px;
+                spacing: 12px;
+                for i in 5: Rectangle {
+                    width: 10px; height: 10px; border-radius: 5px;
+                    background: root.page == i ? Theme.accent
+                        : (dots.pressed ? Theme.soft : Theme.line);
+                }
+            }
+        }
+    }
+
+    // ======================= view 1 — network picker =======================
+    if root.net-view == 1: Rectangle {
+        width: 100%; height: 100%;
+
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 36px;
+            text: "SETTINGS";
+            color: Theme.faint; font-size: 12px; letter-spacing: 3px;
+        }
+        PageTitle { title: "NETWORKS"; }
+        BackChevron { clicked => { root.nav-back(); } }
+        PillButton {
+            x: parent.width - 128px; y: 22px;
+            width: 106px; height: 36px;
+            text: "RESCAN";
+            text-size: 13px;
+            tracking: 1px;
+            enabled: !root.scanning;
+            clicked => { root.net-rescan(); }
+        }
+
+        if root.scanning: Text {
+            x: (parent.width - self.width) / 2;
+            y: 220px;
+            text: "Scanning\u{2026}";
+            color: Theme.soft; font-size: 22px; letter-spacing: 2px;
+        }
+        if !root.scanning && root.nets.length == 0: Text {
+            x: (parent.width - self.width) / 2;
+            y: 220px;
+            text: "No networks found";
+            color: Theme.dim; font-size: 18px;
+        }
+
+        // Strongest-first rows (Rust caps the model at 6 — dedup'd, sorted).
+        if !root.scanning: Rectangle {
+            x: 22px; y: 96px; width: 366px; height: 350px;
+            for net[i] in root.nets: NetworkRow {
+                x: 0; y: i * 50px; width: 366px;
+                ssid: net.ssid;
+                bars: net.bars;
+                secured: net.secured;
+                pick => { root.net-pick(i); }
+            }
+            // Hidden-network fallback: manual SSID entry via the keyboard.
+            manual := PressTile {
+                x: 0; y: min(root.nets.length, 6) * 50px;
+                width: 366px; height: 46px;
+                rest-background: Theme.bg;
+                clicked => { root.net-manual(); }
+                Text {
+                    x: 16px;
+                    y: (parent.height - self.height) / 2;
+                    text: "Other network\u{2026}";
+                    color: manual.pressed ? Theme.accent : Theme.soft;
+                    font-size: 16px;
+                }
+            }
+        }
+    }
+
+    // ======================= view 2 — keyboard =======================
+    if root.net-view == 2: Rectangle {
+        width: 100%; height: 100%;
+
+        BackChevron { clicked => { root.nav-back(); } }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 30px;
+            text: root.kb-title;
+            color: Theme.soft; font-size: 18px; font-weight: 600; letter-spacing: 3px;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 58px;
+            text: root.kb-context;
+            color: Theme.dim; font-size: Theme.t-caption; letter-spacing: 1px;
+        }
+
+        // Text field: Rust pushes the (masked, tail-windowed) display string.
+        field := Rectangle {
+            x: 22px; y: 96px; width: 366px; height: 52px;
+            border-radius: Theme.r-chip;
+            background: Theme.panel;
+            border-width: 1px; border-color: Theme.line;
+            ft := Text {
+                x: 16px;
+                y: (parent.height - self.height) / 2;
+                text: root.kb-text;
+                color: Theme.ink;
+                font-size: 20px;
+            }
+            Rectangle { // caret
+                x: 18px + ft.width;
+                y: 13px; width: 2px; height: 26px;
+                background: Theme.accent;
+            }
+            // Show-password eye (drawn; accent while revealing).
+            eye := IconButton {
+                x: parent.width - 50px; y: 4px; width: 44px; height: 44px;
+                clicked => { root.kb-eye(); }
+                Rectangle {
+                    x: 11px; y: 15px; width: 22px; height: 14px;
+                    border-radius: 7px; border-width: 2px;
+                    border-color: root.kb-plain || eye.pressed ? Theme.accent : Theme.dim;
+                }
+                Rectangle {
+                    x: 19px; y: 19px; width: 6px; height: 6px; border-radius: 3px;
+                    background: root.kb-plain || eye.pressed ? Theme.accent : Theme.dim;
+                }
+            }
+        }
+
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 162px;
+            text: "\u{2713} connects and saves";
+            color: Theme.faint; font-size: Theme.t-caption;
+        }
+
+        KeyboardPane {
+            x: 0; y: 270px; width: parent.width;
+            key(k) => { root.kb-key(k); }
+            bksp-down => { root.kb-bksp-down(); }
+            bksp-up => { root.kb-bksp-up(); }
+            done => { root.kb-done(); }
+        }
+    }
+}

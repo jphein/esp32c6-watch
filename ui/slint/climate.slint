@@ -132,11 +132,14 @@ export component ClimateOverlay {
                     text: "set \{round(card.setpoint)}\{card.unit}";
                     color: Theme.dim; font-size: 14px;
                 }
-                // big current temp (right)
+                // big current temp (right). 40px, NOT 38: every distinct
+                // font-size embeds a whole pre-rendered glyph set (~70KB at
+                // this size) and 40px already exists (clock seconds) — the
+                // v0.9.0 ROM squeeze consolidated the near-duplicates.
                 Text {
                     x: parent.width - self.width - 74px; y: (parent.height - self.height) / 2;
                     text: card.cur + card.unit;
-                    color: Theme.ink; font-size: 38px; font-weight: 700;
+                    color: Theme.ink; font-size: 40px; font-weight: 700;
                 }
                 // mode chip (top-right)
                 Rectangle {
@@ -174,11 +177,13 @@ export component ClimateOverlay {
             text: root.cards[root.di].name;
             color: Theme.soft; font-size: 20px; letter-spacing: 1px;
         }
-        // hero current temp + action
+        // hero current temp + action. 84px, NOT 76: glyph-set consolidation
+        // round 2 (v0.9.0 ROM squeeze) — 84px already exists (AOD/meter
+        // heroes) and a distinct 76px set costs ~160KB of ROM.
         Text {
             x: (parent.width - self.width) / 2; y: 132px;
             text: root.cards[root.di].cur + root.cards[root.di].unit;
-            color: Theme.ink; font-size: 76px; font-weight: 700;
+            color: Theme.ink; font-size: 84px; font-weight: 700;
         }
         Text {
             x: (parent.width - self.width) / 2; y: 224px;
@@ -202,10 +207,12 @@ export component ClimateOverlay {
                           root.cards[root.di].min, root.cards[root.di].max));
             }
         }
+        // 50px, NOT 46 (glyph-set consolidation — 50px already exists via
+        // hunt.slint; a distinct 46px set costs ~98KB of ROM).
         Text {
             x: (parent.width - self.width) / 2; y: 268px;
             text: "\{round(root.cards[root.di].setpoint * 10) / 10}\{root.cards[root.di].unit}";
-            color: Theme.accent; font-size: 46px; font-weight: 700;
+            color: Theme.accent; font-size: 50px; font-weight: 700;
         }
         plus := Stepper {
             x: parent.width - self.width - 40px; y: 258px; width: 72px; height: 72px;

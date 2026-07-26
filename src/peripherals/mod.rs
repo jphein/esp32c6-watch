@@ -21,4 +21,5 @@ pub mod power;
 pub mod power_stats;
 pub mod rtc;
 pub mod touch;
-pub mod wifi;
+// (wifi.rs retired in v0.9.0: its WifiConfig/WifiState only served the fb
+// Settings app; the hub's NETWORK flow lives in main.rs + slint_shell.)

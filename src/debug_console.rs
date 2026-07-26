@@ -28,7 +28,9 @@
 //!   - `launch <idx>`     — raise the app at registry index <idx>
 //!   - `home`             — return to the watchface
 //!   - `state`            — print AppState + key UI flags
-//!   - `perf`             — print the last-N render-frame durations (µs)
+//!   - `perf`             — print the last-N render-frame durations (µs) plus
+//!                          the loop-body watchdog (`arm_max_us` /
+//!                          `arm_over10ms`, #53 — both reset on read)
 //!   - `beep`             — play the 800 Hz/50 ms test tone on the shared TX
 //!                          ring (#23) — validates playback AND that the mic
 //!                          still captures afterwards (run `launch` Sound next)
@@ -177,6 +179,57 @@ pub fn record_frame(micros: u32) {
         r.head = (h + 1) % PERF_N;
         r.count = r.count.saturating_add(1);
     });
+}
+
+// ============================================================================
+// Loop-body ("arm") watchdog (#53) — enforces the >10ms-is-a-bug budget
+// ============================================================================
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// The main-loop realtime budget (µs): after the net-task restructure no arm
+/// may block/await longer than this. See the budget banner at the loop head
+/// in main.rs for the rule + its documented exemptions.
+pub const ARM_BUDGET_US: u32 = 10_000;
+
+/// Worst loop-body duration since the last `perf` read (µs).
+static ARM_MAX_US: AtomicU32 = AtomicU32::new(0);
+/// Bodies over [`ARM_BUDGET_US`] since the last `perf` read.
+static ARM_OVER_BUDGET: AtomicU32 = AtomicU32::new(0);
+/// One-shot: the current iteration opted out (a *documented* park, e.g. the
+/// voice PTT hold). Cleared by the guard's drop.
+static ARM_EXEMPT: AtomicBool = AtomicBool::new(false);
+
+/// RAII timer for one main-loop iteration. Constructed right after the wake
+/// select; the drop (loop tail AND every `continue` path) records the body
+/// duration into the watchdog counters — full-frame renders included, so the
+/// metric measures what a user would feel as input latency.
+pub struct ArmTimer(embassy_time::Instant);
+
+impl ArmTimer {
+    pub fn start() -> Self {
+        ArmTimer(embassy_time::Instant::now())
+    }
+}
+
+impl Drop for ArmTimer {
+    fn drop(&mut self) {
+        if ARM_EXEMPT.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let us = (embassy_time::Instant::now() - self.0).as_micros() as u32;
+        ARM_MAX_US.fetch_max(us, Ordering::Relaxed);
+        if us > ARM_BUDGET_US {
+            ARM_OVER_BUDGET.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Exempt the CURRENT iteration from the arm watchdog. For the documented
+/// by-design parks only (voice PTT holds the loop while the finger is down);
+/// everything else must fit the budget and gets measured.
+pub fn arm_exempt() {
+    ARM_EXEMPT.store(true, Ordering::Relaxed);
 }
 
 // ============================================================================
@@ -370,7 +423,15 @@ fn report_perf() {
         let _ = write!(out, "{}", v);
     }
     let avg = if n > 0 { (sum / n as u64) as u32 } else { 0 };
-    let _ = write!(out, "] max_us={} avg_us={}", max, avg);
+    // Loop-body watchdog (#53): worst body + over-budget count since the last
+    // read (both reset here so a host script gets per-test-step numbers).
+    let arm_max = ARM_MAX_US.swap(0, Ordering::Relaxed);
+    let arm_over = ARM_OVER_BUDGET.swap(0, Ordering::Relaxed);
+    let _ = write!(
+        out,
+        "] max_us={} avg_us={} arm_max_us={} arm_over10ms={}",
+        max, avg, arm_max, arm_over
+    );
     println!("{}", out);
 }
 

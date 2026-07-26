@@ -92,7 +92,15 @@ else
     scp -q "familiar:$ELF_REMOTE" "$TMP/esp32c6-watch.elf"
     # espflash may be absent from a non-login shell's PATH; fall back to cargo bin.
     ESPFLASH="$(command -v espflash || echo "$HOME/.cargo/bin/espflash")"
-    "$ESPFLASH" save-image --chip esp32c6 "$TMP/esp32c6-watch.elf" "$TMP/watch.bin"
+    "$ESPFLASH" save-image --chip esp32c6 --flash-size 16mb --partition-table "$ROOT/partitions.csv" "$TMP/esp32c6-watch.elf" "$TMP/watch.bin"
+    # Slot-fit gate: the A/B app slots are 4,128,768 B; refuse early with a
+    # clear message instead of espflash's mid-flow error (and keep margin).
+    BIN_SIZE=$(stat -c%s "$TMP/watch.bin")
+    if [ "$BIN_SIZE" -gt 6291456 ]; then
+        echo "ota_push: ABORT - image ${BIN_SIZE}B exceeds the 6291456B OTA slot (see the partition-grow issue)" >&2
+        exit 3
+    fi
+    echo "ota_push: image ${BIN_SIZE}B fits the slot ($((6291456 - BIN_SIZE))B headroom)"
 
     # 4. Publish the image to the OTA HTTP server.
     scp -q "$TMP/watch.bin" "$OTA_DEST"

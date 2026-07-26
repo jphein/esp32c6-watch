@@ -1,0 +1,1229 @@
+#!/usr/bin/env python3
+"""watchctl — the one-command USB/WiFi debug rig for the esp32c6-watch fleet.
+
+Closes the two chronic tooling holes:
+  #20 the SLOT TRAP  — bare `espflash flash` writes ota_0 while otadata boots
+                       ota_1; `watchctl deploy` always writes the BOOTING slot.
+  #21 the USB WEDGE  — the C6 USB-Serial-JTAG recurrently wedges; `watchctl
+                       reset|recover` walk the proven recovery ladder.
+
+Watches are ALWAYS addressed by sigil or efuse-MAC serial, never by ttyACM
+number (ttyACM numbers shuffle on every replug).
+
+    watchctl list                                   # fleet presence + ports
+    watchctl logs eldritch-lantern --seconds 20     # capture serial output
+    watchctl logs mythic-throne --reset             # boot burst (panic capture)
+    watchctl reset eldritch-lantern                 # verified reset (+ ladder)
+    watchctl recover eldritch-lantern               # the full wedge ladder
+    watchctl slot mythic-throne                     # booting slot + fingerprint
+    watchctl deploy eldritch-lantern fw.elf         # slot-trap-proof deploy
+    watchctl flash-full mythic-throne fw.elf --erase-otadata   # provisioning
+    watchctl console eldritch-lantern               # debug-console REPL
+    watchctl test eldritch-lantern hotpaths         # ui_test.py suites
+    watchctl ota-status                             # ubox0 journal + announce
+    watchctl endpoint eldritch-lantern              # WiFi debug endpoint probe
+
+Global flags: --json (machine output), --transport usb|wifi|auto, -v.
+Exit codes:   0 ok · 2 not-found/usage · 3 recovery-needed · 4 gate-failed.
+
+Dependencies: python3 stdlib; pyserial if available (falls back to a raw
+termios tty). espflash for flash/reset operations (~/.cargo/bin/espflash).
+
+The full field guide lives in docs/debugging.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# Fleet facts (hard-won — see docs/debugging.md before "simplifying" any)
+# --------------------------------------------------------------------------- #
+FLEET = {
+    # sigil            : efuse MAC == USB serial (udev ID_SERIAL_SHORT)
+    "eldritch-lantern": "98:A3:16:A7:2F:E4",
+    "mythic-throne":    "98:A3:16:A5:A7:F8",
+}
+ESPRESSIF_VID = "303a"          # USB-Serial-JTAG debug unit VID (PID 1001)
+
+# A/B app slots (partitions.csv). otadata decides which one BOOTS.
+SLOT_OFFSETS = {"ota_0": 0x10000, "ota_1": 0x610000}  # 6MB slots (#50)
+IMAGE_GATE = 6_225_920          # bytes — 6MB slot - 64KB (#50)
+
+# USB port paths that cannot enumerate a C6 (EPROTO -71): the 1-7.x hub, and
+# some mobo ports. Any hub (dotted) path gets a warning; 1-7 gets a loud one.
+KNOWN_BAD_HUB = "1-7"
+
+USBDEVFS_RESET = 21780          # ioctl on /dev/bus/usb/<bus>/<dev> (needs sudo)
+
+# WiFi debug channel (firmware side is planned — see docs/debugging.md).
+DEBUG_TCP_PORT = 5555
+DEBUG_ENDPOINT_TOPIC = "watch/{sigil}/debug/endpoint"   # RETAINED "<ip>:5555"
+OTA_ANNOUNCE_TOPIC = "watch/ota/announce"
+OTA_HOST = "ubox0"              # OTA HTTP server + broker-reachable ssh leg
+OTA_UNIT = "watch-ota.service"
+
+# Boot-banner shapes (bootloader + firmware prints).
+BOOT_OFFSET_RE = re.compile(r"Loaded app from partition at offset (0x[0-9A-Fa-f]+)")
+SIGIL_RE = re.compile(r"\[SIGIL\] (\S+) \(node id (\d+)")
+STACK_RE = re.compile(r"\[STACK\] gap = (\d+) B")
+ROM_MARK = "ESP-ROM:"
+DOWNLOAD_MARK = "waiting for download"   # ROM parked in download mode
+
+ANSI_RE = re.compile(rb"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\^_])")
+
+EXIT_OK, EXIT_NOTFOUND, EXIT_RECOVERY, EXIT_GATE = 0, 2, 3, 4
+
+REPO = Path(__file__).resolve().parent.parent
+UI_TEST = REPO / "tools" / "ui_test.py"
+PARTITIONS_CSV = REPO / "partitions.csv"
+
+JSON_MODE = False
+VERBOSE = False
+
+
+# --------------------------------------------------------------------------- #
+# Output helpers
+# --------------------------------------------------------------------------- #
+def say(msg: str = "") -> None:
+    """Human line — stdout normally, stderr under --json (stdout = JSON only)."""
+    print(msg, file=sys.stderr if JSON_MODE else sys.stdout, flush=True)
+
+
+def vlog(msg: str) -> None:
+    if VERBOSE:
+        print(f"watchctl: {msg}", file=sys.stderr, flush=True)
+
+
+def emit(obj: dict) -> None:
+    if JSON_MODE:
+        print(json.dumps(obj, indent=2), flush=True)
+
+
+def run(cmd: list[str], timeout: float = 30, **kw) -> subprocess.CompletedProcess:
+    vlog("+ " + " ".join(shlex.quote(c) for c in cmd))
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+
+
+def espflash_bin() -> str:
+    return shutil.which("espflash") or str(Path.home() / ".cargo" / "bin" / "espflash")
+
+
+def espflash(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    return run([espflash_bin(), "--skip-update-check", *args], timeout=timeout)
+
+
+# --------------------------------------------------------------------------- #
+# Config (.cargo/config.toml [env] — gitignored, same source as ota_push.sh)
+# --------------------------------------------------------------------------- #
+def cfg_path(args) -> Path:
+    if getattr(args, "config", None):
+        return Path(args.config)
+    if os.environ.get("WATCHCTL_CONFIG"):
+        return Path(os.environ["WATCHCTL_CONFIG"])
+    return REPO / ".cargo" / "config.toml"
+
+
+def cfg_get(path: Path, key: str) -> str | None:
+    """Read KEY="value" from the flat [env] section (mirrors ota_push.sh)."""
+    if not path.is_file():
+        return None
+    m = re.search(rf'^{re.escape(key)}="(.*)"', path.read_text(), re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def debug_token(args) -> str | None:
+    """Shared secret for the WiFi debug channel (WATCH_DEBUG_TOKEN in [env])."""
+    return (os.environ.get("WATCH_DEBUG_TOKEN")
+            or cfg_get(cfg_path(args), "WATCH_DEBUG_TOKEN")
+            or cfg_get(cfg_path(args), "WATCH_HA_TOKEN"))
+
+
+# --------------------------------------------------------------------------- #
+# USB enumeration — ALWAYS by serial, never by ttyACM number
+# --------------------------------------------------------------------------- #
+def udev_props(dev: str) -> dict[str, str]:
+    try:
+        p = run(["udevadm", "info", "-q", "property", "-n", dev], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    props = {}
+    for line in p.stdout.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            props[k] = v
+    return props
+
+
+def port_path_from_devpath(devpath: str) -> str:
+    """'/devices/.../usb1/1-9/1-9:1.0/tty/ttyACM2' -> '1-9' (the USB port)."""
+    parts = devpath.split("/")
+    for i, p in enumerate(parts):
+        if re.fullmatch(r"\d+-[\d.]+", p) and i + 1 < len(parts) \
+                and parts[i + 1].startswith(p + ":"):
+            return p
+    return ""
+
+
+def port_warnings(port_path: str, dev: str) -> list[str]:
+    warns = []
+    if not port_path:
+        return warns
+    if port_path.startswith(KNOWN_BAD_HUB + "."):
+        warns.append(f"{dev} is on hub port {port_path} — this hub CANNOT "
+                     "enumerate C6s (EPROTO -71); move to a direct port")
+    elif "." in port_path.split("-", 1)[-1]:
+        warns.append(f"{dev} is behind a USB hub ({port_path}) — C6s often "
+                     "fail to enumerate on hubs (-71); prefer a direct port")
+    return warns
+
+
+def usb_scan() -> list[dict]:
+    """All Espressif USB-Serial-JTAG ttys, with sigil attribution."""
+    serial_to_sigil = {v.upper(): k for k, v in FLEET.items()}
+    rows = []
+    for dev in sorted(glob.glob("/dev/ttyACM*")):
+        props = udev_props(dev)
+        if props.get("ID_VENDOR_ID") != ESPRESSIF_VID:
+            continue
+        serial = (props.get("ID_SERIAL_SHORT")
+                  or props.get("ID_USB_SERIAL_SHORT") or "").upper()
+        port_path = port_path_from_devpath(props.get("DEVPATH", ""))
+        rows.append({
+            "dev": dev,
+            "serial": serial,
+            "sigil": serial_to_sigil.get(serial),
+            "port_path": port_path,
+            "warnings": port_warnings(port_path, dev),
+        })
+    return rows
+
+
+def normalize_mac(s: str) -> str | None:
+    m = re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}", s)
+    return s.replace("-", ":").upper() if m else None
+
+
+def resolve_selector(sel: str) -> tuple[str | None, str | None]:
+    """Selector -> (sigil, serial). Accepts sigil, unique prefix, MAC, /dev/…"""
+    if sel.startswith("/dev/"):
+        return None, None            # handled by find_usb directly
+    mac = normalize_mac(sel)
+    if mac:
+        for sigil, serial in FLEET.items():
+            if serial.upper() == mac:
+                return sigil, serial
+        return None, mac             # foreign but explicit — allow
+    matches = [s for s in FLEET if s == sel or s.startswith(sel)]
+    if len(matches) == 1:
+        return matches[0], FLEET[matches[0]]
+    return None, None
+
+
+def find_usb(sel: str, quiet: bool = False) -> dict | None:
+    """Resolve a selector to a live USB row (None if absent/unknown)."""
+    rows = usb_scan()
+    if sel.startswith("/dev/"):
+        for r in rows:
+            if r["dev"] == sel:
+                return r
+        if not quiet:
+            say(f"watchctl: {sel} is not an Espressif USB-Serial-JTAG device")
+        return None
+    sigil, serial = resolve_selector(sel)
+    if serial is None:
+        if not quiet:
+            say(f"watchctl: unknown watch {sel!r} — known: "
+                + ", ".join(FLEET))
+        return None
+    for r in rows:
+        if r["serial"] == serial.upper():
+            return r
+    if not quiet:
+        say(f"watchctl: {sigil or serial} is not on USB "
+            "(ttyACM absent — check the cable/port; C6s can't enumerate on "
+            f"the {KNOWN_BAD_HUB}.x hub or some mobo ports)")
+    return None
+
+
+def require_usb(sel: str) -> dict:
+    row = find_usb(sel)
+    if row is None:
+        emit({"error": "not-found", "selector": sel})
+        raise SystemExit(EXIT_NOTFOUND)
+    for w in row["warnings"]:
+        say(f"warning: {w}")
+    return row
+
+
+# --------------------------------------------------------------------------- #
+# Tolerant serial reader (light-sleep gates serial on release builds: 0-byte
+# reads are NORMAL; strip NULs + ANSI escapes so output stays grep-friendly)
+# --------------------------------------------------------------------------- #
+class LineReader:
+    def __init__(self, dev: str):
+        self.dev = dev
+        self._buf = b""
+        try:
+            import serial  # type: ignore
+            # exclusive=False ON PURPOSE: espflash must be able to open the
+            # port while we hold it (the capture-before-reset pattern).
+            self._ser = serial.Serial(dev, 115200, timeout=0.15, exclusive=False)
+            self._mode = "pyserial"
+        except ImportError:
+            import termios
+            import tty
+            fd = os.open(dev, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            tty.setraw(fd)
+            attrs = termios.tcgetattr(fd)
+            attrs[6][termios.VMIN] = 0
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            self._fd = fd
+            self._mode = "termios"
+
+    def drain(self) -> None:
+        self._buf = b""
+        if self._mode == "pyserial":
+            self._ser.reset_input_buffer()
+        else:
+            try:
+                while os.read(self._fd, 4096):
+                    pass
+            except (BlockingIOError, OSError):
+                pass
+
+    def _read_some(self) -> bytes:
+        if self._mode == "pyserial":
+            try:
+                return self._ser.read(512)
+            except Exception:       # device vanished mid-read (replug/reset)
+                time.sleep(0.1)
+                return b""
+        import select
+        r, _, _ = select.select([self._fd], [], [], 0.15)
+        if r:
+            try:
+                return os.read(self._fd, 512)
+            except (BlockingIOError, OSError):
+                return b""
+        return b""
+
+    @staticmethod
+    def clean(raw: bytes) -> str:
+        raw = ANSI_RE.sub(b"", raw).replace(b"\x00", b"")
+        return raw.rstrip(b"\r").decode("utf-8", "replace")
+
+    def lines_until(self, deadline: float):
+        """Yield cleaned lines until the deadline. Tolerates 0-byte reads."""
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl >= 0:
+                line, self._buf = self._buf[:nl], self._buf[nl + 1:]
+                yield self.clean(line)
+                continue
+            if time.monotonic() > deadline:
+                if self._buf.strip():
+                    yield self.clean(self._buf)
+                    self._buf = b""
+                return
+            self._buf += self._read_some()
+
+    def close(self) -> None:
+        try:
+            if self._mode == "pyserial":
+                self._ser.close()
+            else:
+                os.close(self._fd)
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# Boot-banner capture (reader opens FIRST, then reset — the race is real)
+# --------------------------------------------------------------------------- #
+def scan_banner(reader: LineReader, wait: float, need: tuple[str, ...] = ("offset",),
+                echo: bool = False, keep: int = 400) -> dict:
+    found: dict = {"rom": False, "download": False, "offset": None,
+                   "sigil": None, "node_id": None, "stack_gap": None,
+                   "lines": []}
+    deadline = time.monotonic() + wait
+    for ln in reader.lines_until(deadline):
+        if not ln.strip():
+            continue
+        if len(found["lines"]) < keep:
+            found["lines"].append(ln)
+        if echo:
+            say(ln)
+        if ROM_MARK in ln:
+            found["rom"] = True
+        if DOWNLOAD_MARK in ln:
+            found["download"] = True
+        m = BOOT_OFFSET_RE.search(ln)
+        if m:
+            found["offset"] = int(m.group(1), 16)
+        m = SIGIL_RE.search(ln)
+        if m:
+            found["sigil"], found["node_id"] = m.group(1), int(m.group(2))
+        m = STACK_RE.search(ln)
+        if m:
+            found["stack_gap"] = int(m.group(1))
+        if all(found[k] not in (None, False) for k in need):
+            break
+    found["alive"] = bool(found["rom"] or found["offset"] is not None
+                          or found["sigil"])
+    return found
+
+
+def reset_and_capture(dev: str, wait: float = 12.0,
+                      need: tuple[str, ...] = ("offset",),
+                      echo: bool = False) -> dict:
+    """espflash reset with the boot burst captured. Reader opens BEFORE the
+    reset (start-reader-then-reset — otherwise the burst is lost)."""
+    try:
+        reader = LineReader(dev)
+    except (OSError, Exception) as e:  # noqa: BLE001
+        return {"alive": False, "open_failed": str(e), "lines": [],
+                "offset": None, "sigil": None, "stack_gap": None,
+                "node_id": None, "rom": False, "download": False}
+    try:
+        reader.drain()
+        try:
+            p = espflash("reset", "--port", dev, timeout=30)
+        except subprocess.TimeoutExpired:
+            return {"alive": False, "reset_failed": "espflash reset timed out",
+                    "lines": [], "offset": None, "sigil": None,
+                    "stack_gap": None, "node_id": None, "rom": False,
+                    "download": False}
+        banner = scan_banner(reader, wait, need=need, echo=echo)
+        if p.returncode != 0:
+            banner["reset_failed"] = (p.stderr or p.stdout).strip()[-400:]
+        return banner
+    finally:
+        reader.close()
+
+
+def slot_of(offset: int | None) -> str | None:
+    for name, off in SLOT_OFFSETS.items():
+        if off == offset:
+            return name
+    return None
+
+
+def fingerprint(banner: dict) -> dict:
+    return {
+        "slot": slot_of(banner.get("offset")),
+        "offset": (hex(banner["offset"]) if banner.get("offset") is not None
+                   else None),
+        "sigil": banner.get("sigil"),
+        "node_id": banner.get("node_id"),
+        "stack_gap_bytes": banner.get("stack_gap"),
+    }
+
+
+def say_fingerprint(banner: dict) -> None:
+    fp = fingerprint(banner)
+    if fp["offset"]:
+        say(f"  booting slot : {fp['slot'] or '?'} @ {fp['offset']}")
+    if fp["sigil"]:
+        say(f"  sigil        : {fp['sigil']} (node id {fp['node_id']})")
+    if fp["stack_gap_bytes"] is not None:
+        say(f"  stack gap    : {fp['stack_gap_bytes']} B "
+            f"({fp['stack_gap_bytes'] // 1024} KB)")
+
+
+# --------------------------------------------------------------------------- #
+# The wedge recovery ladder (#21)
+#   1. espflash reset (also un-parks a chip stuck in download mode)
+#   2. USBDEVFS_RESET ioctl (host-side re-enumeration; needs sudo)
+#   3. report power-cycle (battery devices do NOT reset on replug)
+#   NEVER the sysfs `authorized` toggle — it hard-wedges into EPROTO.
+# --------------------------------------------------------------------------- #
+def usbdevfs_reset(port_path: str) -> tuple[bool, str]:
+    base = Path("/sys/bus/usb/devices") / port_path
+    try:
+        busnum = int((base / "busnum").read_text())
+        devnum = int((base / "devnum").read_text())
+    except (OSError, ValueError) as e:
+        return False, f"could not read busnum/devnum for {port_path}: {e}"
+    node = f"/dev/bus/usb/{busnum:03d}/{devnum:03d}"
+    code = ("import fcntl,os,sys\n"
+            "fd=os.open(sys.argv[1],os.O_WRONLY)\n"
+            f"fcntl.ioctl(fd,{USBDEVFS_RESET},0)\n"
+            "os.close(fd)\n")
+    try:
+        p = run(["sudo", "-n", sys.executable, "-c", code, node], timeout=15)
+    except subprocess.TimeoutExpired:
+        return False, "sudo/ioctl timed out"
+    if p.returncode != 0:
+        return False, (p.stderr or p.stdout).strip() or "ioctl failed"
+    return True, node
+
+
+def wait_for_reenumeration(serial: str, timeout: float = 12.0) -> dict | None:
+    """After a USB reset the ttyACM number may MOVE — re-resolve by serial."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for r in usb_scan():
+            if r["serial"] == serial.upper():
+                return r
+        time.sleep(0.5)
+    return None
+
+
+def recovery_ladder(row: dict, sel: str) -> tuple[int, dict]:
+    """Walk the ladder; returns (exit_code, result_dict)."""
+    result: dict = {"selector": sel, "sigil": row.get("sigil"),
+                    "serial": row.get("serial"), "rungs": []}
+
+    # Rung 1: espflash reset (twice if the chip was parked in download mode).
+    say("rung 1: espflash reset + banner verify …")
+    banner = reset_and_capture(row["dev"], wait=10.0)
+    if banner.get("download"):
+        say("  chip was parked in download mode — resetting again")
+        banner = reset_and_capture(row["dev"], wait=10.0)
+    result["rungs"].append({"rung": "espflash-reset", "alive": banner["alive"],
+                            **fingerprint(banner)})
+    if banner["alive"]:
+        say("  OK — boot banner seen")
+        say_fingerprint(banner)
+        result["recovered_by"] = "espflash-reset"
+        return EXIT_OK, result
+    say("  no boot banner — escalating")
+
+    # Rung 2: USBDEVFS_RESET (host-side re-enumeration).
+    say("rung 2: USBDEVFS_RESET ioctl (host-side USB re-enumeration) …")
+    ok, detail = usbdevfs_reset(row["port_path"])
+    result["rungs"].append({"rung": "usbdevfs-reset", "ok": ok,
+                            "detail": detail})
+    if ok:
+        say(f"  ioctl sent to {detail}; waiting for re-enumeration "
+            "(the ttyACM number may move)")
+        row2 = wait_for_reenumeration(row["serial"])
+        if row2 is None:
+            say("  device did not re-enumerate")
+        else:
+            if row2["dev"] != row["dev"]:
+                say(f"  re-enumerated as {row2['dev']} (was {row['dev']})")
+            banner = reset_and_capture(row2["dev"], wait=10.0)
+            result["rungs"].append({"rung": "espflash-reset-after-usb-reset",
+                                    "alive": banner["alive"],
+                                    **fingerprint(banner)})
+            if banner["alive"]:
+                say("  OK — boot banner seen after USB reset")
+                say_fingerprint(banner)
+                result["recovered_by"] = "usbdevfs-reset"
+                result["dev"] = row2["dev"]
+                return EXIT_OK, result
+    else:
+        say(f"  ioctl failed: {detail}")
+
+    # Rung 3: only power fully removes the wedge on a battery device.
+    say("rung 3: POWER-CYCLE THE WATCH (battery + USB both off) — replugging "
+        "USB does NOT reset the SoC on battery power.")
+    say("        NEVER toggle sysfs 'authorized' — it hard-wedges EPROTO.")
+    result["recovered_by"] = None
+    result["action_needed"] = "power-cycle"
+    return EXIT_RECOVERY, result
+
+
+# --------------------------------------------------------------------------- #
+# MQTT / ssh plumbing (via ubox0 — katana→VLAN-11 MQTT stalls mid-handshake,
+# so all broker traffic rides the same ssh leg ota_push.sh uses)
+# --------------------------------------------------------------------------- #
+def mqtt_read_retained(args, topic: str, timeout: int = 4) -> str | None:
+    cfg = cfg_path(args)
+    broker = cfg_get(cfg, "MQTT_BROKER")
+    if not broker:
+        say(f"watchctl: MQTT_BROKER not set in {cfg} (gitignored — copy "
+            ".cargo/config.example.toml and fill it in)")
+        return None
+    host, _, port = broker.partition(":")
+    user, pw = cfg_get(cfg, "MQTT_USER"), cfg_get(cfg, "MQTT_PASS")
+    inner = (f"mosquitto_sub -h {shlex.quote(host)} -p {shlex.quote(port or '1883')}"
+             + (f" -u {shlex.quote(user)}" if user else "")
+             + (f" -P {shlex.quote(pw)}" if pw else "")
+             + f" -t {shlex.quote(topic)} -C 1 -W {timeout}")
+    try:
+        p = run(["ssh", "-o", "ConnectTimeout=6", OTA_HOST, inner],
+                timeout=timeout + 12)
+    except subprocess.TimeoutExpired:
+        return None
+    out = p.stdout.strip()
+    return out or None
+
+
+# --------------------------------------------------------------------------- #
+# WiFi debug transport (client side; firmware server is the follow-on task —
+# same line protocol as the serial debug console, port 5555, token-gated)
+# --------------------------------------------------------------------------- #
+def wifi_endpoint(args, sigil: str) -> str | None:
+    return mqtt_read_retained(args, DEBUG_ENDPOINT_TOPIC.format(sigil=sigil))
+
+
+def wifi_connect(endpoint: str, token: str | None, timeout: float = 4.0):
+    import socket
+    host, _, port = endpoint.partition(":")
+    sock = socket.create_connection((host, int(port or DEBUG_TCP_PORT)),
+                                    timeout=timeout)
+    sock.settimeout(0.15)
+    if token:
+        sock.sendall(f"auth {token}\n".encode())
+    return sock
+
+
+class SocketReader:
+    """LineReader-compatible wrapper over the WiFi debug socket."""
+
+    def __init__(self, sock):
+        self._sock = sock
+        self._buf = b""
+
+    def drain(self) -> None:
+        self._buf = b""
+
+    def _read_some(self) -> bytes:
+        import socket
+        try:
+            data = self._sock.recv(512)
+        except socket.timeout:
+            return b""
+        except OSError:
+            return b""
+        if data == b"":
+            raise ConnectionError("debug link closed by the watch "
+                                  "(auth reject / server stop)")
+        return data
+
+    def lines_until(self, deadline: float):
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl >= 0:
+                line, self._buf = self._buf[:nl], self._buf[nl + 1:]
+                yield LineReader.clean(line)
+                continue
+            if time.monotonic() > deadline:
+                return
+            self._buf += self._read_some()
+
+    def send_line(self, s: str) -> None:
+        self._sock.sendall((s + "\n").encode())
+
+    def close(self) -> None:
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def resolve_transport(args, sel: str) -> tuple[str, dict]:
+    """-> ("usb", usb_row) or ("wifi", {"endpoint":…, "token":…, "sigil":…}).
+
+    USB-only commands must NOT call this — they call require_usb directly."""
+    mode = getattr(args, "transport", "auto") or "auto"
+    if mode in ("usb", "auto"):
+        row = find_usb(sel, quiet=(mode == "auto"))
+        if row is not None:
+            for w in row["warnings"]:
+                say(f"warning: {w}")
+            return "usb", row
+        if mode == "usb":
+            emit({"error": "not-found", "selector": sel, "transport": "usb"})
+            raise SystemExit(EXIT_NOTFOUND)
+    sigil, _ = resolve_selector(sel)
+    if sigil is None:
+        say(f"watchctl: unknown watch {sel!r} — known sigils: "
+            + ", ".join(FLEET) + " (WiFi transport needs a fleet sigil)")
+        emit({"error": "not-found", "selector": sel})
+        raise SystemExit(EXIT_NOTFOUND)
+    if mode == "auto":
+        say(f"{sigil} not on USB — trying the WiFi debug endpoint …")
+    ep = wifi_endpoint(args, sigil)
+    if ep is None:
+        say(f"watchctl: no retained debug endpoint for {sigil} "
+            f"(topic watch/{sigil}/debug/endpoint) — the firmware debug "
+            "server is not running (or not built yet; see docs/debugging.md "
+            "'WiFi debug channel')")
+        emit({"error": "no-endpoint", "selector": sel, "sigil": sigil})
+        raise SystemExit(EXIT_NOTFOUND)
+    return "wifi", {"endpoint": ep, "token": debug_token(args), "sigil": sigil}
+
+
+# --------------------------------------------------------------------------- #
+# Subcommands
+# --------------------------------------------------------------------------- #
+def cmd_list(args) -> int:
+    rows = usb_scan()
+    by_serial = {r["serial"]: r for r in rows}
+    out = {"fleet": [], "foreign": [], "warnings": []}
+    say(f"{'SIGIL':<18} {'SERIAL':<19} {'PORT':<14} {'USB-PATH':<9} STATE")
+    for sigil, serial in FLEET.items():
+        r = by_serial.get(serial.upper())
+        state = "present" if r else "absent"
+        dev = r["dev"] if r else "-"
+        path = r["port_path"] if r else "-"
+        say(f"{sigil:<18} {serial:<19} {dev:<14} {path:<9} {state}")
+        out["fleet"].append({"sigil": sigil, "serial": serial,
+                             "dev": r["dev"] if r else None,
+                             "port_path": r["port_path"] if r else None,
+                             "present": bool(r),
+                             "warnings": r["warnings"] if r else []})
+        if r:
+            out["warnings"] += r["warnings"]
+    for r in rows:
+        if r["sigil"] is None:
+            say(f"{'(not fleet)':<18} {r['serial']:<19} {r['dev']:<14} "
+                f"{r['port_path']:<9} present — do NOT flash watch firmware")
+            out["foreign"].append({k: r[k] for k in
+                                   ("serial", "dev", "port_path")})
+    for w in out["warnings"]:
+        say(f"warning: {w}")
+    emit(out)
+    return EXIT_OK
+
+
+def cmd_logs(args) -> int:
+    transport, tgt = resolve_transport(args, args.watch)
+    secs = args.seconds
+    collected: list[str] = []
+
+    if transport == "wifi":
+        if args.reset:
+            say("watchctl: --reset is USB-only (espflash needs the wire) — "
+                "capturing without reset")
+        try:
+            sock = wifi_connect(tgt["endpoint"], tgt["token"])
+        except OSError as e:
+            say(f"watchctl: cannot reach {tgt['endpoint']}: {e}")
+            emit({"error": "unreachable", **tgt})
+            return EXIT_RECOVERY
+        reader = SocketReader(sock)
+        reader.send_line("logs")
+    else:
+        try:
+            reader = LineReader(tgt["dev"])
+        except OSError as e:
+            say(f"watchctl: cannot open {tgt['dev']}: {e}")
+            emit({"error": "open-failed", "dev": tgt["dev"]})
+            return EXIT_RECOVERY
+        if args.reset:
+            # Capture-before-reset: the reader is already open, so the boot
+            # burst (which starts within ~100 ms of the reset) is not lost.
+            try:
+                p = espflash("reset", "--port", tgt["dev"], timeout=30)
+                if p.returncode != 0:
+                    say(f"watchctl: espflash reset failed: "
+                        f"{(p.stderr or p.stdout).strip()[-200:]}")
+            except subprocess.TimeoutExpired:
+                say("watchctl: espflash reset timed out")
+
+    deadline = time.monotonic() + secs
+    try:
+        for ln in reader.lines_until(deadline):
+            if not ln.strip():
+                continue
+            collected.append(ln)
+            if not JSON_MODE:
+                print(ln, flush=True)
+    except ConnectionError as e:
+        say(f"watchctl: {e}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reader.close()
+
+    if not collected:
+        if args.reset:
+            say("watchctl: --reset produced NO boot burst — the port is "
+                "likely wedged; run: watchctl recover " + args.watch)
+            emit({"lines": [], "count": 0, "wedged_suspect": True})
+            return EXIT_RECOVERY
+        say("(no output — release builds light-sleep and gate serial; this "
+            "is normal at idle. Use --reset for the boot burst, or a "
+            "debug-console build which never sleeps.)")
+    emit({"lines": collected, "count": len(collected),
+          "transport": transport})
+    return EXIT_OK
+
+
+def cmd_reset(args) -> int:
+    row = require_usb(args.watch)
+    say(f"resetting {row.get('sigil') or row['dev']} ({row['dev']}) …")
+    banner = reset_and_capture(row["dev"], wait=10.0)
+    if banner.get("download"):
+        say("chip was parked in download mode — resetting again")
+        banner = reset_and_capture(row["dev"], wait=10.0)
+    if banner["alive"]:
+        say("OK — boot banner seen")
+        say_fingerprint(banner)
+        emit({"ok": True, **fingerprint(banner)})
+        return EXIT_OK
+    say("no boot banner after reset — auto-escalating the recovery ladder")
+    code, result = recovery_ladder(row, args.watch)
+    emit(result)
+    return code
+
+
+def cmd_recover(args) -> int:
+    row = require_usb(args.watch)
+    say(f"recovery ladder for {row.get('sigil') or row['dev']} "
+        f"({row['dev']}, USB path {row['port_path']}) …")
+    code, result = recovery_ladder(row, args.watch)
+    emit(result)
+    return code
+
+
+def cmd_slot(args) -> int:
+    row = require_usb(args.watch)
+    say(f"reading boot banner of {row.get('sigil') or row['dev']} "
+        f"({row['dev']}) — this resets the watch …")
+    banner = reset_and_capture(row["dev"], wait=18.0,
+                               need=("offset", "sigil"))
+    if banner.get("offset") is None:
+        say("no 'Loaded app from partition' line seen — port wedged or boot "
+            "not reaching the bootloader; run: watchctl recover " + args.watch)
+        emit({"error": "no-banner", "lines": banner["lines"][-40:]})
+        return EXIT_RECOVERY
+    say_fingerprint(banner)
+    if banner.get("sigil") is None:
+        say("  (no [SIGIL] line within the wait — app may have panicked "
+            "before radio init; try: watchctl logs --reset)")
+    emit({"ok": True, **fingerprint(banner)})
+    return EXIT_OK
+
+
+def _parse_slot_arg(s: str) -> int | None:
+    s = s.strip().lower()
+    if s in ("0", "ota_0", "a"):
+        return SLOT_OFFSETS["ota_0"]
+    if s in ("1", "ota_1", "b"):
+        return SLOT_OFFSETS["ota_1"]
+    try:
+        off = int(s, 16) if s.startswith("0x") else int(s)
+    except ValueError:
+        return None
+    return off if off in SLOT_OFFSETS.values() else None
+
+
+def _image_from(path: Path, tmpdir: str) -> tuple[Path | None, str]:
+    """ELF -> espflash app image (or pass a .bin through). -> (bin, kind)."""
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic != b"\x7fELF":
+        return path, "bin"
+    out = Path(tmpdir) / (path.stem + ".bin")
+    p = espflash("save-image", "--chip", "esp32c6", "--flash-size", "16mb", "--partition-table", str(PARTITIONS_CSV), str(path), str(out),
+                 timeout=120)
+    if p.returncode != 0:
+        say(f"watchctl: espflash save-image failed: "
+            f"{(p.stderr or p.stdout).strip()[-400:]}")
+        return None, "elf"
+    return out, "elf"
+
+
+def cmd_deploy(args) -> int:
+    row = require_usb(args.watch)
+    image = Path(args.image)
+    if not image.is_file():
+        say(f"watchctl: no such file: {image}")
+        emit({"error": "not-found", "image": str(image)})
+        return EXIT_NOTFOUND
+
+    with tempfile.TemporaryDirectory(prefix="watchctl-") as tmp:
+        binp, kind = _image_from(image, tmp)
+        if binp is None:
+            emit({"error": "save-image-failed"})
+            return EXIT_GATE
+        size = binp.stat().st_size
+        if size > IMAGE_GATE:
+            say(f"watchctl: GATE FAILED — image {size} B exceeds the "
+                f"{IMAGE_GATE} B OTA slot cap ({size - IMAGE_GATE} B over)")
+            emit({"error": "gate-failed", "size": size, "gate": IMAGE_GATE})
+            return EXIT_GATE
+        say(f"image {size} B fits the slot ({IMAGE_GATE - size} B headroom)"
+            + (f" [converted from ELF]" if kind == "elf" else ""))
+
+        # The slot trap (#20): bare `espflash flash` writes ota_0 while
+        # otadata may boot ota_1. ALWAYS write the slot that actually boots.
+        if args.slot == "auto":
+            say("detecting the BOOTING slot (reset + banner) …")
+            banner = reset_and_capture(row["dev"], wait=10.0)
+            if banner.get("offset") is None:
+                say("could not read the booting slot — run: watchctl recover "
+                    + args.watch + " (or pass --slot explicitly)")
+                emit({"error": "no-banner"})
+                return EXIT_RECOVERY
+            target = banner["offset"]
+            say(f"  booting slot = {slot_of(target)} @ {hex(target)}")
+        else:
+            target = _parse_slot_arg(args.slot)
+            if target is None:
+                say(f"watchctl: bad --slot {args.slot!r} (auto, 0, 1, ota_0, "
+                    "ota_1, 0x10000, 0x410000)")
+                emit({"error": "bad-slot", "slot": args.slot})
+                return EXIT_NOTFOUND
+
+        say(f"writing {binp.name} -> {slot_of(target)} @ {hex(target)} "
+            f"on {row['dev']} …")
+        try:
+            p = espflash("write-bin", "--port", row["dev"], hex(target),
+                         str(binp), timeout=600)
+        except subprocess.TimeoutExpired:
+            say("watchctl: write-bin timed out — run: watchctl recover "
+                + args.watch)
+            emit({"error": "write-timeout"})
+            return EXIT_RECOVERY
+        if p.returncode != 0:
+            say(f"watchctl: write-bin failed: "
+                f"{(p.stderr or p.stdout).strip()[-400:]}")
+            say("if espflash cannot sync, run: watchctl recover " + args.watch)
+            emit({"error": "write-failed"})
+            return EXIT_RECOVERY
+
+    say("verifying boot (reset + banner) …")
+    banner = reset_and_capture(row["dev"], wait=18.0, need=("offset", "sigil"))
+    booted = banner.get("offset")
+    if booted is None:
+        say("NO boot banner after deploy — run: watchctl recover " + args.watch)
+        emit({"error": "no-banner-after-deploy"})
+        return EXIT_RECOVERY
+    if booted != target:
+        say(f"SLOT MISMATCH: wrote {hex(target)} but the bootloader loaded "
+            f"{hex(booted)} — otadata changed underneath us (a pending OTA?); "
+            "re-run deploy, or flash-full --erase-otadata to pin ota_0")
+        emit({"error": "slot-mismatch", "wrote": hex(target),
+              "booted": hex(booted)})
+        return EXIT_RECOVERY
+    say("deploy OK — new image is the booting slot and it came up:")
+    say_fingerprint(banner)
+    if banner.get("sigil") is None:
+        say("  (no [SIGIL] line — if this build should print one, the app "
+            "may be crashing; check: watchctl logs --reset " + args.watch + ")")
+    emit({"ok": True, "wrote": hex(target), "size": size,
+          **fingerprint(banner)})
+    return EXIT_OK
+
+
+def cmd_flash_full(args) -> int:
+    row = require_usb(args.watch)
+    elf = Path(args.elf)
+    if not elf.is_file():
+        say(f"watchctl: no such file: {elf}")
+        emit({"error": "not-found", "elf": str(elf)})
+        return EXIT_NOTFOUND
+    with open(elf, "rb") as f:
+        if f.read(4) != b"\x7fELF":
+            say("watchctl: flash-full needs an ELF (use deploy for a .bin)")
+            emit({"error": "not-elf"})
+            return EXIT_NOTFOUND
+    if not PARTITIONS_CSV.is_file():
+        say(f"watchctl: missing {PARTITIONS_CSV} — a full flash WITHOUT the "
+            "partition table is exactly the #20 trap; refusing")
+        emit({"error": "no-partition-table"})
+        return EXIT_GATE
+
+    # Gate the app image size before touching the device.
+    with tempfile.TemporaryDirectory(prefix="watchctl-") as tmp:
+        binp, _ = _image_from(elf, tmp)
+        if binp is None:
+            emit({"error": "save-image-failed"})
+            return EXIT_GATE
+        size = binp.stat().st_size
+        if size > IMAGE_GATE:
+            say(f"watchctl: GATE FAILED — image {size} B exceeds the "
+                f"{IMAGE_GATE} B slot cap")
+            emit({"error": "gate-failed", "size": size, "gate": IMAGE_GATE})
+            return EXIT_GATE
+    say(f"image {size} B fits the slot ({IMAGE_GATE - size} B headroom)")
+
+    cmd = ["flash", "--chip", "esp32c6", "--port", row["dev"],
+           "--partition-table", str(PARTITIONS_CSV)]
+    if args.erase_otadata:
+        cmd += ["--erase-parts", "otadata"]
+        say("erasing otadata (boot pointer -> ota_0) as part of the flash")
+    cmd.append(str(elf))
+    say(f"full flash of {elf.name} onto {row.get('sigil') or row['dev']} "
+        f"({row['dev']}) …")
+    try:
+        p = espflash(*cmd, timeout=600)
+    except subprocess.TimeoutExpired:
+        say("watchctl: flash timed out — run: watchctl recover " + args.watch)
+        emit({"error": "flash-timeout"})
+        return EXIT_RECOVERY
+    if p.returncode != 0:
+        say(f"watchctl: flash failed: {(p.stderr or p.stdout).strip()[-400:]}")
+        say("if espflash cannot sync, run: watchctl recover " + args.watch)
+        emit({"error": "flash-failed"})
+        return EXIT_RECOVERY
+
+    say("verifying boot (reset + banner) …")
+    banner = reset_and_capture(row["dev"], wait=18.0, need=("offset", "sigil"))
+    if not banner["alive"]:
+        say("no boot banner after flash — run: watchctl recover " + args.watch)
+        emit({"error": "no-banner-after-flash"})
+        return EXIT_RECOVERY
+    say("flash-full OK:")
+    say_fingerprint(banner)
+    if args.erase_otadata and banner.get("offset") not in (None,
+                                                           SLOT_OFFSETS["ota_0"]):
+        say(f"  NOTE: expected ota_0 after an otadata erase but booted "
+            f"{hex(banner['offset'])}")
+    emit({"ok": True, "size": size, "erased_otadata": bool(args.erase_otadata),
+          **fingerprint(banner)})
+    return EXIT_OK
+
+
+def _ui_test_argv(args, mode: list[str]) -> list[str] | None:
+    transport, tgt = resolve_transport(args, args.watch)
+    if transport == "usb":
+        target = tgt["dev"]
+        extra: list[str] = []
+    else:
+        target = f"tcp://{tgt['endpoint']}"
+        extra = ["--token", tgt["token"]] if tgt["token"] else []
+        if not tgt["token"]:
+            say("warning: no WATCH_DEBUG_TOKEN in .cargo/config.toml [env] — "
+                "the debug server will drop an unauthenticated connection")
+    return [sys.executable, str(UI_TEST), "--port", target, *extra, *mode]
+
+
+def cmd_console(args) -> int:
+    argv = _ui_test_argv(args, ["repl"])
+    return subprocess.call(argv)
+
+
+def cmd_test(args) -> int:
+    suite = {None: "suite", "default": "suite", "suite": "suite",
+             "hotpaths": "hotpaths", "lights": "lights"}.get(args.suite)
+    if suite is None:
+        say(f"watchctl: unknown suite {args.suite!r} "
+            "(default | hotpaths | lights)")
+        return EXIT_NOTFOUND
+    argv = _ui_test_argv(args, [suite])
+    return subprocess.call(argv)
+
+
+def cmd_ota_status(args) -> int:
+    out: dict = {"journal": [], "announce": None}
+    say(f"— {OTA_UNIT} journal on {OTA_HOST} (last {args.lines}) —")
+    try:
+        p = run(["ssh", "-o", "ConnectTimeout=6", OTA_HOST,
+                 f"journalctl -u {OTA_UNIT} -n {int(args.lines)} --no-pager"],
+                timeout=25)
+    except subprocess.TimeoutExpired:
+        say(f"watchctl: ssh {OTA_HOST} timed out")
+        emit({"error": "ssh-timeout"})
+        return EXIT_RECOVERY
+    if p.returncode != 0:
+        say(f"watchctl: journal read failed: {p.stderr.strip()[-300:]}")
+    else:
+        for ln in p.stdout.splitlines():
+            out["journal"].append(ln)
+            say(ln)
+
+    say("")
+    say(f"— retained announce ({OTA_ANNOUNCE_TOPIC}) —")
+    msg = mqtt_read_retained(args, OTA_ANNOUNCE_TOPIC)
+    if msg is None:
+        say("(no retained announce on the broker)")
+    else:
+        parts = msg.split("|")
+        ann = {"raw": msg}
+        if len(parts) >= 2 and parts[0] == "OTA":
+            try:
+                epoch = int(parts[1])
+                ann["build"] = epoch
+                ann["build_time"] = datetime.fromtimestamp(epoch).isoformat(
+                    sep=" ")
+            except ValueError:
+                pass
+            ann["url"] = parts[2] if len(parts) > 2 else ""
+        out["announce"] = ann
+        say(msg)
+        if "build_time" in ann:
+            say(f"  build id {ann['build']} = {ann['build_time']} (local)")
+    emit(out)
+    return EXIT_OK
+
+
+def cmd_endpoint(args) -> int:
+    sigil, _ = resolve_selector(args.watch)
+    if sigil is None:
+        say(f"watchctl: endpoint needs a fleet sigil (got {args.watch!r})")
+        emit({"error": "not-found", "selector": args.watch})
+        return EXIT_NOTFOUND
+    topic = DEBUG_ENDPOINT_TOPIC.format(sigil=sigil)
+    say(f"reading retained {topic} …")
+    ep = mqtt_read_retained(args, topic)
+    if ep is None:
+        say(f"no retained endpoint — {sigil}'s debug server is not running "
+            "(the firmware TCP debug server is the follow-on task; see "
+            "docs/debugging.md 'WiFi debug channel')")
+        emit({"sigil": sigil, "endpoint": None, "reachable": False})
+        return EXIT_NOTFOUND
+    say(f"endpoint: {ep} — probing (connect + auth + ping) …")
+    token = debug_token(args)
+    try:
+        sock = wifi_connect(ep, token)
+    except OSError as e:
+        say(f"UNREACHABLE: {e} (stale retained endpoint? watch asleep/off "
+            "WiFi?)")
+        emit({"sigil": sigil, "endpoint": ep, "reachable": False,
+              "error": str(e)})
+        return EXIT_RECOVERY
+    reader = SocketReader(sock)
+    try:
+        reader.send_line("ping")
+        deadline = time.monotonic() + 4.0
+        for ln in reader.lines_until(deadline):
+            if "pong" in ln:
+                say(f"REACHABLE — {ln.strip()}")
+                emit({"sigil": sigil, "endpoint": ep, "reachable": True})
+                return EXIT_OK
+        say("connected but no pong within 4 s"
+            + ("" if token else " — no WATCH_DEBUG_TOKEN configured, the "
+               "server likely dropped the unauthenticated session"))
+        emit({"sigil": sigil, "endpoint": ep, "reachable": False,
+              "error": "no-pong"})
+        return EXIT_RECOVERY
+    except ConnectionError as e:
+        say(f"connection dropped: {e} (bad/missing token?)")
+        emit({"sigil": sigil, "endpoint": ep, "reachable": False,
+              "error": str(e)})
+        return EXIT_RECOVERY
+    finally:
+        reader.close()
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="machine output (JSON on stdout, chatter on stderr)")
+    common.add_argument("--transport", choices=("usb", "wifi", "auto"),
+                        default=argparse.SUPPRESS,
+                        help="usb | wifi | auto (default auto; reset/recover/"
+                             "slot/deploy/flash-full are USB-only)")
+    common.add_argument("--config", default=argparse.SUPPRESS,
+                        help="path to .cargo/config.toml (default: repo copy; "
+                             "env WATCHCTL_CONFIG)")
+    common.add_argument("-v", "--verbose", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="echo commands and raw serial to stderr")
+
+    ap = argparse.ArgumentParser(
+        prog="watchctl",
+        parents=[common],
+        description="one-command USB/WiFi debug rig for the esp32c6-watch "
+                    "fleet (see docs/debugging.md)")
+    # NO ap.set_defaults() for the common flags: parents=[] SHARES the action
+    # objects, and set_defaults would mutate their SUPPRESS defaults — the
+    # subparser would then clobber a pre-subcommand `--json` back to False.
+    # main() getattr()s the fallbacks instead.
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", parents=[common],
+                   help="fleet presence, ports, port-path warnings")
+
+    p = sub.add_parser("logs", parents=[common],
+                       help="capture serial/WiFi log lines (grep-friendly)")
+    p.add_argument("watch", help="sigil | serial | /dev/ttyACM*")
+    p.add_argument("--seconds", type=float, default=10.0,
+                   help="capture window (default 10)")
+    p.add_argument("--reset", action="store_true",
+                   help="reset first, capturing the boot burst (USB only)")
+
+    p = sub.add_parser("reset", parents=[common],
+                       help="verified reset; auto-escalates the wedge ladder")
+    p.add_argument("watch")
+
+    p = sub.add_parser("recover", parents=[common],
+                       help="the full #21 recovery ladder, explicitly")
+    p.add_argument("watch")
+
+    p = sub.add_parser("slot", parents=[common],
+                       help="booting slot + offset + build fingerprint "
+                            "(resets the watch)")
+    p.add_argument("watch")
+
+    p = sub.add_parser("deploy", parents=[common],
+                       help="slot-trap-proof deploy: write-bin into the "
+                            "BOOTING slot + boot verify")
+    p.add_argument("watch")
+    p.add_argument("image", help="ELF (auto save-image) or app .bin")
+    p.add_argument("--slot", default="auto",
+                   help="auto (detect booting slot) | 0 | 1 | ota_0 | ota_1 "
+                        "| 0x10000 | 0x410000")
+
+    p = sub.add_parser("flash-full", parents=[common],
+                       help="full espflash flash WITH partitions.csv "
+                            "(provisioning / fresh devices)")
+    p.add_argument("watch")
+    p.add_argument("elf")
+    p.add_argument("--erase-otadata", action="store_true",
+                   help="also erase otadata (boot pointer back to ota_0)")
+
+    p = sub.add_parser("console", parents=[common],
+                       help="debug-console REPL (wraps tools/ui_test.py)")
+    p.add_argument("watch")
+
+    p = sub.add_parser("test", parents=[common],
+                       help="ui_test.py suites: default | hotpaths | lights")
+    p.add_argument("watch")
+    p.add_argument("suite", nargs="?", default="default")
+
+    p = sub.add_parser("ota-status", parents=[common],
+                       help="ubox0 watch-ota journal + retained OTA announce")
+    p.add_argument("-n", "--lines", type=int, default=15,
+                   help="journal lines (default 15)")
+
+    p = sub.add_parser("endpoint", parents=[common],
+                       help="WiFi debug endpoint: retained lookup + "
+                            "connect/auth/ping probe")
+    p.add_argument("watch")
+
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    global JSON_MODE, VERBOSE
+    args = build_parser().parse_args(argv)
+    JSON_MODE = getattr(args, "json", False)
+    VERBOSE = getattr(args, "verbose", False)
+
+    handlers = {
+        "list": cmd_list,
+        "logs": cmd_logs,
+        "reset": cmd_reset,
+        "recover": cmd_recover,
+        "slot": cmd_slot,
+        "deploy": cmd_deploy,
+        "flash-full": cmd_flash_full,
+        "console": cmd_console,
+        "test": cmd_test,
+        "ota-status": cmd_ota_status,
+        "endpoint": cmd_endpoint,
+    }
+    try:
+        return handlers[args.cmd](args)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,6 +1,14 @@
 import { Theme, PageTitle } from "theme.slint";
 import { BackChevron, Stepper } from "controls.slint";
 
+// #30 — one spectrum band: bar level + peak-hold tick, both dBFS in [-60, 0]
+// (the meter's scale). Rust pushes 12 of these per Sound tick (~15 Hz), one
+// per log-spaced band 80 Hz → 8 kHz (band table: mic-dsp::BAND_EDGE_BINS).
+export struct SpecBand {
+    level: float,
+    peak: float,
+}
+
 // MC4 — standalone "Sound Level" dBFS meter screen. Overlay-style: MC5 shows it
 // via `if root.mic-open: SoundLevel {}` (same pattern as launcher/AOD) and
 // forwards the two input properties. This component is pure presentation — Rust
@@ -13,8 +21,9 @@ import { BackChevron, Stepper } from "controls.slint";
 export component SoundLevel {
     in property <float> mic-dbfs: -60;
     in property <float> mic-peak: -60;
-    // Scrolling waveform amplitudes, [0,1], oldest first (pushed by Rust ~30 Hz).
-    in property <[float]> mic-waveform: [];
+    // Real-FFT spectrum (#30): 12 log-spaced bands 80 Hz → 8 kHz, pushed by
+    // Rust once per Sound tick. Replaces the old scrolling waveform.
+    in property <[SpecBand]> spectrum: [];
     // Mic digital-gain stepper (0..+18 dB). Rust owns the value + clamping; the
     // − / + buttons just emit intent. The live meter above reflects the change.
     in property <int> gain-db: 0;
@@ -44,25 +53,41 @@ export component SoundLevel {
 
     // Back chevron — shared BackChevron component (controls.slint): one canonical
     // 78x64 placement so overlays never drift. Right-swipe also closes (Rust
-    // shell). Sits top-left, above the waveform band.
+    // shell). Sits top-left, above the spectrum band.
     BackChevron { clicked => { root.close(); } }
 
-    // Scrolling waveform (one auto-scaled bar per 16 ms window). Bipolar: each bar
-    // grows from a centre line so it reads like a live waveform envelope. Newest
-    // is on the right; the band sits between the title and the hero number.
+    // Real-FFT spectrum analyzer (#30, factory-firmware parity): 12 log-spaced
+    // bands 80 Hz → 8 kHz, one bottom-anchored bar per band plus a peak-hold
+    // tick that lingers after transients (meter-peak feel). dBFS → height uses
+    // the meter's [-60, 0] mapping; bar colours reuse the old waveform's zone
+    // thresholds. The band sits between the title and the hero number.
     HorizontalLayout {
         x: root.bar-x;
-        y: 66px;
+        y: 96px;
         width: root.bar-w;
-        height: 56px;
-        spacing: 2px;
-        for v in root.mic-waveform: Rectangle {
+        height: 60px;
+        spacing: 4px;
+        for b in root.spectrum: Rectangle {
+            // Faint column track so the 12 bands read even in silence.
+            background: Theme.track;
+            border-radius: 3px;
             Rectangle {
-                width: parent.width;
-                height: max(2px, parent.height * clamp(v, 0.0, 1.0));
-                y: (parent.height - self.height) / 2;
-                border-radius: min(self.width, self.height) / 2;
-                background: v >= 0.85 ? Theme.warn : (v >= 0.5 ? Theme.warm : Theme.accent);
+                property <float> lvl: clamp((b.level + 60) / 60, 0.0, 1.0);
+                width: 100%;
+                height: max(2px, parent.height * self.lvl);
+                y: parent.height - self.height;
+                border-radius: 3px;
+                background: self.lvl >= 0.85 ? Theme.warn
+                    : (self.lvl >= 0.5 ? Theme.warm : Theme.accent);
+            }
+            // Peak-hold tick — hidden at the silence floor.
+            Rectangle {
+                property <float> pk: clamp((b.peak + 60) / 60, 0.0, 1.0);
+                visible: b.peak > -59.5;
+                width: 100%;
+                height: 2px;
+                y: clamp(parent.height * (1 - self.pk) - 1px, 0px, parent.height - 2px);
+                background: Theme.ink;
             }
         }
     }
@@ -70,7 +95,7 @@ export component SoundLevel {
     // Hero numeric readout, coloured by zone. "-inf" at the silence floor.
     Text {
         x: (parent.width - self.width) / 2;
-        y: 140px;
+        y: 162px;
         text: root.mic-dbfs <= -59.5 ? "-\u{221e}" : "\{round(root.mic-dbfs)}";
         color: root.level-color;
         font-size: 84px;
@@ -78,7 +103,7 @@ export component SoundLevel {
     }
     Text {
         x: (parent.width - self.width) / 2;
-        y: 240px;
+        y: 254px;
         text: "dBFS";
         color: Theme.dim;
         font-size: 20px;

@@ -32,8 +32,10 @@ export struct LauncherTile {
     present: bool,
 }
 
-// A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS order.
-component AppIcon {
+// A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS
+// order. Exported: the app switcher (#31, switcher.slint) renders its session
+// cards with the same glyphs, so an app looks identical in both surfaces.
+export component AppIcon {
     in property <int> id;
     in property <color> tint;
     width: 46px;
@@ -238,7 +240,12 @@ export component LauncherOverlay {
         y: 96px + floor(slot / 3) * (root.tile-h + root.gutter);
         width: root.tile-w;
         height: root.tile-h;
-        if root.tiles[root.page * 9 + slot].present: AppTile {
+        // `visible:`-gated, not `if`-gated: identical culling (draw + input)
+        // without the generated-inner-component ROM cost (gesture-shell diet
+        // idiom — see shade.slint). The overlay itself stays `if`-gated in
+        // shell.slint, so nothing here is resident while the launcher is shut.
+        AppTile {
+            visible: root.tiles[root.page * 9 + slot].present;
             width: 100%; height: 100%;
             name: root.tiles[root.page * 9 + slot].name;
             accent: root.tiles[root.page * 9 + slot].accent;

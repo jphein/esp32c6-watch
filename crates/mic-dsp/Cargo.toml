@@ -9,3 +9,9 @@ license = "MIT OR Apache-2.0"
 # no_std sqrt/log10 that also builds on the host — keeps the module identical
 # on the riscv target and under `cargo test`.
 libm = "0.2"
+# #30 spectrum analyzer: const-generic, no-alloc real FFT. `size-256` is the
+# minimal feature for `rfft_256`: the fn itself is gated on `size-128` (its
+# internal CFFT), but the recombination step indexes the shared SINE table,
+# which is sized by the LARGEST enabled size — with only `size-128` enabled it
+# panics out-of-bounds (verified by the host tests). Keeps table ROM ≈ 1 KB.
+microfft = { version = "0.6", default-features = false, features = ["size-256"] }
