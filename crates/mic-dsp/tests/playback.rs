@@ -134,7 +134,7 @@ fn tick_length() {
     assert_eq!(fill_tick_mono_s16le(&mut buf, 16_000), CLICK_LEN);
 }
 
-// === fill_ping_chime_mono_s16le (watch-to-watch ping, #35) ====================
+// === fill_ping_chime_mono_s16le (watch-to-watch ping, #35 / melody #58) =======
 
 /// Zero-crossing count over a sample window — a cheap dominant-frequency
 /// probe: a sine at f Hz crosses zero ~2f times per second.
@@ -144,7 +144,7 @@ fn crossings(buf: &[u8], from: usize, to: usize) -> usize {
         .count()
 }
 
-/// The chime fills exactly PING_CHIME_LEN bytes at 16 kHz (300 ms).
+/// The chime fills exactly PING_CHIME_LEN bytes at 16 kHz (480 ms).
 #[test]
 fn ping_chime_length() {
     let mut buf = [0u8; PING_CHIME_LEN];
@@ -166,19 +166,29 @@ fn ping_chime_edges_and_level() {
     assert!(peak <= 14_000, "chime must stay pleasant, got peak {peak}");
 }
 
-/// Two-tone and RISING: the early window is dominated by E5 (~659 Hz), the
-/// late window by B5 (~988 Hz) — verified by zero-crossing rate, ±20%.
+/// A 4-note RISING arpeggio C5→E5→G5→C6 (#58): each note's window rings at a
+/// strictly higher rate than the last — verified by zero-crossing count.
+/// Windows sit inside each note's own span (each note starts 110 ms after the
+/// previous), so the newest, loudest note dominates the crossing rate.
 #[test]
-fn ping_chime_rises_two_tones() {
+fn ping_chime_rises_four_notes() {
     let mut buf = [0u8; PING_CHIME_LEN];
     fill_ping_chime_mono_s16le(&mut buf, 16_000);
-    // Early window 10..90 ms (note 1 alone): expect ~2 * 659 * 0.080 ≈ 105.
-    let c1 = crossings(&buf, 160, 1440);
-    // Late window 150..270 ms (note 2 dominant): ~2 * 988 * 0.120 ≈ 237.
-    let c2 = crossings(&buf, 2400, 4320);
-    assert!((84..=127).contains(&c1), "early window should ring at ~659 Hz, got {c1} crossings");
-    assert!((190..=285).contains(&c2), "late window should ring at ~988 Hz, got {c2} crossings");
-    assert!(c2 > c1, "the chime must RISE (got {c1} then {c2})");
+    // ms → sample index at 16 kHz.
+    let w = |a_ms: usize, b_ms: usize| crossings(&buf, a_ms * 16, b_ms * 16);
+    // C5 ~523 Hz: 30..95 ms, alone (E5 enters at 110). ~2*523*0.065 ≈ 68.
+    let c1 = w(30, 95);
+    // E5 ~659 Hz: 140..205 ms. ~2*659*0.065 ≈ 86.
+    let c2 = w(140, 205);
+    // G5 ~784 Hz: 250..315 ms. ~2*784*0.065 ≈ 102.
+    let c3 = w(250, 315);
+    // C6 ~1047 Hz: 360..460 ms (the held arrival). ~2*1047*0.100 ≈ 209.
+    let c4 = w(360, 460);
+    assert!(c1 < c2, "C5 ({c1}) → E5 ({c2}) must rise");
+    assert!(c2 < c3, "E5 ({c2}) → G5 ({c3}) must rise");
+    assert!(c3 < c4, "G5 ({c3}) → C6 ({c4}) must rise");
+    // Sanity on the octave leap: C6 is ~2x C5.
+    assert!(c4 > 2 * c1, "top C6 ({c4}) should ring ~2x the root C5 ({c1})");
 }
 
 /// The every-touch tick is strictly QUIETER than the launch click (texture,

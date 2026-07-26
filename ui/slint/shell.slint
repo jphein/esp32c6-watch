@@ -19,6 +19,7 @@ import { SettingsHub } from "settings.slint";
 import { PowerMenu } from "power_menu.slint";
 import { SwitcherOverlay } from "switcher.slint";
 import { ShadeOverlay, NotifCard } from "shade.slint";
+import { VolumeOverlay } from "volume.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -199,6 +200,18 @@ export component WatchShell inherits Window {
     in property <string> kb-context: "";
     in property <string> kb-text: "";
     in property <bool> kb-plain: false;
+    // Buttons section (#59): the four mapped-action labels, page 5 of the hub.
+    in property <string> boot-short-action: "Volume +";
+    in property <string> boot-long-action: "Launcher";
+    in property <string> pwron-short-action: "Volume \u{2212}";
+    in property <string> pwron-long-action: "Power menu";
+    // Volume HUD overlay (#59): appears on any change, ~2s auto-dismiss (Rust
+    // owns the clock). `volume-overlay-open` is Rust-driven; the slider emits
+    // `volume-changed` → 0..1 (mapped to 0..15 + clears mute in the loop).
+    in property <bool> volume-overlay-open: false;
+    in property <int> volume-level: 11;
+    in property <bool> volume-muted: false;
+    in-out property <float> volume-frac: 0.73; // Rust-driven slider fraction
     // Gesture hints (wake shimmer): armed by Rust at each wake-to-bright seam
     // (ShellUi::hint_wake) and sequenced there — bloom-in → hold → fade-out →
     // destroy — on the loop's render clock; Slint only draws. `hint-sides` /
@@ -271,6 +284,15 @@ export component WatchShell inherits Window {
     callback kb-bksp-up();
     callback kb-eye();             // show/hide password
     callback kb-done();            // commit field (SSID → password → connect)
+    // Buttons section (#59): tap a mapping row → Rust cycles that slot's action
+    // (0 boot-short · 1 boot-long · 2 pwron-short · 3 pwron-long) + persists.
+    callback button-cycle(int);
+    callback volume-down();        // SOUND-page speaker − : lower volume step
+    callback volume-up();          // SOUND-page speaker + : raise volume step
+    callback volume-mute-tap();    // SOUND-page mute toggle
+    // Volume HUD slider drag → 0..1 (Rust maps to 0..15, clears mute, resets
+    // the 2s auto-dismiss). Shared by the SOUND page's inline slider too.
+    callback volume-changed(float);
     // Power menu (#48): SHUTDOWN → AXP2101 poweroff (cell drain in main.rs);
     // REBOOT reuses `reboot-tap` — the power page's proven OTA+reset drain.
     callback power-shutdown-tap();
@@ -786,9 +808,19 @@ export component WatchShell inherits Window {
         fw: root.fw-text;
         node-id: root.node-id;
         ota-status: root.ota-status;
+        volume-level: root.volume-level;
+        volume-muted: root.volume-muted;
+        boot-short-action: root.boot-short-action;
+        boot-long-action: root.boot-long-action;
+        pwron-short-action: root.pwron-short-action;
+        pwron-long-action: root.pwron-long-action;
         toggle-touch-sound => { root.touch-sound-tap(); }
         gain-down => { root.mic-gain-down(); }
         gain-up => { root.mic-gain-up(); }
+        vol-down => { root.volume-down(); }
+        vol-up => { root.volume-up(); }
+        vol-mute => { root.volume-mute-tap(); }
+        button-cycle(s) => { root.button-cycle(s); }
         brightness-changed(f) => { root.brightness-changed(f); }
         // Radio toggles reuse the chrome dots' callbacks — existing
         // semantics + toasts, one drain in the loop.
@@ -865,6 +897,20 @@ export component WatchShell inherits Window {
         dismissed => { root.ping-pulse-tap(); }
     }
 
+    // ==================== Volume HUD (#59) ====================
+    // Ephemeral, above every overlay/modal (a hardware volume press must land
+    // wherever you are) but below AOD — Rust only arms it while awake, so AOD
+    // winning is the safe render on the one sleep-transition tick (the power
+    // menu / ping-pulse z-rule). NOT a full-screen swallow: it's a HUD card,
+    // taps outside fall through.
+    if root.volume-overlay-open: VolumeOverlay {
+        width: 100%; height: 100%;
+        level: root.volume-level;
+        muted: root.volume-muted;
+        frac <=> root.volume-frac;
+        changed(f) => { root.volume-changed(f); }
+    }
+
     // ==================== AOD overlay ====================
     if root.aod: Rectangle {
         width: 100%; height: 100%;
@@ -882,7 +928,7 @@ export component WatchShell inherits Window {
             y: 300px;
             text: root.date-text;
             color: Theme.faint;
-            font-size: 17px;
+            font-size: 18px;
             letter-spacing: 2px;
         }
     }

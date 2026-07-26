@@ -1390,6 +1390,38 @@ async fn main(_spawner: Spawner) -> ! {
     // Touch sound (#49): the persisted every-tap tick gate. Default ON.
     let mut touch_sound = watch_cfg.touch_sound;
 
+    // === Speaker volume + button mapping (#59) ===
+    // Restore the persisted volume step + mute into the codec master-volume
+    // atomic so EVERY clip (chime/beeps/clicks/tick) plays at the stored level
+    // (audio_out::service_amp reads it on each amp-raise). The amp is down at
+    // boot, so this just seeds the atomic; no live codec write needed.
+    let mut volume = watch_cfg.volume.min(peripherals::config::VOL_MAX);
+    let mut muted = watch_cfg.muted;
+    audio_out::MASTER_VOL_REG.store(
+        audio_out::vol_to_reg(volume, muted),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    // Button map (#59): BOOT/PWRON × short/long → action. Restored like the
+    // radio toggles; each hub cycle re-persists.
+    use crate::peripherals::config::ButtonAction;
+    let mut boot_short = watch_cfg.boot_short;
+    let mut boot_long = watch_cfg.boot_long;
+    let mut pwron_short = watch_cfg.pwron_short;
+    let mut pwron_long = watch_cfg.pwron_long;
+    // ONE action queued per tick by the button state machines below, dispatched
+    // in a single place BEFORE the app-state match (so it can freely set
+    // app_state / launcher / power-menu / volume regardless of which arm runs).
+    let mut pending_button: Option<ButtonAction> = None;
+    // BOOT press state machine (short vs long): press start, long-fired latch,
+    // and "this press only woke the screen" (so a wake press never also acts).
+    let mut boot_press_start: Option<Instant> = None;
+    let mut boot_long_fired = false;
+    let mut boot_wake_consumed = false;
+    const BOOT_LONG_MS: u64 = 600;
+    // Volume HUD auto-dismiss deadline (#59): armed on any volume change, a
+    // drag resets it; the per-tick check closes the overlay when it passes.
+    let mut volume_overlay_until: Option<Instant> = None;
+
     // === Watch-to-watch ping (#35) — tiny sender/receiver state ===
     // Sender: one outstanding (seq, sent_at) awaiting its PINGACK; a 3s
     // cooldown between sends (etiquette — the hero shows a recharge sweep).
@@ -1412,6 +1444,11 @@ async fn main(_spawner: Spawner) -> ! {
     // at the protocol level — see smol_mesh::handle_rx).
     let mut ping_rx_last: Option<(u8, u16)> = None;
     let mut ping_rx_gate_until: Option<Instant> = None;
+    // #58 pop-over-everything: the framebuffer app a ping SUSPENDED to take the
+    // panel for the pulse. `Some(app)` means "resume this game once the pulse
+    // ends" — the fb was freed + the Slint scene brought up so the pulse could
+    // composite; on dismiss we re-launch through #31's resume path (state kept).
+    let mut ping_resume_app: Option<AppState> = None;
 
     // === Settings hub (v0.9.0, #49) — NETWORK flow state ===
     // The hub is scene-resident (no framebuffer); the WiFi creds flow is
@@ -1443,6 +1480,13 @@ async fn main(_spawner: Spawner) -> ! {
     shell.set_mesh_enabled(mesh_enabled);
     shell.set_wifi_intent(!watch_cfg.wifi_off);
     shell.set_net_current(watch_cfg.ssid.as_str());
+    shell.set_volume(volume, muted);
+    shell.set_button_actions(
+        boot_short.label(),
+        boot_long.label(),
+        pwron_short.label(),
+        pwron_long.label(),
+    );
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
@@ -1934,6 +1978,9 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 Ok(Some(key)) => {
                     last_interaction = now;
+                    // Capture the PRE-wake brightness state: the wake-vs-volume
+                    // nuance (#59) hinges on whether the screen was already on.
+                    let was_bright = screen_state == 3;
                     if screen_state < 3 {
                         // Wake-to-bright (AOD/dim; the panel is already ON in
                         // states 1-2, so no display_on() dance is needed).
@@ -1947,24 +1994,23 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                         shell.request_redraw();
                     }
+                    // #59 button mapping: PWRON short acts ONLY when the screen
+                    // was already bright (else the press is consumed by the wake
+                    // — the power button MUST still wake the watch). PWRON long
+                    // always acts after waking (a deliberate hold), preserving
+                    // the #48 "long-press → power menu" from any lit/dim state.
                     match key {
                         PowerKey::Long => {
-                            // A game holds the panel + heap: exit it first
-                            // (fb drop; the Slint arm below resumes the scene
-                            // this same tick), then raise the menu.
-                            if fb.is_some() {
-                                fb = None;
-                                app_state = AppState::Watchface;
-                                println!("[PKEY] long-press: game exited for power menu");
-                            }
-                            power_menu_request = true;
+                            println!("[PKEY] long-press -> {:?}", pwron_long);
+                            pending_button = Some(pwron_long);
                         }
                         PowerKey::Short => {
-                            // Wake/keep-awake only, matching the vendor: its
-                            // firmware never read the latch (short-press did
-                            // nothing while on; in PMIC hardware it is the
-                            // power-ON trigger when off, ONLEVEL=128ms).
-                            println!("[PKEY] short-press: wake");
+                            if was_bright {
+                                println!("[PKEY] short-press -> {:?}", pwron_short);
+                                pending_button = Some(pwron_short);
+                            } else {
+                                println!("[PKEY] short-press: wake (mapped action consumed)");
+                            }
                         }
                     }
                 }
@@ -2043,6 +2089,43 @@ async fn main(_spawner: Spawner) -> ! {
         };
         #[cfg(not(feature = "debug-console"))]
         let injected_this_tick = false;
+
+        // === BOOT button press machine (#59: short vs long) ===
+        // Runs BEFORE the wake block so a press-start captures the PRE-wake
+        // screen state — a press that only wakes the watch never also fires its
+        // mapped action (the wake-vs-action nuance, matching PWRON). A long
+        // press fires AT the threshold while still held (immediate feedback);
+        // a short press fires on release if the long didn't. Replaces the old
+        // is_low() launcher toggles.
+        {
+            let boot_low = boot_button.is_low();
+            if boot_low && boot_press_start.is_none() {
+                boot_press_start = Some(now);
+                boot_long_fired = false;
+                boot_wake_consumed = screen_state < 3; // this press is waking
+            }
+            if boot_low && !boot_long_fired {
+                if let Some(t0) = boot_press_start {
+                    if (now - t0).as_millis() >= BOOT_LONG_MS {
+                        boot_long_fired = true;
+                        if !boot_wake_consumed {
+                            pending_button = Some(boot_long);
+                        }
+                    }
+                }
+            }
+            if !boot_low {
+                if let Some(t0) = boot_press_start {
+                    let held = (now - t0).as_millis();
+                    // Short press = released before the long threshold, wasn't a
+                    // wake, and past a small debounce (spurious sub-40ms blips).
+                    if !boot_long_fired && !boot_wake_consumed && held >= 40 {
+                        pending_button = Some(boot_short);
+                    }
+                    boot_press_start = None;
+                }
+            }
+        }
 
         // === Screen sleep/wake state machine ===
         let any_touch = touch_int.is_low();
@@ -2560,39 +2643,83 @@ async fn main(_spawner: Spawner) -> ! {
                                 ping_rx_gate_until =
                                     Some(Instant::now() + Duration::from_secs(2));
                                 let from = ping_sigil(from_id, mac);
-                                // The chime IS the ping — it plays wherever the
-                                // greeting lands (bright, dim, AOD, mid-game).
+                                // (1) The chime IS the ping — ALWAYS play it,
+                                // wherever the greeting lands (bright, dim, AOD,
+                                // full-off, mid-game). Half-duplex is fine.
                                 audio_out::play_pcm(ping_chime_pcm);
                                 audio_out::service_amp(&mut amp_en, &mut audio_codec);
-                                if screen_state == 0 || fb.is_some() {
-                                    // Panel fully off, or a game owns it (scene
-                                    // suspended): the pulse can't land — leave a
-                                    // shade card via the notify ring instead.
-                                    let mut title: heapless::String<32> =
-                                        heapless::String::new();
+                                // (3) ALWAYS log a shade card (#58) — a persistent,
+                                // RTC-stamped record that survives the ~4s pulse.
+                                // The time in the body keeps distinct pings from
+                                // the same peer out of notify's consecutive-dup
+                                // suppression (so the unread badge bumps each ping).
+                                {
                                     use core::fmt::Write as _;
+                                    let mut title: heapless::String<
+                                        { crate::notify::TITLE_CAP },
+                                    > = heapless::String::new();
                                     let _ = write!(title, "Ping from {}", from.as_str());
+                                    let mut body: heapless::String<
+                                        { crate::notify::BODY_CAP },
+                                    > = heapless::String::new();
+                                    match last_dt.as_ref() {
+                                        Some(dt) => {
+                                            let _ = write!(
+                                                body,
+                                                "A greeting across the mesh \u{00b7} {:02}:{:02}:{:02}",
+                                                dt.hours, dt.minutes, dt.seconds
+                                            );
+                                        }
+                                        None => {
+                                            let _ = body
+                                                .push_str("A greeting across the mesh");
+                                        }
+                                    }
                                     crate::notify::push(
                                         crate::notify::Source::System,
                                         title.as_str(),
-                                        "A greeting across the mesh",
+                                        body.as_str(),
                                     );
-                                } else {
-                                    if screen_state < 3 {
-                                        // Wake to bright — the wrist-raise seam
-                                        // (the panel is already ON in AOD/dim;
-                                        // only brightness changes). No hint_wake:
-                                        // the pulse owns this wake's choreography.
-                                        display.set_brightness(brightness);
-                                        screen_state = 3;
-                                        next_flush = now;
-                                        shell.set_aod(false);
-                                        shell.request_redraw();
-                                    }
-                                    // Keep the screen up through the ~4s pulse.
-                                    last_interaction = Instant::now();
-                                    shell.ping_pulse_show(from.as_str());
                                 }
+                                // (2) Pop the pulse over EVERYTHING (#58). A
+                                // framebuffer game/app owns the panel + heap and
+                                // the Slint scene is suspended, so the pulse can't
+                                // composite over it. SUSPEND the app (state kept —
+                                // #31), free the fb, bring the scene back up, and
+                                // arm the resume: on dismiss we re-launch it right
+                                // where it was. Scene-resident overlays need none
+                                // of this — the pulse is just top-z above them.
+                                if fb.is_some() {
+                                    ping_resume_app = Some(app_state);
+                                    sessions.suspend(app_state);
+                                    fb = None; // free the ~51KB fb BEFORE the scene
+                                    shell.resume_scene(); // recreate so the pulse can draw
+                                    // The shell arm's return-from-game block
+                                    // re-pushes battery/time/radios/etc. (keyed on
+                                    // prev_app_state); resume_scene there no-ops.
+                                    app_state = AppState::Watchface;
+                                    println!(
+                                        "[PING] suspended {:?} for the pulse",
+                                        ping_resume_app
+                                    );
+                                }
+                                // Wake to bright from ANY sleep state — a ping is a
+                                // can't-miss event (#58). Panel fully off needs the
+                                // display_on() + warmup the touch-wake path uses.
+                                if screen_state < 3 {
+                                    if screen_state == 0 {
+                                        display.display_on();
+                                        Timer::after(Duration::from_millis(20)).await;
+                                    }
+                                    display.set_brightness(brightness);
+                                    screen_state = 3;
+                                    next_flush = now;
+                                    shell.set_aod(false);
+                                    shell.request_redraw();
+                                }
+                                // Keep the screen up through the ~4s pulse.
+                                last_interaction = Instant::now();
+                                shell.ping_pulse_show(from.as_str());
                                 println!(
                                     "[PING] greeting from {} (id{from_id} seq {seq})",
                                     from.as_str()
@@ -2742,6 +2869,119 @@ async fn main(_spawner: Spawner) -> ! {
             audio_out::service_amp(&mut amp_en, &mut audio_codec);
         }
 
+        // === Mapped button-action dispatch (#59) ===
+        // ONE place both button state machines feed (BOOT SM + PWRON poll), run
+        // BEFORE the app-state match so it can freely set app_state / launcher /
+        // power-menu / volume regardless of which arm runs this tick. Volume
+        // actions defer the apply+persist+overlay to a single shared tail so
+        // VolUp/VolDown/Mute don't each duplicate it.
+        {
+            let mut vol_changed = false;
+            let mut vol_feedback = false; // play the tick at the NEW level
+            if let Some(action) = pending_button.take() {
+                match action {
+                    ButtonAction::None => {}
+                    ButtonAction::VolUp => {
+                        muted = false;
+                        volume = (volume + 1).min(peripherals::config::VOL_MAX);
+                        vol_changed = true;
+                        vol_feedback = true;
+                    }
+                    ButtonAction::VolDown => {
+                        muted = false;
+                        volume = volume.saturating_sub(1);
+                        vol_changed = true;
+                        vol_feedback = true;
+                    }
+                    ButtonAction::Mute => {
+                        muted = !muted;
+                        vol_changed = true;
+                        vol_feedback = !muted; // only the unmute is audible
+                    }
+                    ButtonAction::PowerMenu => {
+                        // Leaving a game: SUSPEND it first (#31) so it stays
+                        // resumable, exactly like the fb-arm exit path.
+                        if fb.is_some() {
+                            sessions.suspend(app_state);
+                            fb = None;
+                            app_state = AppState::Watchface;
+                        }
+                        power_menu_request = true;
+                    }
+                    ButtonAction::Shutdown => {
+                        println!("[BTN] shutdown");
+                        if power.shutdown().is_err() {
+                            println!("[BTN] shutdown I2C failed");
+                        }
+                    }
+                    ButtonAction::Launcher => {
+                        if fb.is_some() {
+                            sessions.suspend(app_state);
+                            fb = None;
+                            app_state = AppState::Watchface;
+                        }
+                        if shell.modal_open() {
+                            shell.set_switcher_open(false);
+                            shell.set_shade_open(false);
+                        } else {
+                            let opening = app_state == AppState::Watchface;
+                            shell.set_launcher_open(opening);
+                            app_state =
+                                if opening { AppState::Launcher } else { AppState::Watchface };
+                        }
+                    }
+                    ButtonAction::Ping => {
+                        if fb.is_some() {
+                            sessions.suspend(app_state);
+                            fb = None;
+                        }
+                        app_state = AppState::Watchface;
+                        shell.req.launch.set(Some(AppState::Ping));
+                    }
+                    ButtonAction::Voice => {
+                        if fb.is_some() {
+                            sessions.suspend(app_state);
+                            fb = None;
+                        }
+                        app_state = AppState::Watchface;
+                        shell.req.launch.set(Some(AppState::Voice));
+                    }
+                }
+            }
+            if vol_changed {
+                last_interaction = now;
+                audio_out::set_master_volume(&mut audio_codec, volume, muted);
+                shell.set_volume(volume, muted);
+                shell.set_volume_overlay_open(true);
+                shell.request_redraw(); // snappy HUD even at the 1Hz clock idle
+                volume_overlay_until = Some(now + Duration::from_secs(2));
+                if watch_cfg.volume != volume || watch_cfg.muted != muted {
+                    watch_cfg.volume = volume;
+                    watch_cfg.muted = muted;
+                    if cfg_save(flash, config_offset, &watch_cfg).await {
+                        println!("[CFG] volume={} muted={} saved", volume, muted);
+                    } else {
+                        println!("[CFG] volume save failed");
+                    }
+                }
+                if vol_feedback && !audio_out::busy() {
+                    audio_out::play_pcm(tick_pcm);
+                    audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                }
+            }
+        }
+
+        // Volume HUD auto-dismiss (#59): close after the 2s window OR the moment
+        // the screen leaves bright (it must never linger into AOD/off; a drag in
+        // the hub drain re-arms the deadline).
+        if let Some(deadline) = volume_overlay_until {
+            if now >= deadline || screen_state < 2 {
+                shell.set_volume_overlay_open(false);
+                shell.request_redraw(); // clear it promptly at idle cadence
+                volume_overlay_until = None;
+            }
+        }
+
         // === App state machine ===
         // Snapshot the state we dispatch on THIS iteration. The app→shell guard
         // below ("force a fresh repaint on return") compares against the state we
@@ -2819,6 +3059,14 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_net_status(net_status);
                     shell.set_ota_status(ota_status_text);
                     shell.set_mic_gain_db(mic_capture::GAIN_STEPS_DB[gain_idx] as i32);
+                    // #59: volume + button map are also lost on a scene rebuild.
+                    shell.set_volume(volume, muted);
+                    shell.set_button_actions(
+                        boot_short.label(),
+                        boot_long.label(),
+                        pwron_short.label(),
+                        pwron_long.label(),
+                    );
                     if let Some((t, c)) = last_weather {
                         shell.set_weather(Some(t), c);
                     }
@@ -3262,6 +3510,18 @@ async fn main(_spawner: Spawner) -> ! {
                 if shell.req.ping_pulse_tap.take() {
                     shell.ping_pulse_dismiss();
                 }
+                // #58 pop-over-everything: if a ping SUSPENDED a fb game to take
+                // the panel, resume it the instant the pulse ends (tap, swipe,
+                // OR the ~4s auto-dismiss — all observed through the one
+                // ping_pulse_active flag). Re-launch through #31's resume path
+                // (launch cell → take_resume skips setup → state preserved).
+                if let Some(app) = ping_resume_app {
+                    if !shell.ping_pulse_active() {
+                        shell.req.launch.set(Some(app));
+                        ping_resume_app = None;
+                        println!("[PING] pulse done \u{2014} resuming {app:?}");
+                    }
+                }
                 // Hero tap → one PING broadcast. The Slint gate (mesh-on +
                 // not cooling + not mid-flight) already filtered; re-verify
                 // here — properties mirror the loop one tick behind.
@@ -3671,6 +3931,72 @@ async fn main(_spawner: Spawner) -> ! {
                         } else {
                             println!("[CFG] touch_sound save failed")
                         }
+                    }
+                }
+                // === Volume + buttons hub drains (#59) ===
+                // SOUND-page steppers / mute route through the SAME pending
+                // action path as the hardware buttons, so apply+persist+overlay
+                // is single-sourced (dispatched above next tick... no — feed it
+                // THIS tick by setting pending_button before it's re-checked?
+                // The dispatcher already ran this tick; instead apply inline via
+                // the shared helper so the touch path is immediate). Simplest:
+                // queue onto pending_button for next tick's dispatcher.
+                if shell.req.volume_up.take() {
+                    pending_button = Some(ButtonAction::VolUp);
+                }
+                if shell.req.volume_down.take() {
+                    pending_button = Some(ButtonAction::VolDown);
+                }
+                if shell.req.volume_mute.take() {
+                    pending_button = Some(ButtonAction::Mute);
+                }
+                // Volume HUD / SOUND-page slider drag: absolute set (0..1 →
+                // 0..15), clears mute, re-arms the 2s dismiss. Applied inline
+                // (not via pending_button, which is momentary ±).
+                if let Some(frac) = shell.req.volume_changed.take() {
+                    let new_level =
+                        (frac.clamp(0.0, 1.0) * peripherals::config::VOL_MAX as f32 + 0.5) as u8;
+                    let new_level = new_level.min(peripherals::config::VOL_MAX);
+                    if new_level != volume || muted {
+                        volume = new_level;
+                        muted = false;
+                        audio_out::set_master_volume(&mut audio_codec, volume, muted);
+                        shell.set_volume(volume, muted);
+                        if watch_cfg.volume != volume || watch_cfg.muted != muted {
+                            watch_cfg.volume = volume;
+                            watch_cfg.muted = muted;
+                            if cfg_save(flash, config_offset, &watch_cfg).await {
+                                println!("[CFG] volume={} (drag) saved", volume);
+                            }
+                        }
+                    }
+                    // Keep the HUD alive while dragging (re-arm the 2s window).
+                    shell.set_volume_overlay_open(true);
+                    volume_overlay_until = Some(now + Duration::from_secs(2));
+                }
+                // Buttons page: cycle a mapping slot's action + persist.
+                if let Some(slot) = shell.req.button_cycle.take() {
+                    let target = match slot {
+                        0 => &mut boot_short,
+                        1 => &mut boot_long,
+                        2 => &mut pwron_short,
+                        _ => &mut pwron_long,
+                    };
+                    *target = target.next();
+                    watch_cfg.boot_short = boot_short;
+                    watch_cfg.boot_long = boot_long;
+                    watch_cfg.pwron_short = pwron_short;
+                    watch_cfg.pwron_long = pwron_long;
+                    shell.set_button_actions(
+                        boot_short.label(),
+                        boot_long.label(),
+                        pwron_short.label(),
+                        pwron_long.label(),
+                    );
+                    if cfg_save(flash, config_offset, &watch_cfg).await {
+                        println!("[CFG] button map saved (slot {slot})");
+                    } else {
+                        println!("[CFG] button map save failed");
                     }
                 }
                 // UPDATE FIRMWARE (SYSTEM page): same semantics, one queue —
@@ -4157,6 +4483,14 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_mesh_enabled(mesh_enabled);
                         shell.set_wifi_intent(!watch_cfg.wifi_off);
                         shell.set_ota_status(ota_status_text);
+                        // #59 volume + button map for the SOUND/BUTTONS pages.
+                        shell.set_volume(volume, muted);
+                        shell.set_button_actions(
+                            boot_short.label(),
+                            boot_long.label(),
+                            pwron_short.label(),
+                            pwron_long.label(),
+                        );
                         shell.set_settings_open(true);
                         app_state = AppState::Settings;
                     } else {
@@ -4246,23 +4580,10 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                 }
 
-                // BOOT button toggles the launcher overlay; with a shell modal
-                // (switcher/shade) up it dismisses that first — "home".
-                if boot_button.is_low() {
-                    if shell.modal_open() {
-                        shell.set_switcher_open(false);
-                        shell.set_shade_open(false);
-                    } else {
-                        let opening = app_state == AppState::Watchface;
-                        shell.set_launcher_open(opening);
-                        app_state = if opening {
-                            AppState::Launcher
-                        } else {
-                            AppState::Watchface
-                        };
-                    }
-                    Timer::after(Duration::from_millis(200)).await;
-                }
+                // (#59) BOOT is now a mapped button: the short/long dispatch
+                // above owns launcher-toggle (the default BOOT hold = Launcher),
+                // so the old raw is_low() toggle here is gone. Modal-dismiss +
+                // launcher-toggle live in the ButtonAction::Launcher arm.
 
                 // Auto-clear the RAM-busy toast once its window elapses (guarded
                 // so we only push the empty string a single time).
@@ -4393,11 +4714,12 @@ async fn main(_spawner: Spawner) -> ! {
                     audio_out::play_pcm(beep_pcm);
                     audio_out::service_amp(&mut amp_en, &mut audio_codec);
                 }
-                // Exit (app-signalled or boot-button) returns to the launcher.
-                // Normalized: Snake used to drop to the watchface (P3 fix — every
-                // game now exits consistently to the launcher).
-                let boot = boot_button.is_low();
-                if exit || boot {
+                // Exit (app-signalled) returns to the launcher. (#59) BOOT no
+                // longer force-exits here — it's a mapped button now (default
+                // hold = Launcher, handled in the dispatcher above, which
+                // suspends the session identically). In-game BOOT tap defaults
+                // to Volume+.
+                if exit {
                     // Session manager (#31): every fb exit SUSPENDS — the state
                     // struct is a main-loop local and persists, so the next
                     // open resumes mid-game unless the switcher killed it.
@@ -4408,9 +4730,6 @@ async fn main(_spawner: Spawner) -> ! {
                     app_state = AppState::Launcher;
                     fb = None;
                     println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
-                    if boot {
-                        Timer::after(Duration::from_millis(200)).await;
-                    }
                 }
             }
 

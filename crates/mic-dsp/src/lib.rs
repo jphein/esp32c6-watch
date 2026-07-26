@@ -143,25 +143,32 @@ pub fn fill_tick_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
     fill_click_with_peak(buf, sample_rate, 6000.0)
 }
 
-/// Length of the watch-ping receiver chime in mono BYTES at 16 kHz (300 ms).
-pub const PING_CHIME_LEN: usize = 4800 * 2;
+/// Length of the watch-ping receiver chime in mono BYTES at 16 kHz (480 ms).
+pub const PING_CHIME_LEN: usize = 7680 * 2;
 
-/// Synthesize the watch-to-watch ping chime (#35): a pleasant rising two-tone
-/// "din-ding" — E5 (659 Hz) answered by B5 (988 Hz), a perfect fifth up, each
-/// note a struck sine (fast linear attack, exponential decay) with a slight
-/// legato overlap. ~300 ms total; a 10 ms master fade-out guarantees a
-/// pop-free tail (amp-release insurance, same discipline as the click/beep).
-/// Mono s16le at `sample_rate`; returns MONO bytes written. Distinct on the
-/// tiny speaker from both the 12 ms tap tick and the 50 ms snake beep.
+/// Synthesize the watch-to-watch ping chime (#35, melodic upgrade #58): a
+/// bright, pleasant rising MAJOR ARPEGGIO — C5 → E5 → G5 → C6 (a C-major
+/// triad climbing an octave, the classic "good news" motif). Each note is a
+/// struck sine with a soft linear attack and an exponential decay, entering
+/// legato as the previous one rings down; the top C6 is held a beat longer as
+/// the arrival. ~480 ms total; a 12 ms master fade-out guarantees a pop-free
+/// tail (amp-release insurance, same discipline as the click/beep). Mono
+/// s16le at `sample_rate`; returns MONO bytes written. Unmistakable next to
+/// the 12 ms tap tick and the 50 ms snake beep — this is the "someone's
+/// thinking of you" sound (#58: the ping must be a can't-miss event).
 pub fn fill_ping_chime_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
     /// One struck note: (start ms, length ms, freq Hz, peak, decay tau ms).
-    const NOTES: [(u32, u32, f32, f32, f32); 2] = [
-        (0, 150, 659.0, 11_000.0, 55.0),   // E5
-        (120, 180, 988.0, 12_000.0, 70.0), // B5 — enters as E5 decays
+    /// Notes are strictly ascending in pitch AND start time (the rising
+    /// arpeggio — host-tested by zero-crossing rate per note window).
+    const NOTES: [(u32, u32, f32, f32, f32); 4] = [
+        (0, 150, 523.25, 9_000.0, 70.0),    // C5
+        (110, 150, 659.25, 9_000.0, 70.0),  // E5
+        (220, 160, 783.99, 8_800.0, 75.0),  // G5
+        (330, 200, 1046.50, 9_500.0, 90.0), // C6 — held, the arrival
     ];
-    const TOTAL_MS: u32 = 300;
-    const ATTACK_MS: f32 = 6.0;
-    const FADE_MS: u32 = 10;
+    const TOTAL_MS: u32 = 480;
+    const ATTACK_MS: f32 = 8.0;
+    const FADE_MS: u32 = 12;
 
     let sr = sample_rate as f32;
     let total = ((sample_rate * TOTAL_MS / 1000) as usize).min(buf.len() / 2);

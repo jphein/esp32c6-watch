@@ -6,7 +6,7 @@ exclude = ["crates/i-slint-renderer-software"]
 
 [package]
 name = "esp32c6-watch"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
