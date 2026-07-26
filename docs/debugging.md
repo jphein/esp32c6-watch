@@ -90,6 +90,15 @@ tools/watchctl test eldritch-lantern lights     # end-to-end Lights latency
 Needs a `debug-console` build (see below). Run `hotpaths` before/after a perf
 change and diff the numbers.
 
+### Soak-test boot stability
+```bash
+tools/watch_soak.py /dev/ttyACM3 20 12   # port, trials, seconds watched per trial
+```
+Resets the watch N times and classifies every boot (WiFi panic / brick / download mode /
+alive), reporting a crash rate and time-to-crash. Born fighting #61, where the crash rate
+*was* the acceptance gate — a stability fix has to move it to 0 %. Needs `pyserial`.
+(A `watchctl soak` wrapper is a follow-up; today it's invoked directly.)
+
 ### Drive the UI by hand
 ```bash
 tools/watchctl console eldritch-lantern

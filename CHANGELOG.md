@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] — 2026-07-26
+
+- **CRITICAL — the "freezing" was a WiFi-blob crash** (#61). esp-radio 0.18's WiFi blob
+  null-dereferences inside `ppRxFragmentProc` during scan/associate: a deterministic panic
+  ~2.2 s into boot, **100 % of the time**, straight into a reboot loop. The fix is the one
+  RX-aggregation knob 0.18 exposes — `ControllerConfig::with_ampdu_rx_enable(false)` at
+  WiFi bring-up. Measured **100 % → 0 %** crash rate on both watches, with association,
+  DHCP and #57 roaming all intact. Cable-flashed, since crash-looping firmware can't
+  self-OTA.
+- **`tools/watch_soak.py`** — the boot-stability harness that came out of the #61 hunt:
+  reset a watch N times, classify every boot (WiFi panic / brick / download mode / alive),
+  and report a crash rate plus time-to-crash. That crash rate was the loop's measurement
+  gate — 0 % is the pass.
+
 ## [0.12.0] — 2026-07-26
 
 - **The unmissable ping** (#58) — three upgrades to the #35 receiver. The chime is now a
