@@ -1,0 +1,85 @@
+import { Theme } from "theme.slint";
+import { SliderControl } from "controls.slint";
+
+// Volume HUD overlay (#59). A centered ephemeral card that appears on ANY
+// volume change (button press or slider), auto-dismisses after ~2s (Rust owns
+// the clock; a drag resets it), and is touch-draggable via the shared
+// SliderControl. Deliberately NOT a full-screen swallow — it's a HUD, so taps
+// outside the card fall through to whatever is behind (phone-style). Speaker
+// glyph + sound bars reflect the level; muted reads "MUTED" and dims the bars.
+// Every colour is a Theme token, so all four schemes recolour it.
+export component VolumeOverlay {
+    in property <int> level: 11;      // 0..15 (drives the number + bars)
+    in property <bool> muted: false;
+    // Slider fraction (0..1) — Rust-driven two-way (the brightness idiom): a
+    // button press sets it so the knob jumps to the new level; a drag pushes it
+    // back up + fires `changed`. Plain in-out (NOT a derived binding) so the
+    // shared SliderControl can assign to it internally.
+    in-out property <float> frac: 0.73;
+    callback changed(float);          // slider → 0..1, Rust maps to 0..15
+
+    // Centred card.
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 196px;
+        width: 320px;
+        height: 132px;
+        border-radius: 20px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.line;
+
+        // --- speaker glyph (driver + three sound bars) ---
+        // Driver body.
+        Rectangle {
+            x: 24px; y: 30px; width: 14px; height: 20px;
+            border-radius: 3px;
+            background: root.muted ? Theme.dim : Theme.accent;
+        }
+        // Cone (a wider block butting the driver — a drawn speaker, no Path).
+        Rectangle {
+            x: 34px; y: 24px; width: 12px; height: 32px;
+            border-radius: 3px;
+            background: root.muted ? Theme.dim : Theme.accent;
+        }
+        // Three sound bars, lit by zone (>0 / >5 / >10). Dimmed when muted.
+        Rectangle {
+            x: 56px; y: 34px; width: 5px; height: 12px; border-radius: 2px;
+            background: !root.muted && root.level > 0 ? Theme.accent : Theme.track;
+        }
+        Rectangle {
+            x: 65px; y: 28px; width: 5px; height: 24px; border-radius: 2px;
+            background: !root.muted && root.level > 5 ? Theme.accent : Theme.track;
+        }
+        Rectangle {
+            x: 74px; y: 22px; width: 5px; height: 36px; border-radius: 2px;
+            background: !root.muted && root.level > 10 ? Theme.accent : Theme.track;
+        }
+
+        // Level readout (right side): "MUTED" or the step number.
+        Text {
+            x: parent.width - self.width - 26px;
+            y: 22px;
+            text: root.muted ? "MUTED" : "\{root.level}";
+            color: root.muted ? Theme.warn : Theme.ink;
+            font-size: root.muted ? 22px : 40px;
+            font-weight: 700;
+        }
+        Text {
+            x: parent.width - self.width - 26px;
+            y: root.muted ? 50px : 66px;
+            text: "VOLUME";
+            color: Theme.dim;
+            font-size: 12px;
+            letter-spacing: 3px;
+        }
+
+        // Draggable slider along the card's bottom. Dragging emits changed()
+        // and (in Rust) also clears the mute + resets the auto-dismiss clock.
+        SliderControl {
+            x: 24px; y: 82px; width: 272px;
+            value <=> root.frac;
+            changed(f) => { root.changed(f); }
+        }
+    }
+}

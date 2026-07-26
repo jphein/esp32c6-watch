@@ -111,7 +111,7 @@ export component EnergyPage {
             x: parent.width - self.width - 40px; y: 296px;
             // Slint `/` is float division; round to one decimal (kW).
             text: "\{round(root.solar-w / 100) / 10} kW";
-            color: Theme.warm; font-size: 34px; font-weight: 700;
+            color: Theme.warm; font-size: 30px; font-weight: 700;
         }
 
         // ---------------- grid ----------------
@@ -129,7 +129,7 @@ export component EnergyPage {
             x: parent.width - self.width - 40px; y: 366px;
             text: "\{round(abs(root.grid-w) / 100) / 10} kW";
             color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.soft);
-            font-size: 34px; font-weight: 700;
+            font-size: 30px; font-weight: 700;
         }
 
         // caption

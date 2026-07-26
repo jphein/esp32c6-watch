@@ -42,7 +42,7 @@
 //! after the last sample — which also scrubs the ring back to all-zero (ring
 //! invariant: all-silence whenever idle) — before releasing the amp.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -93,6 +93,37 @@ static PLAYBACK: Channel<CriticalSectionRawMutex, PcmChunk, PLAY_QUEUE_DEPTH> = 
 /// `mic_capture_task` discards capture windows while set (no AEC — the mic
 /// would only hear the speaker).
 pub static PLAYBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Persisted master-volume as the ES8311 0x32 register value (#59). Set from
+/// the config volume step at boot + on every volume change; read by
+/// [`service_amp`] so EVERY clip (chime/beeps/clicks/tick) plays at the stored
+/// level. Default = the config default step 11 via [`vol_to_reg`]. `0x00` when
+/// muted (codec silent while the amp still cycles normally).
+pub static MASTER_VOL_REG: AtomicU8 = AtomicU8::new(0xD0);
+
+/// Map a volume STEP (0..=15) + mute to the ES8311 master-volume register
+/// (0x32). Muted → 0. Otherwise a linear ramp `0x30..=0xFF` so even step 0
+/// stays audibly present (true silence is the separate mute), step 15 = max.
+pub fn vol_to_reg(level: u8, muted: bool) -> u8 {
+    if muted {
+        return 0x00;
+    }
+    let level = level.min(15) as u16;
+    (0x30 + level * (0xFF - 0x30) / 15) as u8
+}
+
+/// Apply a volume step + mute to the master-volume atomic AND, if a clip's amp
+/// is up right now, to the live codec so a change mid-playback is heard at
+/// once (the usual case: the change itself queues a feedback tick). Returns
+/// the register value stored.
+pub fn set_master_volume<I: I2c>(codec: &mut Es8311<I>, level: u8, muted: bool) -> u8 {
+    let reg = vol_to_reg(level, muted);
+    MASTER_VOL_REG.store(reg, Ordering::Relaxed);
+    if AMP_READY.load(Ordering::Relaxed) {
+        let _ = codec.set_volume(reg);
+    }
+    reg
+}
 
 /// "Amp + codec should be ON" — set by [`play_pcm`], cleared by the feeder
 /// after the tail. The main loop's [`service_amp`] acts on the edges.
@@ -156,6 +187,10 @@ pub fn service_amp<I: I2c>(amp: &mut Output<'static>, codec: &mut Es8311<I>) {
     let have = AMP_READY.load(Ordering::Relaxed);
     if want && !have {
         let _ = codec.unmute();
+        // unmute() writes its own ~80% default to 0x32; override with the
+        // persisted master volume (#59) so every clip honors the stored level
+        // (and stays silent when muted).
+        let _ = codec.set_volume(MASTER_VOL_REG.load(Ordering::Relaxed));
         amp.set_high();
         AMP_READY.store(true, Ordering::Relaxed);
     } else if !want && have {
