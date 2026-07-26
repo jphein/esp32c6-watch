@@ -17,9 +17,8 @@ pub mod mqtt_ha;
 pub mod mqtt_climate;
 pub mod names;
 // #53 net_task: the network owner (WiFi connect machine, scan, boot burst,
-// OTA). Dead-code-silenced until the stage-3 main.rs migration spawns it —
-// same convention as mqtt_climate/voice_stt during their integration windows.
-#[allow(dead_code)]
+// OTA). Spawned from main.rs; commands in via `net_task::send`, state out via
+// `net_task::snapshot` + NET_WAKE.
 pub mod net_task;
 pub mod ota_http;
 // Per-device SIGIL IDENTITY from the efuse MAC (#34): name, node id,

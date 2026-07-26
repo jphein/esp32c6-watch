@@ -88,8 +88,11 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// The embassy-net stack runner (smoltcp poll loop). Distinct from
+/// `net::net_task::net_task`, the #53 network OWNER that drives the WiFi
+/// controller/scan/burst/OTA — this one just pumps packets.
 #[embassy_executor::task]
-async fn net_task(
+async fn net_stack_task(
     mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>,
 ) -> ! {
     runner.run().await
@@ -468,45 +471,9 @@ async fn cfg_save(
     }
 }
 
-/// One-shot SNTP query; sets the RTC and returns the Unix time.
-async fn ntp_sync(
-    stack: embassy_net::Stack<'static>,
-    rtc: &mut crate::peripherals::rtc::Pcf85063aRtc<impl embedded_hal::i2c::I2c>,
-) -> Result<u32, ()> {
-    use embassy_net::udp::{PacketMetadata, UdpSocket};
-
-    let mut rx_meta = [PacketMetadata::EMPTY; 1];
-    let mut rx_buf = [0u8; 256];
-    let mut tx_meta = [PacketMetadata::EMPTY; 1];
-    let mut tx_buf = [0u8; 256];
-
-    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
-    socket.bind(12345).map_err(|_| ())?;
-
-    let mut ntp_request = [0u8; 48];
-    ntp_request[0] = 0x1B; // LI=0, VN=3, Mode=3 (client)
-
-    // time.google.com anycast (no DNS needed)
-    let ntp_addr = embassy_net::Ipv4Address::new(216, 239, 35, 0);
-    socket
-        .send_to(&ntp_request, (ntp_addr, 123))
-        .await
-        .map_err(|_| ())?;
-
-    let mut response = [0u8; 48];
-    match embassy_time::with_timeout(Duration::from_secs(5), socket.recv_from(&mut response)).await
-    {
-        Ok(Ok((len, _addr))) if len >= 48 => {
-            let ntp_secs =
-                u32::from_be_bytes([response[40], response[41], response[42], response[43]]);
-            let unix_secs = ntp_secs.wrapping_sub(2_208_988_800);
-            let (h, m, s) = set_rtc_from_unix(rtc, unix_secs);
-            println!("[NTP] {h:02}:{m:02}:{s:02} (US Pacific), unix={unix_secs}");
-            Ok(unix_secs)
-        }
-        _ => Err(()),
-    }
-}
+// The one-shot SNTP query moved into `net::net_task` (#53) — the socket half
+// runs there during the boot burst; the RTC/mesh-authority application stays
+// in the main loop (it owns both), fed by `net_task::take_ntp_unix()`.
 
 #[allow(clippy::too_many_arguments)]
 fn update_power_stats(
@@ -514,7 +481,7 @@ fn update_power_stats(
     screen_state: u8,
     imu_on: bool,
     wifi_connected: bool,
-    wifi_on_request: bool,
+    wifi_wanted: bool,
     brightness: u8,
     batt_mv: u16,
     batt_pct: u8,
@@ -526,7 +493,7 @@ fn update_power_stats(
         2 => DisplayState::Dim,
         _ => DisplayState::Bright,
     });
-    stats.wifi = Some(if !wifi_on_request && !wifi_connected {
+    stats.wifi = Some(if !wifi_wanted && !wifi_connected {
         WifiMode::Off
     } else if wifi_connected {
         WifiMode::PowerSave
@@ -956,7 +923,7 @@ async fn main(_spawner: Spawner) -> ! {
     // In esp-radio 0.18 `set_config` is what starts the controller, so we
     // build the station config here but only apply it on the first toggle.
     log_heap("pre-wifi"); // per-region heap right before the WiFi stack inits
-    let (mut wifi_controller, wifi_interfaces) =
+    let (wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("WiFi init failed");
     log_heap("post-wifi"); // confirms the RX-pool carve isn't starving a region
     let ble_connector =
@@ -970,7 +937,6 @@ async fn main(_spawner: Spawner) -> ! {
     );
     println!("[RADIO] stack ready (WiFi OFF, BLE advertising OFF)");
 
-    use esp_radio::wifi::sta::StationConfig;
     // Credentials: flash config wins; compile-time env is the fallback seed.
     let mut watch_cfg = config_offset
         .and_then(|off| peripherals::config::load(&mut flash, off))
@@ -1008,11 +974,8 @@ async fn main(_spawner: Spawner) -> ! {
     if !wifi_has_creds {
         println!("[WIFI] no credentials - set them in Settings");
     }
-    let mut station_config = esp_radio::wifi::Config::Station(
-        StationConfig::default()
-            .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
-            .with_password(watch_cfg.pass.as_str().into()),
-    );
+    // The station config itself is built inside net_task from the creds we
+    // hand it at spawn (and any later NetCmd::SetCreds).
 
     // ESP-NOW rides the same radio; usable whenever WiFi is started.
     let mut esp_now = wifi_interfaces.esp_now;
@@ -1027,7 +990,24 @@ async fn main(_spawner: Spawner) -> ! {
         RESOURCES.init(embassy_net::StackResources::new()),
         12345u64,
     );
-    _spawner.spawn(net_task(runner).expect("net_task token"));
+    _spawner.spawn(net_stack_task(runner).expect("net_stack_task token"));
+
+    // #53: the network OWNER. From here on `wifi_controller` belongs to
+    // net_task exclusively — the connect state machine, reconnect backoff,
+    // scanning, the boot burst, and OTA downloads all run there; main drives
+    // it over NetCmd and renders from its published snapshot. `boot_connect`
+    // mirrors the old auto-connect intent (creds present and not forced-off).
+    _spawner.spawn(
+        crate::net::net_task::net_task(
+            wifi_controller,
+            stack,
+            flash,
+            watch_cfg.ssid.clone(),
+            watch_cfg.pass.clone(),
+            wifi_has_creds && !watch_cfg.wifi_off,
+        )
+        .expect("net_task token"),
+    );
 
     // #58: HA climate session infrastructure. The session runs in its own task
     // (holds WiFi while the Climate screen is open); main.rs drives it via the
@@ -1189,20 +1169,21 @@ async fn main(_spawner: Spawner) -> ! {
     let mut next_step_poll = Instant::now();
     let mut was_touching = false;
 
-    // Radio state (user intent vs. actual radio state, per the S3 design).
-    // Auto-connect boot burst (NTP/MQTT/weather) when creds exist — unless the
-    // user persisted the WiFi intent as FORCED-OFF (config v5 wifi bit, #46):
-    // then the watch boots radio-quiet and WiFi only rises on demand.
-    let mut wifi_on_request = wifi_has_creds && !watch_cfg.wifi_off;
+    // Radio state (#53): user intent vs. radio truth lives in net_task now —
+    // the boot auto-connect intent rode the spawn's `boot_connect` arg. Main
+    // keeps only UI-side edge trackers; everything else reads the per-tick
+    // `net` snapshot.
     // #58: Climate session lifecycle. climate_active holds WiFi while the screen
     // is open (cleared on session return); climate_running gates the one-shot
     // open-signal so the session spawns once per screen visit.
     let mut climate_active = false;
     let mut energy_active = false;
-    // #58 finding-(b): true when the shared session RAISED the WiFi hold (i.e. WiFi
-    // was off when a HA screen opened). Cleared on the both-closed transition so we
-    // drop WiFi promptly → mesh re-pins ch6, WITHOUT clobbering a manual WiFi-on.
-    let mut session_holds_wifi = false;
+    // #58 finding-(b) is structural now (#53): the shared session raises its
+    // OWN Hold::Session bit in net_task, so dropping it can never clobber a
+    // manual WiFi-on (Hold::User). These track the sent-edge so a rejected
+    // send (queue full during an OTA) retries next tick.
+    let mut session_hold_up = false;
+    let mut voice_hold_up = false;
     let mut climate_running = false;
     // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
     let mut climate_pending: Option<ClimatePending> = None;
@@ -1240,15 +1221,9 @@ async fn main(_spawner: Spawner) -> ! {
     // 80 Hz–8 kHz). Fed ONE 256-pt FFT per Sound tick — the C6 has no FPU, so
     // the softfloat FFT (~few ms) runs once on the latest window, not per chunk.
     let mut spec_env = mic_dsp::SpectrumEnvelope::new();
-    // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
-    // from WiFi credentials/association (that's `wifi_connected`). Set by either
-    // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
-    // this, so mesh no longer requires WiFi creds to run.
-    let mut radio_started = false;
-    let mut wifi_scanned = false;
-    let mut wifi_connected = false;
-    let mut ntp_synced = false;
-    let mut next_ntp_attempt = Instant::now();
+    // "STA radio (PHY) started" / association / NTP-burst state: all owned by
+    // net_task (#53), read back per tick via `net_task::snapshot()`. The
+    // toggle latch + idle-backstop rate limit stay here (they're UI intent).
     let mut wifi_toggle_request = false;
     let mut last_wifi_idle_check = Instant::now();
     // #46 (BLE bit): restore the persisted BLE toggle (config v4) so BLE-on —
@@ -1266,7 +1241,6 @@ async fn main(_spawner: Spawner) -> ! {
     }
     let mut ble_toggle_request = false;
     let mut settings_connect_pending = false;
-    let mut wifi_connect_attempts: u8 = 0;
     // SMOLv1 mesh: explicit flash-config node id, or the MAC-derived sigil id
     // when config still holds the 42 "unset" sentinel (#34, arbitrated above).
     let mut mesh = SmolMesh::new(node_id);
@@ -1287,10 +1261,12 @@ async fn main(_spawner: Spawner) -> ! {
     // creds NOT required (set_config starts the PHY without connecting).
     let mut mesh_enabled = watch_cfg.mesh_on;
     if mesh_enabled {
-        if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
-            let _ = wifi_controller.set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
-            radio_started = true;
-        }
+        // PHY-only start is a net_task hold now (#53): creds NOT required
+        // (set_config starts the PHY without connecting). The mesh block
+        // gates on the published radio_started, so it comes up a beat later.
+        let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::Raise(
+            crate::net::net_task::Hold::Phy,
+        ));
         println!("[MESH] restored ON from config (persisted toggle)");
     }
     // Touch sound (#49): the persisted every-tap tick gate. Default ON.
@@ -1342,21 +1318,17 @@ async fn main(_spawner: Spawner) -> ! {
     const OTA_HEALTHY_UPTIME: Duration = Duration::from_secs(10);
     let boot_instant = Instant::now();
     let mut ota_marked_valid = false;
-    // UPDATE-FIRMWARE pending window: set by the Settings tap OR an accepted
-    // push announce (raising WiFi if it's down), consumed by the hoisted
-    // executor below (per-tick, any screen) once WiFi is ready, or dropped
-    // after a 25s WiFi timeout.
-    let mut ota_pending_since: Option<Instant> = None;
-    // Download attempts for the CURRENT pending update. A failed attempt re-arms
-    // the pending state (up to OTA_MAX_ATTEMPTS) instead of giving up — the loop
-    // unblocks between attempts so the WiFi machine can reconnect, then the
-    // executor re-fires. Reset whenever a fresh update is queued.
-    const OTA_MAX_ATTEMPTS: u8 = 3;
-    let mut ota_attempts: u8 = 0;
-    // Push-OTA image-URL override from the accepted announce (`None` = the
-    // baked OTA_URL). Set alongside ota_pending_since; cleared with it.
-    let mut ota_push_url: Option<heapless::String<{ crate::net::ota_http::ANNOUNCE_URL_CAP }>> =
-        None;
+    // UPDATE-FIRMWARE (#53): the job (WiFi window, attempts, re-arm, the
+    // download itself) lives in net_task now. Main renders its OtaPhase —
+    // status line, toasts, and the Staged reboot — off phase EDGES.
+    let mut prev_ota_phase = crate::net::net_task::OtaPhase::Idle;
+    // Streaming scan (#53): last consumed rows generation; a bump re-pulls
+    // the published rows into the picker.
+    let mut last_scan_seq: u32 = 0;
+    // REBOOT-with-OTA (power page): armed when the reboot tap queued an
+    // update first; the reset fires on the job's terminal phase (Staged
+    // reboots via the OTA arm) or this deadline, whichever comes first.
+    let mut reboot_deadline: Option<Instant> = None;
 
     loop {
         let touch_held = touch_int.is_low();
@@ -1567,8 +1539,11 @@ async fn main(_spawner: Spawner) -> ! {
             // instead of sitting in the shared mutex for up to a full idle tick
             // (1s on the HA screens — the biggest firmware-side term of the
             // press→render round trip). Coalescing Signal: bursts wake once.
+            // NET_WAKE (#53) is the same pattern for net_task state: WiFi
+            // phase flips, streaming scan rows, OTA progress, NTP/weather
+            // handoffs all render on the next pass instead of a stale tick.
             #[cfg(feature = "debug-console")]
-            let _ = embassy_futures::select::select(
+            let _ = embassy_futures::select::select3(
                 embassy_futures::select::select4(
                     Timer::after(tick),
                     touch_int.wait_for_falling_edge(),
@@ -1576,14 +1551,18 @@ async fn main(_spawner: Spawner) -> ! {
                     debug_console::wait_inject(),
                 ),
                 crate::net::mqtt_climate::STATE_WAKE.wait(),
+                crate::net::net_task::NET_WAKE.wait(),
             )
             .await;
             #[cfg(not(feature = "debug-console"))]
-            let _ = embassy_futures::select::select4(
-                Timer::after(tick),
-                touch_int.wait_for_falling_edge(),
-                boot_button.wait_for_falling_edge(),
-                crate::net::mqtt_climate::STATE_WAKE.wait(),
+            let _ = embassy_futures::select::select(
+                embassy_futures::select::select4(
+                    Timer::after(tick),
+                    touch_int.wait_for_falling_edge(),
+                    boot_button.wait_for_falling_edge(),
+                    crate::net::mqtt_climate::STATE_WAKE.wait(),
+                ),
+                crate::net::net_task::NET_WAKE.wait(),
             )
             .await;
 
@@ -1615,6 +1594,12 @@ async fn main(_spawner: Spawner) -> ! {
         let now = Instant::now();
         let dt_ms = (now - last_frame).as_millis() as u32;
         last_frame = now;
+
+        // === Net snapshot (#53) ===
+        // ONE read per tick: the only view of WiFi/scan/OTA state this loop
+        // uses. net_task owns the controller; changes wake us via NET_WAKE.
+        let net = crate::net::net_task::snapshot();
+        let wifi_connected = net.phase.connected();
 
         // === IMU gating ===
         let need_imu = screen_state >= 2
@@ -1927,19 +1912,29 @@ async fn main(_spawner: Spawner) -> ! {
             shell.set_power_menu_open(false);
         }
 
-        // === WiFi state machine (one action per iteration) ===
+        // === WiFi intent (the machine itself lives in net_task, #53) ===
         if wifi_toggle_request && (now - last_wifi_idle_check).as_millis() >= 1000 {
             wifi_toggle_request = false;
             last_wifi_idle_check = now;
             if wifi_has_creds {
-                wifi_on_request = !wifi_on_request;
-                println!("[WIFI] toggled -> {}", if wifi_on_request { "ON" } else { "OFF" });
+                // Flip against the CURRENT association intent: net.wanted is
+                // the union of holds, so a toggle while a burst/session holds
+                // WiFi reads as "turn OFF" (Drop(User) also clears the burst;
+                // session holds keep the link, exactly like the old per-tick
+                // wifi_want re-raise did).
+                let turn_on = !net.wanted;
+                let _ = crate::net::net_task::send(if turn_on {
+                    crate::net::net_task::NetCmd::Raise(crate::net::net_task::Hold::User)
+                } else {
+                    crate::net::net_task::NetCmd::Drop(crate::net::net_task::Hold::User)
+                });
+                println!("[WIFI] toggled -> {}", if turn_on { "ON" } else { "OFF" });
                 // Persist the WiFi INTENT (#46 wifi bit, config v5): only the
                 // USER toggle writes it — the automatic drops (NTP burst done,
                 // idle timeout, session close) leave the persisted "auto"
                 // intent alone, so this stays edge-triggered and flash-cheap.
-                if watch_cfg.wifi_off != !wifi_on_request {
-                    watch_cfg.wifi_off = !wifi_on_request;
+                if watch_cfg.wifi_off != !turn_on {
+                    watch_cfg.wifi_off = !turn_on;
                     if cfg_save(flash, config_offset, &watch_cfg).await {
                         println!("[CFG] wifi_off={} saved to flash", watch_cfg.wifi_off)
                     } else {
@@ -1963,140 +1958,66 @@ async fn main(_spawner: Spawner) -> ! {
         // once the window clears — rate-limits WiFi start/stop without losing
         // the tap (the old `else if { = false }` silently ate it).
 
-        if wifi_on_request && !wifi_connected {
-            if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
-                // Minimum PS until DHCP+NTP are done; Maximum breaks DHCP
-                // under BLE coex. Switched to Maximum after first NTP sync.
-                let _ = wifi_controller
-                    .set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
-                radio_started = true;
+        // Connect machine, link-loss detection, reconnect backoff, the boot
+        // burst (NTP/MQTT/weather) and scanning all run in net_task now
+        // (#53) — the arms below only consume its published results. Under a
+        // dead AP this loop never blocks: the worst case is a status dot.
+
+        // Settings-hub connect feedback, derived from the published phase:
+        // associated → connected; 3+ consecutive failures → failed (the old
+        // inline machine's give-up threshold, now just a UI verdict — the
+        // backoff keeps retrying behind it).
+        if settings_connect_pending {
+            if wifi_connected {
+                net_status = 2;
+                shell.set_net_status(net_status);
+                settings_connect_pending = false;
+            } else if net.connect_fails >= 3 {
+                net_status = 3;
+                shell.set_net_status(net_status);
+                settings_connect_pending = false;
             }
-            if radio_started {
-                // One-time diagnostic scan: is the AP visible, on what
-                // channel, with what auth?
-                if !wifi_scanned {
-                    wifi_scanned = true;
-                    match wifi_controller
-                        .scan_async(&esp_radio::wifi::scan::ScanConfig::default())
-                        .await
-                    {
-                        Ok(aps) => {
-                            println!("[SCAN] {} networks:", aps.len());
-                            for ap in aps.iter().take(12) {
-                                println!(
-                                    "[SCAN]   {:?} ch{} rssi{} auth={:?}",
-                                    ap.ssid, ap.channel, ap.signal_strength, ap.auth_method
-                                );
-                            }
-                        }
-                        Err(e) => println!("[SCAN] failed: {e:?}"),
-                    }
-                }
-                match embassy_time::with_timeout(
-                    Duration::from_secs(15),
-                    wifi_controller.connect_async(),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => {
-                        println!("[WIFI] connected");
-                        wifi_connect_attempts = 0;
-                        wifi_connected = true;
-                        if settings_connect_pending {
-                            // Hub NETWORK page feedback: connected.
-                            net_status = 2;
-                            shell.set_net_status(net_status);
-                            settings_connect_pending = false;
-                        }
-                        // NTP happens from the main loop once DHCP lands.
-                    }
-                    other => {
-                        // Transient hotspot errors (AuthenticationExpired etc.)
-                        // are common - retry a few times before giving up.
-                        wifi_connect_attempts += 1;
-                        match other {
-                            Ok(Err(e)) => println!(
-                                "[WIFI] connect error (attempt {wifi_connect_attempts}/3): {e:?}"
-                            ),
-                            _ => println!(
-                                "[WIFI] connect timeout (attempt {wifi_connect_attempts}/3)"
-                            ),
-                        }
-                        if wifi_connect_attempts >= 3 {
-                            wifi_connect_attempts = 0;
-                            wifi_on_request = false;
-                            if settings_connect_pending {
-                                // Hub NETWORK page feedback: failed.
-                                net_status = 3;
-                                shell.set_net_status(net_status);
-                                settings_connect_pending = false;
-                            }
-                            // Notification (#32): the give-up, on-wrist. Deduped
-                            // by source — a down AP retriggers this every WiFi
-                            // burst and must not stack a card per attempt.
-                            if !crate::notify::has_source(crate::notify::Source::Wifi) {
-                                crate::notify::push(
-                                    crate::notify::Source::Wifi,
-                                    "WiFi failed",
-                                    "3 attempts - check network",
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            last_wifi_idle_check = now;
         }
-        if !wifi_on_request && wifi_connected {
-            // esp-radio 0.18 has no controller stop(); full teardown means
-            // dropping the controller. Disconnect + PS=Maximum leaves the
-            // idle STA cheap enough for v1.
-            let _ = wifi_controller.disconnect_async().await;
-            println!("[WIFI] disconnected");
-            wifi_connected = false;
-            last_wifi_idle_check = now;
+        // Notification (#32): the connect give-up threshold, on-wrist —
+        // preserved from the inline machine it rode in on. Deduped by source:
+        // a down AP keeps failing behind the backoff (connect_fails stays
+        // >= 3) and must not stack a card per attempt; after a dismissal the
+        // still-failing link re-raises one card, matching the old
+        // once-per-burst retrigger.
+        if net.connect_fails >= 3 && !crate::notify::has_source(crate::notify::Source::Wifi) {
+            crate::notify::push(
+                crate::notify::Source::Wifi,
+                "WiFi failed",
+                "3 attempts - check network",
+            );
         }
-        // Safety net: radio left on + 5 min idle -> auto-off.
-        if wifi_on_request && idle_secs >= 300 && (now - last_wifi_idle_check).as_secs() >= 60 {
-            wifi_on_request = false;
+
+        // Safety net: association wanted + 5 min idle -> drop the user/burst
+        // intent (rate-limited; session/voice/OTA holds are their own owners').
+        if net.wanted && idle_secs >= 300 && (now - last_wifi_idle_check).as_secs() >= 60 {
+            let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::Drop(
+                crate::net::net_task::Hold::User,
+            ));
             last_wifi_idle_check = now;
         }
 
-        // Detect link loss (AP gone, coex hiccup). wifi_on_request stays
-        // true, so the connect branch above re-fires next iteration.
-        if wifi_connected && !wifi_controller.is_connected() {
-            println!("[WIFI] link lost - will reconnect");
-            wifi_connected = false;
-        }
-
-        // NTP once DHCP is up; retry with a 10s backoff until it works.
-        // After a successful sync the watch follows smol's TIME-SHARE design:
-        // WiFi burst done -> drop the association -> pin ESP-NOW to the fixed
-        // mesh channel. The watch becomes a mesh time authority.
-        if wifi_connected && !ntp_synced && now >= next_ntp_attempt {
-            if stack.config_v4().is_some() {
-                if let Ok(unix) = ntp_sync(stack, &mut rtc).await {
-                    ntp_synced = true;
-                    sync_src = "ntp";
-                    last_sync = now;
-                    mesh.set_time_authoritative(unix, now.as_secs());
-                    println!("[NTP] synced - RTC set, mesh authority claimed");
-                    // MQTT burst to Home Assistant while the WiFi window is
-                    // still open. Fire-and-forget: logs and moves on after at
-                    // most ~5s; never blocks the boot/NTP/mesh flow.
-                    crate::net::mqtt_ha::publish_burst(stack, batt_pct).await;
-                    // Weather fetch in the same WiFi window (fire-and-forget,
-                    // bounded at 8s; logs [WX] failed and moves on).
-                    if let Some(wx) = crate::net::weather::fetch(stack).await {
-                        last_weather = Some((wx.temp_f, wx.code));
-                        shell.set_weather(Some(wx.temp_f), wx.code);
-                    }
-                    wifi_on_request = false; // WiFi burst complete
-                } else {
-                    println!("[NTP] failed, retrying in 10s");
-                }
+        // One-shot NTP handoff from the burst: main owns the RTC + mesh, so
+        // the time is APPLIED here (the socket query ran in net_task).
+        if let Some(unix) = crate::net::net_task::take_ntp_unix() {
+            let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
+            println!("[NTP] {h:02}:{m:02}:{s:02} (US Pacific), unix={unix}");
+            sync_src = "ntp";
+            last_sync = now;
+            mesh.set_time_authoritative(unix, now.as_secs());
+            if let Ok(dt) = rtc.get_time() {
+                last_dt = Some(dt);
             }
-            next_ntp_attempt = now + Duration::from_secs(10);
+            println!("[NTP] synced - RTC set, mesh authority claimed");
+        }
+        // One-shot weather handoff (fetched in the same burst window).
+        if let Some((temp_f, code)) = crate::net::net_task::take_weather() {
+            last_weather = Some((temp_f, code));
+            shell.set_weather(Some(temp_f), code);
         }
 
         // OTA rollback-safety: once the app has stayed alive OTA_HEALTHY_UPTIME
@@ -2111,140 +2032,114 @@ async fn main(_spawner: Spawner) -> ! {
             ota_marked_valid = true;
         }
 
-        // === OTA pending executor (any screen) ===
-        // ONE executor for both triggers — the Settings tap and an accepted push
-        // announce both set `ota_pending_since` (+ optional `ota_push_url`); this
-        // runs the download once WiFi is ready. Hoisted out of the Settings arm
-        // so a pushed update is zero-touch from ANY screen (games included).
-        // Runs BEFORE the announce-accept block below, so a fresh accept always
-        // gets one full dispatch pass first — the toast/status paints before the
-        // download blocks this loop (deliberate: an update is a user/deploy
-        // action, blocking is fine; it is off the hot path otherwise).
-        if let Some(t0) = ota_pending_since {
-            if wifi_connected && stack.config_v4().is_some() {
-                ota_pending_since = None;
-                ota_status_text = "Updating\u{2026}";
-                shell.set_ota_status(ota_status_text);
-                // Paint before the blocking download: the Settings hub is
-                // scene-resident now, so one shell render shows the status
-                // line. Other screens already show the "Updating firmware…"
-                // toast (set when the trigger queued, one tick ago).
-                if app_state == AppState::Settings {
-                    shell.render(&mut display);
+        // === OTA render arm (the job runs in net_task, #53) ===
+        // The download, its 45 s WiFi window, and the 3-attempt re-arm loop
+        // all live in net_task; this arm turns OtaPhase EDGES into the status
+        // line, toasts, and the Staged reboot. Works from ANY screen (games
+        // included) — exactly the old hoisted executor's coverage, minus the
+        // minutes-long loop stall.
+        if net.ota != prev_ota_phase {
+            use crate::net::net_task::OtaPhase;
+            match net.ota {
+                OtaPhase::Idle => {}
+                OtaPhase::WaitingWifi => {
+                    ota_status_text = "Connecting WiFi\u{2026}";
+                    shell.set_ota_status(ota_status_text);
                 }
-                let url = ota_push_url.take();
-                match crate::net::ota_http::ota_update(stack, flash, url.as_deref(), |_, _| {})
-                    .await
-                {
-                    Ok(()) => {
-                        println!("[OTA] staged - rebooting to apply");
-                        ota_status_text = "Staged \u{2013} rebooting";
-                        shell.set_ota_status(ota_status_text);
-                        if app_state == AppState::Settings {
-                            shell.render(&mut display);
-                            Timer::after(Duration::from_millis(1200)).await;
-                        }
+                OtaPhase::Downloading { pct } => {
+                    // Live percent (the old blocking executor could never
+                    // paint one). The static fallback keeps scene-recreate
+                    // re-pushes sane; the formatted line rides on top.
+                    ota_status_text = "Updating\u{2026}";
+                    let mut line: heapless::String<24> = heapless::String::new();
+                    use core::fmt::Write as _;
+                    let _ = write!(line, "Updating\u{2026} {pct}%");
+                    shell.set_ota_status(line.as_str());
+                }
+                OtaPhase::Retrying { attempt } => {
+                    println!("[OTA] retrying (attempt {attempt} failed; WiFi reconnects under the job)");
+                    ota_status_text = "Retrying update\u{2026}";
+                    shell.set_ota_status(ota_status_text);
+                    shell.set_toast("Update retrying\u{2026}");
+                    toast_until = Instant::now() + Duration::from_secs(20);
+                    toast_active = true;
+                }
+                OtaPhase::Staged => {
+                    println!("[OTA] staged - rebooting to apply");
+                    ota_status_text = "Staged \u{2013} rebooting";
+                    shell.set_ota_status(ota_status_text);
+                    if app_state == AppState::Settings && screen_state >= 2 {
+                        shell.render(&mut display);
+                        Timer::after(Duration::from_millis(1200)).await;
+                    }
+                    esp_hal::system::software_reset();
+                }
+                OtaPhase::Failed { msg } => {
+                    ota_status_text = msg;
+                    shell.set_ota_status(ota_status_text);
+                    // Notification (#32): the final give-up persists in the
+                    // shade after the toast fades. ("Staged" is deliberately
+                    // NOT posted — the ring is RAM and the staged path reboots
+                    // 1.2s later.) Both old failure paths — download give-up
+                    // AND the 45s WiFi window — funnel through this one edge.
+                    crate::notify::push(crate::notify::Source::Ota, "Update failed", msg);
+                    let mut toast: heapless::String<64> = heapless::String::new();
+                    let _ = toast.push_str("Update failed: ");
+                    let _ = toast.push_str(msg);
+                    shell.set_toast(toast.as_str());
+                    toast_until = Instant::now() + Duration::from_secs(5);
+                    toast_active = true;
+                    // REBOOT-with-OTA: the update this reboot queued is dead;
+                    // honor the reboot now (edge-triggered, so a stale Failed
+                    // from an earlier update can never false-fire).
+                    if reboot_deadline.is_some() {
+                        println!("[OTA] reboot-queued update failed - rebooting anyway");
                         esp_hal::system::software_reset();
                     }
-                    Err(e) => {
-                        ota_attempts += 1;
-                        println!("[OTA] attempt {ota_attempts}/{OTA_MAX_ATTEMPTS} failed: {e}");
-                        if ota_attempts < OTA_MAX_ATTEMPTS {
-                            // RE-ARM instead of giving up: restore the URL the
-                            // attempt consumed, keep WiFi requested, and start a
-                            // fresh pending window. The loop unblocks now, so the
-                            // WiFi machine gets to reconnect (the usual failure is
-                            // a mid-transfer link drop it couldn't service while
-                            // the download blocked this loop); the executor
-                            // re-fires once the link is back.
-                            ota_push_url = url;
-                            wifi_on_request = true;
-                            ota_pending_since = Some(Instant::now());
-                            ota_status_text = "Retrying update\u{2026}";
-                            shell.set_ota_status(ota_status_text);
-                            shell.set_toast("Update retrying\u{2026}");
-                            toast_until = Instant::now() + Duration::from_secs(20);
-                            toast_active = true;
-                        } else {
-                            ota_status_text = e;
-                            shell.set_ota_status(ota_status_text);
-                            // Notification (#32): the final give-up persists in
-                            // the shade after the toast fades. ("Staged" is
-                            // deliberately NOT posted — the ring is RAM and the
-                            // staged path reboots 1.2s later.)
-                            crate::notify::push(crate::notify::Source::Ota, "Update failed", e);
-                            let mut msg: heapless::String<64> = heapless::String::new();
-                            let _ = msg.push_str("Update failed: ");
-                            let _ = msg.push_str(e);
-                            shell.set_toast(msg.as_str());
-                            // Fresh timestamp, NOT the tick-start `now`: the download
-                            // may have blocked for minutes, and a stale-based window
-                            // would already be expired — the toast would flash for a
-                            // single tick and be auto-cleared.
-                            toast_until = Instant::now() + Duration::from_secs(5);
-                            toast_active = true;
-                        }
-                    }
                 }
-            } else if (now - t0) > Duration::from_secs(45) {
-                ota_pending_since = None;
-                ota_push_url = None;
-                println!("[OTA] WiFi didn't come up within 45s - giving up");
-                ota_status_text = "WiFi failed \u{2014} tap to retry";
-                shell.set_ota_status(ota_status_text);
-                // Notification (#32): same persistence rationale as the
-                // download-failure post above.
-                crate::notify::push(
-                    crate::notify::Source::Ota,
-                    "Update failed",
-                    "WiFi didn't come up",
-                );
-                shell.set_toast("Update failed: WiFi");
-                toast_until = now + Duration::from_secs(5);
-                toast_active = true;
-            } else {
-                // Keep WiFi requested for the whole pending window — the NTP
-                // burst-complete drop (wifi_on_request = false after sync) must
-                // not tear the association down under a queued update.
-                wifi_on_request = true;
             }
+            prev_ota_phase = net.ota;
+        }
+        // REBOOT-with-OTA deadline backstop (edge above handles the fast path).
+        if reboot_deadline.is_some_and(|t| now >= t) {
+            println!("[OTA] reboot-queued update still pending at deadline - rebooting");
+            esp_hal::system::software_reset();
         }
 
         // === Push-OTA announce accept ===
         // `ota_http::handle_announce` (fed by both MQTT paths) already applied
         // the BUILD_EPOCH monotonicity gate; anything taken here is a go. Same
-        // flow as the Settings tap: raise WiFi, queue, executor above runs it
-        // next tick (after one paint pass shows the toast).
+        // flow as the Settings tap: queue on net_task (it raises the WiFi hold
+        // and runs the window), toast here.
         if let Some(ann) = crate::net::ota_http::take_announce() {
-            if ota_pending_since.is_some() {
+            if net.ota.active() {
                 println!("[OTA] push: build {} ignored (update already pending)", ann.build);
             } else {
                 println!("[OTA] push: build {} queued (zero-touch)", ann.build);
-                ota_push_url = ann.url;
-                ota_attempts = 0;
                 ota_status_text = "Updating\u{2026}";
                 shell.set_ota_status(ota_status_text);
                 shell.set_toast("Updating firmware\u{2026}");
                 toast_until = now + Duration::from_secs(30);
                 toast_active = true;
-                wifi_on_request = true;
-                ota_pending_since = Some(now);
+                let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::Ota {
+                    url: ann.url,
+                });
             }
         }
 
         // TIME-SHARE steady state: whenever WiFi is down but the radio is up,
-        // pin ESP-NOW to the fleet's fixed channel. Re-pin after any WiFi use.
-        // SUPPRESSED while an OTA is pending: the pin steals the radio from a
-        // RECONNECTING WiFi (observed on watch #2: mesh pin → link lost → the
-        // MQTT/OTA window never stabilizes). The update owns the radio until it
-        // completes or gives up; the mesh re-pins on the next tick after.
-        // The pin yields to ANY active WiFi intent (`wifi_on_request`), not just a
-        // pending OTA: pinning ch6 between association attempts drops auth frames
-        // on other channels — observed on mythic-throne (mesh persisted ON) as
-        // AuthenticationExpired at -61dBm and 1-network scans, masquerading as
-        // dead RX hardware for two days. WiFi-wanted beats mesh; mesh gets the
-        // radio back in the steady state after the burst completes.
-        if radio_started && !wifi_connected && !mesh_channel_pinned && ota_pending_since.is_none() && !wifi_on_request {
+        // pin ESP-NOW to the fleet's fixed channel. The pin DECISION is
+        // net_task's now (#53, `mesh_pin_ok`), preserving the v0.9.1
+        // arbitration verbatim: the pin yields to ANY WiFi intent — a pending
+        // OTA (watch #2: pin → link lost → the MQTT/OTA window never
+        // stabilizes) and association attempts (mythic-throne: pinning ch6
+        // between attempts dropped auth frames — AuthenticationExpired at
+        // -61dBm masquerading as dead RX for two days). Main still executes
+        // the set_channel because the mesh owns the esp_now handle.
+        // Level-reconciled BOTH ways — a bonus over v0.9.1: after a scan
+        // sweep the verdict returns true and the mesh re-pins ch6 instead of
+        // idling on whatever channel the sweep stopped at.
+        if net.mesh_pin_ok && !mesh_channel_pinned {
             match esp_now.set_channel(crate::net::smol_mesh::MESH_CHANNEL) {
                 Ok(()) => {
                     mesh_channel_pinned = true;
@@ -2256,12 +2151,12 @@ async fn main(_spawner: Spawner) -> ! {
                 Err(e) => println!("[MESH] set_channel failed: {e:?}"),
             }
         }
-        if wifi_connected && mesh_channel_pinned {
-            mesh_channel_pinned = false; // rides the AP channel while associated
+        if !net.mesh_pin_ok && mesh_channel_pinned {
+            mesh_channel_pinned = false; // rides the AP/scan channel meanwhile
         }
 
         // === SMOLv1 mesh (ESP-NOW) ===
-        if radio_started {
+        if net.radio_started {
             if !esp_now_peer_added {
                 let peer = esp_radio::esp_now::PeerInfo {
                     interface: esp_radio::esp_now::EspNowWifiInterface::Station,
@@ -2681,7 +2576,7 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if let Some(act) = shell.req.wled_action.take() {
                     if let Some(btn) = wled_button(act) {
-                        if radio_started && esp_now_peer_added {
+                        if net.radio_started && esp_now_peer_added {
                             wled_seq = wled_seq.wrapping_add(1);
                             let frame = wled_wizmote::encode_wizmote(btn, wled_seq, batt_pct);
                             if let Ok(w) =
@@ -2786,46 +2681,48 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                 }
                 // WiFi hold + session start/stop, keyed on "either screen open".
-                // When both close, releasing the hold returns the watch to mesh —
-                // the unconditional restore (oracle-t10 inv b): however the session
-                // ended (Ok close or Err), closing the screen(s) frees WiFi, so it
-                // can never be stranded held.
+                // The holds are net_task bits now (#53): Session for the HA
+                // screens, Voice for STT — each raised on the open edge and
+                // dropped on the close edge, so closing the screen(s) frees
+                // WiFi and returns the mesh PROMPTLY (oracle-t10 inv b /
+                // finding-b), while a manual WiFi-on (Hold::User) is preserved
+                // by construction. The edge trackers only flip when the send
+                // is accepted, so a full queue (mid-OTA) retries next tick —
+                // a hold can never strand silently.
                 let climate_session_want = climate_active || energy_active || lights_active;
-                // Voice also needs WiFi (STT upload) but NOT the MQTT session, so it
-                // widens the WiFi HOLD without touching the session start/stop. Keyed
-                // on app_state==Voice: leaving the screen drops it out of wifi_want →
-                // the release arm below frees WiFi + re-pins mesh (never stranded).
-                let wifi_want = climate_session_want || app_state == AppState::Voice;
-                if wifi_want {
-                    wifi_on_request = true;
-                    // DHCP gate (config_v4): association alone is NOT a usable
-                    // stack — signalling `open` before the lease lands made the
-                    // first TCP connect fail instantly (no route), which put a
-                    // cold screen-open into the reconnect backoff. That single
-                    // race was ~10s of "Finding your room…" on an otherwise
-                    // healthy LAN. Voice (below) and OTA already gate this way.
-                    if climate_session_want
-                        && wifi_connected
-                        && stack.config_v4().is_some()
-                        && !climate_running
-                    {
+                if climate_session_want != session_hold_up {
+                    let cmd = if climate_session_want {
+                        crate::net::net_task::NetCmd::Raise(crate::net::net_task::Hold::Session)
+                    } else {
+                        crate::net::net_task::NetCmd::Drop(crate::net::net_task::Hold::Session)
+                    };
+                    if crate::net::net_task::send(cmd) {
+                        session_hold_up = climate_session_want;
+                    }
+                }
+                let voice_want = app_state == AppState::Voice;
+                if voice_want != voice_hold_up {
+                    let cmd = if voice_want {
+                        crate::net::net_task::NetCmd::Raise(crate::net::net_task::Hold::Voice)
+                    } else {
+                        crate::net::net_task::NetCmd::Drop(crate::net::net_task::Hold::Voice)
+                    };
+                    if crate::net::net_task::send(cmd) {
+                        voice_hold_up = voice_want;
+                    }
+                }
+                if climate_session_want {
+                    // DHCP gate (phase.ready() == associated + lease): opening
+                    // the session before the lease lands made the first TCP
+                    // connect fail instantly (no route) — ~10s of "Finding
+                    // your room…" on a healthy LAN. Unchanged v0.8.8 gate,
+                    // phase-derived now.
+                    if net.phase.ready() && !climate_running {
                         climate_open.signal(());
                         climate_running = true;
                     }
-                } else {
-                    // Both screens closed → RELEASE the WiFi hold we raised so the
-                    // idle path drops WiFi + re-pins mesh ch6 PROMPTLY (finding-b:
-                    // don't rely on the 300s idle backstop — it resets on every
-                    // interaction, so an active user would keep the mesh off-fleet
-                    // indefinitely). Gated on session_holds_wifi → a manual WiFi-on
-                    // (toggle then Climate) is preserved. Then end the session.
-                    if session_holds_wifi {
-                        wifi_on_request = false;
-                        session_holds_wifi = false;
-                    }
-                    if climate_running {
-                        climate_close.signal(());
-                    }
+                } else if climate_running {
+                    climate_close.signal(());
                 }
                 // Climate screen: route setpoint/mode commands + push the roster.
                 if app_state == AppState::Climate {
@@ -3079,7 +2976,7 @@ async fn main(_spawner: Spawner) -> ! {
                 // is the "connect failed" bug — show "Connecting…" and DON'T attempt;
                 // WiFi bring-up keeps running in the loop, so a beat later the next press
                 // streams. (dream/mic-fix predates morpheus's gate; add it here.)
-                let voice_net_ready = wifi_connected && stack.config_v4().is_some();
+                let voice_net_ready = net.phase.ready();
                 if app_state == AppState::Voice && voice_pressed && !voice_net_ready {
                     shell.set_voice_state(5); // connecting (waiting for WiFi/DHCP)
                     shell.request_redraw();
@@ -3248,7 +3145,7 @@ async fn main(_spawner: Spawner) -> ! {
                                 screen_state,
                                 imu_powered,
                                 wifi_connected,
-                                wifi_on_request,
+                                net.wanted,
                                 brightness,
                                 batt_mv,
                                 batt_pct,
@@ -3354,25 +3251,25 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                     }
                 }
-                // UPDATE FIRMWARE (SYSTEM page): the old fb Settings OTA
-                // request, same semantics — SELF-SERVE WiFi (the tap raises it;
-                // the hoisted pending executor runs the download once ready).
+                // UPDATE FIRMWARE (SYSTEM page): same semantics, one queue —
+                // net_task raises the WiFi hold, runs the 45 s window and the
+                // download; the OTA render arm above paints its progress.
                 if shell.req.settings_ota.take() {
                     if !crate::net::ota_http::URL_SET {
                         println!("[OTA] tap: no OTA_URL baked into this build");
                         ota_status_text = "No OTA URL in build";
-                    } else if wifi_connected && stack.config_v4().is_some() {
-                        println!("[OTA] tap: WiFi ready - updating now");
-                        ota_push_url = None; // tap = the baked OTA_URL
-                        ota_pending_since = Some(now);
-                        ota_status_text = "Updating\u{2026}";
+                    } else if net.ota.active() {
+                        println!("[OTA] tap: update already pending");
                     } else {
-                        println!("[OTA] tap: raising WiFi for update");
-                        ota_status_text = "Connecting WiFi\u{2026}";
-                        ota_push_url = None; // tap = the baked OTA_URL
-                        ota_attempts = 0;
-                        wifi_on_request = true;
-                        ota_pending_since = Some(now);
+                        println!("[OTA] tap: queueing update (net_task owns the window)");
+                        ota_status_text = if net.phase.ready() {
+                            "Updating\u{2026}"
+                        } else {
+                            "Connecting WiFi\u{2026}"
+                        };
+                        let _ = crate::net::net_task::send(
+                            crate::net::net_task::NetCmd::Ota { url: None }, // tap = baked OTA_URL
+                        );
                     }
                     shell.set_ota_status(ota_status_text);
                 }
@@ -3382,76 +3279,33 @@ async fn main(_spawner: Spawner) -> ! {
                 // network pick, or ✓ on the password) — one shared arm below.
                 let mut net_connect = false;
                 // Scan trigger (choose-network + rescan): raise the picker and
-                // paint the "Scanning…" frame FIRST — the scan blocks this loop
-                // for a couple of seconds (user-initiated, like OTA).
+                // hand the sweep to net_task (#53). The loop keeps rendering —
+                // the scanning animation actually animates now — and rows
+                // STREAM in below as each channel completes.
                 if shell.req.wifi_scan.take() {
                     net_view = 1;
                     shell.set_net_view(net_view);
                     shell.set_net_scanning(true);
-                    shell.render(&mut display);
-                    // The scan needs the STA radio; start it exactly like the
-                    // mesh toggle does (set_config starts the PHY, no connect).
-                    if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
-                        let _ = wifi_controller
-                            .set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
-                        radio_started = true;
-                    }
                     scan_list.clear();
-                    if radio_started {
-                        match wifi_controller
-                            .scan_async(&esp_radio::wifi::scan::ScanConfig::default())
-                            .await
-                        {
-                            Ok(aps) => {
-                                // Dedup by SSID keeping the best RSSI (multi-AP
-                                // networks collapse to one row), then sort by
-                                // strength and cap to the picker's 6 rows.
-                                let mut rows: heapless::Vec<
-                                    (heapless::String<32>, i8, bool),
-                                    12,
-                                > = heapless::Vec::new();
-                                for ap in aps.iter() {
-                                    let ssid = ap.ssid.as_str();
-                                    if ssid.is_empty() {
-                                        continue; // hidden — the manual row covers these
-                                    }
-                                    let secured = ap.auth_method
-                                        != Some(esp_radio::wifi::AuthenticationMethod::None);
-                                    if let Some(row) =
-                                        rows.iter_mut().find(|r| r.0.as_str() == ssid)
-                                    {
-                                        if ap.signal_strength > row.1 {
-                                            row.1 = ap.signal_strength;
-                                            row.2 = secured;
-                                        }
-                                    } else if !rows.is_full() {
-                                        let mut s: heapless::String<32> =
-                                            heapless::String::new();
-                                        let _ = s.push_str(ssid);
-                                        let _ = rows.push((s, ap.signal_strength, secured));
-                                    }
-                                }
-                                rows.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-                                let top = &rows[..rows.len().min(6)];
-                                for r in top {
-                                    let _ = scan_list.push((r.0.clone(), r.2));
-                                }
-                                shell.set_wifi_nets(top);
-                                println!(
-                                    "[NET] scan: {} networks ({} shown)",
-                                    rows.len(),
-                                    top.len()
-                                );
-                            }
-                            Err(e) => {
-                                println!("[NET] scan failed: {e:?}");
-                                shell.set_wifi_nets(&[]);
-                            }
+                    shell.set_wifi_nets(&[]);
+                    let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::Scan);
+                }
+                // Streaming scan results: net_task bumps scan_seq after every
+                // channel; re-pull the published rows into the picker (top 6,
+                // already dedup'd + strength-sorted) and mirror the pick list.
+                if net.scan_seq != last_scan_seq {
+                    last_scan_seq = net.scan_seq;
+                    scan_list.clear();
+                    let mut top: heapless::Vec<(heapless::String<32>, i8, bool), 6> =
+                        heapless::Vec::new();
+                    crate::net::net_task::with_scan_rows(|rows| {
+                        for r in rows.iter().take(6) {
+                            let _ = scan_list.push((r.0.clone(), r.2));
+                            let _ = top.push(r.clone());
                         }
-                    } else {
-                        shell.set_wifi_nets(&[]);
-                    }
-                    shell.set_net_scanning(false);
+                    });
+                    shell.set_wifi_nets(&top);
+                    shell.set_net_scanning(net.scanning);
                 }
                 // Picker row tapped: secured → password keyboard; OPEN network
                 // → connect right away with an empty password.
@@ -3567,8 +3421,11 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     shell.set_net_view(net_view);
                 }
-                // Shared connect arm: persist + (re)connect — the old fb
-                // Settings CONNECT machinery, verbatim semantics.
+                // Shared connect arm: persist here (main owns flash config),
+                // then hand the creds to net_task — SetCreds reconnects with
+                // them, resets the backoff (user action), and re-arms the
+                // NTP/MQTT/weather burst; the feedback arm above maps the
+                // published phase back onto net_status.
                 if net_connect {
                     watch_cfg.ssid.clear();
                     let _ = watch_cfg.ssid.push_str(pending_ssid.as_str());
@@ -3582,16 +3439,11 @@ async fn main(_spawner: Spawner) -> ! {
                     } else {
                         println!("[CFG] save failed")
                     }
-                    station_config = esp_radio::wifi::Config::Station(
-                        StationConfig::default()
-                            .with_ssid(esp_radio::wifi::Ssid::from(watch_cfg.ssid.as_str()))
-                            .with_password(watch_cfg.pass.as_str().into()),
-                    );
                     wifi_has_creds = !watch_cfg.ssid.is_empty();
-                    radio_started = false;
-                    wifi_connected = false;
-                    ntp_synced = false;
-                    wifi_on_request = true;
+                    let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::SetCreds {
+                        ssid: watch_cfg.ssid.clone(),
+                        pass: watch_cfg.pass.clone(),
+                    });
                     settings_connect_pending = true;
                     net_status = 1;
                     net_edit = NetEdit::None;
@@ -3614,15 +3466,12 @@ async fn main(_spawner: Spawner) -> ! {
                     if mesh_enabled {
                         // Bring up the STA radio for ESP-NOW if it isn't already
                         // (creds NOT required — set_config starts the PHY without
-                        // connecting). The mesh block gates on radio_started, so
-                        // this is what actually lets the mesh come up. The channel
-                        // pin (set_channel(MESH_CHANNEL)) rides the existing path.
-                        if !radio_started && wifi_controller.set_config(&station_config).is_ok() {
-                            let _ = wifi_controller
-                                .set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
-                            radio_started = true;
-                            println!("[MESH] STA radio started for ESP-NOW");
-                        }
+                        // connecting). PHY-only hold on net_task (#53); the mesh
+                        // block gates on the published radio_started, and the
+                        // channel pin rides the mesh_pin_ok verdict.
+                        let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::Raise(
+                            crate::net::net_task::Hold::Phy,
+                        ));
                     } else {
                         // Reflect "off" in the MESH chrome dot immediately; peers
                         // repopulate from HELLOs once re-enabled. Radio stays up
@@ -3661,16 +3510,26 @@ async fn main(_spawner: Spawner) -> ! {
                 }
                 if shell.req.reboot.take() {
                     println!("REBOOT requested");
-                    // If WiFi is up and an OTA_URL was baked in at build time,
-                    // try to stage an OTA update first; reboot either way.
-                    if wifi_connected && crate::net::ota_http::URL_SET {
-                        if let Err(e) =
-                            crate::net::ota_http::ota_update(stack, flash, None, |_, _| {}).await
-                        {
-                            println!("[OTA] failed: {e}");
-                        }
+                    // Old semantics: with WiFi up + a baked OTA_URL, stage an
+                    // update first, reboot either way. The download runs in
+                    // net_task now, so the UI stays live meanwhile: queue the
+                    // job and arm a bounded reboot — Staged reboots via the
+                    // OTA render arm, a Failed edge or this 6-min deadline
+                    // (the download's own hard cap) reboots without it.
+                    if wifi_connected
+                        && crate::net::ota_http::URL_SET
+                        && !net.ota.active()
+                        && crate::net::net_task::send(crate::net::net_task::NetCmd::Ota {
+                            url: None,
+                        })
+                    {
+                        reboot_deadline = Some(now + Duration::from_secs(360));
+                        shell.set_toast("Updating, then rebooting\u{2026}");
+                        toast_until = now + Duration::from_secs(30);
+                        toast_active = true;
+                    } else {
+                        esp_hal::system::software_reset();
                     }
-                    esp_hal::system::software_reset();
                 }
                 if shell.req.power_shutdown.take() {
                     // Power menu SHUTDOWN (#48): AXP2101 poweroff (0x10 bit0,
@@ -3782,22 +3641,14 @@ async fn main(_spawner: Spawner) -> ! {
                         // comes up for either screen; the live feed is in the shared
                         // session block below.
                         shell.set_energy_open(true);
-                        energy_active = true;
-                        if !wifi_on_request {
-                            session_holds_wifi = true; // we're raising the hold
-                        }
-                        wifi_on_request = true;
+                        energy_active = true; // Hold::Session rises on the edge above
                         app_state = AppState::Energy;
                     } else if target == AppState::Climate {
                         // #58: raise the Climate overlay + hold WiFi up. The MQTT
                         // session task starts once WiFi associates (Climate tick
                         // below); released on session return (both Ok + Err).
                         shell.set_climate_open(true);
-                        climate_active = true;
-                        if !wifi_on_request {
-                            session_holds_wifi = true; // we're raising the hold
-                        }
-                        wifi_on_request = true;
+                        climate_active = true; // Hold::Session rises on the edge above
                         app_state = AppState::Climate;
                     } else if target == AppState::Lights {
                         // Lights (#39): raise the overlay + hold WiFi, riding the
@@ -3808,11 +3659,7 @@ async fn main(_spawner: Spawner) -> ! {
                         lights_noreply_until = None;
                         lights_opened_at = Some(Instant::now()); // [LAT] open->first-state
                         shell.set_lights_open(true);
-                        lights_active = true;
-                        if !wifi_on_request {
-                            session_holds_wifi = true; // we're raising the hold
-                        }
-                        wifi_on_request = true;
+                        lights_active = true; // Hold::Session rises on the edge above
                         app_state = AppState::Lights;
                     } else if target == AppState::Voice {
                         // Voice-to-text (#42): a Slint overlay (scene-resident, no
@@ -3823,17 +3670,12 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_voice_transcript("");
                         shell.set_voice_error("");
                         shell.set_voice_open(true);
-                        // STT is WiFi-dependent (HTTP to the LAN bridge). Hold WiFi
-                        // up like climate/energy: raise it here, release + restore
-                        // mesh on close. The hold is keyed on app_state==Voice in the
-                        // WiFi-want block below, so leaving the screen (right-swipe →
-                        // reconcile → app_state=Watchface) deterministically frees it
-                        // → never strands the mesh. session_holds_wifi guards a manual
-                        // WiFi-on (toggle then Voice) so we don't drop it on close.
-                        if !wifi_on_request {
-                            session_holds_wifi = true; // we're raising the hold
-                        }
-                        wifi_on_request = true;
+                        // STT is WiFi-dependent (HTTP to the LAN bridge).
+                        // Hold::Voice rises on the app_state==Voice edge above,
+                        // and drops the same way when the screen closes
+                        // (right-swipe → reconcile → app_state=Watchface) —
+                        // deterministic release, never strands the mesh; a
+                        // manual WiFi-on (Hold::User) is untouched by design.
                         app_state = AppState::Voice;
                     } else if target == AppState::Sound {
                         // Sound-level meter (#28): a Slint overlay (scene-resident,
