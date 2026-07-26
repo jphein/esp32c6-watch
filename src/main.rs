@@ -1353,6 +1353,11 @@ async fn main(_spawner: Spawner) -> ! {
     loop {
         let touch_held = touch_int.is_low();
         let button_held = boot_button.is_low();
+        // Pre-select peek at the net state (#53): the AOD arms below defer
+        // light sleep while WiFi is actively wanted (see the sleep gate), so
+        // they need the intent BEFORE the tick/sleep decision. The
+        // authoritative per-tick snapshot is re-read after the wake select.
+        let net_wanted_pre = crate::net::net_task::snapshot().wanted;
 
         let tick = if touch_held || button_held {
             Duration::from_millis(16)
@@ -1362,10 +1367,11 @@ async fn main(_spawner: Spawner) -> ! {
             // AOD: wake often enough that the minute flip never looks stuck.
             // debug-console builds AND BLE-on release builds skip AOD
             // light-sleep (the raise detector runs on THIS tick instead of the
-            // 700ms sleep-poll), so match the sleep-poll cadence there; only a
-            // sleeping release build keeps the lazy 5s (the sleep block
-            // self-paces at 700ms).
-            if cfg!(feature = "debug-console") || ble_on {
+            // 700ms sleep-poll), so match the sleep-poll cadence there — and
+            // so does a WiFi-wanted window (#53, sleep deferred, bounded);
+            // only a sleeping release build keeps the lazy 5s (the sleep
+            // block self-paces at 700ms).
+            if cfg!(feature = "debug-console") || ble_on || net_wanted_pre {
                 Duration::from_millis(700)
             } else {
                 Duration::from_secs(5)
@@ -1449,7 +1455,21 @@ async fn main(_spawner: Spawner) -> ! {
         // sent from light sleep anyway — use the tick-idle AOD path instead
         // (same as debug-console builds). Battery tradeoff is the user's,
         // via the BLE toggle.
-        if screen_state == 1 && !cfg!(feature = "debug-console") && sleep_cal_ok && !ble_on {
+        //
+        // `!wanted` (#53): with the connect machine in net_task, an
+        // association attempt can now be in flight while THIS loop idles into
+        // AOD — the old inline machine made that impossible (the loop was the
+        // one connecting). Light-sleeping mid-WPA-handshake is the same
+        // hazard class as the BLE lockup above, so defer light sleep while
+        // WiFi is actively wanted; bounded (the burst gives up after 180 s,
+        // the idle backstop drops user intent) and the tick-idle AOD path
+        // covers the meantime.
+        if screen_state == 1
+            && !cfg!(feature = "debug-console")
+            && sleep_cal_ok
+            && !ble_on
+            && !net_wanted_pre
+        {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass)
             // + WRIST-RAISE wake (polling): park the HP core in light sleep
             // instead of WFI-idling. Wake on a short poll timer OR touch (GPIO15)
