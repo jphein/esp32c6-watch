@@ -67,6 +67,43 @@ component ToggleRow {
     }
 }
 
+// One button-mapping row (#59): label + current action, tap cycles to the
+// next action (Rust owns + persists the enum; the cycle is a compact picker
+// that adds no glyph sets — ROM budget is tight). Recipe A pressed feedback;
+// the action value reads in accent so the current binding is legible.
+component MappingRow {
+    in property <string> label;
+    in property <string> action;
+    callback tapped();
+    height: 60px;
+
+    PressTile {
+        width: 100%; height: 100%;
+        clicked => { root.tapped(); }
+        Text {
+            x: 18px; y: 10px;
+            text: root.label;
+            color: Theme.ink;
+            font-size: Theme.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 18px; y: 34px;
+            text: "tap to change";
+            color: Theme.dim;
+            font-size: Theme.t-caption;
+        }
+        Text {
+            x: parent.width - self.width - 18px;
+            y: (parent.height - self.height) / 2;
+            text: root.action;
+            color: Theme.accent;
+            font-size: Theme.t-body;
+            font-weight: 700;
+        }
+    }
+}
+
 // One scanned-network row: SSID + padlock + RSSI bars (Recipe A pressed state).
 component NetworkRow {
     in property <string> ssid;
@@ -122,17 +159,29 @@ component NetworkRow {
 
 export component SettingsHub {
     // --- hub paging (Rust flips via swipe; dots flip locally) ---
-    in-out property <int> page: 0; // 0 SOUND · 1 DISPLAY · 2 RADIOS · 3 NETWORK · 4 SYSTEM
-    property <[string]> titles: ["SOUND", "DISPLAY", "RADIOS", "NETWORK", "SYSTEM"];
+    in-out property <int> page: 0; // 0 SOUND·1 DISPLAY·2 RADIOS·3 NETWORK·4 SYSTEM·5 BUTTONS
+    property <[string]> titles: ["SOUND", "DISPLAY", "RADIOS", "NETWORK", "SYSTEM", "BUTTONS"];
     // NETWORK sub-view (RUST-OWNED): 0 hub pages · 1 picker · 2 keyboard.
     in property <int> net-view: 0;
 
     // --- SOUND ---
     in property <bool> touch-sound;
     in property <int> gain-db: 0;
+    in property <int> volume-level: 11; // 0..15
+    in property <bool> volume-muted: false;
     callback toggle-touch-sound();
     callback gain-down();
     callback gain-up();
+    callback vol-down();
+    callback vol-up();
+    callback vol-mute();
+
+    // --- BUTTONS (#59): tap a row → Rust cycles + persists that slot ---
+    in property <string> boot-short-action: "Volume +";
+    in property <string> boot-long-action: "Launcher";
+    in property <string> pwron-short-action: "Volume \u{2212}";
+    in property <string> pwron-long-action: "Power menu";
+    callback button-cycle(int); // 0 boot-short · 1 boot-long · 2 pwron-short · 3 pwron-long
 
     // --- DISPLAY ---
     in-out property <float> brightness;
@@ -199,7 +248,7 @@ export component SettingsHub {
 
         // --- page 0 · SOUND ---
         if root.page == 0: Rectangle {
-            x: 22px; y: 110px; width: 366px; height: 330px;
+            x: 22px; y: 104px; width: 366px; height: 336px;
 
             ToggleRow {
                 x: 0; y: 0; width: 366px;
@@ -209,10 +258,55 @@ export component SettingsHub {
                 tapped => { root.toggle-touch-sound(); }
             }
 
+            // Speaker volume (#59): − / level / + steppers; tap the value to
+            // toggle mute. Same control the hardware buttons + HUD drive, so
+            // this is the touch entry point to summon the volume HUD too.
+            Rectangle {
+                x: 0; y: 72px; width: 366px; height: 92px;
+                border-radius: Theme.r-card;
+                background: Theme.panel;
+                border-width: 1px; border-color: Theme.line;
+                Text {
+                    x: 18px; y: 12px;
+                    text: "VOLUME";
+                    color: Theme.dim; font-size: 12px; letter-spacing: 2px;
+                }
+                Stepper {
+                    x: 18px; y: 34px; width: 56px; height: 48px;
+                    glyph: "\u{2212}"; glyph-dy: -3px;
+                    clicked => { root.vol-down(); }
+                }
+                // Level readout doubles as the mute toggle (IconButton halo).
+                mute-btn := IconButton {
+                    x: (parent.width - self.width) / 2; y: 30px;
+                    width: 120px; height: 52px;
+                    clicked => { root.vol-mute(); }
+                    Text {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        text: root.volume-muted ? "MUTED" : "\{root.volume-level}";
+                        color: root.volume-muted ? Theme.warn
+                            : (mute-btn.pressed ? Theme.accent : Theme.ink);
+                        font-size: root.volume-muted ? 18px : 22px;
+                        font-weight: 700;
+                    }
+                }
+                Stepper {
+                    x: parent.width - 74px; y: 34px; width: 56px; height: 48px;
+                    glyph: "+"; glyph-dy: -3px;
+                    clicked => { root.vol-up(); }
+                }
+            }
+            Text {
+                x: 18px; y: 170px;
+                text: "tap the number to mute \u{00b7} 0\u{2013}15 steps";
+                color: Theme.faint; font-size: Theme.t-caption;
+            }
+
             // Mic gain: the Sound-app stepper, persisted. Same Recipe C
             // steppers as the meter screen; the value between acknowledges.
             Rectangle {
-                x: 0; y: 80px; width: 366px; height: 96px;
+                x: 0; y: 196px; width: 366px; height: 92px;
                 border-radius: Theme.r-card;
                 background: Theme.panel;
                 border-width: 1px; border-color: Theme.line;
@@ -222,24 +316,24 @@ export component SettingsHub {
                     color: Theme.dim; font-size: 12px; letter-spacing: 2px;
                 }
                 Stepper {
-                    x: 18px; y: 36px; width: 56px; height: 48px;
+                    x: 18px; y: 34px; width: 56px; height: 48px;
                     glyph: "\u{2212}"; glyph-dy: -3px;
                     clicked => { root.gain-down(); }
                 }
                 Text {
                     x: (parent.width - self.width) / 2;
-                    y: 46px;
+                    y: 44px;
                     text: "+\{root.gain-db} dB";
                     color: Theme.ink; font-size: 22px; font-weight: 700;
                 }
                 Stepper {
-                    x: parent.width - 74px; y: 36px; width: 56px; height: 48px;
+                    x: parent.width - 74px; y: 34px; width: 56px; height: 48px;
                     glyph: "+"; glyph-dy: -3px;
                     clicked => { root.gain-up(); }
                 }
             }
             Text {
-                x: 18px; y: 190px;
+                x: 18px; y: 294px;
                 text: "digital boost \u{00b7} live meter in the Sound app";
                 color: Theme.faint; font-size: Theme.t-caption;
             }
@@ -380,18 +474,57 @@ export component SettingsHub {
             }
         }
 
+        // --- page 5 · BUTTONS (#59) ---
+        // Per-button short/long action pickers. Tap a row cycles its action
+        // (Rust owns + persists). "Power off on hold" = mapping a hold to
+        // Power menu / Power off.
+        if root.page == 5: Rectangle {
+            x: 22px; y: 104px; width: 366px; height: 336px;
+
+            MappingRow {
+                x: 0; y: 0; width: 366px;
+                label: "BOOT \u{00b7} tap";
+                action: root.boot-short-action;
+                tapped => { root.button-cycle(0); }
+            }
+            MappingRow {
+                x: 0; y: 66px; width: 366px;
+                label: "BOOT \u{00b7} hold";
+                action: root.boot-long-action;
+                tapped => { root.button-cycle(1); }
+            }
+            MappingRow {
+                x: 0; y: 132px; width: 366px;
+                label: "POWER \u{00b7} tap";
+                action: root.pwron-short-action;
+                tapped => { root.button-cycle(2); }
+            }
+            MappingRow {
+                x: 0; y: 198px; width: 366px;
+                label: "POWER \u{00b7} hold";
+                action: root.pwron-long-action;
+                tapped => { root.button-cycle(3); }
+            }
+            Text {
+                x: 18px; y: 268px;
+                width: 330px; wrap: word-wrap;
+                text: "POWER tap only acts while the screen is on \u{2014} otherwise it wakes.";
+                color: Theme.faint; font-size: Theme.t-caption;
+            }
+        }
+
         // Page-indicator dots (launcher idiom): tap advances, swipe flips.
         dots := IconButton {
             x: (parent.width - self.width) / 2;
             y: 448px;
-            width: 160px;
+            width: 200px;
             height: 44px;
-            clicked => { root.page = mod(root.page + 1, 5); }
+            clicked => { root.page = mod(root.page + 1, 6); }
             HorizontalLayout {
-                x: (parent.width - 5 * 10px - 4 * 12px) / 2;
+                x: (parent.width - 6 * 10px - 5 * 12px) / 2;
                 y: (parent.height - 10px) / 2 - 2px;
                 spacing: 12px;
-                for i in 5: Rectangle {
+                for i in 6: Rectangle {
                     width: 10px; height: 10px; border-radius: 5px;
                     background: root.page == i ? Theme.accent
                         : (dots.pressed ? Theme.soft : Theme.line);

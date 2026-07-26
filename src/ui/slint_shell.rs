@@ -108,7 +108,7 @@ const SHADE_CARD_PITCH: u16 = 92;
 const SHADE_CARDS: usize = 4;
 
 /// Settings-hub section pages (ui/slint/settings.slint `titles` order).
-pub const SETTINGS_PAGE_COUNT: i32 = 5;
+pub const SETTINGS_PAGE_COUNT: i32 = 6;
 /// The DISPLAY page's index — the one hosting the hub's brightness slider.
 const HUB_PAGE_DISPLAY: i32 = 1;
 /// y-band of the Settings hub's brightness slider (settings.slint DISPLAY
@@ -243,6 +243,17 @@ pub struct ShellRequests {
     pub kb_eye: Cell<bool>,
     /// Keyboard: ✓ — commit the field (SSID stage → password stage → connect).
     pub kb_done: Cell<bool>,
+    /// Buttons section (#59): a tapped mapping row's slot (0 boot-short ·
+    /// 1 boot-long · 2 pwron-short · 3 pwron-long) — the loop cycles + persists
+    /// that slot's [`ButtonAction`].
+    pub button_cycle: Cell<Option<i32>>,
+    /// SOUND-page volume steppers + mute toggle (#59).
+    pub volume_down: Cell<bool>,
+    pub volume_up: Cell<bool>,
+    pub volume_mute: Cell<bool>,
+    /// Volume HUD / SOUND-page slider drag → 0..1 (the loop maps to 0..15,
+    /// clears mute, and resets the HUD's 2s auto-dismiss).
+    pub volume_changed: Cell<Option<f32>>,
     /// Power menu (#48): SHUTDOWN row → the loop writes the AXP2101 poweroff
     /// bit (power.shutdown()). REBOOT reuses the `reboot` cell above.
     pub power_shutdown: Cell<bool>,
@@ -1429,6 +1440,39 @@ impl ShellUi {
         ui.set_kb_plain(plain);
     }
 
+    // === Volume + buttons (#59) ===
+
+    /// Push the volume step (0..15) + mute to the SOUND page + the HUD overlay,
+    /// plus the slider fraction (muted → 0) so the HUD knob tracks the level.
+    pub fn set_volume(&self, level: u8, muted: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        let level = level.min(15);
+        ui.set_volume_level(level as i32);
+        ui.set_volume_muted(muted);
+        ui.set_volume_frac(if muted { 0.0 } else { level as f32 / 15.0 });
+    }
+
+    /// Raise/lower the ephemeral volume HUD (Rust owns the 2s auto-dismiss).
+    pub fn set_volume_overlay_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_volume_overlay_open(open);
+    }
+
+    /// Push the four button-mapping action labels to the BUTTONS page.
+    pub fn set_button_actions(
+        &self,
+        boot_short: &str,
+        boot_long: &str,
+        pwron_short: &str,
+        pwron_long: &str,
+    ) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_boot_short_action(SharedString::from(boot_short));
+        ui.set_boot_long_action(SharedString::from(boot_long));
+        ui.set_pwron_short_action(SharedString::from(pwron_short));
+        ui.set_pwron_long_action(SharedString::from(pwron_long));
+    }
+
     // === App switcher (#31) ===
 
     /// Raise/lower the app switcher. Opening retires a running hint window —
@@ -1803,6 +1847,22 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_kb_done(move || r.kb_done.set(true));
+
+        // Buttons + volume (#59).
+        let r = req.clone();
+        ui.on_button_cycle(move |slot| r.button_cycle.set(Some(slot)));
+
+        let r = req.clone();
+        ui.on_volume_down(move || r.volume_down.set(true));
+
+        let r = req.clone();
+        ui.on_volume_up(move || r.volume_up.set(true));
+
+        let r = req.clone();
+        ui.on_volume_mute_tap(move || r.volume_mute.set(true));
+
+        let r = req.clone();
+        ui.on_volume_changed(move |f| r.volume_changed.set(Some(f)));
 
         // App switcher (#31): the status-cluster chip opens it (same cell as
         // the edge-hold — the loop builds the cards first); a card tap resumes
