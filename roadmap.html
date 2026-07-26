@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Roadmap — esp32c6-watch · shipped timeline & open issues</title>
-<meta name="description" content="The esp32c6-watch roadmap — a shipped-release timeline from v0.2.0 through v0.8.8 (the fastpath release), plus the open issue tracker grouped into six themes: gesture shell & UI, audio pipeline, the fleet, Home Assistant, platform & tooling, and the radio frontier. Every open item links to its GitHub issue.">
+<meta name="description" content="The esp32c6-watch roadmap — a shipped-release timeline from v0.2.0 through v0.10.0 (the realtime release), plus the open issue tracker grouped into six themes: gesture shell & UI, audio pipeline, the fleet, Home Assistant, platform & tooling, and the radio frontier. Every open item links to its GitHub issue.">
 <meta name="theme-color" content="#000000">
-<meta property="og:title" content="esp32c6-watch — Roadmap (v0.8.8)">
-<meta property="og:description" content="Shipped from v0.2.0 → v0.8.8, and where the watch goes next — six themed groups of open issues, each linking to GitHub. Mirrors the issue tracker.">
+<meta property="og:title" content="esp32c6-watch — Roadmap (v0.10.0)">
+<meta property="og:description" content="Shipped from v0.2.0 → v0.10.0, and where the watch goes next — six themed groups of open issues, each linking to GitHub. Mirrors the issue tracker.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/fonts.css">
@@ -235,7 +235,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
   <div class="hero-in">
     <div class="eyebrow">Roadmap</div>
     <h1>Shipped, and where it's going.</h1>
-    <p class="lede">The roadmap lives in the <a href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">issue tracker</a> — this page mirrors it. A shipped-release timeline from the first Slint shell through the <b style="color:var(--ink)">two-watch fleet</b> and a fastpath reliability pass, then every open issue grouped into six themes. Each open item links straight to its GitHub issue.</p>
+    <p class="lede">The roadmap lives in the <a href="https://github.com/jphein/esp32c6-watch/issues" target="_blank" rel="noopener">issue tracker</a> — this page mirrors it. A shipped-release timeline from the first Slint shell through the <b style="color:var(--ink)">two-watch fleet</b> to a UI that stays smooth with the network down, then every open issue grouped into six themes. Each open item links straight to its GitHub issue.</p>
     <nav class="jump" aria-label="Jump to">
       <a href="#shipped"><span class="e">✅</span> Shipped</a>
       <a href="#gesture"><span class="e">🧭</span> Gesture &amp; UI</a>
@@ -334,10 +334,26 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         <div class="head"><span class="ver">v0.8.7</span><span class="cap">Room-aware lights</span></div>
         <p class="txt">The <b>Lights</b> plugin (<a href="https://github.com/jphein/esp32c6-watch/issues/39" target="_blank" rel="noopener">#39</a>): a hero button → MQTT command → HA resolves the watch's Bermuda room and toggles <em>that</em> room, with retained state back to the tile. Plus a hotfix — light-sleep with the BLE controller active could lock the chip, so BLE-on now tick-idles AOD (continuous adverts, so room presence keeps working).</p>
       </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.8.8</span><span class="cap">The fastpath release</span></div>
+        <p class="txt">Five stacked latency + freeze causes, run down by forensics: MQTT state arrivals wake the render loop (was a +1&nbsp;s idle tick), “Finding your room” stops paying a 10&nbsp;s backoff racing DHCP, presses while disconnected reject with a hint instead of replaying later, Energy only reads unreachable on a real offline LWT, and the config record is dual-slot mirrored so a freeze can't wipe creds / theme / radio state.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.9.0</span><span class="cap">Touch sounds &amp; the Settings hub</span></div>
+        <p class="txt">Every tap answers: one hoisted hook plays a 12&nbsp;ms tick for <em>both</em> input families — the Slint shell and the framebuffer apps — at texture volume, never per-widget, with a persisted toggle (<a href="https://github.com/jphein/esp32c6-watch/issues/49" target="_blank" rel="noopener">#49</a>). The Settings tile became a scene-resident hub of five paged sections, retiring the framebuffer Settings app and the T9 keyboard; joining WiFi is now a <b>scan-based picker</b> with a 4-layer QWERTY keyboard. Config record v5 completed the persistence migration (<a href="https://github.com/jphein/esp32c6-watch/issues/46" target="_blank" rel="noopener">#46</a>) — mesh, WiFi intent, touch sound and mic gain all survive a reboot. Paid for in ROM: ~397&nbsp;KB of glyph-set consolidation to fit the slot, behind a new image-size gate.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.9.1</span><span class="cap">The channel pin yields</span></div>
+        <p class="txt">The ch6 ESP-NOW mesh pin was firing <em>between</em> WiFi association attempts, dropping auth frames on other channels — so any watch with MESH persisted on struggled to associate at all. The pin now yields whenever WiFi is actively wanted. Also: the mesh startup log had a hardcoded node id and had been lying about which id it ran with.</p>
+      </div>
       <div class="tl now">
         <span class="dot"></span>
-        <div class="head"><span class="ver">v0.8.8</span><span class="cap">The fastpath release</span><span class="badge">latest</span></div>
-        <p class="txt">Five stacked latency + freeze causes, run down by forensics: MQTT state arrivals wake the render loop (was a +1&nbsp;s idle tick), “Finding your room” stops paying a 10&nbsp;s backoff racing DHCP, presses while disconnected reject with a hint instead of replaying later, Energy only reads unreachable on a real offline LWT, and the config record is dual-slot mirrored so a freeze can't wipe creds / theme / radio state.</p>
+        <div class="head"><span class="ver">v0.10.0</span><span class="cap">Dead AP, live UI — the realtime release</span><span class="badge">latest</span></div>
+        <p class="txt">The render loop no longer owns the radio. WiFi, OTA and scanning moved into a dedicated <span class="mono">net_task</span> that exclusively holds the controller (<a href="https://github.com/jphein/esp32c6-watch/issues/53" target="_blank" rel="noopener">#53</a>) — commands in, a snapshot out, a <b>hold mask</b> replacing the old per-tick re-raise scramble, and 2s/10s/60s/300s backoff. The number that matters, measured on glass <em>while the access point was dead</em>: <b>worst frame 202&nbsp;ms</b>, arm max 135&nbsp;ms. The same outage used to freeze the watch for <b>15 seconds</b>. A loop-budget rule — more than 10&nbsp;ms of blocking in any arm is a bug — plus a per-arm watchdog keep it there, and OTA survives a mid-download reconnect.</p>
+        <p class="txt">Riding along: the <b>edge-gesture shell</b> — bottom-swipe launcher (<a href="https://github.com/jphein/esp32c6-watch/issues/29" target="_blank" rel="noopener">#29</a>), bottom-hold app switcher with suspend/resume/kill and a badge (<a href="https://github.com/jphein/esp32c6-watch/issues/31" target="_blank" rel="noopener">#31</a>), top-swipe notification shade fed by MQTT and system events (<a href="https://github.com/jphein/esp32c6-watch/issues/32" target="_blank" rel="noopener">#32</a>); a power-button SHUTDOWN/REBOOT menu with the 4&nbsp;s hardware failsafe intact (<a href="https://github.com/jphein/esp32c6-watch/issues/48" target="_blank" rel="noopener">#48</a>); a 12-band FFT spectrum analyzer (<a href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener">#30</a>); and the OTA slots grown <b>4&nbsp;MB → 6&nbsp;MB</b> (<a href="https://github.com/jphein/esp32c6-watch/issues/50" target="_blank" rel="noopener">#50</a>) after the margin fell to 5.4&nbsp;KB — a cable event on both watches, which reset the config records once.</p>
       </div>
     </div>
   </div>
@@ -390,19 +406,13 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         <div class="rg-head">
           <span class="emo" aria-hidden="true">🧭</span>
           <h3>Gesture shell &amp; UI</h3>
-          <span class="cnt">5 open</span>
+          <span class="cnt">6 open</span>
         </div>
-        <p class="rg-sub">Edge gestures, a notification shade, and the polish that makes the shell feel inevitable.</p>
+        <p class="rg-sub">The edge-gesture shell landed in v0.10.0 (<a href="https://github.com/jphein/esp32c6-watch/issues/29" target="_blank" rel="noopener" style="color:var(--ga)">#29</a>/<a href="https://github.com/jphein/esp32c6-watch/issues/31" target="_blank" rel="noopener" style="color:var(--ga)">#31</a>/<a href="https://github.com/jphein/esp32c6-watch/issues/32" target="_blank" rel="noopener" style="color:var(--ga)">#32</a>) — what remains is making the face itself editable, and the polish that makes the shell feel inevitable.</p>
         <div class="iss-list">
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/29" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#29</span></span>
-            <span class="txt"><b>Bottom-edge swipe-up</b> to open the app launcher</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/31" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#31</span></span>
-            <span class="txt"><b>Session manager</b> — background apps, corner badge, bottom-hold alt-tab switcher</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/32" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#32</span></span>
-            <span class="txt"><b>Notification shade</b> — top-edge swipe-down; HA messages over MQTT + system events</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/54" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#54</span></span>
+            <span class="txt"><b>Overlays leak taps</b> to the chrome beneath — a shared swallow layer is needed</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/28" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#28</span></span>
             <span class="txt"><b>AOD pixel-shift</b> (burn-in) + typography token sweep</span></a>
@@ -415,9 +425,6 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/44" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#44</span></span>
             <span class="txt"><b>Plugin Manager</b> — toggle + configure plugins on-glass, registry-driven</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/48" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#48</span></span>
-            <span class="txt"><b>Power-button long-press</b> → SHUTDOWN / REBOOT menu (AXP2101 PWRON events)</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/10" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#10</span></span>
             <span class="txt"><b>Emoji-expression face</b> (vendor parity)</span></a>
@@ -429,16 +436,10 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         <div class="rg-head">
           <span class="emo" aria-hidden="true">🔊</span>
           <h3>Audio pipeline</h3>
-          <span class="cnt">6 open</span>
+          <span class="cnt">5 open</span>
         </div>
-        <p class="rg-sub">The TX playback seam shipped in v0.8.5 (<a href="https://github.com/jphein/esp32c6-watch/issues/23" target="_blank" rel="noopener" style="color:var(--ga)">#23</a>) — now climb it, from a spectrum analyzer to a music player to a full spoken-conversation loop.</p>
+        <p class="rg-sub">The TX playback seam shipped in v0.8.5 (<a href="https://github.com/jphein/esp32c6-watch/issues/23" target="_blank" rel="noopener" style="color:var(--ga)">#23</a>) — and the spectrum analyzer in v0.10.0 (<a href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener" style="color:var(--ga)">#30</a>) — now climb the rest, from a music player to a full spoken-conversation loop.</p>
         <div class="iss-list">
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/49" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#49</span></span>
-            <span class="txt"><b>Touch sounds everywhere</b> + a persisted toggle, and a Settings overhaul</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#30</span></span>
-            <span class="txt"><b>Real FFT spectrum analyzer</b> in the Sound app</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/33" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#33</span></span>
             <span class="txt"><b>Music player</b> — Navidrome/Subsonic client + internet radio (KVMR) via a LAN PCM bridge</span></a>
@@ -486,9 +487,9 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         <div class="rg-head">
           <span class="emo" aria-hidden="true">🔧</span>
           <h3>Platform &amp; tooling</h3>
-          <span class="cnt">6 open</span>
+          <span class="cnt">5 open</span>
         </div>
-        <p class="rg-sub">Provisioning, flash-slot safety, wedge recovery, and the on-glass verifies that keep the hardware honest.</p>
+        <p class="rg-sub">The <span class="mono">watchctl</span> rig closed the flash-slot trap and wedge recovery (<a href="https://github.com/jphein/esp32c6-watch/issues/20" target="_blank" rel="noopener" style="color:var(--ga)">#20</a>/<a href="https://github.com/jphein/esp32c6-watch/issues/21" target="_blank" rel="noopener" style="color:var(--ga)">#21</a>). Left: provisioning, the firmware half of the debug channel, and the on-glass verifies that keep the hardware honest.</p>
         <div class="iss-list">
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/22" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#22</span></span>
@@ -499,24 +500,9 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
           <div class="iss">
             <span class="nums"><a class="num" href="https://github.com/jphein/esp32c6-watch/issues/16" target="_blank" rel="noopener">#16</a><a class="num" href="https://github.com/jphein/esp32c6-watch/issues/26" target="_blank" rel="noopener">#26</a></span>
             <span class="txt"><b>On-glass verifies</b> — charger profile, steps, wrist-raise tuning</span></div>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/20" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#20</span></span>
-            <span class="txt"><b>USB-flash slot-trap tooling</b> — bare <span class="mono">espflash flash</span> writes the slot the bootloader isn't booting</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/21" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#21</span></span>
-            <span class="txt"><b>USB-JTAG wedge auto-recovery</b> script</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/46" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#46</span></span>
-            <span class="txt"><b>Persist user toggles</b> across reboots (BLE / mesh / WiFi intent, mic gain) — a presence prerequisite</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/51" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#51</span></span>
             <span class="txt"><b>Firmware TCP debug server</b> (<span class="mono">:5555</span>, token-gated) — the WiFi half of the debug rig</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/50" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#50</span></span>
-            <span class="txt"><b>Grow the OTA slots</b> 4&nbsp;MB → 6&nbsp;MB (the ROM budget is nearly full) — needs one cabled reflash per watch</span></a>
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/19" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#19</span></span>
-            <span class="txt"><b>Rust + Embassy ESP32-C3/C6 ecosystem survey</b> (prior art)</span></a>
         </div>
       </article>
 
@@ -557,7 +543,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
       <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">GitHub ↗</a>
     </div>
   </div>
-  <div class="foot-note">Roadmap mirrors the GitHub issue tracker · shipped through <b class="mono" style="color:var(--soft)">v0.8.8</b> — the fastpath release · dual-licensed MIT OR Apache-2.0</div>
+  <div class="foot-note">Roadmap mirrors the GitHub issue tracker · shipped through <b class="mono" style="color:var(--soft)">v0.10.0</b> — the realtime release · dual-licensed MIT OR Apache-2.0</div>
 </footer>
 
 <!-- shared logo symbol -->

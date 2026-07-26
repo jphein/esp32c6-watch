@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>esp32c6-watch — 100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch</title>
-<meta name="description" content="A 100% Rust, no_std firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch — Slint UI with a four-scheme theme system, tactile pressed-state feedback, wake gesture hints, a paged launcher, ESP-NOW mesh, a migrating Mesh Familiar, push-to-talk voice, restored speaker SFX, room-aware Home Assistant lights, games, BLE, WiFi, and reliable zero-touch OTA across a two-watch fleet with per-device sigil identities, all on a RISC-V microcontroller.">
+<meta name="description" content="A 100% Rust, no_std firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch — Slint UI with a four-scheme theme system, tactile pressed-state feedback, wake gesture hints, a paged launcher, ESP-NOW mesh, a migrating Mesh Familiar, push-to-talk voice, an edge-gesture shell with an app switcher and notification shade, a realtime network task that keeps the UI responsive through an outage, restored speaker SFX with an FFT spectrum analyzer, room-aware Home Assistant lights, games, BLE, WiFi, and reliable zero-touch OTA across a two-watch fleet with per-device sigil identities, all on a RISC-V microcontroller.">
 <meta name="theme-color" content="#000000">
-<meta property="og:title" content="esp32c6-watch — v0.8.8">
+<meta property="og:title" content="esp32c6-watch — v0.10.0">
 <meta property="og:description" content="100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch — a self-updating two-watch fleet (eldritch-lantern & mythic-throne) with per-device sigil identities, restored speaker SFX, room-aware Home Assistant lights, and a fastpath reliability release. Slint UI, four themes, tactile pressed states, wake gesture hints, ESP-NOW mesh, a migrating Familiar, push-to-talk voice, reliable zero-touch OTA, and more.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -606,6 +606,14 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
         <p><b>One-tap self-serve</b>: the update button raises WiFi itself, pulls the new build over HTTP, and flips slots — no pre-connect needed. <b>Zero-touch push</b>: <span class="mono">tools/ota_push.sh</span> publishes a retained MQTT announce that a monotonic build gate accepts only if it's newer. v0.8.3 made it <b>dependable</b> — retry that survives link drops, mesh traffic suppressed during the flash so bandwidth goes to the download, and tightened stall margins. Both land in the A/B layout — flash <span class="mono">ota_1</span> while running from <span class="mono">ota_0</span>, then flip, with rollback safety.</p>
       </article>
 
+      <!-- Realtime release SHIPPED v0.10.0 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.10.0</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 7v5l3.5 2"/></svg></div>
+        <h3>Dead AP, live UI</h3>
+        <p>The render loop no longer owns the radio. WiFi, OTA and scanning moved into a dedicated <span class="mono">net_task</span> that exclusively holds the controller — commands in, a snapshot out, a <b>hold mask</b> replacing the old per-tick re-raise scramble, and 2s/10s/60s/300s backoff. The number that matters, measured on glass <em>while the access point was dead</em>: <b>worst frame 202&nbsp;ms</b>. The same outage used to freeze the watch for <b>15 seconds</b>. A loop-budget rule — more than 10&nbsp;ms of blocking in any arm is a bug — plus a per-arm watchdog keep it honest, and OTA now survives a mid-download reconnect.</p>
+      </article>
+
       <!-- Fastpath reliability SHIPPED v0.8.8 -->
       <article class="feat done reveal">
         <span class="kbadge">shipped · v0.8.8</span>
@@ -789,7 +797,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
             <div class="rows" style="gap:1.5cqw">
               <div class="srow"><span class="k">CHIP</span><span class="v">ESP32-C6 · RISC-V</span></div>
               <div class="srow"><span class="k">DISPLAY</span><span class="v">410x502 AMOLED</span></div>
-              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.8.8</span></div>
+              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.10.0</span></div>
               <div class="srow"><span class="k">HEAP</span><span class="v acc">123k free</span></div>
               <div class="srow"><span class="k">UPTIME</span><span class="v">02:41:07</span></div>
               <div class="srow"><span class="k">BATTERY</span><span class="v">78% · 4012 mV</span></div>
@@ -928,10 +936,10 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
     <div class="two" style="align-items:start">
       <div class="reveal">
         <div class="layers">
-          <div class="layer"><span class="lname">apps</span><div class="lmods"><code>registry</code><code>snake</code><code>world_snake</code><code>game2048</code><code>tetris</code><code>flappy</code><code>maze</code><code>settings</code></div></div>
-          <div class="layer"><span class="lname">ui</span><div class="lmods"><code>slint_shell</code><code>slint_platform</code><code>t9_keyboard</code><code>shell</code><code>controls</code><code>clock</code><code>launcher</code><code>theme</code><code>climate</code><code>energy</code><code>lights</code><code>voice</code><code>soundlevel</code></div></div>
-          <div class="layer"><span class="lname">net</span><div class="lmods"><code>smol_mesh</code><code>familiar</code><code>weather</code><code>mqtt_ha</code><code>mqtt_climate</code><code>voice_stt</code><code>ota_http</code><code>sigil</code><code>names</code></div></div>
-          <div class="layer"><span class="lname">peripherals</span><div class="lmods"><code>wifi</code><code>ble</code><code>imu</code><code>touch</code><code>rtc</code><code>power</code><code>power_stats</code><code>audio</code><code>audio_out</code><code>es7210</code><code>mic_capture</code><code>config</code><code>die_temp</code><code>cpu_clock</code></div></div>
+          <div class="layer"><span class="lname">apps</span><div class="lmods"><code>registry</code><code>session</code><code>snake</code><code>world_snake</code><code>game2048</code><code>tetris</code><code>flappy</code><code>maze</code></div></div>
+          <div class="layer"><span class="lname">ui</span><div class="lmods"><code>slint_shell</code><code>slint_platform</code><code>shell</code><code>controls</code><code>clock</code><code>launcher</code><code>settings</code><code>keyboard</code><code>switcher</code><code>shade</code><code>power_menu</code><code>theme</code><code>climate</code><code>energy</code><code>lights</code><code>voice</code><code>soundlevel</code></div></div>
+          <div class="layer"><span class="lname">net</span><div class="lmods"><code>net_task</code><code>smol_mesh</code><code>familiar</code><code>weather</code><code>mqtt_ha</code><code>mqtt_climate</code><code>voice_stt</code><code>ota_http</code><code>sigil</code><code>names</code></div></div>
+          <div class="layer"><span class="lname">peripherals</span><div class="lmods"><code>ble</code><code>imu</code><code>touch</code><code>rtc</code><code>power</code><code>power_stats</code><code>audio</code><code>audio_out</code><code>es7210</code><code>mic_capture</code><code>config</code><code>die_temp</code><code>cpu_clock</code></div></div>
           <div class="layer"><span class="lname">drivers</span><div class="lmods"><code>co5300</code><code>qspi_bus</code><code>framebuffer</code></div></div>
         </div>
       </div>

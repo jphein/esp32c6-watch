@@ -149,7 +149,7 @@ footer a{color:var(--soft)}
     <li><b>USB-C</b> — native USB-Serial-JTAG (flash, log & debug over one cable)</li>
     <li><b>Expansion pads</b> — VBUS, 3V3, BAT, UART (TX/RX) and spare GPIO</li>
     <li><b>Buttons</b> — BOOT (GPIO9) and PWR / reset</li>
-    <li><b>A/B OTA flash layout</b> — two 4 MB app slots (<span class="bus">ota_0</span> / <span class="bus">ota_1</span>) plus NVS, otadata and a 64 KB config partition on the 16 MB flash — no factory partition, so an update always writes the slot it isn't running from</li>
+    <li><b>A/B OTA flash layout</b> — two <b>6 MB</b> app slots (<span class="bus">ota_0</span> @ <span class="bus">0x10000</span> / <span class="bus">ota_1</span> @ <span class="bus">0x610000</span>) plus NVS, otadata and a 64 KB config partition at <span class="bus">0xC10000</span> on the 16 MB flash — no factory partition, so an update always writes the slot it isn't running from</li>
   </ul>
 </div></section>
 
