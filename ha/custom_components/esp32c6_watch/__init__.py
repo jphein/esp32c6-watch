@@ -11,11 +11,12 @@ watch has no TLS, so this cannot be a ``HomeAssistantView``.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from aiohttp import web
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
@@ -34,6 +35,7 @@ from .const import (
     DEFAULT_PORT,
     DOMAIN,
 )
+from .mqtt_bridge import WatchMqttBridge
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +80,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = {"runner": runner, "queue": queue}
     _LOGGER.info("esp32c6_watch: serving watch HTTP on 0.0.0.0:%s", port)
 
+    # #60: ALSO publish the watch/* retained MQTT topics the firmware parser
+    # reads (the HTTP endpoints alone left Climate + Energy blank once the
+    # Node-RED bridge was retired). Best-effort: a MQTT-less HA still serves
+    # HTTP. Started after HA is running so the initial snapshot reads live
+    # states, not boot-time `unavailable`.
+    #
+    # Registered BEFORE the platform forward on purpose: the MQTT bridge is the
+    # climate/energy critical path, so it must not depend on the (secondary)
+    # media_player platform loading — a platform import break must never take
+    # the watch's data path down with it.
+    bridge = WatchMqttBridge(hass, entry)
+    hass.data[DOMAIN][entry.entry_id]["bridge"] = bridge
+    if hass.is_running:
+        await bridge.async_start()
+    else:
+        async def _start_bridge(_event: Any) -> None:
+            await bridge.async_start()
+
+        entry.async_on_unload(
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_bridge)
+        )
+
     # The media_player platform reads the queue back out of hass.data on setup.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -92,6 +116,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         if data is not None:
+            bridge: WatchMqttBridge | None = data.get("bridge")
+            if bridge is not None:
+                await bridge.async_stop()
             runner: web.AppRunner | None = data.get("runner")
             if runner is not None:
                 await runner.cleanup()
