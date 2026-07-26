@@ -367,30 +367,32 @@ def run_suite(w: Watch) -> int:
     s.check("swipe up opens launcher",
             st.get("app") == "Launcher" and st.get("launcher") == 1, str(st))
 
-    # 3. No frame >100ms during a launcher scroll (the launcher-scroll bug class).
-    def scroll():
-        for _ in range(4):
+    # 3. Paged launcher (v0.8.0+): swipe up/down FLIPS one section-page per
+    #    swipe (AUDIO/GAMES/SYSTEM), not continuous scroll. A flip is a single
+    #    full-frame repaint, so the bar is the render floor (~250ms per #53's
+    #    202ms-worst-under-load), not the old 100ms scroll threshold.
+    def page_flips():
+        for _ in range(2):            # AUDIO -> GAMES -> SYSTEM
             w.cmd("swipe up")
-            time.sleep(0.12)
-        for _ in range(4):
+            time.sleep(0.2)
+        for _ in range(2):            # back to AUDIO
             w.cmd("swipe down")
-            time.sleep(0.12)
-    scroll()
+            time.sleep(0.2)
+    page_flips()
     p = w.perf()
     worst = p.get("max_us", 0)
-    s.check("no frame >100ms during scroll", worst < 100_000,
+    s.check("no frame >250ms during page flips", worst < 250_000,
             f"worst={worst/1000:.1f}ms frames={len(p['frames_us'])}")
 
-    # 4. Launcher scrolls to the bottom row (proxy): after scrolling, the
-    #    bottom-most SYSTEM app (Theme, idx 13) is still reachable and the
-    #    launcher stayed open through the scroll (v0.7.0 regression: bottom rows
-    #    unreachable). True scroll-offset readout isn't exposed by firmware, so
-    #    this asserts reachability + that the scroll didn't collapse the list.
+    # 4. Bottom section reachable (paged): flip to the SYSTEM page, then the
+    #    SYSTEM app Theme (idx 13) is reachable and the launcher stayed open
+    #    through the flips (the v0.7.0 regression this guards: bottom apps
+    #    unreachable). Reachability + launcher-stayed-open, no scroll-offset.
     w.home()
-    w.swipe("up")                     # reopen launcher
-    for _ in range(4):
-        w.cmd("swipe up")             # scroll toward the bottom rows
-        time.sleep(0.12)
+    w.swipe("up")                     # reopen launcher (AUDIO page)
+    for _ in range(2):
+        w.cmd("swipe up")             # flip to the SYSTEM page
+        time.sleep(0.2)
     st = w.state()
     still_open = st.get("app") == "Launcher"
     w.launch(THEME_IDX)

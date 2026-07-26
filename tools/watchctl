@@ -1015,6 +1015,20 @@ def cmd_test(args) -> int:
     return subprocess.call(argv)
 
 
+def cmd_soak(args) -> int:
+    """Boot-stability harness: reset N times, classify each boot, report the
+    crash-rate + time-to-crash (0% = stable). Wraps tools/watch_soak.py."""
+    row = require_usb(args.watch)
+    probe = REPO / "tools" / "watch_soak.py"
+    if not probe.exists():
+        say(f"watchctl: {probe} not found")
+        return EXIT_NOTFOUND
+    say(f"soaking {row.get('sigil') or row['dev']} ({row['dev']}): "
+        f"{args.trials} boots x {args.seconds}s — 0% crash = stable")
+    return subprocess.call([sys.executable, str(probe), row["dev"],
+                            str(args.trials), str(args.seconds)])
+
+
 def cmd_ota_status(args) -> int:
     out: dict = {"journal": [], "announce": None}
     say(f"— {OTA_UNIT} journal on {OTA_HOST} (last {args.lines}) —")
@@ -1187,6 +1201,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("watch")
     p.add_argument("suite", nargs="?", default="default")
 
+    p = sub.add_parser("soak", parents=[common],
+                       help="boot-stability harness: reset N times, report crash-rate")
+    p.add_argument("watch")
+    p.add_argument("-n", "--trials", type=int, default=6,
+                   help="boot trials (default 6)")
+    p.add_argument("-s", "--seconds", type=float, default=12.0,
+                   help="watch seconds per boot (default 12)")
+
     p = sub.add_parser("ota-status", parents=[common],
                        help="ubox0 watch-ota journal + retained OTA announce")
     p.add_argument("-n", "--lines", type=int, default=15,
@@ -1216,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
         "flash-full": cmd_flash_full,
         "console": cmd_console,
         "test": cmd_test,
+        "soak": cmd_soak,
         "ota-status": cmd_ota_status,
         "endpoint": cmd_endpoint,
     }
