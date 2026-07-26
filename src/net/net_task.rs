@@ -401,9 +401,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// user action (fresh hold / SetCreds).
 const BACKOFF_SECS: [u64; 4] = [2, 10, 60, 300];
 /// A boot/creds burst that can't complete (dead AP, NTP unreachable) drops
-/// its intent after this, returning the radio to the mesh — the power
-/// backstop the old 3-attempts-then-give-up provided.
-const BURST_GIVEUP: Duration = Duration::from_secs(600);
+/// its intent after this, returning the radio to the mesh — the power/mesh
+/// backstop the old 3-attempts-then-give-up (~45 s) provided. 180 s spans
+/// the 2 s/10 s/60 s backoff steps (~4 attempts) before the ch6 pin returns.
+const BURST_GIVEUP: Duration = Duration::from_secs(180);
 /// OTA: how long a queued job waits for WiFi before failing (old executor).
 const OTA_WIFI_WINDOW: Duration = Duration::from_secs(45);
 /// OTA: download attempts before giving up (old executor's re-arm loop).
@@ -631,10 +632,11 @@ pub async fn net_task(
                 run_ota(stack, flash, &mut st).await;
                 continue;
             }
-            if (st.holds & Hold::Burst.bit()) != 0
-                && !st.ntp_synced
-                && Instant::now() >= st.next_ntp
-            {
+            // Burst on ANY association while time is unsynced (old semantics:
+            // `wifi_connected && !ntp_synced` — a manual toggle after a
+            // failed boot burst still syncs the clock), not just under the
+            // Burst hold; completion drops Burst+User either way.
+            if !st.ntp_synced && Instant::now() >= st.next_ntp {
                 run_burst(stack, &mut st).await;
                 continue;
             }

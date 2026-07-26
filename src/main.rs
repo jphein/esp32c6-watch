@@ -3321,7 +3321,11 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_net_scanning(true);
                     scan_list.clear();
                     shell.set_wifi_nets(&[]);
-                    let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::Scan);
+                    if !crate::net::net_task::send(crate::net::net_task::NetCmd::Scan) {
+                        // Queue full (an OTA in flight): don't leave the
+                        // picker spinning on a scan that will never run.
+                        shell.set_net_scanning(false);
+                    }
                 }
                 // Streaming scan results: net_task bumps scan_seq after every
                 // channel; re-pull the published rows into the picker (top 6,
