@@ -8,6 +8,11 @@
 
 #![no_std]
 
+mod spectrum;
+pub use spectrum::{
+    spectrum_dbfs, SpectrumEnvelope, BAND_EDGE_BINS, FFT_SIZE, SPECTRUM_BANDS,
+};
+
 /// Lower clamp for the meter, in dBFS. Silence / near-silence reads here.
 pub const DBFS_FLOOR: f32 = -60.0;
 

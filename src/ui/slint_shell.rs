@@ -197,9 +197,9 @@ pub struct ShellUi {
     /// Climate (#58) card model: one ClimateCard per HA climate entity, swapped
     /// in place by set_climate (same long-lived pattern as mesh_model).
     climate_cards: Rc<VecModel<ClimateCard>>,
-    /// Sound meter (#28) scrolling waveform: one f32 per 16 ms window, in [0,1],
-    /// swapped in place by push_mic_waveform (same long-lived pattern).
-    waveform_model: Rc<VecModel<f32>>,
+    /// Sound-app spectrum (#30): 12 log-spaced bands (level + peak-hold, dBFS),
+    /// swapped in place by set_spectrum (same long-lived pattern).
+    spectrum_model: Rc<VecModel<SpecBand>>,
     /// Settings-hub NETWORK picker rows, swapped in place by set_wifi_nets
     /// (same long-lived pattern as mesh_model).
     wifi_model: Rc<VecModel<WifiNet>>,
@@ -235,9 +235,15 @@ impl ShellUi {
         let req = Rc::new(ShellRequests::default());
         let mesh_model: Rc<VecModel<PeerRow>> = Rc::new(VecModel::default());
         let climate_cards: Rc<VecModel<ClimateCard>> = Rc::new(VecModel::default());
-        let waveform_model: Rc<VecModel<f32>> = Rc::new(VecModel::default());
+        // Prefill at the silence floor so the 12 columns render immediately on
+        // first open (level 0.0 would paint full-scale bars).
+        let spectrum_model: Rc<VecModel<SpecBand>> = Rc::new(VecModel::from(
+            (0..mic_dsp::SPECTRUM_BANDS)
+                .map(|_| SpecBand { level: mic_dsp::DBFS_FLOOR, peak: mic_dsp::DBFS_FLOOR })
+                .collect::<Vec<_>>(),
+        ));
         let wifi_model: Rc<VecModel<WifiNet>> = Rc::new(VecModel::default());
-        let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model, &wifi_model);
+        let ui = build_scene(&req, &mesh_model, &climate_cards, &spectrum_model, &wifi_model);
         // First frame under ReusedBuffer must be a full paint (the panel just
         // showed fill_screen(BLACK); the renderer has no prior frame to diff
         // against). Slint already dirties everything on first show, but request it
@@ -250,7 +256,7 @@ impl ShellUi {
             req,
             mesh_model,
             climate_cards,
-            waveform_model,
+            spectrum_model,
             wifi_model,
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
@@ -292,7 +298,7 @@ impl ShellUi {
             &self.req,
             &self.mesh_model,
             &self.climate_cards,
-            &self.waveform_model,
+            &self.spectrum_model,
             &self.wifi_model,
         );
         ui.set_current_page(self.saved_page);
@@ -1084,14 +1090,19 @@ impl ShellUi {
         ui.set_mic_gain_db(db);
     }
 
-    /// SoundLevel scrolling waveform (#28): per-16 ms-window amplitudes in [0,1],
-    /// oldest first. Swaps the model contents in place (no per-frame ModelRc
-    /// alloc). Only meaningful while the Sound overlay is open.
-    pub fn push_mic_waveform(&self, bars: &[f32]) {
+    /// SoundLevel spectrum (#30): 12 per-band values (bar dBFS + peak-hold dBFS,
+    /// both in [-60, 0], low band first). Swaps the model contents in place (no
+    /// per-frame ModelRc alloc). Only meaningful while the Sound overlay is open.
+    pub fn set_spectrum(&self, bars: &[f32], peaks: &[f32]) {
         if self.ui.is_none() {
             return;
         }
-        self.waveform_model.set_vec(bars.to_vec());
+        let bands: Vec<SpecBand> = bars
+            .iter()
+            .zip(peaks.iter())
+            .map(|(&level, &peak)| SpecBand { level, peak })
+            .collect();
+        self.spectrum_model.set_vec(bands);
     }
 
     pub fn page(&self) -> i32 {
@@ -1198,7 +1209,7 @@ fn build_scene(
     req: &Rc<ShellRequests>,
     mesh_model: &Rc<VecModel<PeerRow>>,
     climate_cards: &Rc<VecModel<ClimateCard>>,
-    waveform_model: &Rc<VecModel<f32>>,
+    spectrum_model: &Rc<VecModel<SpecBand>>,
     wifi_model: &Rc<VecModel<WifiNet>>,
 ) -> WatchShell {
     let ui = WatchShell::new().expect("failed to create WatchShell");
@@ -1322,7 +1333,7 @@ fn build_scene(
     }
     ui.set_mesh_rows(ModelRc::from(mesh_model.clone()));
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
-    ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
+    ui.set_mic_spectrum(ModelRc::from(spectrum_model.clone()));
     ui.set_wifi_nets(ModelRc::from(wifi_model.clone()));
     // Launcher pages are built once from the app registry (single source of
     // truth) — static per boot, so plain VecModels the scene owns are enough.

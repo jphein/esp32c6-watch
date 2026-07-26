@@ -1185,12 +1185,10 @@ async fn main(_spawner: Spawner) -> ! {
     // release — so brief speech syllables visibly fill/hold the bar instead of
     // the raw instantaneous RMS collapsing to -inf between words.
     let mut meter_env = mic_dsp::DBFS_FLOOR;
-    // Scrolling waveform ring (per-16 ms-window peak, auto-scaled to [0,1]) and a
-    // slowly-decaying reference so quiet speech still fills it while loud events
-    // expand the scale. WAVE_BARS bars ≈ WAVE_BARS×16 ms of history.
-    const WAVE_BARS: usize = 48;
-    let mut wave_ring = [0.0f32; WAVE_BARS];
-    let mut wave_ref = 0.0f32;
+    // #30 spectrum analyzer: per-band bar + peak-hold envelopes (12 log bands,
+    // 80 Hz–8 kHz). Fed ONE 256-pt FFT per Sound tick — the C6 has no FPU, so
+    // the softfloat FFT (~few ms) runs once on the latest window, not per chunk.
+    let mut spec_env = mic_dsp::SpectrumEnvelope::new();
     // "STA radio (PHY) started via set_config" — what ESP-NOW needs, decoupled
     // from WiFi credentials/association (that's `wifi_connected`). Set by either
     // the credentialed connect path OR a MESH toggle-on; the mesh block gates on
@@ -1331,13 +1329,14 @@ async fn main(_spawner: Spawner) -> ! {
             }
         } else {
             match app_state {
-                // Sound meter + waveform are a live 30 Hz display; pace them
+                // Sound meter + spectrum are a live display; pace them
                 // explicitly. (In the grouped arm below, a Sound overlay would
                 // otherwise inherit the underlying page's cadence — often 1 Hz —
                 // so the meter sampled one 16 ms window/sec and read silence.)
-                // 66ms (15Hz): still smooth for a meter/waveform, but halves the
-                // scene-render load that was blocking the executor and starving the
-                // capture DMA (→ gap "spikes" in the waveform + laggy feel at 30Hz).
+                // 66ms (15Hz): still smooth for a meter/spectrum, but halves the
+                // scene-render load that was blocking the executor and starving
+                // the capture DMA. The #30 FFT (softfloat, ~few ms) also rides
+                // this cadence — one 256-pt transform per tick.
                 AppState::Sound => Duration::from_millis(66),
                 AppState::Watchface
                 | AppState::Launcher
@@ -2975,43 +2974,33 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.request_redraw(); // paint the transcript/error promptly
                 }
 
-                // #28 sound-level meter: drain the SHARED ES7210 capture → dBFS bar +
-                // peak-hold + scrolling waveform on SoundLevel. Non-blocking (unlike the
-                // PTT flow, which parks the loop): update once per 33 ms tick. Opens the
-                // METER gate on entry (mic is the ES7210, inited at boot), closes on exit.
+                // #28 sound-level meter + #30 spectrum: drain the SHARED ES7210
+                // capture → dBFS bar + peak-hold + 12-band FFT spectrum on
+                // SoundLevel. Non-blocking (unlike the PTT flow, which parks the
+                // loop): update once per tick. Opens the METER gate on entry (mic
+                // is the ES7210, inited at boot), closes on exit.
                 if app_state == AppState::Sound {
                     if !meter_on {
                         mic_capture::METER.store(true, core::sync::atomic::Ordering::Relaxed);
                         meter_peak = mic_dsp::DBFS_FLOOR;
                         meter_env = mic_dsp::DBFS_FLOOR;
-                        wave_ring = [0.0f32; WAVE_BARS];
-                        wave_ref = 0.0;
+                        spec_env.reset();
+                        shell.set_spectrum(spec_env.bars(), spec_env.peaks());
                         meter_on = true;
                     }
-                    // Drain ALL buffered chunks each 33 ms tick. For each 16 ms window
-                    // compute rms (dBFS, for the meter) and a DC-removed peak (for the
-                    // scrolling waveform); scroll one auto-scaled bar per window.
+                    // Drain ALL buffered chunks each tick; rms (cheap) runs per 16 ms
+                    // window, the FFT (softfloat, ~few ms) only on the LAST window.
                     let rx = MIC_CH.receiver();
                     let mut latest_dbfs: Option<f32> = None;
-                    let mut got = false;
-                    // Full-scale reference for a quiet room; loud events expand it and
-                    // it decays back so quiet speech re-fills the waveform.
-                    const WAVE_MIN_REF: f32 = 800.0;
+                    let mut samples = [0i16; mic_capture::MONO_CHUNK / 2];
+                    let mut last_n = 0usize;
                     while let Ok(chunk) = rx.try_receive() {
-                        got = true;
                         let n = chunk.len() / 2;
-                        let mut samples = [0i16; mic_capture::MONO_CHUNK / 2];
                         for i in 0..n {
                             samples[i] = i16::from_le_bytes([chunk[2 * i], chunk[2 * i + 1]]);
                         }
-                        let dbfs = mic_dsp::rms_dbfs(&samples[..n]);
-                        let peak = mic_dsp::peak_abs(&samples[..n]) as f32;
-                        latest_dbfs = Some(dbfs);
-                        // Auto-scale + scroll the waveform ring (oldest drops off left).
-                        wave_ref = (wave_ref * 0.90).max(peak).max(WAVE_MIN_REF);
-                        let norm = (peak / wave_ref).clamp(0.0, 1.0);
-                        wave_ring.copy_within(1.., 0);
-                        wave_ring[WAVE_BARS - 1] = norm;
+                        last_n = n;
+                        latest_dbfs = Some(mic_dsp::rms_dbfs(&samples[..n]));
                     }
                     if let Some(dbfs) = latest_dbfs {
                         // Bar = fast-attack / slow-release envelope so speech visibly
@@ -3021,9 +3010,11 @@ async fn main(_spawner: Spawner) -> ! {
                         // Peak marker: slower decay so it lingers after a transient.
                         meter_peak = (meter_peak - 0.5).max(dbfs).max(mic_dsp::DBFS_FLOOR);
                         shell.set_mic_level(meter_env, meter_peak);
-                    }
-                    if got {
-                        shell.push_mic_waveform(&wave_ring);
+                        // #30: 256-pt real FFT → 12 log bands → per-band bar +
+                        // peak-hold envelopes (the meter's feel, per band).
+                        let bands = mic_dsp::spectrum_dbfs(&samples[..last_n]);
+                        spec_env.update(&bands);
+                        shell.set_spectrum(spec_env.bars(), spec_env.peaks());
                     }
                 } else if meter_on {
                     // Close the meter gate (ES7210 stays inited; RX idles + discards).
