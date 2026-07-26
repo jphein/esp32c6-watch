@@ -4072,6 +4072,7 @@ async fn main(_spawner: Spawner) -> ! {
             wifi: wifi_connected,
             ble: ble_on,
             mesh_peers: last_mesh_peers,
+            modal: shell.modal_kind(),
         });
 
         // Track the arm we ran so the shell arm can detect a return from an app

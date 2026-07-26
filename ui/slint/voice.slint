@@ -1,5 +1,5 @@
 import { Theme, PageTitle } from "theme.slint";
-import { BackChevron } from "controls.slint";
+import { OverlaySwallow, BackChevron } from "controls.slint";
 
 // Voice-to-text screen (push-to-talk → stream mic → transcript back). Standalone
 // overlay-style component, like SoundLevel (MC4) / RadioScanOverlay (RS5). Pure
@@ -33,6 +33,7 @@ export component VoicePage {
 
     // Opaque AMOLED backdrop.
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     PageTitle { title: "VOICE"; }
 

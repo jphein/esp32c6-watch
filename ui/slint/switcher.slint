@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { PressTile, BackChevron } from "controls.slint";
+import { OverlaySwallow, PressTile, BackChevron } from "controls.slint";
 import { LauncherTile, AppIcon } from "launcher.slint";
 
 // App switcher (#31): the bottom-edge-HOLD overlay — alt-tab for the watch.
@@ -27,6 +27,7 @@ export component SwitcherOverlay {
     callback close();
 
     Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     Text {
         x: (parent.width - self.width) / 2;

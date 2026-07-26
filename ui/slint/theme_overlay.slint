@@ -1,5 +1,5 @@
 import { Theme, Palette, PageTitle } from "theme.slint";
-import { BackChevron } from "controls.slint";
+import { OverlaySwallow, BackChevron } from "controls.slint";
 
 // Theme picker overlay. A scene-resident overlay (no framebuffer, no WiFi) —
 // same idiom as the WLED / Energy / Climate overlays. Reached from a launcher
@@ -80,6 +80,7 @@ export component ThemeOverlay {
     // Opaque backdrop in the ACTIVE scheme (so opening the picker already shows
     // the current theme's ground behind the tiles).
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     PageTitle { title: "THEME"; }
     BackChevron { clicked => { root.close(); } }

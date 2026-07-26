@@ -1,5 +1,5 @@
 import { Theme, PageTitle } from "theme.slint";
-import { PillButton, BackChevron } from "controls.slint";
+import { OverlaySwallow, PillButton, BackChevron } from "controls.slint";
 
 // Power menu overlay (#48) — summoned by the HARDWARE power key (AXP2101
 // PWRON long-press IRQ at 1.5s), never by the launcher, so it is NOT a
@@ -33,14 +33,10 @@ export component PowerMenu {
     // Opaque backdrop in the active scheme (same idiom as the Theme picker).
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
 
-    // Input swallow: a plain Rectangle doesn't consume clicks in Slint, so
-    // without this the shell chrome UNDER the menu (radio dots y8-72, page
-    // dots y448-492) stays hit-testable through the menu's dead zones — an
-    // invisible WiFi toggle from inside a power menu. Declared before the
-    // rows/chevron so they stay topmost. (The other overlays share the
-    // quirk shell-wide; hardened here first because this menu is the one
-    // a user opens with destructive intent.)
-    TouchArea {}
+    // Input swallow — this menu shipped the pattern first (#48); it is now
+    // the shared OverlaySwallow (#54, controls.slint) applied to every
+    // scene overlay. Declared before the rows/chevron so they stay topmost.
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     PageTitle { title: "POWER"; }
     BackChevron { clicked => { root.close(); } }
