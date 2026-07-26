@@ -4,6 +4,100 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-07-26
+
+- **The UI loop no longer owns the radio** (#53). A dedicated `net_task` exclusively
+  holds the WiFi controller: commands in (`Raise`/`Drop` a hold, `Scan`, `SetCreds`,
+  `Ota`) over a depth-8 channel; a `NetSnapshot` out behind a blocking mutex
+  (`WifiPhase`, `radio_started`, scan rows, one-shot NTP/weather handoffs, `OtaPhase`),
+  every change signalling `NET_WAKE` on the v0.8.8 coalescing pattern. A **hold mask**
+  (`User`/`Burst`/`Session`/`Voice`/`Ota`/`Phy`) replaces the old `wifi_on_request` +
+  `session_holds_wifi` + per-tick re-raise scramble — `Phy` being mesh's
+  start-the-radio-without-associating case — with 2s/10s/60s/300s exponential backoff
+  on consecutive failures. Every WiFi/OTA/scan arm migrated out of the main loop, and
+  OTA now survives a mid-download reconnect.
+  **Acceptance, measured on glass under a dead-AP outage: worst frame 202 ms,
+  `arm_max` 135 ms — where the old code froze for 15 seconds.** Held there by a
+  REALTIME BUDGET rule at the loop head (>10 ms of blocking in any arm is a bug, with
+  an audited exemption list: full-frame Slint renders, ms-scale flash sector programs,
+  the by-design voice PTT park, wake one-offs) plus an RAII per-arm watchdog that
+  reports `arm_max_us` / `arm_over10ms` from `debug-console` builds. Independently
+  reviewed before merge — a busy-spin, a pin race and a sleep-gate hazard all folded.
+- **Edge-gesture shell** (#29 / #31 / #32): a bottom-edge swipe-up opens the launcher
+  from any watchface page; a bottom-edge **hold** raises an app switcher with
+  suspend / resume / kill and a corner badge for what's still running; a top-edge
+  swipe-down pulls down a **notification shade** fed by MQTT (`watch/notify`) plus
+  system events, with retained notifies riding the boot-burst MQTT window.
+- **Power menu** (#48): an AXP2101 PKEY long-press opens SHUTDOWN / REBOOT. The 4-second
+  hardware failsafe stays intact underneath it.
+- **12-band FFT spectrum analyzer** in the Sound app (#30), log-spaced for factory
+  parity — plus a same-day on-glass fix after the band painted over the page title.
+- **OTA slots grown 4 MB → 6 MB** (#50): `ota_0` @ `0x10000`, `ota_1` @ `0x610000`,
+  `config` moves to `0xC10000`. The margin was down to **5.4 KB** at consolidation.
+  `ota_push.sh` and `watchctl` gates follow the new table, and `save-image` now needs
+  `--flash-size 16mb`. Deployed to both watches as a **cable event** — a full flash
+  with the new table, which resets the config record, so persisted toggles and theme
+  return at defaults exactly once.
+- **ROM**: the gesture-shell overlays went component-lean (~90 KB of image reclaimed)
+  and the shell chrome conditionals are visible-gated (~21.5 KB more).
+- **Heap 214 KB → 198 KB**: the consolidated scene build (power menu + switcher + shade
+  + spectrum) overflowed the 46.9 KB stack and tripped esp-hal's stack guard at boot.
+  Caught by the wrong-credentials acceptance run rather than in the field — +16 KB of
+  stack (gap ≈63 KB), with the heap still ~38 KB clear of the framebuffer need.
+
+## [0.9.1] — 2026-07-25
+
+- **Mesh channel-pin yields to WiFi** — the ch6 ESP-NOW pin fired between
+  association attempts (only an OTA-pending update suppressed it), dropping auth
+  frames on other channels: `AuthenticationExpired` at -61 dBm and single-network
+  scans on any watch with MESH persisted on. The pin now yields whenever
+  `wifi_on_request` is raised.
+- The `[MESH] up as node id042` log was a hardcoded string — the mesh had been
+  running with the arbitrated sigil id all along; it now prints the real one.
+
+## [0.9.0] — 2026-07-25
+
+- **Touch sounds everywhere** (#49) — one hoisted tap hook plays a 12 ms 1.8 kHz
+  tick for *both* input families (the Slint shell's `handle_touch` and the
+  framebuffer apps' `AppInput.tap`), never per-widget. Peak ~-15 dBFS: texture,
+  not notification. Gated on the persisted toggle, `audio_out::busy()`, and PTT
+  recording (half-duplex). The old per-control launch/OTA clicks are gone.
+- **Settings hub** — the Settings tile now opens a scene-resident Slint overlay
+  (registry kind `Overlay`: no framebuffer, no scene suspend) with five paged
+  sections — SOUND, DISPLAY, RADIOS, NETWORK, SYSTEM. Swipe up/down flips pages;
+  right-swipe backs out then closes. The old framebuffer Settings app, the T9
+  keyboard, and `peripherals/wifi.rs` are deleted.
+- **Scan-based WiFi join + QWERTY keyboard** — `scan_async` → dedup by SSID
+  keeping best RSSI → strength-sorted top 6 plus "Other network…"; secured picks
+  open a 4-layer QWERTY pane with Rust owning the buffer (masking, 24-char tail
+  window, held-backspace auto-repeat on the 16 ms touch tick, show-password eye).
+  Feeds the same credential-save + station-config rebuild path as the old flow.
+- **Config record v5** (`SWCFG5`, 113 B) completes the #46 persistence migration:
+  v4's reserved radios-flag bits are spent in place (bit 1 mesh-on, bit 2
+  WiFi-forced-off, bit 3 touch-sound-muted — OFF bits inverted so a v4 record's
+  zero bits decode to mesh off / WiFi auto / sound **on**) plus a mic-gain
+  step-index byte. Boot restores mesh, WiFi intent, mic gain, and touch sound;
+  edge-triggered dual-slot mirror saves persist each. v1–v4 records still load.
+- **ROM budget** — each distinct font size embeds a whole pre-rendered glyph set,
+  so the hub's arrival put the 4 MB app slot ~70 KB over. Seven visually-adjacent
+  size consolidations across two rounds freed **~397 KB**. The real acceptance
+  test is `espflash save-image` fitting the slot, not `readelf` section math
+  (espflash adds ~116 KB of segment padding/metadata): the release image is now
+  **3,987,776 B of 4,128,768 = 96.6 %**, 137.7 KB margin (debug-console 96.7 %,
+  135.5 KB). Stack gap unchanged at 54.5 KB, floor 46 KB. `tools/ota_push.sh`
+  gained an early slot-fit gate with a headroom report so this can't ship blind.
+- **`tools/watchctl`** (#20, #21) — a one-command USB/WiFi debug rig for the
+  fleet: `list`/`logs`/`reset`/`recover`/`slot`/`deploy`/`flash-full`/`console`/
+  `test`/`ota-status`/`endpoint`, `--json`, `--transport usb|wifi|auto`. Watches
+  resolve by sigil/efuse-MAC serial via udev, never by `ttyACM` number. `deploy`
+  defeats the #20 slot trap (save-image + size gate + write-bin into the
+  *booting* slot read from the boot banner + a `[SIGIL]`/`[STACK]` boot verify);
+  `reset`/`recover` walk the #21 wedge ladder (verified `espflash reset` →
+  `USBDEVFS_RESET` ioctl + re-resolve by serial → report power-cycle).
+  `ui_test.py` grows a `tcp://host:port` transport speaking the same console
+  protocol, and **`docs/debugging.md`** is the agent field guide to all three
+  debug channels. The firmware side of the TCP channel is [#51](https://github.com/jphein/esp32c6-watch/issues/51).
+
 ## [0.8.8] — 2026-07-25
 
 - **The fastpath release** — five stacked latency/freeze causes fixed (forensics):
