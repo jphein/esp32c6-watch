@@ -4,6 +4,23 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+*Tooling and docs only — no firmware change; fold into the next release heading.*
+
+- **`watchctl soak <sigil> [-n trials] [-s seconds]`** — the boot-stability probe is now a
+  first-class subcommand (defaults 6 boots × 12 s), resolving the watch by sigil instead of
+  needing a raw `/dev/ttyACM*`. Verified 0 % on `eldritch-lantern` (#63).
+- **`ui_test.py hotpaths` fixed for the paged launcher** (#63): the suite still carried a
+  continuous-scroll step from before v0.8.0 and aborted on it. It now flips one section page
+  per swipe (AUDIO → GAMES → SYSTEM and back) and gates at a 250 ms bar, since a page flip is
+  one full-frame repaint — the render floor, not the old 100 ms scroll threshold.
+- **docs: corrected a stale OTA slot cap.** `docs/debugging.md` still quoted the pre-#50
+  **4,128,768 B** image gate in two places; the real cap has been **6,225,920 B** (6 MB slot
+  less 64 KB) since the slots grew, and `save-image` now needs `--flash-size 16mb` plus the
+  partition table to match. Understating the budget by ~2 MB would have sent someone
+  shrinking an image that already fit.
+
 ## [0.12.1] — 2026-07-26
 
 - **CRITICAL — the "freezing" was a WiFi-blob crash** (#61). esp-radio 0.18's WiFi blob

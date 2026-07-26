@@ -16,6 +16,7 @@ tools/watchctl deploy eldritch-lantern fw.elf        # slot-trap-proof USB deplo
 tools/watchctl flash-full mythic-throne fw.elf --erase-otadata  # provisioning
 tools/watchctl console eldritch-lantern              # debug-console REPL
 tools/watchctl test eldritch-lantern hotpaths        # ui_test.py suites
+tools/watchctl soak eldritch-lantern -n 20           # boot-stability: crash-rate + TTC
 tools/watchctl ota-status                            # OTA server journal + announce
 tools/watchctl endpoint eldritch-lantern             # WiFi debug endpoint probe
 ```
@@ -88,16 +89,22 @@ tools/watchctl test eldritch-lantern            # PASS/FAIL assertion suite
 tools/watchctl test eldritch-lantern lights     # end-to-end Lights latency
 ```
 Needs a `debug-console` build (see below). Run `hotpaths` before/after a perf
-change and diff the numbers.
+change and diff the numbers. The launcher assertion follows the **paged** launcher
+(v0.8.0+): it flips one section-page per swipe and gates at a 250 ms bar — a flip is
+a single full-frame repaint, so the render floor is the limit, not the old 100 ms
+continuous-scroll threshold.
 
 ### Soak-test boot stability
 ```bash
-tools/watch_soak.py /dev/ttyACM3 20 12   # port, trials, seconds watched per trial
+tools/watchctl soak eldritch-lantern              # 6 boots x 12s (defaults)
+tools/watchctl soak eldritch-lantern -n 20 -s 15  # 20 boots, 15s watched each
+tools/watch_soak.py /dev/ttyACM3 20 12            # the probe directly: port, trials, secs
 ```
 Resets the watch N times and classifies every boot (WiFi panic / brick / download mode /
 alive), reporting a crash rate and time-to-crash. Born fighting #61, where the crash rate
 *was* the acceptance gate — a stability fix has to move it to 0 %. Needs `pyserial`.
-(A `watchctl soak` wrapper is a follow-up; today it's invoked directly.)
+`watchctl soak` resolves the watch by sigil and wraps the probe (defaults `-n 6`, `-s 12`);
+call `watch_soak.py` directly only when you need to name a raw port.
 
 ### Drive the UI by hand
 ```bash
@@ -114,7 +121,8 @@ scp familiar:fambuild/<worktree-name>/target/riscv32imac-unknown-none-elf/releas
 tools/watchctl deploy eldritch-lantern /tmp/fw.elf
 ```
 `deploy` converts the ELF (`espflash save-image`), gates the size
-(≤ 4,128,768 B — exit 4 if over), detects the **booting** slot from the boot
+(≤ 6,225,920 B — the 6 MB slot less 64 KB, since #50 — exit 4 if over), detects
+the **booting** slot from the boot
 banner, `espflash write-bin`s into *that* slot, resets, and verifies the new
 image actually came up (slot + `[SIGIL]` + `[STACK] gap` fingerprint).
 
@@ -185,9 +193,11 @@ things worse.)
   `familiar:~/fambuild/<worktree-name>/target/riscv32imac-unknown-none-elf/release/esp32c6-watch`.
   If ssh fails, wake it: `realm wol wake familiar` (standing authorization —
   don't stall).
-- Image gate: `espflash save-image --chip esp32c6 <elf> <bin>` must be
-  **≤ 4,128,768 B** (the OTA slot cap). watchctl gates this on every
-  deploy/flash-full (exit 4).
+- Image gate: the saved image must be **≤ 6,225,920 B** — the 6 MB OTA slot less
+  64 KB, since #50 grew the slots (it was 4,128,768 B before). watchctl gates this
+  on every deploy/flash-full (exit 4). Note `save-image` needs the flash size *and*
+  the table to match the 6 MB layout:
+  `espflash save-image --chip esp32c6 --flash-size 16mb --partition-table partitions.csv <elf> <bin>`.
 - `debug-console` builds: the console + UI automator, serial always live
   (no light-sleep). Never ship one over OTA to the fleet.
 - Over-the-air instead of USB: `tools/ota_push.sh` (see
