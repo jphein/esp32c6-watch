@@ -364,7 +364,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
       <div class="tl now">
         <span class="dot"></span>
         <div class="head"><span class="ver">v0.11.0</span><span class="cap">The fleet greets by name</span><span class="badge">latest</span></div>
-        <p class="txt">Press the hero button and the other watch knows. Additive mesh <span class="mono">PING</span>/<span class="mono">PINGACK</span> frames carry a sigil-identified greeting (<a href="https://github.com/jphein/esp32c6-watch/issues/35" target="_blank" rel="noopener">#35</a>); the receiver wakes from always-on, blooms a full-screen accent-ring pulse with the sender's name, and plays a rising two-tone chime — or, if the panel is off or a game holds the framebuffer, chimes and drops a card in the notification shade. Delivery is confirmed, and silence times out honestly at 2&nbsp;s. Voice also stopped asking twice: an early push-to-talk press now <b>latches</b> and fires itself the moment the link lands, cancelling cleanly if you lift your finger first (<a href="https://github.com/jphein/esp32c6-watch/issues/22" target="_blank" rel="noopener">#22</a>). And <span class="mono">mythic-throne</span> took this release <b>over the air, zero-touch</b> — the payoff for the network task, the slot guard and the roaming all landing together.</p>
+        <p class="txt">Press the hero button and the other watch knows. Additive mesh <span class="mono">PING</span>/<span class="mono">PINGACK</span> frames carry a sigil-identified greeting (<a href="https://github.com/jphein/esp32c6-watch/issues/35" target="_blank" rel="noopener">#35</a>); the receiver wakes from always-on, blooms a full-screen accent-ring pulse with the sender's name, and plays a rising two-tone chime — or, if the panel is off or a game holds the framebuffer, chimes and drops a card in the notification shade. Delivery is confirmed, and silence times out honestly at 2&nbsp;s. Voice also stopped asking twice: an early push-to-talk press now <b>latches</b> and fires itself the moment the link lands, cancelling cleanly if you lift your finger first (<a href="https://github.com/jphein/esp32c6-watch/issues/22" target="_blank" rel="noopener">#22</a>). And <span class="mono">mythic-throne</span> took this release <b>over the air, zero-touch</b> — the first such self-update since the v0.10.1 flash-safety fix, and the payoff for the network task, the slot guard and the roaming all landing together.</p>
       </div>
     </div>
   </div>
@@ -492,13 +492,10 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         <div class="rg-head">
           <span class="emo" aria-hidden="true">🔧</span>
           <h3>Platform &amp; tooling</h3>
-          <span class="cnt">5 open</span>
+          <span class="cnt">4 open</span>
         </div>
-        <p class="rg-sub">The <span class="mono">watchctl</span> rig closed the flash-slot trap and wedge recovery (<a href="https://github.com/jphein/esp32c6-watch/issues/20" target="_blank" rel="noopener" style="color:var(--ga)">#20</a>/<a href="https://github.com/jphein/esp32c6-watch/issues/21" target="_blank" rel="noopener" style="color:var(--ga)">#21</a>). Left: provisioning, roaming follow-up, the firmware half of the debug channel, and the on-glass verifies that keep the hardware honest.</p>
+        <p class="rg-sub">The <span class="mono">watchctl</span> rig closed the flash-slot trap and wedge recovery (<a href="https://github.com/jphein/esp32c6-watch/issues/20" target="_blank" rel="noopener" style="color:var(--ga)">#20</a>/<a href="https://github.com/jphein/esp32c6-watch/issues/21" target="_blank" rel="noopener" style="color:var(--ga)">#21</a>). Firmware roaming closed the association failures in v0.10.1 (<a href="https://github.com/jphein/esp32c6-watch/issues/57" target="_blank" rel="noopener" style="color:var(--ga)">#57</a>). Left: provisioning, the firmware half of the debug channel, and the on-glass verifies that keep the hardware honest.</p>
         <div class="iss-list">
-          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/57" target="_blank" rel="noopener">
-            <span class="nums"><span class="num">#57</span></span>
-            <span class="txt"><b>Firmware WiFi roaming</b> — best-BSSID select + RSSI reassociation <em>(core landed in v0.10.1; issue open for follow-up)</em></span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/15" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#15</span></span>
             <span class="txt"><b>Wi-Fi provisioning</b> — SoftAP captive portal</span></a>
