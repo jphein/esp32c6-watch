@@ -156,6 +156,150 @@ pub fn play_pcm(pcm: &[u8]) -> usize {
     queued
 }
 
+/// Queue an ENTIRE clip, awaiting queue space so an arbitrarily long clip plays
+/// in full. Unlike [`play_pcm`] (non-blocking, truncates the remainder when the
+/// 128 ms queue fills), this yields between chunks so the clock task drains the
+/// queue as fast as we refill it — the 480 ms ping chime (#58) was 73 % dropped
+/// by `play_pcm` because a 30-chunk clip can't fit an 8-chunk queue and the
+/// synchronous enqueue can't yield to let the consumer drain. Runs on the
+/// executor (it awaits); the ping chime drives it from a dedicated task so the
+/// mesh/UI path never blocks on the melody.
+///
+/// The amp/mic gates are raised up front (before the first sample can reach the
+/// speaker); the main loop's [`service_amp`] brings the amp up on its next pass,
+/// and the feeder's [`TAIL_STEREO_BYTES`] pad bridges the tiny refill gaps so
+/// the session never ends mid-clip when the queue momentarily drains to empty.
+/// A long `&'static` clip streamed straight off its own buffer (the #58 ping
+/// chime): registered once at boot, played by arming `pos`/`playing`.
+struct LongClip {
+    pcm: Option<&'static [u8]>,
+    /// Mono bytes already handed to the feeder.
+    pos: usize,
+    playing: bool,
+}
+
+/// The long-clip source the feeder falls back to when the SFX queue is empty.
+///
+/// # Why not the queue, and why not a task
+///
+/// The chime is 480 ms (30 × [`PLAY_CHUNK`]) but the queue holds 128 ms (8), and
+/// [`play_pcm`] is synchronous — it cannot yield to let the clock task drain —
+/// so 73 % of the melody was rejected and the ping sounded silent. The first fix
+/// attempt streamed it from a dedicated Embassy task; that task made the watch
+/// panic **100 %** of the time under the `debug-console` build (`Instruction
+/// access fault mepc=0x2` inside `esp_rtos::task::task_wrapper` — one task too
+/// many for the RTOS's per-task resources). Streaming from the feeder that
+/// already exists needs no task, never blocks a caller, and can't truncate.
+static LONG_CLIP: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::RefCell<LongClip>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(LongClip {
+    pcm: None,
+    pos: 0,
+    playing: false,
+}));
+
+/// Register the ping-chime PCM (heap-leaked `&'static` built at boot). Must be
+/// called before [`play_chime`] can do anything.
+pub fn register_chime(pcm: &'static [u8]) {
+    LONG_CLIP.lock(|c| c.borrow_mut().pcm = Some(pcm));
+}
+
+/// Fire the ping chime: stream the FULL melody off its static buffer.
+///
+/// Non-blocking, safe from any task (the ping RX path and the debug console both
+/// use it). Re-arms from the start if one is already playing — a ping is a
+/// can't-miss event, and the RX site already dedups/gates repeats.
+///
+/// # The first chunk goes through the QUEUE on purpose
+///
+/// `silent_clock_task` idles in `select(next_clip(), rearm_requested())`, i.e.
+/// parked on `PLAYBACK.receive()`. It therefore only opens a playback session
+/// when a chunk arrives **through the channel** — arming [`LONG_CLIP`] alone
+/// left the task asleep and the chime SILENT (no `fill_stereo` call ever
+/// happened). So: hand chunk 0 to the queue to wake it and open the session,
+/// and let the feeder pull chunks 1..n straight off the static buffer.
+pub fn play_chime() {
+    let first = LONG_CLIP.lock(|c| {
+        let mut c = c.borrow_mut();
+        let pcm = c.pcm?;
+        let end = PLAY_CHUNK.min(pcm.len());
+        let first = PcmChunk::from_slice(&pcm[..end]).ok()?;
+        c.pos = end; // chunk 0 is in flight via the queue
+        c.playing = true;
+        Some(first)
+    });
+    let Some(first) = first else { return };
+    if PLAYBACK.try_send(first).is_ok() {
+        CHIME_BYTES.store(PLAY_CHUNK.min(chime_len()), Ordering::Relaxed);
+        CHIME_DONE.store(false, Ordering::Relaxed);
+        // Same ordering as play_pcm: suppress the mic and request the amp before
+        // the first sample can reach the speaker.
+        PLAYBACK_ACTIVE.store(true, Ordering::Relaxed);
+        AMP_REQUEST.store(true, Ordering::Relaxed);
+    } else {
+        stop_long_clip(); // queue full — don't leave a half-armed clip behind
+    }
+}
+
+/// Registered chime length in mono bytes (0 before `register_chime`).
+fn chime_len() -> usize {
+    LONG_CLIP.lock(|c| c.borrow().pcm.map_or(0, |p| p.len()))
+}
+
+/// Mono bytes of the current chime handed to the ring so far, and a
+/// completion latch — telemetry so playback is provable from the serial log
+/// instead of only by ear (the first rework shipped silent and the console's
+/// "ok chime" ack proved nothing).
+static CHIME_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static CHIME_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Take the "chime finished" latch, returning `(streamed, total)` mono bytes.
+/// The main loop logs it once per chime.
+pub fn chime_done_take() -> Option<(usize, usize)> {
+    if CHIME_DONE.swap(false, Ordering::Relaxed) {
+        Some((CHIME_BYTES.load(Ordering::Relaxed), chime_len()))
+    } else {
+        None
+    }
+}
+
+/// Next chunk of the streaming long clip, or `None` when idle/finished.
+/// Advances `pos`; clears `playing` on the last chunk.
+fn next_long_chunk() -> Option<PcmChunk> {
+    LONG_CLIP.lock(|c| {
+        let mut c = c.borrow_mut();
+        if !c.playing {
+            return None;
+        }
+        let pcm = c.pcm?;
+        if c.pos >= pcm.len() {
+            c.playing = false;
+            CHIME_DONE.store(true, Ordering::Relaxed);
+            return None;
+        }
+        let end = (c.pos + PLAY_CHUNK).min(pcm.len());
+        // from_slice cannot overflow: end - pos <= PLAY_CHUNK == PcmChunk cap.
+        let chunk = PcmChunk::from_slice(&pcm[c.pos..end]).ok()?;
+        CHIME_BYTES.fetch_add(end - c.pos, Ordering::Relaxed);
+        c.pos = end;
+        if c.pos >= pcm.len() {
+            c.playing = false;
+            CHIME_DONE.store(true, Ordering::Relaxed);
+        }
+        Some(chunk)
+    })
+}
+
+/// Abandon any streaming long clip (transfer re-arm / abort path).
+fn stop_long_clip() {
+    LONG_CLIP.lock(|c| {
+        let mut c = c.borrow_mut();
+        c.playing = false;
+        c.pos = 0;
+    });
+}
+
 /// True while a clip (or its amp-release tail) is still in flight. Seam API
 /// for pacing streamed sources (HA speaker follow-up); SFX callers fire-and-
 /// forget, so nothing in-tree calls it yet.
@@ -249,6 +393,7 @@ impl PlaybackFeeder {
         self.current = None;
         self.tail = 0;
         while PLAYBACK.try_receive().is_ok() {}
+        stop_long_clip(); // don't resume a half-played melody after the re-arm
         PLAYBACK_ACTIVE.store(false, Ordering::Relaxed);
         AMP_REQUEST.store(false, Ordering::Relaxed);
     }
@@ -269,8 +414,13 @@ impl PlaybackFeeder {
         while i + 4 <= out.len() {
             // Stage the next chunk (only past the amp gate, so no audio is
             // spent into a muted DAC while the main loop raises the amp).
+            // Queue first, then the streaming long clip (#58) — a queued SFX is
+            // always short and shouldn't wait behind 480 ms of melody.
             if self.current.is_none() && self.gate_open() {
                 if let Ok(c) = PLAYBACK.try_receive() {
+                    self.current = Some(c);
+                    self.offset = 0;
+                } else if let Some(c) = next_long_chunk() {
                     self.current = Some(c);
                     self.offset = 0;
                 }

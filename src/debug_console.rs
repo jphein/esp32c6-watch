@@ -400,9 +400,18 @@ fn handle_line(bytes: &[u8]) {
             let _ = queue(Inject::Touch { point: None, swipe: None, start_y: 0, tap: false });
             println!("[DBGCON] ok beep ({} of {} B queued)", queued, n);
         }
+        "chime" => {
+            // Fire the FULL watch-ping chime (#58) on a single watch — the same
+            // path a received ping takes (chime_task → play_all streams the whole
+            // 480 ms melody, not play_pcm's 128 ms-truncated stub). Wakes the main
+            // loop so the per-tick service_amp raises the amp promptly.
+            crate::peripherals::audio_out::play_chime();
+            let _ = queue(Inject::Touch { point: None, swipe: None, start_y: 0, tap: false });
+            println!("[DBGCON] ok chime (streaming full melody)");
+        }
         "ping" => println!("[DBGCON] ok pong"),
         "help" => println!(
-            "[DBGCON] cmds: tap <x> <y> | swipe up|down|left|right | launch <idx> | home | state | perf | beep | ping"
+            "[DBGCON] cmds: tap <x> <y> | swipe up|down|left|right | launch <idx> | home | state | perf | beep | chime | ping"
         ),
         _ => println!("[DBGCON] err unknown: {}", cmd),
     }

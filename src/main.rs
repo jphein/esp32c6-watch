@@ -918,6 +918,11 @@ async fn main(_spawner: Spawner) -> ! {
         tick_pcm.len(),
         ping_chime_pcm.len()
     );
+    // #58: hand the chime to the audio seam so the clock task's feeder can
+    // stream the FULL 480 ms melody off this static buffer. Deliberately NOT a
+    // dedicated task: an extra Embassy task here panicked the watch 100 % of the
+    // time under the debug-console build (see audio_out::LONG_CLIP docs).
+    audio_out::register_chime(ping_chime_pcm);
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
     let mut boot_button = Input::new(
@@ -1235,6 +1240,13 @@ async fn main(_spawner: Spawner) -> ! {
     let mut aod_entry_sod: u32 = 0;
     // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
     let mut prev_fam = FamUi::default();
+    // Climate render push-guard (#60 OOM fix): the fingerprint of the last model
+    // pushed to Slint. set_climate rebuilds a heap Vec<ClimateCard> + its
+    // SharedStrings; doing it every tick fragmented the allocator until a ~7 KB
+    // alloc failed and the watch OOM-panicked on the Climate screen. Push only
+    // when the rendered content actually changes. `None` = force the next push
+    // (reset on screen open).
+    let mut prev_climate_fp: Option<u64> = None;
     // Low-battery notification latch (#32): one warning per discharge.
     let mut low_batt_notified = false;
     // Last pushed step count, cached so the shell can be re-populated after a
@@ -2036,6 +2048,13 @@ async fn main(_spawner: Spawner) -> ! {
         // per-tick pass guarantees the DROP side (and any missed raise) even
         // when the queueing code path bails early.
         audio_out::service_amp(&mut amp_en, &mut audio_codec);
+        // #58b: prove the chime actually streamed (streamed/total mono bytes).
+        // The first feeder rework was SILENT — the clock task idles on
+        // PLAYBACK.receive() and nothing woke it — and the console's "ok chime"
+        // ack looked identical to success, so playback is now measurable.
+        if let Some((sent, total)) = audio_out::chime_done_take() {
+            println!("[AUDIO] ping chime streamed {sent}/{total} B");
+        }
 
         // === Touch ===
         // No swipe-preview animation on the C6: the full-frame RGB565
@@ -2657,7 +2676,16 @@ async fn main(_spawner: Spawner) -> ! {
                                 // (1) The chime IS the ping — ALWAYS play it,
                                 // wherever the greeting lands (bright, dim, AOD,
                                 // full-off, mid-game). Half-duplex is fine.
-                                audio_out::play_pcm(ping_chime_pcm);
+                                // Signal the feeder task to play the FULL 480 ms
+                                // melody: play_pcm here truncated it to the 128 ms
+                                // queue (73 % dropped → near-silent). chime_task /
+                                // play_all drain the whole clip; the per-tick
+                                // service_amp (below) raises the amp, the feeder
+                                // holds samples until it's up (pop insurance).
+                                audio_out::play_chime();
+                                // Same-tick amp raise, as every other SFX site
+                                // does — the per-tick pass would also catch it,
+                                // but not before the feeder's first push.
                                 audio_out::service_amp(&mut amp_en, &mut audio_codec);
                                 // (3) ALWAYS log a shade card (#58) — a persistent,
                                 // RTC-stamped record that survives the ~4s pulse.
@@ -3220,6 +3248,7 @@ async fn main(_spawner: Spawner) -> ! {
                     climate_pending = None; // optimistic state doesn't outlive the screen
                     climate_active = false;
                     shell.set_climate_open(false);
+                    println!("[HEAP] climate close: free={}", esp_alloc::HEAP.free());
                     if app_state == AppState::Climate {
                         app_state = AppState::Watchface;
                     }
@@ -3367,14 +3396,30 @@ async fn main(_spawner: Spawner) -> ! {
                     // reads its stepper base from this model, so the next ±tap
                     // accumulates from the optimistic value rather than the stale
                     // authoritative one.
+                    //
+                    // #60 OOM fix: gate the push on a fingerprint of exactly what
+                    // we'd render (state + optimistic override + conn). Rebuilding
+                    // the heap Vec<ClimateCard> + SharedStrings every tick
+                    // fragmented the allocator until a ~7 KB alloc OOM-panicked
+                    // the watch on this screen. Now the model is pushed only when
+                    // the rendered content actually changes.
+                    let conn_mix = (conn as u64).wrapping_mul(0x9E3779B97F4A7C15);
                     if let Some(p) = climate_pending.as_ref() {
                         let mut opt = st.clone();
                         if let Some((_, e)) = opt.entities.get_mut(p.id as usize) {
                             e.set = Some(p.temp);
                         }
-                        shell.set_climate(&opt, conn);
+                        let fp = opt.render_fingerprint() ^ conn_mix;
+                        if prev_climate_fp != Some(fp) {
+                            shell.set_climate(&opt, conn);
+                            prev_climate_fp = Some(fp);
+                        }
                     } else {
-                        shell.set_climate(&st, conn);
+                        let fp = st.render_fingerprint() ^ conn_mix;
+                        if prev_climate_fp != Some(fp) {
+                            shell.set_climate(&st, conn);
+                            prev_climate_fp = Some(fp);
+                        }
                     }
                 } else {
                     let _ = shell.req.climate_set_temp.take();
@@ -4417,6 +4462,12 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_climate_open(true);
                         climate_active = true; // Hold::Session rises on the edge above
                         app_state = AppState::Climate;
+                        // Force the first climate push (change-gate reset) + log the
+                        // heap the screen opens against, so the #60 OOM fix is
+                        // measurable on-glass (free should hold steady now, not
+                        // bleed down per tick).
+                        prev_climate_fp = None;
+                        println!("[HEAP] climate open: free={}", esp_alloc::HEAP.free());
                     } else if target == AppState::Lights {
                         // Lights (#39): raise the overlay + hold WiFi, riding the
                         // shared HA MQTT session exactly like Climate. The session
