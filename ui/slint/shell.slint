@@ -12,7 +12,7 @@ import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { LightsOverlay } from "lights.slint";
 import { VoicePage } from "voice.slint";
-import { SoundLevel } from "soundlevel.slint";
+import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { SettingsHub } from "settings.slint";
 
@@ -22,7 +22,7 @@ import { SettingsHub } from "settings.slint";
 // and pushes them into `launcher-tiles` (page-major, 9 slots per page).
 // `Theme` is re-exported too so Rust can drive the scheme selector via
 // `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
-export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet }
+export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet, SpecBand }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -150,8 +150,9 @@ export component WatchShell inherits Window {
     in-out property <bool> mic-open: false;
     in property <float> mic-dbfs: -60;
     in property <float> mic-peak: -60;
-    // Scrolling waveform: one amplitude per 16 ms window, [0,1], oldest first.
-    in property <[float]> mic-waveform: [];
+    // Real-FFT spectrum (#30): 12 log-spaced bands 80 Hz → 8 kHz, dBFS in
+    // [-60, 0], pushed once per Sound tick. Replaced the scrolling waveform.
+    in property <[SpecBand]> mic-spectrum: [];
     // Mic digital-gain (0..+18 dB) shown on the Sound app; stepped by its buttons.
     in property <int> mic-gain-db: 0;
     // Theme picker overlay: scheme swatches. Opened by the launcher (plugin
@@ -588,7 +589,7 @@ export component WatchShell inherits Window {
         width: 100%; height: 100%;
         mic-dbfs: root.mic-dbfs;
         mic-peak: root.mic-peak;
-        mic-waveform: root.mic-waveform;
+        spectrum: root.mic-spectrum;
         gain-db: root.mic-gain-db;
         gain-down => { root.mic-gain-down(); }
         gain-up => { root.mic-gain-up(); }
