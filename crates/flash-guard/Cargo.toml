@@ -1,0 +1,8 @@
+[package]
+name = "flash-guard"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Pure write-range guard logic for the watch's runtime flash writer (#55). no_std, host-unit-tested."
+
+[dependencies]

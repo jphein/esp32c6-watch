@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "esp32c6-watch"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "climate-model",
  "critical-section",
@@ -2066,6 +2066,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-storage",
+ "flash-guard",
  "heapless 0.9.3",
  "hunt",
  "log",
@@ -2218,6 +2219,10 @@ dependencies = [
  "smallvec",
  "writeable",
 ]
+
+[[package]]
+name = "flash-guard"
+version = "0.1.0"
 
 [[package]]
 name = "flate2"

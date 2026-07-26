@@ -7,7 +7,6 @@
 
 use embedded_storage::{ReadStorage, Storage};
 use esp_println::println;
-use esp_storage::FlashStorage;
 
 /// Byte offset of the BACKUP record slot inside the `config` partition (64KB —
 /// the record itself is ~112B at the start). One flash sector (4KB) past the
@@ -128,7 +127,7 @@ fn checksum(buf: &[u8]) -> u16 {
 /// Load the config: primary slot first, then the backup mirror (a torn primary
 /// write — freeze/power-loss mid-save — falls back to the previous save's
 /// values instead of factory defaults). The next `save` re-heals both slots.
-pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
+pub fn load(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
     if let Some(cfg) = load_slot(flash, offset) {
         return Some(cfg);
     }
@@ -139,7 +138,7 @@ pub fn load(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
     fallback
 }
 
-fn load_slot(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
+fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
     let mut buf = [0u8; REC_LEN_V5];
     flash.read(offset, &mut buf).ok()?;
     // v2plus = has default_page + units (v2+); v3plus = also the theme byte;
@@ -230,7 +229,7 @@ fn load_slot(flash: &mut FlashStorage<'_>, offset: u32) -> Option<WatchConfig> {
 /// least one loadable slot. `Ok` = the primary landed; the backup mirror is
 /// best-effort (its failure is logged, not fatal — the primary already holds
 /// the new record).
-pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
+pub fn save(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
     let res = save_slot(flash, offset, cfg);
     if res.is_ok() && save_slot(flash, offset + BACKUP_SLOT, cfg).is_err() {
         println!("[CFG] backup-slot mirror write failed (primary OK)");
@@ -238,7 +237,7 @@ pub fn save(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Res
     res
 }
 
-fn save_slot(flash: &mut FlashStorage<'_>, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
+fn save_slot(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
     let mut buf = [0u8; REC_LEN_V5];
     buf[..6].copy_from_slice(&MAGIC_V5);
     buf[6] = cfg.node_id;

@@ -225,24 +225,44 @@ async fn run(
         .map_err(|_| "partition table scan failed")?
         .ok_or("no otadata partition")?;
 
-    let current = {
-        let mut f = flash.lock().await;
-        let region = otadata.as_embedded_storage(&mut *f);
-        let mut ota = Ota::new(region, 2).map_err(|_| "otadata invalid")?;
-        ota.current_app_partition().map_err(|_| "otadata read failed")?
+    // #55: the RUNNING slot comes from the MMU (which physical flash page the
+    // CPU is executing from — `booted_partition` reads MMU entry 0), NEVER
+    // from otadata. otadata is a boot *request*, not a boot *fact*: after
+    // #50's re-partition, stale otadata still said "Ota1, Valid" while ota_1
+    // was empty — the bootloader fell back to ota_0, but the old code here
+    // (`Ota::current_app_partition`) believed otadata, picked "the other
+    // slot" = ota_0, and streamed the download over the running image
+    // (sector erase @0x152000 + replanted app-desc SHA @0x100B0 → checksum
+    // fail → boot-loop brick, zero user interaction required).
+    let booted = pt
+        .booted_partition()
+        .map_err(|_| "booted-slot probe failed")?
+        .ok_or("booted slot not in partition table")?;
+    let current = match booted.partition_type() {
+        PartitionType::App(sub) => sub,
+        _ => return Err("booted partition is not an app slot"),
     };
-    // With empty otadata (Factory) the bootloader falls back to ota_0.
     let target = match current {
         AppPartitionSubType::Ota0 | AppPartitionSubType::Factory => AppPartitionSubType::Ota1,
         AppPartitionSubType::Ota1 => AppPartitionSubType::Ota0,
         _ => return Err("unexpected boot slot"),
     };
-    println!("[OTA] current slot {current:?}, writing to {target:?}");
+    println!(
+        "[OTA] running from {current:?} @{:#x} (MMU), writing to {target:?}",
+        booted.offset()
+    );
 
     let target_entry = pt
         .find_partition(PartitionType::App(target))
         .map_err(|_| "partition table scan failed")?
         .ok_or("target ota slot missing")?;
+    // Belt and braces (#55): whatever the selection above computed, refuse
+    // outright if the write target is the partition we are executing from.
+    // (The FlashMutex's GuardedFlash range-check backstops this again at
+    // every individual write.)
+    if target_entry.offset() == booted.offset() {
+        return Err("target slot == running slot (refused)");
+    }
     let slot_size = target_entry.len() as u64;
 
     // --- HTTP GET ------------------------------------------------------------
@@ -388,7 +408,7 @@ async fn run(
 /// nothing to do (already `Valid`/`Invalid`, or a factory layout with no
 /// otadata). Never touches flash beyond the otadata select entry.
 pub fn mark_valid_if_pending(
-    flash: &mut esp_storage::FlashStorage<'_>,
+    flash: &mut impl embedded_storage::Storage,
 ) -> Result<bool, &'static str> {
     let mut pt_mem = vec![0u8; partitions::PARTITION_TABLE_MAX_LEN];
     let pt = partitions::read_partition_table(flash, &mut pt_mem)

@@ -4,6 +4,36 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **CRITICAL fix: OTA could download into the RUNNING slot and brick the watch**
+  (#55, the eldritch-lantern boot-loop). Slot selection trusted otadata
+  (`Ota::current_app_partition`) — a boot *request*, not a boot *fact*. Stale
+  otadata (left saying "ota_1, Valid" from the pre-#50 4MB layout, which cable
+  flashes never rewrite) made "the other slot" resolve to the very partition
+  the CPU was executing from; a retained push-OTA announce then triggered a
+  zero-touch self-overwrite: every 4KB chunk erase+rewrote the live image
+  (replanting the app-descriptor ELF-SHA at flash `0x100B0`) until the erase
+  of the sector holding in-use WiFi rodata (`0x152000`, download chunk 322)
+  killed the app mid read-modify-write — checksum-broken ota_0 + empty ota_1 =
+  "No bootable app partitions". Fixed by deriving the running slot from the
+  **MMU** (`PartitionTable::booted_partition` — which physical flash page the
+  CPU actually executes from; otadata is never consulted), plus a hard refusal
+  if the computed target equals the booted slot.
+- **Flash write guard** (#55, systemic): the shared `FlashMutex` now wraps a
+  `GuardedFlash` — every `Storage::write` is range-checked (sector-rounded:
+  esp-storage RMW erases whole 4KB sectors) against a deny-list holding the
+  bootloader + partition-table region and the booted app slot (both slots if
+  the boot probe fails; the whole flash if the partition table is unreadable).
+  Violations refuse + log (`[FLASH-GUARD] REFUSED …`), never touch flash. The
+  range math is the new host-tested `crates/flash-guard` (pure no_std; tests
+  include the exact incident vectors). Boot log now prints
+  `[OTA] booted from … (MMU)` alongside what otadata *requests*.
+- `tools/ota_push.sh --clear`: delete the retained OTA announce (empty
+  retained publish). A cable-flashed dev build (`OTA_BUILD=0`) accepts any
+  retained announce and zero-touch replaces itself on its next MQTT window —
+  clear the topic before bench sessions.
+
 ## [0.10.0] — 2026-07-26
 
 - **The UI loop no longer owns the radio** (#53). A dedicated `net_task` exclusively

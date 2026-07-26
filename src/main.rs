@@ -16,6 +16,7 @@
 
 mod board;
 mod drivers;
+mod guarded_flash;
 mod net;
 mod notify;
 mod peripherals;
@@ -447,14 +448,19 @@ fn log_heap(tag: &str) {
 /// so a stale `R` can never reboot-loop the watch.
 const REBOOT_DEBOUNCE_MS: u64 = 10_000;
 
-/// The one `FlashStorage`, shared between the main loop (config saves, OTA
+/// The one flash writer, shared between the main loop (config saves, OTA
 /// mark-valid) and the OTA download (#53: moving into `net_task`). An async
 /// mutex locked **per operation** — one config save, one 4 KB OTA chunk write —
 /// never across a whole download, so a config save during an OTA waits at most
 /// one sector program, and an OTA never waits on more than one save.
+///
+/// #55: the storage inside is a [`guarded_flash::GuardedFlash`], not a raw
+/// `FlashStorage` — every write is range-checked against the booted app slot
+/// and the bootloader/partition-table region, so no caller (present or
+/// future) can corrupt the running image through this mutex.
 pub type FlashMutex = embassy_sync::mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    esp_storage::FlashStorage<'static>,
+    guarded_flash::GuardedFlash,
 >;
 
 /// Persist the config record through the shared flash mutex. Returns whether
@@ -894,8 +900,14 @@ async fn main(_spawner: Spawner) -> ! {
     // === OTA foundation: report partition layout + boot slot ===
     let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
     let mut config_offset: Option<u32> = None;
+    // #55: the app slot the CPU is actually executing from (MMU probe) and
+    // both app slots' geometry, feeding the GuardedFlash deny-list below.
+    let mut booted_slot: Option<(u32, u32)> = None;
+    let mut app_slots: [Option<(u32, u32)>; 2] = [None, None];
     {
-        use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionType};
+        use esp_bootloader_esp_idf::partitions::{
+            self, AppPartitionSubType, DataPartitionSubType, PartitionType,
+        };
         let mut pt_mem = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
         match partitions::read_partition_table(&mut flash, &mut pt_mem) {
             Ok(pt) => {
@@ -905,12 +917,35 @@ async fn main(_spawner: Spawner) -> ! {
                 {
                     config_offset = Some(cp.offset());
                 }
+                for (i, sub) in [AppPartitionSubType::Ota0, AppPartitionSubType::Ota1]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Ok(Some(p)) = pt.find_partition(PartitionType::App(sub)) {
+                        app_slots[i] = Some((p.offset(), p.len()));
+                    }
+                }
+                // The booted slot per the MMU vs the slot otadata REQUESTS:
+                // they disagree whenever the bootloader fell back (#55 — stale
+                // otadata after the #50 re-partition said Ota1 while ota_1 was
+                // empty). The MMU is the fact; otadata is only a request.
+                match pt.booted_partition() {
+                    Ok(Some(bp)) => {
+                        println!(
+                            "[OTA] booted from {:?} @{:#x} (MMU)",
+                            bp.partition_type(),
+                            bp.offset()
+                        );
+                        booted_slot = Some((bp.offset(), bp.len()));
+                    }
+                    _ => println!("[OTA] booted-slot probe FAILED - protecting both app slots"),
+                }
                 match pt.find_partition(PartitionType::Data(DataPartitionSubType::Ota)) {
                     Ok(Some(od)) => {
                         let region = od.as_embedded_storage(&mut flash);
                         match esp_bootloader_esp_idf::ota::Ota::new(region, 2) {
                             Ok(mut ota) => println!(
-                                "[OTA] boot slot {:?}, state {:?}",
+                                "[OTA] otadata requests {:?}, state {:?}",
                                 ota.current_app_partition(),
                                 ota.current_ota_state()
                             ),
@@ -955,7 +990,39 @@ async fn main(_spawner: Spawner) -> ! {
         watch_cfg.node_id,
         watch_cfg.ssid.as_str()
     );
-    // Boot reads above used the raw handle; everything from here shares it.
+    // Boot reads above used the raw handle; everything from here shares it —
+    // wrapped in the #55 write guard: the bootloader + partition-table region
+    // and the slot the CPU executes from are write-protected. If the booted
+    // slot (or the whole table) couldn't be determined, protect both app
+    // slots (fail-safe: OTA refuses on its own booted check, config/otadata
+    // writes still work).
+    let flash = {
+        let mut guard = flash_guard::WriteGuard::new();
+        let mut deny = |start: u32, len: u32| {
+            if guard.deny(start, len).is_err() {
+                // Can't happen (<= 3 ranges), but never fail open silently.
+                println!("[FLASH-GUARD] deny-list full - range {start:#x}+{len:#x} DROPPED");
+            }
+        };
+        // Bootloader + partition table: nothing runtime-writes below nvs.
+        deny(0x0, 0x9000);
+        match booted_slot {
+            Some((off, len)) => deny(off, len),
+            None => {
+                let mut any = false;
+                for slot in app_slots.into_iter().flatten() {
+                    deny(slot.0, slot.1);
+                    any = true;
+                }
+                if !any {
+                    // Table unreadable: there are no known-legitimate write
+                    // targets either — deny the whole flash.
+                    deny(0x9000, u32::MAX - 0x9000);
+                }
+            }
+        }
+        guarded_flash::GuardedFlash::new(flash, guard)
+    };
     static FLASH_MUTEX: StaticCell<FlashMutex> = StaticCell::new();
     let flash: &'static FlashMutex = FLASH_MUTEX.init(embassy_sync::mutex::Mutex::new(flash));
     // SIGIL IDENTITY (#34): config node id 42 is the never-explicitly-chosen
