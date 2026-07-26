@@ -63,9 +63,9 @@ export component SoundLevel {
     // thresholds. The band sits between the title and the hero number.
     HorizontalLayout {
         x: root.bar-x;
-        y: 66px;
+        y: 96px;
         width: root.bar-w;
-        height: 72px;
+        height: 60px;
         spacing: 4px;
         for b in root.spectrum: Rectangle {
             // Faint column track so the 12 bands read even in silence.
@@ -95,7 +95,7 @@ export component SoundLevel {
     // Hero numeric readout, coloured by zone. "-inf" at the silence floor.
     Text {
         x: (parent.width - self.width) / 2;
-        y: 140px;
+        y: 162px;
         text: root.mic-dbfs <= -59.5 ? "-\u{221e}" : "\{round(root.mic-dbfs)}";
         color: root.level-color;
         font-size: 84px;
@@ -103,7 +103,7 @@ export component SoundLevel {
     }
     Text {
         x: (parent.width - self.width) / 2;
-        y: 240px;
+        y: 254px;
         text: "dBFS";
         color: Theme.dim;
         font-size: 20px;
