@@ -1354,10 +1354,19 @@ async fn main(_spawner: Spawner) -> ! {
         let touch_held = touch_int.is_low();
         let button_held = boot_button.is_low();
         // Pre-select peek at the net state (#53): the AOD arms below defer
-        // light sleep while WiFi is actively wanted (see the sleep gate), so
-        // they need the intent BEFORE the tick/sleep decision. The
-        // authoritative per-tick snapshot is re-read after the wake select.
-        let net_wanted_pre = crate::net::net_task::snapshot().wanted;
+        // light sleep while the RADIO IS BUSY, so they need the verdict
+        // BEFORE the tick/sleep decision. "Busy" is derived from the pin
+        // verdict rather than `wanted` (review F2): mesh_pin_ok is true only
+        // when the radio is up, unassociated, not connecting/scanning, with
+        // no holds and no OTA — i.e. quiescent BY CONSTRUCTION — so its
+        // negation also covers connect tails after a hold drops and scan
+        // sweeps, which `wanted` alone missed. A never-started radio is
+        // trivially quiescent. The authoritative per-tick snapshot is re-read
+        // after the wake select.
+        let net_radio_busy = {
+            let s = crate::net::net_task::snapshot();
+            s.radio_started && !s.mesh_pin_ok
+        };
 
         let tick = if touch_held || button_held {
             Duration::from_millis(16)
@@ -1368,10 +1377,10 @@ async fn main(_spawner: Spawner) -> ! {
             // debug-console builds AND BLE-on release builds skip AOD
             // light-sleep (the raise detector runs on THIS tick instead of the
             // 700ms sleep-poll), so match the sleep-poll cadence there — and
-            // so does a WiFi-wanted window (#53, sleep deferred, bounded);
+            // so does a radio-busy window (#53, sleep deferred, bounded);
             // only a sleeping release build keeps the lazy 5s (the sleep
             // block self-paces at 700ms).
-            if cfg!(feature = "debug-console") || ble_on || net_wanted_pre {
+            if cfg!(feature = "debug-console") || ble_on || net_radio_busy {
                 Duration::from_millis(700)
             } else {
                 Duration::from_secs(5)
@@ -1456,19 +1465,21 @@ async fn main(_spawner: Spawner) -> ! {
         // (same as debug-console builds). Battery tradeoff is the user's,
         // via the BLE toggle.
         //
-        // `!wanted` (#53): with the connect machine in net_task, an
-        // association attempt can now be in flight while THIS loop idles into
-        // AOD — the old inline machine made that impossible (the loop was the
-        // one connecting). Light-sleeping mid-WPA-handshake is the same
-        // hazard class as the BLE lockup above, so defer light sleep while
-        // WiFi is actively wanted; bounded (the burst gives up after 180 s,
+        // `!net_radio_busy` (#53, review F2): with the connect machine in
+        // net_task, an association attempt/scan sweep can now be in flight
+        // while THIS loop idles into AOD — the old inline machine made that
+        // impossible (the loop was the one connecting). Light-sleeping
+        // mid-WPA-handshake is the same hazard class as the BLE lockup
+        // above, so defer light sleep until the radio is quiescent by
+        // construction (pin-verdict-derived, covering connect tails and
+        // scans, not just `wanted`); bounded (the burst gives up after 180 s,
         // the idle backstop drops user intent) and the tick-idle AOD path
         // covers the meantime.
         if screen_state == 1
             && !cfg!(feature = "debug-console")
             && sleep_cal_ok
             && !ble_on
-            && !net_wanted_pre
+            && !net_radio_busy
         {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass)
             // + WRIST-RAISE wake (polling): park the HP core in light sleep
@@ -1969,11 +1980,16 @@ async fn main(_spawner: Spawner) -> ! {
                 // session holds keep the link, exactly like the old per-tick
                 // wifi_want re-raise did).
                 let turn_on = !net.wanted;
-                let _ = crate::net::net_task::send(if turn_on {
+                if !crate::net::net_task::send(if turn_on {
                     crate::net::net_task::NetCmd::Raise(crate::net::net_task::Hold::User)
                 } else {
                     crate::net::net_task::NetCmd::Drop(crate::net::net_task::Hold::User)
-                });
+                }) {
+                    // Queue full (a download in flight — review F4): re-latch
+                    // the tap; this debounced arm re-derives the direction
+                    // and retries in ~1 s instead of eating user intent.
+                    wifi_toggle_request = true;
+                }
                 println!("[WIFI] toggled -> {}", if turn_on { "ON" } else { "OFF" });
                 // Persist the WiFi INTENT (#46 wifi bit, config v5): only the
                 // USER toggle writes it — the automatic drops (NTP burst done,
@@ -2185,7 +2201,13 @@ async fn main(_spawner: Spawner) -> ! {
         // Level-reconciled BOTH ways — a bonus over v0.9.1: after a scan
         // sweep the verdict returns true and the mesh re-pins ch6 instead of
         // idling on whatever channel the sweep stopped at.
-        if net.mesh_pin_ok && !mesh_channel_pinned {
+        //
+        // FRESH read, not the tick-start `net` snapshot (review F1): the awaits
+        // above (a cfg_save flash program in the toggle arm) can park this loop
+        // while net_task processes the very Raise that just went out — pinning
+        // ch6 off a stale true here is exactly the a5a4c27 auth-frame hazard.
+        let mesh_pin_ok = crate::net::net_task::snapshot().mesh_pin_ok;
+        if mesh_pin_ok && !mesh_channel_pinned {
             match esp_now.set_channel(crate::net::smol_mesh::MESH_CHANNEL) {
                 Ok(()) => {
                     mesh_channel_pinned = true;
@@ -2197,7 +2219,7 @@ async fn main(_spawner: Spawner) -> ! {
                 Err(e) => println!("[MESH] set_channel failed: {e:?}"),
             }
         }
-        if !net.mesh_pin_ok && mesh_channel_pinned {
+        if !mesh_pin_ok && mesh_channel_pinned {
             mesh_channel_pinned = false; // rides the AP/scan channel meanwhile
         }
 
@@ -3497,12 +3519,16 @@ async fn main(_spawner: Spawner) -> ! {
                         println!("[CFG] save failed")
                     }
                     wifi_has_creds = !watch_cfg.ssid.is_empty();
-                    let _ = crate::net::net_task::send(crate::net::net_task::NetCmd::SetCreds {
+                    let sent = crate::net::net_task::send(crate::net::net_task::NetCmd::SetCreds {
                         ssid: watch_cfg.ssid.clone(),
                         pass: watch_cfg.pass.clone(),
                     });
-                    settings_connect_pending = true;
-                    net_status = 1;
+                    // Queue full (review F4): the creds ARE persisted (they
+                    // apply at next boot), but no reconnect will fire — show
+                    // "failed" honestly instead of spinning "Connecting…";
+                    // the user re-taps ✓ once the download window passes.
+                    settings_connect_pending = sent;
+                    net_status = if sent { 1 } else { 3 };
                     net_edit = NetEdit::None;
                     kb_buf.clear();
                     net_view = 0;

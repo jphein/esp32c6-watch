@@ -411,6 +411,10 @@ const OTA_WIFI_WINDOW: Duration = Duration::from_secs(45);
 const OTA_MAX_ATTEMPTS: u8 = 3;
 /// NTP retry cadence while the burst window is open (old inline machine).
 const NTP_RETRY: Duration = Duration::from_secs(10);
+/// Pace between retries of a failing `set_config` (PHY start). Rare — the
+/// call is infallible in practice — but a bare retry loop would busy-spin
+/// the executor if the radio glue ever wedges (review F6).
+const SET_CONFIG_RETRY: Duration = Duration::from_millis(500);
 
 fn backoff_for(fails: u8) -> Duration {
     let idx = (fails.saturating_sub(1) as usize).min(BACKOFF_SECS.len() - 1);
@@ -562,7 +566,10 @@ pub async fn net_task(
         // Burst give-up: a dead AP must not hold the radio hostage forever.
         if let Some(t0) = st.burst_since {
             if Instant::now().duration_since(t0) > BURST_GIVEUP {
-                println!("[NET] burst gave up (10 min) - releasing wifi intent");
+                println!(
+                    "[NET] burst gave up ({}s) - releasing wifi intent",
+                    BURST_GIVEUP.as_secs()
+                );
                 st.holds &= !(Hold::Burst.bit() | Hold::User.bit());
                 st.burst_since = None;
             }
@@ -590,16 +597,27 @@ pub async fn net_task(
                 println!("[WIFI] disconnected (new credentials)");
             }
             st.creds_dirty = !apply_station_config(&mut controller, &mut st);
+            if st.creds_dirty {
+                // set_config refused (radio glue wedged): pace the retry —
+                // an unconditional `continue` here would busy-spin the
+                // executor (review F6).
+                Timer::after(SET_CONFIG_RETRY).await;
+            }
             continue;
         }
         if st.phy_want() && !st.radio_started {
-            if !apply_station_config(&mut controller, &mut st) && st.scan_pending {
-                // Radio refused to start: fail the scan visibly instead of
-                // leaving the picker spinning.
-                st.scan_pending = false;
-                let empty = heapless::Vec::new();
-                st.scan_seq = st.scan_seq.wrapping_add(1);
-                post_scan_rows(&empty, st.scan_seq, false);
+            if !apply_station_config(&mut controller, &mut st) {
+                if st.scan_pending {
+                    // Radio refused to start: fail the scan visibly instead
+                    // of leaving the picker spinning.
+                    st.scan_pending = false;
+                    let empty = heapless::Vec::new();
+                    st.scan_seq = st.scan_seq.wrapping_add(1);
+                    post_scan_rows(&empty, st.scan_seq, false);
+                }
+                // Pace the retry (review F6): phy_want stays up, so a bare
+                // `continue` would spin on a persistently failing set_config.
+                Timer::after(SET_CONFIG_RETRY).await;
             }
             continue;
         }
