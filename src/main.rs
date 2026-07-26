@@ -1065,6 +1065,9 @@ async fn main(_spawner: Spawner) -> ! {
     power_stats.cpu_mhz = 160;
     let mut app_state = AppState::Watchface;
     let mut prev_app_state = app_state;
+    // Session manager (#31): which apps are suspended (exited with state kept),
+    // most recent first. Drives the bottom-edge-hold switcher + the badge chip.
+    let mut sessions = crate::apps::session::Sessions::new();
     let mut snake_game = SnakeGame::new();
     // World Snake shares the SMOLv1 node id so its SNK frames name us.
     let mut world_snake = WorldSnakeApp::new(node_id);
@@ -1685,6 +1688,7 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     debug_console::Inject::Home => {
                         shell.set_launcher_open(false);
+                        shell.set_switcher_open(false);
                         fb = None;
                         app_state = AppState::Watchface;
                     }
@@ -1745,7 +1749,13 @@ async fn main(_spawner: Spawner) -> ! {
             display.display_off();
             screen_state = 0;
         } else if idle_secs >= 15 && screen_state > 1 {
-            if app_state == AppState::Watchface && shell.page() == slint_shell::PAGE_CLOCK {
+            // A shell modal (switcher/shade) blocks AOD: dimming into an AOD
+            // clock OVER a modal would be dishonest — go dark like any
+            // non-clock page instead.
+            if app_state == AppState::Watchface
+                && shell.page() == slint_shell::PAGE_CLOCK
+                && !shell.modal_open()
+            {
                 display.set_brightness(0x18);
                 screen_state = 1;
                 shell.set_aod(true);
@@ -2433,6 +2443,10 @@ async fn main(_spawner: Spawner) -> ! {
                     // static "idle"/20MHz) so the power row isn't blank after a
                     // scene recreate (wisp's review — same lost-on-recreate class).
                     shell.set_lp_core("idle", 20);
+                    // Session badge (#31, same lost-on-recreate class) — this is
+                    // also what makes the chip appear right after a game exit
+                    // (the suspend happened while the scene was down).
+                    shell.set_suspended_count(sessions.len() as i32);
                     // Settings-hub state (same lost-on-recreate class): the hub
                     // reads these whenever it next opens; a fresh scene resets
                     // them all to component defaults.
@@ -3484,10 +3498,35 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     esp_hal::system::software_reset();
                 }
+                // === App switcher (#31) ===
+                // Bottom-edge HOLD (handle_touch) or the status-cluster chip
+                // queued an open: build the session cards, then raise the
+                // overlay. Cards must exist BEFORE the scrim shows.
+                if shell.req.open_switcher.take() {
+                    push_switcher(&mut shell, &sessions);
+                    shell.set_switcher_open(true);
+                }
+                // Kill-swipe on a card: drop the session (next open runs
+                // setup()) and rebuild in place — the overlay stays up (empty
+                // state if that was the last one) so a second kill doesn't
+                // need a fresh hold gesture.
+                if let Some(idx) = shell.req.switcher_kill.take() {
+                    if let Some(state) = crate::apps::registry::launch_state(idx as usize) {
+                        sessions.kill(state);
+                        println!("[SESSION] killed {state:?} ({} left)", sessions.len());
+                    }
+                    push_switcher(&mut shell, &sessions);
+                    shell.set_suspended_count(sessions.len() as i32);
+                }
+
                 if let Some(target) = shell.req.launch.take() {
                     // Launch tap-click: covered by the hoisted every-touch tick
                     // (#49) — the old per-control click here would double up.
                     shell.set_launcher_open(false);
+                    // A switcher-card resume arrives on this same cell; close
+                    // the overlay before dispatching (idempotent — the Slint
+                    // side already hard-cut it on the tap).
+                    shell.set_switcher_open(false);
                     if target == AppState::Wled {
                         // WLED is a Slint overlay, not a framebuffer app: it renders
                         // through the resident scene, so raise the overlay in place
@@ -3624,22 +3663,50 @@ async fn main(_spawner: Spawner) -> ! {
                             Some(f) => {
                                 fb = Some(f);
                                 log_heap("app enter");
-                                // Run the SAME per-app setup the old launcher arm did
-                                // (without setup the games boot into garbage).
-                                match target {
-                                    AppState::Snake => snake_game.setup(),
-                                    AppState::WorldSnake => world_snake.setup(),
-                                    AppState::Game2048 => {
-                                        let fb = fb.as_mut().unwrap();
-                                        game_2048.setup();
-                                        game_2048.render(fb);
-                                        fb.flush(&mut display);
+                                // Session manager (#31): a suspended app RESUMES —
+                                // its state struct was kept, so setup() (the reset)
+                                // is exactly what a resume must skip. Fresh
+                                // launches (never suspended, or killed from the
+                                // switcher) run the SAME per-app setup the old
+                                // launcher arm did (without it the games boot
+                                // into garbage).
+                                let resumed = sessions.take_resume(target);
+                                if !resumed {
+                                    match target {
+                                        AppState::Snake => snake_game.setup(),
+                                        AppState::WorldSnake => world_snake.setup(),
+                                        AppState::Game2048 => game_2048.setup(),
+                                        AppState::Tetris => tetris_game.setup(),
+                                        AppState::Flappy => flappy_game.setup(),
+                                        AppState::Maze => maze_game.setup(),
+                                        AppState::Settings => {}
+                                        _ => {}
                                     }
-                                    AppState::Tetris => tetris_game.setup(),
-                                    AppState::Flappy => flappy_game.setup(),
-                                    AppState::Maze => maze_game.setup(),
-                                    AppState::Settings => {}
-                                    _ => {}
+                                }
+                                // Entry frame: event-driven apps (2048 — dirty
+                                // only on a move) would sit on a black fb until
+                                // their first input. True for a fresh 2048 (the
+                                // old inline render) and for EVERY resume: the
+                                // kept state must show NOW, not after a touch.
+                                let entry: Option<&dyn App> = match target {
+                                    AppState::Game2048 => Some(&game_2048),
+                                    _ if resumed => match target {
+                                        AppState::Snake => Some(&snake_game),
+                                        AppState::WorldSnake => Some(&world_snake),
+                                        AppState::Tetris => Some(&tetris_game),
+                                        AppState::Flappy => Some(&flappy_game),
+                                        AppState::Maze => Some(&maze_game),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(app) = entry {
+                                    let fb = fb.as_mut().unwrap();
+                                    app.render(fb);
+                                    fb.flush(&mut display);
+                                }
+                                if resumed {
+                                    println!("[SESSION] resumed {target:?}");
                                 }
                                 app_state = target;
                             }
@@ -3663,15 +3730,20 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                 }
 
-                // BOOT button toggles the launcher overlay.
+                // BOOT button toggles the launcher overlay; with a shell modal
+                // (switcher/shade) up it dismisses that first — "home".
                 if boot_button.is_low() {
-                    let opening = app_state == AppState::Watchface;
-                    shell.set_launcher_open(opening);
-                    app_state = if opening {
-                        AppState::Launcher
+                    if shell.modal_open() {
+                        shell.set_switcher_open(false);
                     } else {
-                        AppState::Watchface
-                    };
+                        let opening = app_state == AppState::Watchface;
+                        shell.set_launcher_open(opening);
+                        app_state = if opening {
+                            AppState::Launcher
+                        } else {
+                            AppState::Watchface
+                        };
+                    }
                     Timer::after(Duration::from_millis(200)).await;
                 }
 
@@ -3808,6 +3880,13 @@ async fn main(_spawner: Spawner) -> ! {
                 // game now exits consistently to the launcher).
                 let boot = boot_button.is_low();
                 if exit || boot {
+                    // Session manager (#31): every fb exit SUSPENDS — the state
+                    // struct is a main-loop local and persists, so the next
+                    // open resumes mid-game unless the switcher killed it.
+                    // (Game-over screens self-reset on tap in-app, so resuming
+                    // onto one is fine.) Badge count lands via the
+                    // resume_scene re-push in the shell arm.
+                    sessions.suspend(s);
                     app_state = AppState::Launcher;
                     fb = None;
                     println!("[HEAP] app exit free: {}", esp_alloc::HEAP.free());
@@ -3870,6 +3949,24 @@ fn run_fb_app(
         *next_flush = now + Duration::from_millis(app.min_flush_ms() as u64);
     }
     (false, sfx)
+}
+
+/// Rebuild the app-switcher cards (#31) from the suspension list: registry
+/// indices, most recently suspended first. The overlay shows the first 4;
+/// the full count drives its "+N more" line.
+fn push_switcher(shell: &mut ShellUi, sessions: &crate::apps::session::Sessions) {
+    let mut rows: heapless::Vec<i32, 8> = heapless::Vec::new();
+    for st in sessions.iter() {
+        if let Some(pos) = crate::apps::registry::REGISTRY
+            .iter()
+            .position(|d| d.state == st)
+        {
+            if rows.push(pos as i32).is_err() {
+                break;
+            }
+        }
+    }
+    shell.set_switcher_cards(&rows, sessions.len());
 }
 
 /// Push the Settings-hub keyboard display state (v0.9.0 NETWORK flow). Rust

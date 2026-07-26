@@ -222,6 +222,13 @@ pub struct ShellRequests {
     pub kb_eye: Cell<bool>,
     /// Keyboard: ✓ — commit the field (SSID stage → password stage → connect).
     pub kb_done: Cell<bool>,
+    /// App switcher (#31): open request — bottom-edge HOLD (handle_touch) or
+    /// the status-cluster chip. A cell (not a direct property set) because the
+    /// main loop must build the session cards BEFORE the overlay shows.
+    pub open_switcher: Cell<bool>,
+    /// App switcher: kill-swipe on a card — the registry idx to drop. The loop
+    /// owns the session list; it kills + rebuilds the cards in place.
+    pub switcher_kill: Cell<Option<i32>>,
 }
 
 pub struct ShellUi {
@@ -246,6 +253,12 @@ pub struct ShellUi {
     /// Settings-hub NETWORK picker rows, swapped in place by set_wifi_nets
     /// (same long-lived pattern as mesh_model).
     wifi_model: Rc<VecModel<WifiNet>>,
+    /// App-switcher session cards (#31), swapped in place by
+    /// set_switcher_cards (same long-lived pattern as mesh_model).
+    switcher_model: Rc<VecModel<LauncherTile>>,
+    /// Registry idx per visible switcher slot — maps a kill-swipe's start_y
+    /// (→ slot via [`switcher_slot`]) back to the app it lands on.
+    switcher_rows: heapless::Vec<i32, SWITCHER_CARDS>,
     line_buf: Vec<Rgb565Pixel>,
     scratch: Vec<u16>,
     touch_down: bool,
@@ -269,6 +282,15 @@ pub struct ShellUi {
     hint_lit: bool,
     hint_seen_lr: bool,
     hint_seen_up: bool,
+    /// Bottom-edge HOLD tracking (#31). Armed on every press edge with the
+    /// press origin; drifting past [`HOLD_SLOP_PX`] disarms it (swipe intent).
+    /// When an armed press inside the bottom edge zone outlives [`HOLD_MS`]
+    /// on a clean watchface, the switcher-open request fires and
+    /// `hold_fired` latches so the eventual lift releases off-window and
+    /// never classifies as a tap/swipe.
+    hold_armed_at: Option<embassy_time::Instant>,
+    hold_start: (u16, u16),
+    hold_fired: bool,
 }
 
 impl ShellUi {
@@ -280,7 +302,15 @@ impl ShellUi {
         let climate_cards: Rc<VecModel<ClimateCard>> = Rc::new(VecModel::default());
         let waveform_model: Rc<VecModel<f32>> = Rc::new(VecModel::default());
         let wifi_model: Rc<VecModel<WifiNet>> = Rc::new(VecModel::default());
-        let ui = build_scene(&req, &mesh_model, &climate_cards, &waveform_model, &wifi_model);
+        let switcher_model: Rc<VecModel<LauncherTile>> = Rc::new(VecModel::default());
+        let ui = build_scene(
+            &req,
+            &mesh_model,
+            &climate_cards,
+            &waveform_model,
+            &wifi_model,
+            &switcher_model,
+        );
         // First frame under ReusedBuffer must be a full paint (the panel just
         // showed fill_screen(BLACK); the renderer has no prior frame to diff
         // against). Slint already dirties everything on first show, but request it
@@ -295,6 +325,8 @@ impl ShellUi {
             climate_cards,
             waveform_model,
             wifi_model,
+            switcher_model,
+            switcher_rows: heapless::Vec::new(),
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
             touch_down: false,
@@ -306,6 +338,9 @@ impl ShellUi {
             hint_lit: false,
             hint_seen_lr: false,
             hint_seen_up: false,
+            hold_armed_at: None,
+            hold_start: (0, 0),
+            hold_fired: false,
         }
     }
 
@@ -337,6 +372,7 @@ impl ShellUi {
             &self.climate_cards,
             &self.waveform_model,
             &self.wifi_model,
+            &self.switcher_model,
         );
         ui.set_current_page(self.saved_page);
         // A fresh scene resets the Theme global to scheme 0; restore the active
@@ -376,11 +412,33 @@ impl ShellUi {
             let event = if self.touch_down {
                 WindowEvent::PointerMoved { position: pos }
             } else {
+                // Press edge: arm the bottom-edge HOLD detector (#31).
+                self.hold_armed_at = Some(embassy_time::Instant::now());
+                self.hold_start = (tp.x, tp.y);
+                self.hold_fired = false;
                 WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left }
             };
             self.touch_down = true;
             self.last_pos = pos;
             let _ = self.window.window().try_dispatch_event(event);
+            // Bottom-edge HOLD (#31): drift past the slop disarms (that's a
+            // swipe forming); a still press inside the edge zone that outlives
+            // HOLD_MS on a clean watchface requests the app switcher. Fires at
+            // most once per touch (`hold_fired` latch), and the finger is
+            // still down when it fires — the lift is swallowed below.
+            if let Some(t0) = self.hold_armed_at {
+                let drift = (tp.x.abs_diff(self.hold_start.0))
+                    .max(tp.y.abs_diff(self.hold_start.1));
+                if drift > HOLD_SLOP_PX {
+                    self.hold_armed_at = None;
+                } else if t0.elapsed().as_millis() >= HOLD_MS {
+                    self.hold_armed_at = None;
+                    if self.hold_start.1 >= EDGE_BOTTOM_Y && shell_clean(ui) {
+                        self.hold_fired = true;
+                        self.req.open_switcher.set(true);
+                    }
+                }
+            }
         } else if self.touch_down {
             self.touch_down = false;
             // touch.poll() reports the concluding swipe in the SAME iteration
@@ -405,8 +463,13 @@ impl ShellUi {
             // vertical swipe in the paged launcher is a page FLIP — navigation —
             // so the off-window release below correctly suppresses a stray tile
             // click at the lift point.)
-            let directional = matches!(swipe, Some(d) if d != SwipeDirection::Tap)
-                && !slider_drag;
+            // A fired edge-hold (#31) also releases off-window: the switcher
+            // just opened under the finger, and the lift must not click the
+            // card that happens to sit at the hold point.
+            let directional = (matches!(swipe, Some(d) if d != SwipeDirection::Tap)
+                && !slider_drag)
+                || self.hold_fired;
+            self.hold_armed_at = None;
             let release_pos = if directional {
                 let off = slint::LogicalPosition::new(-1.0, -1.0);
                 let _ = self
@@ -421,6 +484,13 @@ impl ShellUi {
                 position: release_pos,
                 button: PointerEventButton::Left,
             });
+        }
+
+        // A fired edge-hold consumed this whole touch (#31): the concluding
+        // lift must not also classify as a tap/swipe against the switcher.
+        if self.hold_fired && point.is_none() {
+            self.hold_fired = false;
+            return;
         }
 
         if let Some(direction) = swipe {
@@ -471,6 +541,26 @@ impl ShellUi {
                     }
                     return;
                 }
+            }
+            // App switcher (#31, not a registry app): swallows nav swipes.
+            // Up starting ON a card kills that session — via a request cell,
+            // the loop owns the session list and rebuilds the cards in place.
+            // Right (the universal close) or Down ("push it back down") closes.
+            if ui.get_switcher_open() {
+                match direction {
+                    SwipeDirection::Right | SwipeDirection::Down => {
+                        ui.set_switcher_open(false)
+                    }
+                    SwipeDirection::Up => {
+                        if let Some(slot) = switcher_slot(swipe_start_y) {
+                            if let Some(&idx) = self.switcher_rows.get(slot) {
+                                self.req.switcher_kill.set(Some(idx));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
             }
             // Launcher overlay next (not a registry app): it swallows nav swipes
             // wherever they start (including the power page's slider band).
@@ -1119,6 +1209,60 @@ impl ShellUi {
         ui.set_kb_plain(plain);
     }
 
+    // === App switcher (#31) ===
+
+    /// Raise/lower the app switcher. Opening retires a running hint window —
+    /// the strips must not shimmer under the scrim (launcher idiom).
+    pub fn set_switcher_open(&mut self, open: bool) {
+        if open {
+            self.hints_cancel();
+        }
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_switcher_open(open);
+    }
+
+    /// True while a shell-level modal (the app switcher) is up. main.rs gates
+    /// AOD entry on it: dimming into AOD over a modal would be dishonest —
+    /// idle with a modal up goes dark like any non-clock page.
+    pub fn modal_open(&self) -> bool {
+        self.ui
+            .as_ref()
+            .is_some_and(|ui| ui.get_switcher_open())
+    }
+
+    /// Suspended-session count → the watchface status-cluster chip
+    /// (0 hides it). Re-pushed by main.rs after a scene recreate.
+    pub fn set_suspended_count(&self, n: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_suspended_count(n);
+    }
+
+    /// Push the switcher cards: `reg_indices` are app-registry positions,
+    /// most recently suspended first (only the first [`SWITCHER_CARDS`] are
+    /// shown); `total` is the full suspension count (the "+N more" line).
+    /// The slot→idx map is kept for the kill-swipe's start_y lookup.
+    pub fn set_switcher_cards(&mut self, reg_indices: &[i32], total: usize) {
+        use crate::apps::registry::REGISTRY;
+        self.switcher_rows.clear();
+        let mut tiles: Vec<LauncherTile> = Vec::new();
+        for &i in reg_indices.iter().take(SWITCHER_CARDS) {
+            let Some(d) = REGISTRY.get(i as usize) else {
+                continue;
+            };
+            let _ = self.switcher_rows.push(i);
+            tiles.push(LauncherTile {
+                name: SharedString::from(d.name),
+                accent: color_from_rgb(d.accent),
+                icon_id: d.icon_id as i32,
+                idx: i,
+                present: true,
+            });
+        }
+        self.switcher_model.set_vec(tiles);
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_switcher_count(total as i32);
+    }
+
     /// SoundLevel meter (#28): current dBFS + peak-hold, both in [-60, 0].
     pub fn set_mic_level(&self, dbfs: f32, peak: f32) {
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -1248,6 +1392,7 @@ fn build_scene(
     climate_cards: &Rc<VecModel<ClimateCard>>,
     waveform_model: &Rc<VecModel<f32>>,
     wifi_model: &Rc<VecModel<WifiNet>>,
+    switcher_model: &Rc<VecModel<LauncherTile>>,
 ) -> WatchShell {
     let ui = WatchShell::new().expect("failed to create WatchShell");
     {
@@ -1361,6 +1506,20 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_kb_done(move || r.kb_done.set(true));
+
+        // App switcher (#31): the status-cluster chip opens it (same cell as
+        // the edge-hold — the loop builds the cards first); a card tap resumes
+        // through the SAME launch cell as a launcher tile, so the suspend-
+        // aware launch path is the single dispatch spot.
+        let r = req.clone();
+        ui.on_open_switcher(move || r.open_switcher.set(true));
+
+        let r = req.clone();
+        ui.on_switcher_resume(move |idx| {
+            if let Some(app) = crate::apps::registry::launch_state(idx as usize) {
+                r.launch.set(Some(app));
+            }
+        });
     }
     {
         // Theme picker: the tile already set Theme.scheme (instant preview); this
@@ -1372,6 +1531,7 @@ fn build_scene(
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
     ui.set_mic_waveform(ModelRc::from(waveform_model.clone()));
     ui.set_wifi_nets(ModelRc::from(wifi_model.clone()));
+    ui.set_switcher_tiles(ModelRc::from(switcher_model.clone()));
     // Launcher pages are built once from the app registry (single source of
     // truth) — static per boot, so plain VecModels the scene owns are enough.
     // (The old Flickable + content-height plumbing is gone with the paged
@@ -1435,6 +1595,25 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
 /// 0xRRGGBB -> Slint opaque color.
 fn color_from_rgb(rgb: u32) -> slint::Color {
     slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// True when nothing is stacked over the watchface pages. The edge-hold
+/// switcher gesture (#31) only arms here — the launcher, the Settings hub,
+/// every registry overlay, and the switcher itself own their gestures.
+fn shell_clean(ui: &WatchShell) -> bool {
+    !ui.get_launcher_open()
+        && !ui.get_settings_open()
+        && !ui.get_switcher_open()
+        && !OVERLAYS.iter().any(|o| (o.is_open)(ui))
+}
+
+/// Map a kill-swipe's `start_y` onto a switcher card slot (fixed geometry —
+/// see the SWITCHER_CARD_* constants and ui/slint/switcher.slint). `None`
+/// when the swipe started in a gutter or off the card stack.
+fn switcher_slot(start_y: u16) -> Option<usize> {
+    let rel = start_y.checked_sub(SWITCHER_CARD_TOP)?;
+    let slot = (rel / SWITCHER_CARD_PITCH) as usize;
+    (rel % SWITCHER_CARD_PITCH < SWITCHER_CARD_H && slot < SWITCHER_CARDS).then_some(slot)
 }
 
 /// True when a swipe starting at `start_y` grabbed the Settings hub's

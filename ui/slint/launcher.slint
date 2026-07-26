@@ -32,8 +32,10 @@ export struct LauncherTile {
     present: bool,
 }
 
-// A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS order.
-component AppIcon {
+// A per-app vector glyph, ~46x46, drawn in `tint`. id matches LAUNCHER_APPS
+// order. Exported: the app switcher (#31, switcher.slint) renders its session
+// cards with the same glyphs, so an app looks identical in both surfaces.
+export component AppIcon {
     in property <int> id;
     in property <color> tint;
     width: 46px;

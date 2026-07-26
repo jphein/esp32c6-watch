@@ -15,6 +15,7 @@ import { VoicePage } from "voice.slint";
 import { SoundLevel } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { SettingsHub } from "settings.slint";
+import { SwitcherOverlay } from "switcher.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -185,6 +186,13 @@ export component WatchShell inherits Window {
     // destroy — on the loop's render clock; Slint only draws. `hint-sides` /
     // `hint-up` gate the conditional edge strips below (zero cost when hidden:
     // the elements don't exist), `hints-lit` drives their opacity tween.
+    // App switcher (#31): bottom-edge HOLD overlay. Cards ride the launcher's
+    // LauncherTile struct (glyph/name/accent/registry idx), built by Rust from
+    // the session list; `suspended-count` drives the status-cluster chip.
+    in-out property <bool> switcher-open: false;
+    in property <[LauncherTile]> switcher-tiles: [];
+    in property <int> switcher-count: 0;
+    in property <int> suspended-count: 0;
     in property <bool> hint-sides: false;
     in property <bool> hint-up: false;
     in property <bool> hints-lit: false;
@@ -227,6 +235,10 @@ export component WatchShell inherits Window {
     callback kb-bksp-up();
     callback kb-eye();             // show/hide password
     callback kb-done();            // commit field (SSID → password → connect)
+    // App switcher (#31): chip tap → Rust builds cards, raises the overlay;
+    // card tap → resume via the launcher's launch cell (registry idx).
+    callback open-switcher();
+    callback switcher-resume(int);
 
     in-out property <float> brightness: 0.8;
 
@@ -478,6 +490,40 @@ export component WatchShell inherits Window {
         }
     }
 
+    // ==================== status cluster (#31/#32) ====================
+    // ONE corner spot for shell badges — top-right, tucked under the battery
+    // pill (the only chrome-free corner strip; #32's unread chip joins this
+    // row). Theme-tokened; AOD-excluded (gated, and the AOD overlay paints
+    // over the chrome anyway). The chip is a tappable shortcut: Recipe B
+    // halo, opens the switcher.
+    if root.suspended-count > 0 && !root.aod: susp-chip := IconButton {
+        x: parent.width - self.width - Theme.safe-corner;
+        y: 64px;
+        width: 58px;
+        height: 30px;
+        clicked => { root.open-switcher(); }
+        // Stacked-cards glyph — "something's put away back there".
+        Rectangle {
+            x: 10px; y: 11px; width: 15px; height: 11px; border-radius: 3px;
+            border-width: 1px;
+            border-color: susp-chip.pressed ? Theme.accent : Theme.dim;
+        }
+        Rectangle {
+            x: 14px; y: 7px; width: 15px; height: 11px; border-radius: 3px;
+            border-width: 1px;
+            border-color: susp-chip.pressed ? Theme.accent : Theme.soft;
+            background: Theme.panel;
+        }
+        Text {
+            x: 36px;
+            y: (parent.height - self.height) / 2;
+            text: "\{root.suspended-count}";
+            color: susp-chip.pressed ? Theme.accent : Theme.soft;
+            font-size: 15px;
+            font-weight: 600;
+        }
+    }
+
     // Toast (RAM-busy etc.): visible while toast-text != ""
     if root.toast-text != "": Rectangle {
         x: (parent.width - self.width) / 2;
@@ -650,6 +696,21 @@ export component WatchShell inherits Window {
         kb-bksp-up => { root.kb-bksp-up(); }
         kb-eye => { root.kb-eye(); }
         kb-done => { root.kb-done(); }
+    }
+
+    // ==================== App switcher (#31) ====================
+    // Bottom-edge HOLD overlay. `resume` also closes it locally for an
+    // instant hard-cut; the launch drain in main.rs closes it again
+    // idempotently before dispatching the app.
+    if root.switcher-open: SwitcherOverlay {
+        width: 100%; height: 100%;
+        tiles: root.switcher-tiles;
+        count: root.switcher-count;
+        resume(i) => {
+            root.switcher-open = false;
+            root.switcher-resume(i);
+        }
+        close => { root.switcher-open = false; }
     }
 
     // ==================== AOD overlay ====================
