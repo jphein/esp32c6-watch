@@ -4,7 +4,82 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.12.0] — 2026-07-26
+
+- **The unmissable ping** (#58) — three upgrades to the #35 receiver. The chime is now a
+  four-note rising **major arpeggio** (C5→E5→G5→C6, ~480 ms, soft 8 ms attack and
+  exponential decay per note, legato overlap, the top C6 held as the arrival), host-tested
+  for pop-free edges, bounded level, and strictly-rising note *order* by per-note
+  zero-crossing rate. It plays on receive regardless of screen state. The pulse now lands
+  over **framebuffer games** too: a ping suspends the running app through #31's session
+  path (state preserved), frees the ~51 KB framebuffer, resumes the Slint scene so the
+  pulse can composite — and on dismiss re-launches the app exactly where it was. A fully
+  off panel now wakes to the pulse as well, not just AOD/dim. And **every** received ping
+  logs an RTC-stamped shade card, whose timestamped body keeps distinct pings from being
+  swallowed by notify's consecutive-duplicate suppression, so there's a persistent record
+  after the pulse auto-dismisses.
+- **Volume and mappable buttons** (#59), persisted in one config extension — **v6**
+  (`SWCFG6`, 118 B): a volume byte (0–15 level plus a mute bit) and four button-map bytes
+  (BOOT/PWRON × short/long → `ButtonAction`, one of none / volume up / volume down / mute /
+  power menu / shutdown / launcher / ping / voice). v1–v5 records load with defaults and
+  the first save rewrites v6. Volume applies to **all** codec playback — the master
+  register is set at boot and on every change, and re-applied after unmute, so every
+  chime, beep, click and touch tick honours the level. A **volume HUD** overlay appears on
+  any change and auto-dismisses after ~2 s (dragging re-arms it). Button dispatch is a
+  single pending-action path fed by a BOOT press state machine (600 ms long threshold —
+  long fires while held, short on release) plus the PWRON poll, with one deliberate
+  nuance: a short press acts **only** if the screen was already bright, so a press in the
+  dark just wakes the watch. Long always acts after waking, preserving #48's
+  hold → power menu. Leaving a game via a mapped action suspends the session first.
+- **Climate and Energy are live again** (#60) — and the root cause was not what it looked
+  like. The firmware reads *retained MQTT*, but the deployed HA component served HTTP only
+  and the old Node-RED MQTT bridge had been retired, so `watch/climate/+/state`,
+  `watch/climate/roster`, `watch/energy/state` and `watch/energy/avail` were simply empty
+  on the broker. Deploy verification then exposed the deeper reason they stayed empty:
+  `media_player.py` imported `homeassistant.helpers.device_info`, a module removed in
+  modern HA, so a `ModuleNotFoundError` was thrown *during entry setup* — the HTTP site
+  starts before that line, which is why `/watch/*` answered and looked healthy, while
+  everything after it never ran. Fixed by importing `DeviceInfo` from its modern home in
+  `device_registry` (with a fallback for older HA), which also **restored the
+  `media_player` speaker entity**, and by starting the MQTT bridge *before* forwarding the
+  media_player platform so the data path can never again be taken down by a secondary
+  platform's import break. Component **v0.3.0** now republishes the same data the HTTP
+  endpoints compute onto the retained topics the parser reads, and subscribes to
+  `watch/climate/+/set` so a watch-side command runs the same dispatch as the HTTP POST
+  (retained deliveries ignored, so a stale command can't replay). Verified on live HA:
+  all four topic families populate retained, energy live-updates, and a watch→HA command
+  is processed cleanly with zero component errors — **no firmware reflash needed**.
+
+## [0.11.0] — 2026-07-26
+
+- **Press-once voice** (#22): a PTT press before WiFi/DHCP was ready used to show
+  "Connecting…" and *drop* the press — press-twice UX, and the common case on a
+  time-shared radio. An early press now latches and auto-fires the capture through the
+  **same** entry path as a real press once the link lands (a fresh hold resets the
+  backoff, so the first attempt is immediate). Releasing while it waits cancels, on a
+  3-read debounce of the authoritative I²C finger count — the INT pin lies about still
+  fingers — so the latch dies within ~300 ms of a lift and can never survive into
+  dim/AOD, and a transient I²C miss defers the fire one tick rather than producing a
+  junk capture. A 30 s window then reports "WiFi failed". `StackResources` 4 → 5 for
+  the burst + STT socket overlap.
+- **Watch-to-watch ping** (#35) — the fleet greets by name. Additive SMOLv1 mesh frames
+  (`PING` broadcast, `PINGACK` unicast confirm, ACKed at the protocol level on the
+  HELLO→ACK idiom, flagged for smol upstreaming, #36). The plugin is a 200 px hero
+  reading "PING <sigil>" when the peer is live from HELLOs, with delivery confirmation,
+  an honest 2 s no-reply timeout, a 3 s cooldown, and a hint to enable MESH when it's
+  off. The receiver wakes AOD/dim to bright, blooms a full-screen accent-ring pulse
+  carrying the sender's sigil, and plays a ~300 ms rising E5→B5 two-tone chime; with the
+  panel fully off or a game holding the framebuffer it gets the chime plus a shade card.
+- `mythic-throne` took this release **over the air, zero-touch** — the first such
+  self-update since the v0.10.1 flash-safety fix, and the payoff for #53's net_task,
+  #55's slot guard and #57's roaming landing together. (The genuine first was v0.8.4:
+  pre-#50, otadata still resolved correctly and zero-touch worked — #55 only turned
+  fatal once #50 moved the slots.)
+- Image 4.26 MB with a 2.0 MB slot margin (#50's grow paying off); stack 63 KB.
+
+## [0.10.1] — 2026-07-26
+
+**The safety release.**
 
 - **CRITICAL fix: OTA could download into the RUNNING slot and brick the watch**
   (#55, the eldritch-lantern boot-loop). Slot selection trusted otadata
@@ -33,6 +108,30 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
   retained publish). A cable-flashed dev build (`OTA_BUILD=0`) accepts any
   retained announce and zero-touch replaces itself on its next MQTT window —
   clear the topic before bench sessions.
+
+- **Overlays swallow taps** (#54): a shared `OverlaySwallow` seals 13 overlays so the
+  chrome beneath is never hit-testable.
+- **Multi-pass WiFi scan** (#56): esp-radio 0.18 fixes the active dwell at
+  10–20 ms/channel, shorter than a ~100 ms beacon interval, so a single-pass sweep
+  misses APs that are actually present. Each channel is now swept twice and merged,
+  strongest RSSI winning. Picker visibility only.
+- **Firmware WiFi roaming** (#57 — shipped as `v0.10.1-roam`). esp-radio has no
+  802.11r FT: the config struct carries zero FT/MDE fields, so it always negotiates
+  plain WPA2-PSK — FT was never the cause of anything here. The real problem is that
+  its default connect uses `WIFI_FAST_SCAN`, which associates with the **first**
+  SSID-matching AP it hears (`sort_method` is ignored in fast-scan) — routinely a
+  distant BSSID whose weak-link 4-way handshake times out while a strong AP sits beside
+  you, in a house running one roaming SSID across 12 APs. The watch now roams in
+  firmware, entirely watch-side with no AP changes: a targeted SSID-filtered multi-pass
+  candidate scan pins the strongest BSSID explicitly; a pin that fails twice falls back
+  to one driver-side full-scan select and re-scans, so a vanished BSSID can't wedge the
+  connect; and while connected it samples RSSI every 2 s, reassociating when it holds at
+  ≤ −75 dBm for ~8 s and a candidate is ≥ 12 dB better. On glass:
+  `AuthenticationExpired` → 0.
+- **The two-day WiFi outage is resolved — and it was never one thing.** A USB3 hub
+  jamming 2.4 GHz (unplugged), esp-radio's fast-scan grabbing a far BSSID (#57 above),
+  and a loose antenna on `mythic-throne` (reseated). The jamming half had no firmware
+  cause; that fix was physical.
 
 ## [0.10.0] — 2026-07-26
 
@@ -77,11 +176,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [0.9.1] — 2026-07-25
 
-- **Mesh channel-pin yields to WiFi** — the ch6 ESP-NOW pin fired between
-  association attempts (only an OTA-pending update suppressed it), dropping auth
-  frames on other channels: `AuthenticationExpired` at -61 dBm and single-network
-  scans on any watch with MESH persisted on. The pin now yields whenever
-  `wifi_on_request` is raised.
+- **Mesh channel-pin yields to WiFi** — the ch6 ESP-NOW pin was firing between
+  association attempts (only an OTA-pending update suppressed it), so it could steal
+  the radio from a WiFi connect already in progress. The pin now yields whenever
+  `wifi_on_request` is raised. A correctness fix that stands on its own.
+  > **Corrected in v0.10.1:** this entry originally credited the pin with the
+  > `AuthenticationExpired`-at-good-RSSI failures and single-network scans seen on
+  > `mythic-throne`. That diagnosis was wrong. Those came from esp-radio's fast-scan
+  > associating with a distant BSSID (#57), a USB3 hub jamming 2.4 GHz, and a loose
+  > antenna — see [0.10.1]. The pin change was real, but it never explained the outage.
 - The `[MESH] up as node id042` log was a hardcoded string — the mesh had been
   running with the arbitrated sigil id all along; it now prints the real one.
 

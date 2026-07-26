@@ -991,8 +991,19 @@ async fn main(_spawner: Spawner) -> ! {
     // In esp-radio 0.18 `set_config` is what starts the controller, so we
     // build the station config here but only apply it on the first toggle.
     log_heap("pre-wifi"); // per-region heap right before the WiFi stack inits
+    // #61 WiFi-blob null-deref in `ppRxFragmentProc` (Load access fault,
+    // mtval=4). That blob routine is RX aggregation/fragment reassembly, hit
+    // during scan/assoc. Disable RX AMPDU so received frames bypass the
+    // block-ack reorder path the blob null-derefs in. This is a *runtime*
+    // knob (wifi_init_config_t.ampdu_rx_enable = 0) — the sys blob is still
+    // compiled WITH AMPDU capability (esp-radio's lib.rs const-asserts
+    // CONFIG_ESP_WIFI_AMPDU_RX_ENABLED == 1), we just don't enable it for
+    // our session. Throughput loss is irrelevant on a watch. NOTE: esp-radio
+    // 0.18's ControllerConfig exposes NO amsdu_rx / raw-802.11-fragment knob;
+    // `ampdu_rx_enable` is the only RX-aggregation lever the init API has.
+    let wifi_config = esp_radio::wifi::ControllerConfig::default().with_ampdu_rx_enable(false);
     let (wifi_controller, wifi_interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default()).expect("WiFi init failed");
+        esp_radio::wifi::new(peripherals.WIFI, wifi_config).expect("WiFi init failed");
     log_heap("post-wifi"); // confirms the RX-pool carve isn't starving a region
     let ble_connector =
         BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
