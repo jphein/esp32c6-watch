@@ -824,7 +824,7 @@ def _image_from(path: Path, tmpdir: str) -> tuple[Path | None, str]:
     if magic != b"\x7fELF":
         return path, "bin"
     out = Path(tmpdir) / (path.stem + ".bin")
-    p = espflash("save-image", "--chip", "esp32c6", "--partition-table", str(PARTITIONS_CSV), str(path), str(out),
+    p = espflash("save-image", "--chip", "esp32c6", "--flash-size", "16mb", "--partition-table", str(PARTITIONS_CSV), str(path), str(out),
                  timeout=120)
     if p.returncode != 0:
         say(f"watchctl: espflash save-image failed: "
