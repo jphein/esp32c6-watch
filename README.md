@@ -177,7 +177,6 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 
 ### 🧭 Gesture shell & UI
 
-- [#59](https://github.com/jphein/esp32c6-watch/issues/59) — **Button volume + touch HUD + button remapping** *(shipped in v0.12.0 — issue awaiting close)*
 - [#28](https://github.com/jphein/esp32c6-watch/issues/28) — AOD pixel-shift (burn-in) + typography token sweep
 - [#45](https://github.com/jphein/esp32c6-watch/issues/45) — **Face Manager**: long-press the clock to pick faces, reorder/add/remove carousel pages
 - [#52](https://github.com/jphein/esp32c6-watch/issues/52) — **Complication Manager**: editable watchface slots rendering any plugin or system surface (builds on [#45](https://github.com/jphein/esp32c6-watch/issues/45))
@@ -196,7 +195,6 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 
 ### ⌚⌚ Fleet (two watches)
 
-- [#58](https://github.com/jphein/esp32c6-watch/issues/58) — **Unmissable ping**: arpeggio chime, pops over framebuffer games, always logged *(shipped in v0.12.0 — issue awaiting close)*
 - [#37](https://github.com/jphein/esp32c6-watch/issues/37) — **Super Find**: multi-radio watch finder (mesh + BLE + HA + WiFi + 802.15.4 + LoRa fusion, Find-My scream mode)
 - [#38](https://github.com/jphein/esp32c6-watch/issues/38) — **Meshtastic BLE client**: GPS, LoRa messaging, nodes list
 - [#36](https://github.com/jphein/esp32c6-watch/issues/36) — *Epic:* smol parity — peer-sourced mesh OTA, RELAY/CFG downlink, mesh multiplayer games
