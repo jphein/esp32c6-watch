@@ -16,6 +16,7 @@ import { SoundLevel } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { SettingsHub } from "settings.slint";
 import { SwitcherOverlay } from "switcher.slint";
+import { ShadeOverlay, NotifCard } from "shade.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -23,7 +24,9 @@ import { SwitcherOverlay } from "switcher.slint";
 // and pushes them into `launcher-tiles` (page-major, 9 slots per page).
 // `Theme` is re-exported too so Rust can drive the scheme selector via
 // `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
-export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet }
+// NotifCard rides along for the same reason (slint_shell.rs builds the
+// notification-shade rows from the Rust ring).
+export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet, NotifCard }
 
 export component WatchShell inherits Window {
     width: 410px;
@@ -193,8 +196,16 @@ export component WatchShell inherits Window {
     in property <[LauncherTile]> switcher-tiles: [];
     in property <int> switcher-count: 0;
     in property <int> suspended-count: 0;
+    // Notification shade (#32): top-edge swipe-down overlay. Cards built by
+    // Rust from the bounded ring; `notif-unread` drives the status-cluster
+    // chip, `notif-total` the shade's footer counts.
+    in-out property <bool> shade-open: false;
+    in property <[NotifCard]> notif-cards: [];
+    in property <int> notif-total: 0;
+    in property <int> notif-unread: 0;
     in property <bool> hint-sides: false;
     in property <bool> hint-up: false;
+    in property <bool> hint-down: false;
     in property <bool> hints-lit: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
@@ -239,6 +250,11 @@ export component WatchShell inherits Window {
     // card tap → resume via the launcher's launch cell (registry idx).
     callback open-switcher();
     callback switcher-resume(int);
+    // Notification shade (#32): chip tap → Rust builds cards + clears the
+    // badge, raises the overlay; X/CLEAR ALL → ring edits in the loop.
+    callback open-shade();
+    callback notif-dismiss(int);
+    callback notif-clear();
 
     in-out property <float> brightness: 0.8;
 
@@ -406,6 +422,26 @@ export component WatchShell inherits Window {
         }
     }
 
+    // Top edge: edge-swipe down → notification shade (#32). Mirror of the
+    // bottom handle, hugging the top bezel above the radio dots' visible
+    // row (~y38); the echo "descends" toward the content.
+    if root.hint-down && !root.aod && !root.launcher-open: Rectangle {
+        x: (parent.width - self.width) / 2; y: 2px;
+        width: 104px; height: 26px;
+        opacity: root.hints-lit ? 1.0 : 0.0;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        Rectangle { // the handle
+            x: (parent.width - self.width) / 2; y: 7px;
+            width: 84px; height: 5px; border-radius: 2.5px;
+            background: Theme.accent.with-alpha(0.9);
+        }
+        Rectangle { // echo — narrower and fainter, "descending"
+            x: (parent.width - self.width) / 2; y: 17px;
+            width: 48px; height: 4px; border-radius: 2px;
+            background: Theme.accent2.with-alpha(0.5);
+        }
+    }
+
     // ==================== persistent chrome ====================
     // Top status row. RadioDots are BIG 78x64 tap targets placed at y8 (their
     // visible dot+label sit ~30px in, aligning at ~y38-52 with the battery
@@ -519,6 +555,29 @@ export component WatchShell inherits Window {
             y: (parent.height - self.height) / 2;
             text: "\{root.suspended-count}";
             color: susp-chip.pressed ? Theme.accent : Theme.soft;
+            font-size: 15px;
+            font-weight: 600;
+        }
+    }
+
+    // Unread notifications chip (#32): warm dot + count, left of the
+    // suspended chip when both show — one cluster row. Tap opens the shade.
+    if root.notif-unread > 0 && !root.aod: unread-chip := IconButton {
+        x: parent.width - self.width - Theme.safe-corner
+            - (root.suspended-count > 0 ? 62px : 0px);
+        y: 64px;
+        width: 54px;
+        height: 30px;
+        clicked => { root.open-shade(); }
+        Rectangle {
+            x: 11px; y: 9px; width: 12px; height: 12px; border-radius: 6px;
+            background: unread-chip.pressed ? Theme.accent : Theme.warm;
+        }
+        Text {
+            x: 31px;
+            y: (parent.height - self.height) / 2;
+            text: "\{root.notif-unread}";
+            color: unread-chip.pressed ? Theme.accent : Theme.soft;
             font-size: 15px;
             font-weight: 600;
         }
@@ -711,6 +770,16 @@ export component WatchShell inherits Window {
             root.switcher-resume(i);
         }
         close => { root.switcher-open = false; }
+    }
+
+    // ==================== Notification shade (#32) ====================
+    if root.shade-open: ShadeOverlay {
+        width: 100%; height: 100%;
+        cards: root.notif-cards;
+        total: root.notif-total;
+        dismiss(i) => { root.notif-dismiss(i); }
+        clear-all => { root.notif-clear(); }
+        close => { root.shade-open = false; }
     }
 
     // ==================== AOD overlay ====================
