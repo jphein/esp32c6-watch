@@ -7,6 +7,12 @@
 #                                      # per-watch topic watch/<sigil>/ota (#34)
 #                                      # e.g. --target eldritch-lantern
 #                                      # (combines with --announce-only)
+#   tools/ota_push.sh --clear          # REMOVE the retained announce (empty
+#                                      # retained publish). Use before bench
+#                                      # sessions with cable-flashed dev builds
+#                                      # (OTA_BUILD=0 accepts ANY announce and
+#                                      # zero-touch replaces your build — #55).
+#                                      # (combines with --target)
 #
 # Flow (see docs/ota-deploy.md "Push OTA"):
 #   1. Stamp OTA_BUILD=<unix-seconds> into .cargo/config.toml [env] (gitignored)
@@ -40,12 +46,14 @@ BROKER_PORT="${MQTT_BROKER##*:}"
 
 OTA_DEST="ubox0:/home/jp/watch-ota/watch.bin"
 
-# --- args: --announce-only, --target <sigil> ---------------------------------
+# --- args: --announce-only, --clear, --target <sigil> ------------------------
 ANNOUNCE_ONLY=0
+CLEAR=0
 TARGET=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --announce-only) ANNOUNCE_ONLY=1 ;;
+        --clear) CLEAR=1 ;;
         --target)
             TARGET="${2:-}"
             [ -n "$TARGET" ] || { echo "ota_push: --target needs a sigil (e.g. eldritch-lantern)" >&2; exit 2; }
@@ -63,6 +71,17 @@ ANNOUNCE_TOPIC="watch/ota/announce"
 if [ -n "$TARGET" ]; then
     ANNOUNCE_TOPIC="watch/$TARGET/ota"
     echo "ota_push: targeting ONE watch: $TARGET ($ANNOUNCE_TOPIC)"
+fi
+
+if [ "$CLEAR" = 1 ]; then
+    # Empty retained publish deletes the retained announce; the firmware's
+    # handle_announce treats an empty payload as a retained-clear, not an
+    # announce. (Same ubox0 publish path as below — see that comment.)
+    ssh ubox0 "mosquitto_pub -h '$BROKER_HOST' -p '$BROKER_PORT' \
+        ${MQTT_USER:+-u '$MQTT_USER'} ${MQTT_PASS:+-P '$MQTT_PASS'} \
+        -r -n -t '$ANNOUNCE_TOPIC'"
+    echo "ota_push: retained announce CLEARED on $ANNOUNCE_TOPIC"
+    exit 0
 fi
 
 if [ "$ANNOUNCE_ONLY" = 1 ]; then
@@ -109,7 +128,13 @@ fi
 
 # 5. RETAINED announce: the watch triggers only if <epoch> > its running
 #    OTA_BUILD (monotonic gate), so re-announces and the post-reboot retained
-#    copy are harmless.
+#    copy are harmless FOR STAMPED BUILDS. A cable-flashed dev build
+#    (OTA_BUILD=0) accepts any retained announce and zero-touch replaces
+#    itself on its next MQTT window — run `tools/ota_push.sh --clear` before
+#    bench-debugging. (#55 post-mortem: with the pre-fix firmware this
+#    combination plus stale otadata self-overwrote the RUNNING slot and
+#    bricked the watch; the booted_partition fix removes the brick, the
+#    surprise self-update remains.)
 #    Published FROM ubox0 (VLAN-11, same subnet as the broker's reachable leg):
 #    publishing from katana (VLAN-6) connects but stalls mid-handshake
 #    ("Keepalive exceeded") — an asymmetric-routing quirk on the katana→VLAN-11

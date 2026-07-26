@@ -4,6 +4,149 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **CRITICAL fix: OTA could download into the RUNNING slot and brick the watch**
+  (#55, the eldritch-lantern boot-loop). Slot selection trusted otadata
+  (`Ota::current_app_partition`) — a boot *request*, not a boot *fact*. Stale
+  otadata (left saying "ota_1, Valid" from the pre-#50 4MB layout, which cable
+  flashes never rewrite) made "the other slot" resolve to the very partition
+  the CPU was executing from; a retained push-OTA announce then triggered a
+  zero-touch self-overwrite: every 4KB chunk erase+rewrote the live image
+  (replanting the app-descriptor ELF-SHA at flash `0x100B0`) until the erase
+  of the sector holding in-use WiFi rodata (`0x152000`, download chunk 322)
+  killed the app mid read-modify-write — checksum-broken ota_0 + empty ota_1 =
+  "No bootable app partitions". Fixed by deriving the running slot from the
+  **MMU** (`PartitionTable::booted_partition` — which physical flash page the
+  CPU actually executes from; otadata is never consulted), plus a hard refusal
+  if the computed target equals the booted slot.
+- **Flash write guard** (#55, systemic): the shared `FlashMutex` now wraps a
+  `GuardedFlash` — every `Storage::write` is range-checked (sector-rounded:
+  esp-storage RMW erases whole 4KB sectors) against a deny-list holding the
+  bootloader + partition-table region and the booted app slot (both slots if
+  the boot probe fails; the whole flash if the partition table is unreadable).
+  Violations refuse + log (`[FLASH-GUARD] REFUSED …`), never touch flash. The
+  range math is the new host-tested `crates/flash-guard` (pure no_std; tests
+  include the exact incident vectors). Boot log now prints
+  `[OTA] booted from … (MMU)` alongside what otadata *requests*.
+- `tools/ota_push.sh --clear`: delete the retained OTA announce (empty
+  retained publish). A cable-flashed dev build (`OTA_BUILD=0`) accepts any
+  retained announce and zero-touch replaces itself on its next MQTT window —
+  clear the topic before bench sessions.
+
+## [0.10.0] — 2026-07-26
+
+- **The UI loop no longer owns the radio** (#53). A dedicated `net_task` exclusively
+  holds the WiFi controller: commands in (`Raise`/`Drop` a hold, `Scan`, `SetCreds`,
+  `Ota`) over a depth-8 channel; a `NetSnapshot` out behind a blocking mutex
+  (`WifiPhase`, `radio_started`, scan rows, one-shot NTP/weather handoffs, `OtaPhase`),
+  every change signalling `NET_WAKE` on the v0.8.8 coalescing pattern. A **hold mask**
+  (`User`/`Burst`/`Session`/`Voice`/`Ota`/`Phy`) replaces the old `wifi_on_request` +
+  `session_holds_wifi` + per-tick re-raise scramble — `Phy` being mesh's
+  start-the-radio-without-associating case — with 2s/10s/60s/300s exponential backoff
+  on consecutive failures. Every WiFi/OTA/scan arm migrated out of the main loop, and
+  OTA now survives a mid-download reconnect.
+  **Acceptance, measured on glass under a dead-AP outage: worst frame 202 ms,
+  `arm_max` 135 ms — where the old code froze for 15 seconds.** Held there by a
+  REALTIME BUDGET rule at the loop head (>10 ms of blocking in any arm is a bug, with
+  an audited exemption list: full-frame Slint renders, ms-scale flash sector programs,
+  the by-design voice PTT park, wake one-offs) plus an RAII per-arm watchdog that
+  reports `arm_max_us` / `arm_over10ms` from `debug-console` builds. Independently
+  reviewed before merge — a busy-spin, a pin race and a sleep-gate hazard all folded.
+- **Edge-gesture shell** (#29 / #31 / #32): a bottom-edge swipe-up opens the launcher
+  from any watchface page; a bottom-edge **hold** raises an app switcher with
+  suspend / resume / kill and a corner badge for what's still running; a top-edge
+  swipe-down pulls down a **notification shade** fed by MQTT (`watch/notify`) plus
+  system events, with retained notifies riding the boot-burst MQTT window.
+- **Power menu** (#48): an AXP2101 PKEY long-press opens SHUTDOWN / REBOOT. The 4-second
+  hardware failsafe stays intact underneath it.
+- **12-band FFT spectrum analyzer** in the Sound app (#30), log-spaced for factory
+  parity — plus a same-day on-glass fix after the band painted over the page title.
+- **OTA slots grown 4 MB → 6 MB** (#50): `ota_0` @ `0x10000`, `ota_1` @ `0x610000`,
+  `config` moves to `0xC10000`. The margin was down to **5.4 KB** at consolidation.
+  `ota_push.sh` and `watchctl` gates follow the new table, and `save-image` now needs
+  `--flash-size 16mb`. Deployed to both watches as a **cable event** — a full flash
+  with the new table, which resets the config record, so persisted toggles and theme
+  return at defaults exactly once.
+- **ROM**: the gesture-shell overlays went component-lean (~90 KB of image reclaimed)
+  and the shell chrome conditionals are visible-gated (~21.5 KB more).
+- **Heap 214 KB → 198 KB**: the consolidated scene build (power menu + switcher + shade
+  + spectrum) overflowed the 46.9 KB stack and tripped esp-hal's stack guard at boot.
+  Caught by the wrong-credentials acceptance run rather than in the field — +16 KB of
+  stack (gap ≈63 KB), with the heap still ~38 KB clear of the framebuffer need.
+
+## [0.9.1] — 2026-07-25
+
+- **Mesh channel-pin yields to WiFi** — the ch6 ESP-NOW pin fired between
+  association attempts (only an OTA-pending update suppressed it), dropping auth
+  frames on other channels: `AuthenticationExpired` at -61 dBm and single-network
+  scans on any watch with MESH persisted on. The pin now yields whenever
+  `wifi_on_request` is raised.
+- The `[MESH] up as node id042` log was a hardcoded string — the mesh had been
+  running with the arbitrated sigil id all along; it now prints the real one.
+
+## [0.9.0] — 2026-07-25
+
+- **Touch sounds everywhere** (#49) — one hoisted tap hook plays a 12 ms 1.8 kHz
+  tick for *both* input families (the Slint shell's `handle_touch` and the
+  framebuffer apps' `AppInput.tap`), never per-widget. Peak ~-15 dBFS: texture,
+  not notification. Gated on the persisted toggle, `audio_out::busy()`, and PTT
+  recording (half-duplex). The old per-control launch/OTA clicks are gone.
+- **Settings hub** — the Settings tile now opens a scene-resident Slint overlay
+  (registry kind `Overlay`: no framebuffer, no scene suspend) with five paged
+  sections — SOUND, DISPLAY, RADIOS, NETWORK, SYSTEM. Swipe up/down flips pages;
+  right-swipe backs out then closes. The old framebuffer Settings app, the T9
+  keyboard, and `peripherals/wifi.rs` are deleted.
+- **Scan-based WiFi join + QWERTY keyboard** — `scan_async` → dedup by SSID
+  keeping best RSSI → strength-sorted top 6 plus "Other network…"; secured picks
+  open a 4-layer QWERTY pane with Rust owning the buffer (masking, 24-char tail
+  window, held-backspace auto-repeat on the 16 ms touch tick, show-password eye).
+  Feeds the same credential-save + station-config rebuild path as the old flow.
+- **Config record v5** (`SWCFG5`, 113 B) completes the #46 persistence migration:
+  v4's reserved radios-flag bits are spent in place (bit 1 mesh-on, bit 2
+  WiFi-forced-off, bit 3 touch-sound-muted — OFF bits inverted so a v4 record's
+  zero bits decode to mesh off / WiFi auto / sound **on**) plus a mic-gain
+  step-index byte. Boot restores mesh, WiFi intent, mic gain, and touch sound;
+  edge-triggered dual-slot mirror saves persist each. v1–v4 records still load.
+- **ROM budget** — each distinct font size embeds a whole pre-rendered glyph set,
+  so the hub's arrival put the 4 MB app slot ~70 KB over. Seven visually-adjacent
+  size consolidations across two rounds freed **~397 KB**. The real acceptance
+  test is `espflash save-image` fitting the slot, not `readelf` section math
+  (espflash adds ~116 KB of segment padding/metadata): the release image is now
+  **3,987,776 B of 4,128,768 = 96.6 %**, 137.7 KB margin (debug-console 96.7 %,
+  135.5 KB). Stack gap unchanged at 54.5 KB, floor 46 KB. `tools/ota_push.sh`
+  gained an early slot-fit gate with a headroom report so this can't ship blind.
+- **`tools/watchctl`** (#20, #21) — a one-command USB/WiFi debug rig for the
+  fleet: `list`/`logs`/`reset`/`recover`/`slot`/`deploy`/`flash-full`/`console`/
+  `test`/`ota-status`/`endpoint`, `--json`, `--transport usb|wifi|auto`. Watches
+  resolve by sigil/efuse-MAC serial via udev, never by `ttyACM` number. `deploy`
+  defeats the #20 slot trap (save-image + size gate + write-bin into the
+  *booting* slot read from the boot banner + a `[SIGIL]`/`[STACK]` boot verify);
+  `reset`/`recover` walk the #21 wedge ladder (verified `espflash reset` →
+  `USBDEVFS_RESET` ioctl + re-resolve by serial → report power-cycle).
+  `ui_test.py` grows a `tcp://host:port` transport speaking the same console
+  protocol, and **`docs/debugging.md`** is the agent field guide to all three
+  debug channels. The firmware side of the TCP channel is [#51](https://github.com/jphein/esp32c6-watch/issues/51).
+
+## [0.8.8] — 2026-07-25
+
+- **The fastpath release** — five stacked latency/freeze causes fixed (forensics):
+  MQTT state arrivals wake the render loop (was a +1s idle tick); "Finding your
+  room" no longer eats a 10s backoff racing DHCP; presses while disconnected
+  reject with a hint instead of silently replaying later; Energy reports
+  unreachable only on a real offline LWT; the config record is dual-slot
+  mirrored so a freeze can't wipe creds/theme/BLE.
+
+## [0.8.7] — 2026-07-25
+
+- **Lights plugin** (#39): room-aware light control — hero button → MQTT → HA
+  resolves the watch's Bermuda area and toggles that room, retained state back
+  (HA side: `packages/watch_lights.yaml` in the ha repo, field-tested).
+- **BLE-sleep lockup hotfix**: light-sleep with the BLE controller active locks
+  the chip → BLE-on now tick-idles AOD (continuous adverts keep room presence
+  alive). Audio seam (#23) + stable BLE identity (#47/#46 partial) landed as
+  v0.8.5/0.8.6 and are folded into this tag.
+
 ## [0.8.5] — 2026-07-24
 
 - **Sound is back — shared I2S TX playback seam** (#23): SFX play by substituting
@@ -101,6 +244,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 - Voice push-to-talk (WiFi-ready-gated capture streamed to a LAN STT gateway),
   speaker playback fixed, touch responsiveness (non-blocking DMA flush),
   launcher scroll fix + AUDIO section, Dependabot, esp-rs stack current.
+
+## [0.5.1] — 2026-07-20
+
+- **Stack-floor guardrail**: a boot-time check on the SRAM the linker leaves between
+  `_bss_end` and `_stack_start`, so a future heap bump can't silently eat the stack
+  again (the failure mode that forced v0.5.0's heap trim).
+- **Climate/energy polish**: setpoints apply optimistically and any unsent change is
+  flushed when the screen closes; Energy gates on a live connection instead of
+  rendering `-1` placeholders; the climate roster is published on connect.
+- Shared `BackChevron` component + 72 px setpoint steppers — uniform 78×64 back
+  targets across climate/energy/wled/hunt; one-off colours moved onto theme tokens;
+  Node-RED bridge onboarding notes (`ha-bridge/ONBOARDING.md`).
+- `climate-model` golden vectors gain the `set:null` and heat_cool-only Auto-bit cases.
+
+## [0.5.0] — 2026-07-20
+
+- **Home Assistant climate control** — a bidirectional MQTT climate session
+  (`src/net/mqtt_climate.rs`) drives real thermostats from the wrist: a Climate list
+  screen plus a per-device detail overlay (setpoint steppers, mode picker), with
+  `crates/climate-model` as the pure `no_std` state core — host-tested against golden
+  vectors, including panic-safety on untrusted device names. Design spec:
+  `docs/superpowers/specs/2026-07-20-ha-climate-control-design.md`.
+- **The home-energy screen goes live** — v0.4.0's placeholder now shows real
+  battery/solar/grid values over MQTT (`battery_pct` / `solar_w` / `grid_w` /
+  `charging`, availability via LWT, null-safe parsing).
+- **Node-RED bridges** (`ha-bridge/`): climate command/state + energy flows, with
+  capability-aware `auto` ↔ `heat_cool` mapping so HA-native strings go on the wire
+  rather than pre-encoded ints.
+- **Main heap 240 KB → 228 KB, to _grow_ the stack.** On the C6 the stack is whatever
+  the linker leaves between `_bss_end` and `_stack_start`, so shrinking the heap is
+  what grows the stack — the root cause of the radio-path crash under the new climate
+  session. (The reclaimed pool sits above the stack and can't help.)
+- `crates/finder` — pure `no_std` nearest-peer range/proximity meter.
 
 ## [0.4.0] — 2026-07-20
 
