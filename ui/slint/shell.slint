@@ -15,6 +15,7 @@ import { VoicePage } from "voice.slint";
 import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { SettingsHub } from "settings.slint";
+import { PowerMenu } from "power_menu.slint";
 
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
@@ -191,6 +192,14 @@ export component WatchShell inherits Window {
     in property <bool> hints-lit: false;
     in property <bool> aod: false;
     in property <string> toast-text: "";
+    // Power menu (#48): raised by the HARDWARE power key (AXP2101 PWRON
+    // long-press, polled in main.rs) — not an AppState/registry overlay, so
+    // it stacks over anything (launcher, overlays, settings) without
+    // disturbing app_state or WiFi holds. in-out: Slint clears it on
+    // CANCEL/chevron; handle_touch clears it on Right-swipe. `vbus-on`
+    // drives the shutdown honesty caption (on USB the PMIC re-powers).
+    in-out property <bool> power-menu-open: false;
+    in property <bool> vbus-on: false;
 
     // --- callbacks (drained by the Rust loop via request cells) ---
     callback brightness-changed(float);
@@ -228,6 +237,9 @@ export component WatchShell inherits Window {
     callback kb-bksp-up();
     callback kb-eye();             // show/hide password
     callback kb-done();            // commit field (SSID → password → connect)
+    // Power menu (#48): SHUTDOWN → AXP2101 poweroff (cell drain in main.rs);
+    // REBOOT reuses `reboot-tap` — the power page's proven OTA+reset drain.
+    callback power-shutdown-tap();
 
     in-out property <float> brightness: 0.8;
 
@@ -653,6 +665,22 @@ export component WatchShell inherits Window {
         kb-bksp-up => { root.kb-bksp-up(); }
         kb-eye => { root.kb-eye(); }
         kb-done => { root.kb-done(); }
+    }
+
+    // ==================== Power menu (#48) ====================
+    // Above every launcher/app overlay (the hardware key must always win) but
+    // below AOD, matching the launcher's z-rule: main.rs wakes the screen and
+    // auto-closes the menu when the screen sleeps, so they never truly
+    // coexist — AOD winning is the safe render on the one transition tick.
+    if root.power-menu-open: PowerMenu {
+        width: 100%; height: 100%;
+        battery-percent: root.battery-percent;
+        charging: root.charging;
+        vbus-on: root.vbus-on;
+        reboot-tap => { root.reboot-tap(); }
+        shutdown-tap => { root.power-shutdown-tap(); }
+        // Chevron / CANCEL: clear the flag directly (Flag idiom, like Theme).
+        close => { root.power-menu-open = false; }
     }
 
     // ==================== AOD overlay ====================

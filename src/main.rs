@@ -77,7 +77,7 @@ use crate::peripherals::es7210::Es7210;
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::mic_capture;
-use crate::peripherals::power::Axp2101Power;
+use crate::peripherals::power::{Axp2101Power, PowerKey};
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
 use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
 use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
@@ -840,6 +840,16 @@ async fn main(_spawner: Spawner) -> ! {
     } else {
         println!("[POWER] charger config FAILED (I2C)");
     }
+    // PWRON key events (#48): pin the long-press IRQ threshold to 1.5s
+    // (0x27[5:4], field-masked — the 4s OFFLEVEL failsafe bits are untouched),
+    // enable the short/long latches (0x41 RMW), clear stale ones (0x49 W1C).
+    // The main loop polls the latch; ladder: 1.5s hold -> power menu, 4s hold
+    // -> hardware poweroff (vendor failsafe, works even with firmware hung).
+    if power.enable_pwron_events().is_ok() {
+        println!("[POWER] PWRON events armed: IRQLEVEL 1.5s menu, 4s hw-off failsafe");
+    } else {
+        println!("[POWER] PWRON event arm FAILED (I2C)");
+    }
     Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
     let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
     match mic_adc.init() {
@@ -1125,6 +1135,14 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut next_rtc = Instant::now();
     let mut next_battery = Instant::now();
+    // PWRON key poll (#48): 250ms while awake keeps the worst-case menu
+    // latency at IRQ(1.5s) + 0.25s + a render — comfortably inside the 4s
+    // hardware cutoff. Re-armed after each AOD light-sleep wake (the embassy
+    // clock pauses in sleep, so a plain `now + 250ms` would starve there).
+    let mut next_pkey = Instant::now();
+    // Long-press seen -> the Slint arm raises the menu (deferred one dispatch
+    // so a game can be exited + the scene resumed first, same tick).
+    let mut power_menu_request = false;
     let mut last_frame = Instant::now();
     let mut next_flush = Instant::now();
     // "Power down" now only gates the gyro: the accel stays on at 62.5Hz
@@ -1453,6 +1471,11 @@ async fn main(_spawner: Spawner) -> ! {
             // Disarm so normal falling-edge IRQ handling resumes.
             let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
             let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+            // PWRON poll re-arm (#48): embassy-time paused during the sleep,
+            // so `next_pkey` set to a pre-sleep `+250ms` may never elapse.
+            // Backdate it to the pre-sleep stamp — the poll below then runs
+            // on every 700ms AOD wake, keeping the power key live in AOD.
+            next_pkey = t0;
 
             // Wrist-raise: read one accel sample and test the tilt-to-wake
             // gesture. Accel is alive during AOD (power_down keeps it at 62.5Hz),
@@ -1627,6 +1650,73 @@ async fn main(_spawner: Spawner) -> ! {
             };
         }
 
+        // === Power key (#48: AXP2101 PWRON, polled) ===
+        // The side button reaches the firmware ONLY as a latched PMIC IRQ bit
+        // (no GPIO, no INT line on this board) — one 1-byte I2C read per 250ms
+        // (~100us at 400kHz), write-1-to-clear on a hit. Latency budget:
+        // long-press latches at 1.5s (IRQLEVEL) + <=250ms poll + a render, so
+        // the menu lands well before the 4s hardware OFFLEVEL cutoff.
+        //
+        // screen_state 0 (panel off, 30s ticks): a latched event can be up to
+        // 30s stale -> DISCARD instead of acting (the read already cleared
+        // it). A phantom menu on the next wake would be worse than a dead
+        // key; from screen-off the hardware ladder still works (hold to 4s =
+        // hard poweroff) and any wake (tap/raise/BOOT) re-arms the key within
+        // 250ms. Making PWRON itself a wake source needs the PMIC INT line,
+        // which isn't routed — documented follow-up in #48.
+        if now >= next_pkey {
+            next_pkey = now + Duration::from_millis(250);
+            // While the menu is up, keep its VBUS caption honest at this same
+            // cadence (one status read) — plugging/unplugging USB flips what
+            // SHUTDOWN will actually do, and 180s battery-cadence lag lies.
+            if shell.power_menu_open() {
+                shell.set_vbus(power.is_vbus_in().unwrap_or(false));
+            }
+            match power.poll_power_key() {
+                Ok(Some(key)) if screen_state == 0 => {
+                    println!("[PKEY] {:?} discarded (screen off, stale)", key);
+                }
+                Ok(Some(key)) => {
+                    last_interaction = now;
+                    if screen_state < 3 {
+                        // Wake-to-bright (AOD/dim; the panel is already ON in
+                        // states 1-2, so no display_on() dance is needed).
+                        display.set_brightness(brightness);
+                        screen_state = 3;
+                        next_flush = now;
+                        shell.set_aod(false);
+                        if key == PowerKey::Short {
+                            // Same wake seam as tap/raise -> same hints.
+                            shell.hint_wake();
+                        }
+                        shell.request_redraw();
+                    }
+                    match key {
+                        PowerKey::Long => {
+                            // A game holds the panel + heap: exit it first
+                            // (fb drop; the Slint arm below resumes the scene
+                            // this same tick), then raise the menu.
+                            if fb.is_some() {
+                                fb = None;
+                                app_state = AppState::Watchface;
+                                println!("[PKEY] long-press: game exited for power menu");
+                            }
+                            power_menu_request = true;
+                        }
+                        PowerKey::Short => {
+                            // Wake/keep-awake only, matching the vendor: its
+                            // firmware never read the latch (short-press did
+                            // nothing while on; in PMIC hardware it is the
+                            // power-ON trigger when off, ONLEVEL=128ms).
+                            println!("[PKEY] short-press: wake");
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => println!("[PKEY] I2C poll failed"),
+            }
+        }
+
         // === Audio out: amp + codec sequencing (#23) ===
         // Edge-triggered and cheap (I2C only on a change). The play_pcm call
         // sites also invoke this inline for a same-tick amp raise; this
@@ -1764,6 +1854,13 @@ async fn main(_spawner: Spawner) -> ! {
         } else if idle_secs >= 8 && screen_state > 2 {
             display.set_brightness(0x40);
             screen_state = 2;
+        }
+        // Power menu (#48) is transient: it never survives the screen
+        // sleeping — waking later onto a live SHUTDOWN row would be a
+        // foot-gun. Same-tick as the AOD/off transition, so the sleep frame
+        // renders without it.
+        if screen_state <= 1 && shell.power_menu_open() {
+            shell.set_power_menu_open(false);
         }
 
         // === WiFi state machine (one action per iteration) ===
@@ -2453,6 +2550,25 @@ async fn main(_spawner: Spawner) -> ! {
                         let _ = shell.set_time(dt);
                     }
                     shell.request_redraw();
+                }
+
+                // Power menu (#48): the PWRON long-press poll requested it —
+                // raise it now that the scene is guaranteed live (a game exit
+                // resumes the scene in the block just above, same tick).
+                // Freshen the status the menu shows first: the 180s battery
+                // cadence can be stale, and the VBUS caption ("restarts after
+                // shutdown") must reflect the cable RIGHT NOW.
+                if power_menu_request {
+                    power_menu_request = false;
+                    if let Ok(pct) = power.get_battery_percent() {
+                        batt_pct = pct;
+                        batt_mv = power.get_battery_voltage().unwrap_or(0);
+                        charging = power.is_charging().unwrap_or(false);
+                        shell.set_battery(batt_pct, batt_mv, charging);
+                    }
+                    shell.set_vbus(power.is_vbus_in().unwrap_or(false));
+                    shell.set_power_menu_open(true);
+                    println!("[PKEY] long-press -> power menu");
                 }
 
                 // Mirror overlay open-state into the scene, feed touch, then
@@ -3474,6 +3590,20 @@ async fn main(_spawner: Spawner) -> ! {
                         }
                     }
                     esp_hal::system::software_reset();
+                }
+                if shell.req.power_shutdown.take() {
+                    // Power menu SHUTDOWN (#48): AXP2101 poweroff (0x10 bit0,
+                    // the vendor PowerOff() write). On battery the rails cut
+                    // within the PMIC's shutdown sequence and this loop simply
+                    // stops; PWRON (128ms ONLEVEL) powers back on. On USB the
+                    // PMIC re-powers immediately = a cold reboot (the menu
+                    // caption says so while VBUS is live).
+                    println!("[PKEY] SHUTDOWN -> AXP2101 poweroff (0x10 bit0)");
+                    if power.shutdown().is_err() {
+                        // Still alive = the write never landed. Keep the menu
+                        // up rather than pretending; the log tells the story.
+                        println!("[PKEY] poweroff write FAILED (I2C)");
+                    }
                 }
                 if let Some(target) = shell.req.launch.take() {
                     // Launch tap-click: covered by the hoisted every-touch tick

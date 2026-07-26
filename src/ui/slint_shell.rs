@@ -179,6 +179,9 @@ pub struct ShellRequests {
     pub kb_eye: Cell<bool>,
     /// Keyboard: ✓ — commit the field (SSID stage → password stage → connect).
     pub kb_done: Cell<bool>,
+    /// Power menu (#48): SHUTDOWN row → the loop writes the AXP2101 poweroff
+    /// bit (power.shutdown()). REBOOT reuses the `reboot` cell above.
+    pub power_shutdown: Cell<bool>,
 }
 
 pub struct ShellUi {
@@ -359,11 +362,16 @@ impl ShellUi {
             // at x ≈ -1 and slam brightness to the floor. Taps and slider
             // drags keep the normal release at last_pos. The task-9 hardware
             // gate verifies this gesture behavior.
-            let slider_drag = (!ui.get_launcher_open()
-                && !ui.get_settings_open()
-                && ui.get_current_page() == PAGE_POWER
-                && SLIDER_BAND.contains(&swipe_start_y))
-                || hub_slider_drag(ui, swipe_start_y);
+            // Power menu (#48) opacity guard: while it covers the screen there
+            // is no slider — without this, a Right-swipe starting in a slider
+            // band would keep the normal release at last_pos and could "click"
+            // the menu row it ended on (SHUTDOWN sits inside SLIDER_BAND's y).
+            let slider_drag = !ui.get_power_menu_open()
+                && ((!ui.get_launcher_open()
+                    && !ui.get_settings_open()
+                    && ui.get_current_page() == PAGE_POWER
+                    && SLIDER_BAND.contains(&swipe_start_y))
+                    || hub_slider_drag(ui, swipe_start_y));
             // (The old launcher-scroll exclusion is gone with the Flickable: a
             // vertical swipe in the paged launcher is a page FLIP — navigation —
             // so the off-window release below correctly suppresses a stray tile
@@ -387,7 +395,17 @@ impl ShellUi {
         }
 
         if let Some(direction) = swipe {
-            // Settings hub first (it is in OVERLAYS only for mirror/reconcile):
+            // Power menu (#48) first — it stacks over EVERYTHING (launcher,
+            // overlays, settings), so while it is up it swallows all nav
+            // swipes and Right closes it (Flag idiom; main.rs owns nothing
+            // here — the underlying app_state/WiFi holds are untouched).
+            if ui.get_power_menu_open() {
+                if direction == SwipeDirection::Right {
+                    ui.set_power_menu_open(false);
+                }
+                return;
+            }
+            // Settings hub next (it is in OVERLAYS only for mirror/reconcile):
             // swipe up/down flips its section pages (clamped, launcher idiom);
             // Right backs out of a NETWORK sub-view via the net_back CELL (the
             // loop owns the view transitions + keyboard cleanup) or closes the
@@ -972,6 +990,28 @@ impl ShellUi {
         ui.set_theme_open(open);
     }
 
+    // === Power menu (#48) ===
+    // Raised by main.rs from the AXP2101 PWRON long-press poll; closed by
+    // Slint (CANCEL/chevron), handle_touch (Right-swipe), or main.rs when the
+    // screen sleeps. Not in OVERLAYS: it is not an AppState — it stacks over
+    // whatever is open without touching app_state or the WiFi holds.
+    pub fn set_power_menu_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_power_menu_open(open);
+    }
+
+    /// False while the scene is suspended (a game holds the framebuffer —
+    /// the menu cannot be open then).
+    pub fn power_menu_open(&self) -> bool {
+        self.ui.as_ref().is_some_and(|ui| ui.get_power_menu_open())
+    }
+
+    /// VBUS (USB power) presence — drives the menu's shutdown caption.
+    pub fn set_vbus(&self, on: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_vbus_on(on);
+    }
+
     // === Settings hub (v0.9.0, #49) ===
 
     /// Raise/lower the Settings hub. Opening resets to the first section page
@@ -1240,6 +1280,10 @@ fn build_scene(
     {
         let r = req.clone();
         ui.on_reboot_tap(move || r.reboot.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_power_shutdown_tap(move || r.power_shutdown.set(true));
     }
     {
         let r = req.clone();
