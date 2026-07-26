@@ -11,6 +11,7 @@ import { HuntPage } from "hunt.slint";
 import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { LightsOverlay } from "lights.slint";
+import { PingOverlay, PingPulse } from "ping.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
@@ -142,6 +143,18 @@ export component WatchShell inherits Window {
     in property <int> lights-total: 0;
     in property <int> lights-status: 0;  // 0 finding · 1 ok · 2 no_presence · 3 error
     in property <int> lights-pending: 0; // 0 idle · 1 sent · 2 no-reply hint
+    // Ping overlay (#35): watch-to-watch greeting. The seq/cooldown machine is
+    // Rust-owned; these mirror it for presentation only.
+    in-out property <bool> ping-open: false;
+    in property <string> ping-peer: "";
+    in property <int> ping-state: 0;      // 0 idle · 1 sent · 2 delivered · 3 no reply
+    in property <string> ping-result: "";
+    in property <bool> ping-cooling: false;
+    // Receiver pulse (#35): blooms over EVERYTHING but AOD on a PING rx.
+    // Rust-armed + Rust-sequenced (ShellUi::tick_ping_pulse, the hint idiom).
+    in property <bool> ping-pulse-open: false;
+    in property <string> ping-pulse-from: "";
+    in property <bool> ping-pulse-lit: false;
     // Voice-to-text overlay (#42, push-to-talk). State/level/transcript pushed
     // from the Rust loop; the PTT button emits pressed/released, driven by
     // physical touch (release detected off the INT pin while the loop streams).
@@ -239,6 +252,8 @@ export component WatchShell inherits Window {
     callback climate-closed();             // back-chevron / right-swipe → mesh
     callback lights-cmd(int);              // 0 toggle · 1 on · 2 off → MQTT publish
     callback lights-closed();              // back-chevron / right-swipe → mesh
+    callback ping-send();                  // hero tap → one PING broadcast (#35)
+    callback ping-pulse-tap();             // tap on the receiver pulse → dismiss
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
     callback mic-gain-down();      // Sound app − : lower digital mic gain
@@ -696,6 +711,20 @@ export component WatchShell inherits Window {
         closed => { root.lights-closed(); }
     }
 
+    // ==================== Ping overlay (#35) ====================
+    if root.ping-open: PingOverlay {
+        width: 100%; height: 100%;
+        peer: root.ping-peer;
+        state: root.ping-state;
+        result: root.ping-result;
+        cooling: root.ping-cooling;
+        mesh-on: root.mesh-enabled;
+        send => { root.ping-send(); }
+        // Chevron close: clear the flag directly (Flag idiom, like Theme/Voice
+        // — no resource hold to release). reconcile_overlay picks it up.
+        closed => { root.ping-open = false; }
+    }
+
     // ==================== Voice overlay ====================
     if root.voice-open: VoicePage {
         width: 100%; height: 100%;
@@ -821,6 +850,19 @@ export component WatchShell inherits Window {
         dismiss(i) => { root.notif-dismiss(i); }
         clear-all => { root.notif-clear(); }
         close => { root.shade-open = false; }
+    }
+
+    // ==================== Ping receiver pulse (#35) ====================
+    // Above every overlay and modal (a greeting must land wherever you are)
+    // but below AOD — main.rs wakes the screen before arming it, so AOD
+    // winning is only the safe render on the one transition tick (the power
+    // menu's z-rule). Dismiss goes through a request cell: Rust owns the
+    // 4s auto-dismiss clock and must disarm it with the overlay.
+    if root.ping-pulse-open: PingPulse {
+        width: 100%; height: 100%;
+        from: root.ping-pulse-from;
+        lit: root.ping-pulse-lit;
+        dismissed => { root.ping-pulse-tap(); }
     }
 
     // ==================== AOD overlay ====================

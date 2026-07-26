@@ -388,6 +388,23 @@ fn set_rtc_from_unix(
 
 /// Page label for the WATCH telemetry `scr` field, keyed by the Slint shell's
 /// current-page index (shares the page order with ui/slint/shell.slint).
+/// Resolve a mesh node to its per-device sigil (#35): the known fleet by id
+/// ([`sigil_id::sigil_for_node`] — authoritative even if a frame is ever
+/// relayed), else derived from the frame's source MAC (any watch, #34
+/// derivation). Bounded copy into the roster-name buffer.
+fn ping_sigil(from_id: u8, mac: [u8; 6]) -> heapless::String<{ sigil_id::SIGIL_MAX }> {
+    let mut s = heapless::String::new();
+    match crate::net::names::sigil_for_node(from_id) {
+        Some(name) => {
+            let _ = s.push_str(name);
+        }
+        None => {
+            let _ = s.push_str(crate::net::names::sigil_for_mac(mac).as_str());
+        }
+    }
+    s
+}
+
 fn page_scr_name(page: i32) -> &'static str {
     match page {
         1 => "SENSORS",
@@ -885,10 +902,21 @@ async fn main(_spawner: Spawner) -> ! {
         let n = mic_dsp::fill_tick_mono_s16le(buf, 16_000);
         &buf[..n]
     };
+    // Watch-ping receiver chime (#35): ~300 ms rising two-tone (E5→B5), the
+    // "someone's thinking of you" sound. HEAP-leaked rather than a StaticCell:
+    // 9.6KB of .bss would come straight out of the stack gap (stack =
+    // _stack_start − _bss_end, ≥46KB floor — the v0.5.0 crash class), while a
+    // one-time boot alloc from the heap costs nothing at runtime.
+    let ping_chime_pcm: &'static [u8] = {
+        let buf: &'static mut [u8] = alloc::vec![0u8; mic_dsp::PING_CHIME_LEN].leak();
+        let n = mic_dsp::fill_ping_chime_mono_s16le(buf, 16_000);
+        &buf[..n]
+    };
     println!(
-        "[AUDIO] SFX ready (beep {} B, tick {} B mono) — playback via shared TX ring",
+        "[AUDIO] SFX ready (beep {} B, tick {} B, chime {} B mono) — playback via shared TX ring",
         beep_pcm.len(),
-        tick_pcm.len()
+        tick_pcm.len(),
+        ping_chime_pcm.len()
     );
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
@@ -1362,6 +1390,29 @@ async fn main(_spawner: Spawner) -> ! {
     // Touch sound (#49): the persisted every-tap tick gate. Default ON.
     let mut touch_sound = watch_cfg.touch_sound;
 
+    // === Watch-to-watch ping (#35) — tiny sender/receiver state ===
+    // Sender: one outstanding (seq, sent_at) awaiting its PINGACK; a 3s
+    // cooldown between sends (etiquette — the hero shows a recharge sweep).
+    // `ping_state` mirrors the overlay's presentation machine (0 idle · 1 sent
+    // · 2 delivered · 3 no reply); `ping_result` is the ACKER's sigil.
+    let mut ping_seq: u16 = 0;
+    let mut ping_outstanding: Option<(u16, Instant)> = None;
+    let mut ping_cooldown_until: Option<Instant> = None;
+    let mut ping_state: i32 = 0;
+    let mut ping_result: heapless::String<{ sigil_id::SIGIL_MAX }> = heapless::String::new();
+    // Change gate for the per-tick set_ping push (peer, state, result, cooling).
+    let mut ping_prev_push: Option<(
+        heapless::String<{ sigil_id::SIGIL_MAX }>,
+        i32,
+        heapless::String<{ sigil_id::SIGIL_MAX }>,
+        bool,
+    )> = None;
+    // Receiver etiquette: exact-duplicate frame guard + a 2s absorb window so
+    // rapid re-pings don't restack the pulse/chime (the PINGACK still goes out
+    // at the protocol level — see smol_mesh::handle_rx).
+    let mut ping_rx_last: Option<(u8, u16)> = None;
+    let mut ping_rx_gate_until: Option<Instant> = None;
+
     // === Settings hub (v0.9.0, #49) — NETWORK flow state ===
     // The hub is scene-resident (no framebuffer); the WiFi creds flow is
     // scan-first: picker rows come from `scan_list` (dedup'd, strength-sorted,
@@ -1493,6 +1544,7 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Energy
                 | AppState::Climate
                 | AppState::Lights
+                | AppState::Ping
                 | AppState::Voice
                 | AppState::Theme
                 | AppState::Settings => {
@@ -1502,10 +1554,16 @@ async fn main(_spawner: Spawner) -> ! {
                         // Warmer/colder wants a responsive feel; the RSSI EWMA +
                         // 1.5s trend lag keep 4 Hz from flickering.
                         Duration::from_millis(250)
-                    } else if shell.has_active_animations() || shell.hints_pending() {
+                    } else if shell.has_active_animations()
+                        || shell.hints_pending()
+                        || shell.ping_pulse_active()
+                    {
                         // hints_pending: a wake gesture-hint window is running —
                         // its bloom/fade tweens need frames, and between phase
                         // edges draw_if_needed no-ops (cheap ticks, ≤3.2s).
+                        // ping_pulse_active (#35): same pattern — the greeting
+                        // pulse's stage edges + ring tweens ride this cadence
+                        // for its ≤4.2s window.
                         Duration::from_millis(33)
                     } else {
                         match shell.page() {
@@ -2489,6 +2547,76 @@ async fn main(_spawner: Spawner) -> ! {
                             let unix_now = mesh.unix_now(uptime_secs).unwrap_or(0);
                             familiar.ingest(&frame, rssi, now_ms, unix_now);
                         }
+                        // #35 receiver magic: a greeting for us. The PINGACK
+                        // already went out in handle_rx (protocol-level, like
+                        // HELLO→ACK); here is the choreography — dedup, chime,
+                        // wake, pulse — or the shade card when it can't land.
+                        Some(MeshEvent::Ping { from_id, seq, mac }) => {
+                            let dup = ping_rx_last == Some((from_id, seq));
+                            let gated =
+                                ping_rx_gate_until.is_some_and(|t| Instant::now() < t);
+                            ping_rx_last = Some((from_id, seq));
+                            if !dup && !gated {
+                                ping_rx_gate_until =
+                                    Some(Instant::now() + Duration::from_secs(2));
+                                let from = ping_sigil(from_id, mac);
+                                // The chime IS the ping — it plays wherever the
+                                // greeting lands (bright, dim, AOD, mid-game).
+                                audio_out::play_pcm(ping_chime_pcm);
+                                audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                                if screen_state == 0 || fb.is_some() {
+                                    // Panel fully off, or a game owns it (scene
+                                    // suspended): the pulse can't land — leave a
+                                    // shade card via the notify ring instead.
+                                    let mut title: heapless::String<32> =
+                                        heapless::String::new();
+                                    use core::fmt::Write as _;
+                                    let _ = write!(title, "Ping from {}", from.as_str());
+                                    crate::notify::push(
+                                        crate::notify::Source::System,
+                                        title.as_str(),
+                                        "A greeting across the mesh",
+                                    );
+                                } else {
+                                    if screen_state < 3 {
+                                        // Wake to bright — the wrist-raise seam
+                                        // (the panel is already ON in AOD/dim;
+                                        // only brightness changes). No hint_wake:
+                                        // the pulse owns this wake's choreography.
+                                        display.set_brightness(brightness);
+                                        screen_state = 3;
+                                        next_flush = now;
+                                        shell.set_aod(false);
+                                        shell.request_redraw();
+                                    }
+                                    // Keep the screen up through the ~4s pulse.
+                                    last_interaction = Instant::now();
+                                    shell.ping_pulse_show(from.as_str());
+                                }
+                                println!(
+                                    "[PING] greeting from {} (id{from_id} seq {seq})",
+                                    from.as_str()
+                                );
+                            }
+                        }
+                        // #35 sender side: our greeting landed — flip the hero
+                        // to "delivered to <sigil>" + the confirm tick. Runs
+                        // even if the Ping screen was closed meanwhile (the
+                        // tick is still meaningful; the UI push is gated on
+                        // the screen being open, below).
+                        Some(MeshEvent::PingAck { from_id, seq, mac }) => {
+                            if ping_outstanding.is_some_and(|(s, _)| s == seq) {
+                                ping_outstanding = None;
+                                ping_state = 2;
+                                ping_result = ping_sigil(from_id, mac);
+                                audio_out::play_pcm(tick_pcm);
+                                audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                                println!(
+                                    "[PING] delivered to {} (seq {seq})",
+                                    ping_result.as_str()
+                                );
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -2630,6 +2758,7 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Energy
             | AppState::Climate
             | AppState::Lights
+            | AppState::Ping
             | AppState::Voice
             | AppState::Sound
             | AppState::Theme
@@ -2646,6 +2775,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Energy
                         | AppState::Climate
                         | AppState::Lights
+                        | AppState::Ping
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme
@@ -3122,6 +3252,78 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_lights(ls.area.as_str(), ls.on, ls.total, status, pending);
                 } else {
                     let _ = shell.req.lights_cmd.take();
+                }
+
+                // === Watch-to-watch ping (#35) ===
+                // Receiver-pulse dismiss (tap on the pulse, or any swipe while
+                // it is up): disarm the auto-dismiss clock WITH the overlay.
+                // Drained on every Slint tick — the pulse can bloom over any
+                // scene state, not just the Ping screen.
+                if shell.req.ping_pulse_tap.take() {
+                    shell.ping_pulse_dismiss();
+                }
+                // Hero tap → one PING broadcast. The Slint gate (mesh-on +
+                // not cooling + not mid-flight) already filtered; re-verify
+                // here — properties mirror the loop one tick behind.
+                if shell.req.ping_send.take()
+                    && app_state == AppState::Ping
+                    && mesh_enabled
+                    && esp_now_peer_added
+                    && ping_cooldown_until.is_none_or(|t| now >= t)
+                    && ping_outstanding.is_none()
+                {
+                    ping_seq = ping_seq.wrapping_add(1);
+                    mesh.send_ping(&mut esp_now, ping_seq);
+                    ping_outstanding = Some((ping_seq, now));
+                    ping_state = 1; // "sending…" + the static sent ring
+                    ping_result.clear();
+                    // Etiquette: 3s between pings — the hero recharge sweep.
+                    ping_cooldown_until = Some(now + Duration::from_secs(3));
+                }
+                if app_state == AppState::Ping {
+                    // No-reply timeout: 2s without a PINGACK is an honest
+                    // "maybe out of range", not an endless "sending…".
+                    if let Some((_, sent_at)) = ping_outstanding {
+                        if now.duration_since(sent_at) >= Duration::from_secs(2) {
+                            ping_outstanding = None;
+                            ping_state = 3;
+                        }
+                    }
+                    // Cooldown end re-arms the hero and retires the
+                    // delivered / no-reply caption back to idle.
+                    let cooling = ping_cooldown_until.is_some_and(|t| now < t);
+                    if !cooling {
+                        ping_cooldown_until = None;
+                        if ping_state == 2 || ping_state == 3 {
+                            ping_state = 0;
+                        }
+                    }
+                    // Resolve the hero target from the live roster: the first
+                    // live id-known peer (2-watch fleet — with more peers the
+                    // hero honestly falls back to "PING THE FLEET" below only
+                    // when NONE are known). Sigil via id table / MAC (#34).
+                    let now_ms = now.as_millis();
+                    let mut rows = [PeerView::default(); MESH_MAX_ROWS];
+                    let n = mesh.peers(now_ms, &mut rows);
+                    let peer_name = rows[..n]
+                        .iter()
+                        .filter(|p| p.age_ms < crate::net::smol_mesh::PEER_STALE_MS)
+                        .find_map(|p| {
+                            p.id.filter(|&id| id != node_id)
+                                .map(|id| ping_sigil(id, p.mac))
+                        })
+                        .unwrap_or_default();
+                    // Push gated on change — the strings churn allocs.
+                    let snap = (peer_name.clone(), ping_state, ping_result.clone(), cooling);
+                    if ping_prev_push.as_ref() != Some(&snap) {
+                        shell.set_ping(
+                            peer_name.as_str(),
+                            ping_state,
+                            ping_result.as_str(),
+                            cooling,
+                        );
+                        ping_prev_push = Some(snap);
+                    }
                 }
 
                 // Voice push-to-talk: on the finger-down Slint reported
@@ -3889,6 +4091,21 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_lights_open(true);
                         lights_active = true; // Hold::Session rises on the edge above
                         app_state = AppState::Lights;
+                    } else if target == AppState::Ping {
+                        // Ping (#35): a Slint overlay riding the always-on
+                        // ESP-NOW radio — no WiFi hold, no framebuffer. Reset
+                        // the presentation machine so a stale delivered/no-reply
+                        // caption doesn't linger; an in-flight seq and the
+                        // cooldown carry over (etiquette survives a quick
+                        // close/reopen). The per-tick block above re-pushes the
+                        // fresh snapshot (ping_prev_push = None forces it).
+                        if ping_outstanding.is_none() && ping_state != 0 {
+                            ping_state = 0;
+                            ping_result.clear();
+                        }
+                        ping_prev_push = None;
+                        shell.set_ping_open(true);
+                        app_state = AppState::Ping;
                     } else if target == AppState::Voice {
                         // Voice-to-text (#42): a Slint overlay (scene-resident, no
                         // fb). Open in idle; the PTT flow below drives capture +
@@ -4071,6 +4288,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Energy
                         | AppState::Climate
                         | AppState::Lights
+                        | AppState::Ping
                         | AppState::Voice
                         | AppState::Sound
                         | AppState::Theme

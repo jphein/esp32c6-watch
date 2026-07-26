@@ -162,6 +162,7 @@ const OVERLAYS: &[Overlay] = &[
     Overlay { state: AppState::Energy, is_open: WatchShell::get_energy_open, set_open: WatchShell::set_energy_open, close: OverlayClose::Cell(|r| r.energy_close.set(true)) },
     Overlay { state: AppState::Climate, is_open: WatchShell::get_climate_open, set_open: WatchShell::set_climate_open, close: OverlayClose::Cell(|r| r.climate_closed.set(true)) },
     Overlay { state: AppState::Lights, is_open: WatchShell::get_lights_open, set_open: WatchShell::set_lights_open, close: OverlayClose::Cell(|r| r.lights_closed.set(true)) },
+    Overlay { state: AppState::Ping, is_open: WatchShell::get_ping_open, set_open: WatchShell::set_ping_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Voice, is_open: WatchShell::get_voice_open, set_open: WatchShell::set_voice_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Sound, is_open: WatchShell::get_mic_open, set_open: WatchShell::set_mic_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Theme, is_open: WatchShell::get_theme_open, set_open: WatchShell::set_theme_open, close: OverlayClose::Flag },
@@ -201,6 +202,12 @@ pub struct ShellRequests {
     /// the loop also releases the WiFi hold).
     pub lights_cmd: Cell<Option<i32>>,
     pub lights_closed: Cell<bool>,
+    /// Ping (#35): hero tap → one PING broadcast (the loop gates seq/cooldown).
+    pub ping_send: Cell<bool>,
+    /// Ping receiver pulse: tap-to-dismiss (also set by any swipe while the
+    /// pulse is up) — the loop drains it into [`ShellUi::ping_pulse_dismiss`]
+    /// so the auto-dismiss clock is disarmed with the overlay.
+    pub ping_pulse_tap: Cell<bool>,
     /// Voice PTT (#42): `pressed` is the finger-down that starts capture (drained
     /// by the loop when app_state == Voice). `released` is advisory — the loop's
     /// release watcher keys off the physical touch INT pin, since the Slint
@@ -321,6 +328,13 @@ pub struct ShellUi {
     hold_armed_at: Option<embassy_time::Instant>,
     hold_start: (u16, u16),
     hold_fired: bool,
+    /// Ping receiver-pulse choreography (#35, the hint idiom): the arm
+    /// instant [`ping_pulse_show`] stamped (None = no pulse up);
+    /// [`tick_ping_pulse`] (run from [`render`]) breathes the rings —
+    /// bloom → contract → bloom → auto-dismiss — against it, edge-triggered
+    /// through `ping_pulse_stage` so steady phases set no properties.
+    ping_pulse_armed_at: Option<embassy_time::Instant>,
+    ping_pulse_stage: u8,
 }
 
 impl ShellUi {
@@ -381,6 +395,8 @@ impl ShellUi {
             hold_armed_at: None,
             hold_start: (0, 0),
             hold_fired: false,
+            ping_pulse_armed_at: None,
+            ping_pulse_stage: 0,
         }
     }
 
@@ -392,6 +408,9 @@ impl ShellUi {
         // Retire any running hint window: a stale armed-instant would other-
         // wise resume ticking against the fresh (hint-free) scene on return.
         self.hints_cancel();
+        // Same for a running ping pulse (#35): the fresh scene comes up
+        // pulse-free, so the choreography clock must not keep ticking.
+        self.ping_pulse_dismiss();
         if let Some(ui) = self.ui.as_ref() {
             self.saved_page = ui.get_current_page();
             let _ = ui.hide();
@@ -540,7 +559,15 @@ impl ShellUi {
         }
 
         if let Some(direction) = swipe {
-            // Power menu (#48) first — it stacks over EVERYTHING (launcher,
+            // Ping receiver pulse (#35) first — it renders above everything
+            // but AOD, so while it is up ANY swipe dismisses the greeting
+            // (via the request cell: the loop owns the auto-dismiss clock).
+            // The underlying screen's own gestures resume next touch.
+            if ui.get_ping_pulse_open() {
+                self.req.ping_pulse_tap.set(true);
+                return;
+            }
+            // Power menu (#48) next — it stacks over EVERYTHING (launcher,
             // overlays, settings), so while it is up it swallows all nav
             // swipes and Right closes it (Flag idiom; main.rs owns nothing
             // here — the underlying app_state/WiFi holds are untouched).
@@ -1133,6 +1160,92 @@ impl ShellUi {
         ui.set_lights_pending(pending);
     }
 
+    pub fn set_ping_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_ping_open(open);
+    }
+
+    /// Push the ping-plugin snapshot (#35). `state`: 0 idle · 1 sent ·
+    /// 2 delivered · 3 no reply. `peer` is the resolved target sigil ("" =
+    /// none heard yet → "PING THE FLEET"); `result` the ACKER's sigil for the
+    /// delivered caption; `cooling` drives the 3s recharge sweep. Only called
+    /// while the screen is open, gated on change by the loop.
+    pub fn set_ping(&self, peer: &str, state: i32, result: &str, cooling: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_ping_peer(SharedString::from(peer));
+        ui.set_ping_state(state);
+        ui.set_ping_result(SharedString::from(result));
+        ui.set_ping_cooling(cooling);
+    }
+
+    // === Ping receiver pulse (#35) ===
+
+    /// Bloom the full-screen greeting pulse: `from` is the sender's sigil.
+    /// Created dark (`lit:false` — the wake frame stays cheap, the hint
+    /// idiom); [`tick_ping_pulse`] breathes the rings on the render clock and
+    /// auto-dismisses after ~4s. Re-arming while up (a rapid re-ping the loop
+    /// chose to surface) restarts the choreography with the new sender.
+    pub fn ping_pulse_show(&mut self, from: &str) {
+        // The strips would shimmer under the pulse's scrim — retire them.
+        self.hints_cancel();
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_ping_pulse_from(SharedString::from(from));
+        ui.set_ping_pulse_lit(false);
+        ui.set_ping_pulse_open(true);
+        self.ping_pulse_armed_at = Some(embassy_time::Instant::now());
+        self.ping_pulse_stage = 0;
+    }
+
+    /// Tear the pulse down (tap/swipe dismiss, auto-dismiss, scene suspend).
+    /// Idempotent.
+    pub fn ping_pulse_dismiss(&mut self) {
+        self.ping_pulse_armed_at = None;
+        self.ping_pulse_stage = 0;
+        if let Some(ui) = self.ui.as_ref() {
+            ui.set_ping_pulse_open(false);
+            ui.set_ping_pulse_lit(false);
+        }
+    }
+
+    /// True while the greeting pulse is up. main.rs ORs this into its 33ms
+    /// frame-pacing condition (the hints_pending pattern) so the ring tweens
+    /// get frames even on a 1Hz clock page; it also absorbs a same-sender
+    /// re-ping in the loop's dedup.
+    pub fn ping_pulse_active(&self) -> bool {
+        self.ping_pulse_armed_at.is_some()
+    }
+
+    /// Walk the pulse choreography; called from [`render`] each shell tick
+    /// (the tick_hints pattern). Edge-triggered per stage, so the breathing
+    /// phases between edges set no properties. Schedule: bloom at +150ms
+    /// (1.1s ease-out tween), contract at +1.6s, bloom again at +2.75s,
+    /// auto-dismiss at +4.2s.
+    fn tick_ping_pulse(&mut self) {
+        let Some(t0) = self.ping_pulse_armed_at else {
+            return;
+        };
+        let elapsed = t0.elapsed().as_millis();
+        if elapsed >= 4200 {
+            self.ping_pulse_dismiss();
+            return;
+        }
+        let Some(ui) = self.ui.as_ref() else {
+            return;
+        };
+        let (stage, lit) = match elapsed {
+            0..150 => (0, None),
+            150..1600 => (1, Some(true)),
+            1600..2750 => (2, Some(false)),
+            _ => (3, Some(true)),
+        };
+        if stage != self.ping_pulse_stage {
+            self.ping_pulse_stage = stage;
+            if let Some(lit) = lit {
+                ui.set_ping_pulse_lit(lit);
+            }
+        }
+    }
+
     pub fn set_voice_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_voice_open(open);
@@ -1543,6 +1656,8 @@ impl ShellUi {
         // Advance the wake gesture-hint choreography on the render clock
         // (no-op unless a hint window is armed).
         self.tick_hints();
+        // Same clock for the ping receiver pulse (#35): breathe + auto-dismiss.
+        self.tick_ping_pulse();
         slint::platform::update_timers_and_animations();
         self.window.draw_if_needed(|renderer| {
             let mut flusher =
@@ -1636,6 +1751,12 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_lights_closed(move || r.lights_closed.set(true));
+
+        let r = req.clone();
+        ui.on_ping_send(move || r.ping_send.set(true));
+
+        let r = req.clone();
+        ui.on_ping_pulse_tap(move || r.ping_pulse_tap.set(true));
 
         let r = req.clone();
         ui.on_voice_ptt_pressed(move || r.voice_ptt_pressed.set(true));
@@ -1794,6 +1915,7 @@ fn shell_clean(ui: &WatchShell) -> bool {
         && !ui.get_settings_open()
         && !ui.get_switcher_open()
         && !ui.get_shade_open()
+        && !ui.get_ping_pulse_open()
         && !OVERLAYS.iter().any(|o| (o.is_open)(ui))
 }
 

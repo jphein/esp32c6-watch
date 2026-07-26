@@ -59,11 +59,15 @@ REGISTRY = [
     "Settings",                                                       # 6
     "Wled", "Hunt", "Energy", "Climate", "Voice", "Sound", "Theme",  # 7-13
     "Lights",                                                         # 14
+    "Ping",                                                           # 15
 ]
 THEME_IDX = REGISTRY.index("Theme")    # 13
 LIGHTS_IDX = REGISTRY.index("Lights")  # 14
+PING_IDX = REGISTRY.index("Ping")      # 15
 # Lights hero button centre (lights.slint: cx = width/2, cy = 226px).
 LIGHTS_HERO = (206, 226)
+# Ping hero button centre (ping.slint: same proven hero geometry as Lights).
+PING_HERO = (206, 226)
 
 REPLY_PREFIX = "[DBGCON] "
 PANEL = 412  # square AMOLED, logical px
