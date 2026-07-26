@@ -1,5 +1,5 @@
 import { Theme, WifiNet, StatRow, PageTitle } from "theme.slint";
-import { BackChevron, IconButton, PressTile, PillButton, Stepper, SliderControl } from "controls.slint";
+import { OverlaySwallow, BackChevron, IconButton, PressTile, PillButton, Stepper, SliderControl } from "controls.slint";
 import { KeyboardPane } from "keyboard.slint";
 
 // ============================================================================
@@ -180,6 +180,7 @@ export component SettingsHub {
     // Opaque backdrop — the hub fully replaces the watchface (AMOLED black on
     // the dark schemes via the theme token).
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     // ======================= view 0 — the hub pages =======================
     if root.net-view == 0: Rectangle {

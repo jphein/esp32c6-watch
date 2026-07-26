@@ -1,5 +1,5 @@
 import { Theme, PageTitle } from "theme.slint";
-import { BackChevron, PressTile } from "controls.slint";
+import { OverlaySwallow, BackChevron, PressTile } from "controls.slint";
 
 // WLED WiZmote remote page (smol #25 port, UI half). Standalone overlay-style
 // component, like SoundLevel / VoicePage. Big finger tiles; tapping one fires
@@ -42,6 +42,7 @@ export component WledRemote {
     in property <string> status;   // main.rs sets e.g. "-> On" after a send; "" = idle
 
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     PageTitle { title: "WLED"; }
 

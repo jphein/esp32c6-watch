@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { IconButton, PillButton, BackChevron } from "controls.slint";
+import { OverlaySwallow, IconButton, PillButton, BackChevron } from "controls.slint";
 
 // Notification shade (#32): the top-edge swipe-DOWN overlay. Cards are built
 // by Rust from the bounded notification ring (newest first, up to 4 visible;
@@ -54,6 +54,7 @@ export component ShadeOverlay {
     callback close();
 
     Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     Text {
         x: (parent.width - self.width) / 2;

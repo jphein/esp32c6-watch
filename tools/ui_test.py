@@ -236,8 +236,12 @@ class Watch:
         time.sleep(self.settle)
         return r
 
-    def swipe(self, direction: str) -> str:
-        r = self.cmd(f"swipe {direction}")
+    def swipe(self, direction: str, start_y: int | None = None) -> str:
+        """Inject a nav swipe. `start_y` drives the edge-zone gestures
+        (#29/#32): >=427 = bottom edge (launcher), <=75 = top edge (shade);
+        omitted = mid-screen 206 (firmware default)."""
+        r = self.cmd(f"swipe {direction}" if start_y is None
+                     else f"swipe {direction} {start_y}")
         time.sleep(self.settle)
         return r
 
@@ -414,6 +418,106 @@ def run_suite(w: Watch) -> int:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def run_swallow(w: Watch) -> int:
+    """#54: overlays must SWALLOW taps — the chrome beneath must never fire.
+
+    Probe: the shell page-dots hit area (205, 470). A leaked tap advances
+    `page` (mod 5) instantly and side-effect-free, which makes it the one
+    deterministic chrome probe (the radio dots start slow radio state
+    machines — unassertable within a settle window). For each overlay we
+    tap the probe point and assert the shell page did NOT move and the
+    overlay is still up.
+
+    Shadowed spots (own control at the probe point — the launcher and the
+    Settings hub put their OWN page dots there) are probed at the BLE radio
+    dot (141, 40) instead, asserting the state.ble flag (it flips
+    synchronously on a leaked toggle; WiFi association is async and is
+    deliberately not used as a probe).
+
+    Not coverable from the host: the app switcher (needs a real 500ms
+    bottom-edge hold) and the power menu (hardware PMIC key) — both sealed
+    by the same shared OverlaySwallow; verify on-glass.
+    """
+    s = _Suite()
+    DOTS = (205, 470)   # shell page-dots hit area: leak => page advances
+    BLE_DOT = (141, 40) # BLE radio dot: leak => state.ble flips (instant flag)
+
+    def probe_dots(name: str, still_open) -> None:
+        st0 = w.state()
+        w.tap(*DOTS)
+        st1 = w.state()
+        ok = (st1.get("page") == st0.get("page")) and still_open(st1)
+        s.check(f"{name}: dots tap swallowed", ok,
+                f"page {st0.get('page')}->{st1.get('page')} "
+                f"app={st1.get('app')} modal={st1.get('modal')}")
+
+    def probe_ble(name: str, still_open) -> None:
+        # For overlays whose OWN dots shadow the DOTS point. The BLE toggle
+        # flips the state.ble flag synchronously, so a leak is observable
+        # within the settle window (unlike WiFi association).
+        st0 = w.state()
+        w.tap(*BLE_DOT)
+        st1 = w.state()
+        ok = (st1.get("ble") == st0.get("ble")
+              and st1.get("page") == st0.get("page")
+              and still_open(st1))
+        s.check(f"{name}: BLE-dot tap swallowed", ok,
+                f"ble {st0.get('ble')}->{st1.get('ble')} app={st1.get('app')}")
+
+    # Launcher (bottom-edge swipe-up, #29): its own dots sit exactly on the
+    # shell dots, so probe the radio band (no launcher control lives there).
+    w.home()
+    w.swipe("up", 470)
+    st = w.state()
+    s.check("launcher opens (edge swipe)", st.get("app") == "Launcher", str(st))
+    probe_ble("Launcher", lambda st: st.get("app") == "Launcher")
+    w.swipe("right")  # close
+
+    # Registry overlays: open by launch idx, probe, close by right-swipe
+    # (the cell-close path, so the HA screens' WiFi holds are released).
+    # Settings: its own dots shadow the DOTS point and its chevron owns the
+    # top-left, so it takes the BLE probe (x141 clears the chevron at x14-92).
+    for idx, name in [(6, "Settings"), (7, "Wled"), (8, "Hunt"), (9, "Energy"),
+                      (10, "Climate"), (11, "Voice"), (12, "Sound"),
+                      (13, "Theme"), (14, "Lights")]:
+        w.home()
+        w.launch(idx)
+        st = w.state()
+        if st.get("app") != name:
+            s.check(f"{name}: opened", False, str(st))
+            continue
+        still = lambda st, n=name: st.get("app") == n
+        if name == "Settings":
+            probe_ble(name, still)
+        else:
+            probe_dots(name, still)
+        w.swipe("right")
+
+    # Notification shade (top-edge swipe-down, #32; state modal=2). With
+    # notifications held, CLEAR ALL sits near the probe point — its tap is
+    # the shade's OWN control, so the assertions still hold either way.
+    w.home()
+    w.swipe("down", 40)
+    st = w.state()
+    s.check("shade opens (edge swipe)", st.get("modal") == 2, str(st))
+    probe_dots("Shade", lambda st: st.get("modal") == 2)
+    w.swipe("up", 206)  # close (any Up while the shade is open)
+
+    # Edge-zone honesty rides along (#29 acceptance): a MID-screen swipe-up
+    # off the clock page must NOT open the launcher.
+    w.home()
+    for _ in range(5):
+        if w.state().get("page") == 1:
+            break
+        w.swipe("left")
+    w.swipe("up", 206)
+    st = w.state()
+    s.check("mid-screen up on page 1 stays put",
+            st.get("app") == "Watchface" and st.get("page") == 1, str(st))
+    w.home()
+    return s.summary()
+
+
 def repl(w: Watch) -> int:
     print("debug-console REPL — type a command (tap/swipe/launch/home/state/perf), "
           "or 'quit'.")
@@ -514,7 +618,7 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=0.20, help="UI settle delay after input (s)")
     ap.add_argument("-v", "--verbose", action="store_true", help="echo every serial line read")
     ap.add_argument("mode", nargs="?", default="suite",
-                    choices=["suite", "repl", "cmd", "hotpaths", "lights"],
+                    choices=["suite", "repl", "cmd", "hotpaths", "lights", "swallow"],
                     help="what to run (default: suite)")
     ap.add_argument("arg", nargs="?", help="command string when mode=cmd")
     args = ap.parse_args()
@@ -539,6 +643,8 @@ def main() -> int:
             return run_hotpaths(w)
         if args.mode == "lights":
             return run_lights(w)
+        if args.mode == "swallow":
+            return run_swallow(w)
         return run_suite(w)
     except ConnectionError as e:
         # TCP transport: the debug server dropped us (bad/missing token,

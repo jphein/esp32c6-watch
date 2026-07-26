@@ -15,6 +15,22 @@ import { Theme } from "theme.slint";
 // components; nothing here shrinks a hit area to make room for pressed chrome).
 // ============================================================================
 
+// --- OverlaySwallow (#54) ---------------------------------------------------
+// Slint hit-tests topmost-first, but a plain Rectangle — every overlay's
+// scrim/backdrop — does NOT consume clicks. Without a swallow layer, the
+// shell chrome UNDER an overlay (radio dots y8-72, page dots y448-492, the
+// clock page's chips) stays hit-testable through the overlay's dead zones:
+// an invisible WiFi toggle from inside the Climate screen. Every scene
+// overlay places ONE of these directly after its backdrop (before the
+// content, which then sits above it in z): it claims every tap the
+// overlay's own controls don't. Geometry defaults to fill-parent.
+//
+// Swipe navigation is untouched — the Rust shell classifies swipes from the
+// touch driver (slint_shell::handle_touch), not from Slint hit-testing, and
+// consumed navigation swipes already release off-window. First shipped
+// inline by the power menu (#48); shared here so the pattern is one grep.
+export component OverlaySwallow inherits TouchArea {}
+
 // --- Recipe A — PressTile -------------------------------------------------
 // Panel surfaces: launcher tiles, WLED tiles, list cards, hunt "next", clock
 // chips. Pressed: fill lights to accent-bg, edge ignites (Theme.accent by

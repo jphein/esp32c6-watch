@@ -1,5 +1,5 @@
 import { Theme, PageTitle } from "theme.slint";
-import { PressTile, IconButton } from "controls.slint";
+import { OverlaySwallow, PressTile, IconButton } from "controls.slint";
 
 // Categorised PAGED launcher with drawn vector icons + big finger tiles. Icons
 // are lightweight Slint shapes (no bitmaps) so they cost no RAM/flash and
@@ -220,6 +220,7 @@ export component LauncherOverlay {
     // Scrim (watchface faintly behind) — the per-scheme token, so Paper gets
     // its warm light scrim instead of a hardcoded Midnight-dark one.
     Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     // Eyebrow keeps the launcher's identity; the big PageTitle names the
     // current SECTION (one section per page).

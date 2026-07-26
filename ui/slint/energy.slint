@@ -1,5 +1,5 @@
 import { Theme, PageTitle } from "theme.slint";
-import { BackChevron } from "controls.slint";
+import { OverlaySwallow, BackChevron } from "controls.slint";
 
 // Home energy screen — shows YOUR HOUSE's battery / solar / grid (not the
 // watch's own battery, which lives in the chrome pill). Standalone overlay-style
@@ -39,6 +39,7 @@ export component EnergyPage {
     property <bool> exporting: root.grid-w < -50;
 
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     PageTitle { title: "ENERGY"; }
 

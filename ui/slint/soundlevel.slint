@@ -1,5 +1,5 @@
 import { Theme, PageTitle } from "theme.slint";
-import { BackChevron, Stepper } from "controls.slint";
+import { OverlaySwallow, BackChevron, Stepper } from "controls.slint";
 
 // #30 — one spectrum band: bar level + peak-hold tick, both dBFS in [-60, 0]
 // (the meter's scale). Rust pushes 12 of these per Sound tick (~15 Hz), one
@@ -48,6 +48,7 @@ export component SoundLevel {
 
     // Opaque AMOLED backdrop — this screen fully replaces the watchface.
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
     PageTitle { title: "SOUND LEVEL"; }
 
