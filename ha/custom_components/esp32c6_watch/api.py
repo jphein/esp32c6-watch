@@ -182,6 +182,147 @@ def _climate_element(obj_id: str, state: Any) -> dict[str, Any]:
     }
 
 
+def climate_elements(hass: HomeAssistant, conf: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """(object_id, climate-model dict) for every exposed climate entity.
+
+    Shared by GET /watch/climate/state (the array) and the MQTT publisher
+    (one retained ``watch/climate/<id>/state`` per element) — same
+    ``_climate_element`` shape either way.
+    """
+    return [(obj_id, _climate_element(obj_id, state)) for obj_id, state in _exposed_states(hass, conf)]
+
+
+def roster_ids(hass: HomeAssistant, conf: dict[str, Any]) -> list[str]:
+    """Exposed climate object ids (the ``watch/climate/roster`` array)."""
+    return [obj_id for obj_id, _ in _exposed_states(hass, conf)]
+
+
+def energy_source_entities(conf: dict[str, Any]) -> list[str]:
+    """The (configured) energy source entity_ids, for state-change tracking."""
+    keys = (
+        (CONF_BATTERY_PCT_ENTITY, DEFAULT_BATTERY_PCT_ENTITY),
+        (CONF_SOLAR_W_ENTITY, DEFAULT_SOLAR_W_ENTITY),
+        (CONF_GRID_W_ENTITY, DEFAULT_GRID_W_ENTITY),
+        (CONF_CHARGING_ENTITY, ""),
+    )
+    out: list[str] = []
+    for key, default in keys:
+        ent = conf.get(key, default)
+        if ent:
+            out.append(ent)
+    return out
+
+
+def exposed_climate_entity_ids(hass: HomeAssistant, conf: dict[str, Any]) -> list[str]:
+    """``climate.<id>`` entity_ids currently exposed (for state-change tracking)."""
+    return [f"climate.{obj_id}" for obj_id, _ in _exposed_states(hass, conf)]
+
+
+def energy_payload(hass: HomeAssistant, conf: dict[str, Any]) -> dict[str, Any]:
+    """The ``parse_energy`` shape: {battery_pct, solar_w, grid_w, charging}.
+
+    Shared by GET /watch/energy and the MQTT ``watch/energy/state`` publisher —
+    ONE source of truth so the HTTP and MQTT payloads can never drift. Keys +
+    signedness match ``src/net/mqtt_climate.rs::parse_energy`` exactly
+    (``grid_w`` >0 import / <0 export; numeric fields null-tolerant).
+    """
+    battery = _read_state_float(hass, conf.get(CONF_BATTERY_PCT_ENTITY, DEFAULT_BATTERY_PCT_ENTITY))
+    solar = _read_state_float(hass, conf.get(CONF_SOLAR_W_ENTITY, DEFAULT_SOLAR_W_ENTITY))
+    grid = _read_state_float(hass, conf.get(CONF_GRID_W_ENTITY, DEFAULT_GRID_W_ENTITY))
+
+    charging = False
+    charging_entity = conf.get(CONF_CHARGING_ENTITY)
+    if charging_entity:
+        charging_state = hass.states.get(charging_entity)
+        if charging_state is not None and str(charging_state.state).lower() in _TRUTHY:
+            charging = True
+
+    return {
+        "battery_pct": None if battery is None else max(0, min(100, int(round(battery)))),
+        "solar_w": None if solar is None else int(round(solar)),
+        "grid_w": None if grid is None else int(round(grid)),
+        "charging": charging,
+    }
+
+
+async def apply_climate_set(
+    hass: HomeAssistant, conf: dict[str, Any], obj_id: str, body: dict[str, Any]
+) -> tuple[bool, str]:
+    """Apply a ``{"set":<f>}`` / ``{"mode":<str>}`` command to ``climate.<obj_id>``.
+
+    The command body is IDENTICAL whether it arrived over HTTP POST
+    (:8124/watch/climate/<id>/set) or MQTT (``watch/climate/<id>/set``, which
+    the firmware publishes as ``{"set":72.0}`` / ``{"mode":"heat"}`` via
+    ``climate_model::encode_set_*``). Returns ``(ok, reason)``; ``reason`` is
+    ``""`` on success, a short tag otherwise. Never raises for a bad request.
+    """
+    if obj_id in _exclude_set(conf):
+        return False, "unknown entity"
+
+    entity_id = f"climate.{obj_id}"
+    state = hass.states.get(entity_id)
+    if state is None:
+        return False, "unknown entity"
+    if not isinstance(body, dict):
+        return False, "bad body"
+
+    attrs = state.attributes
+
+    if "set" in body:
+        try:
+            target = float(body["set"])
+        except (ValueError, TypeError):
+            return False, "bad body"
+
+        low = _num(attrs.get("target_temp_low"))
+        high = _num(attrs.get("target_temp_high"))
+        single = _num(attrs.get("temperature"))
+        # Dual-setpoint (heat_cool) when the entity currently exposes low/high
+        # and no single temperature, or its state is explicitly heat_cool.
+        dual = low is not None and high is not None and (single is None or state.state == "heat_cool")
+
+        if dual:
+            spread = high - low
+            if spread <= 0:
+                spread = 4.0  # default ±2°F if no current spread
+            half = spread / 2.0
+            data = {
+                "entity_id": entity_id,
+                "target_temp_low": round(target - half, 2),
+                "target_temp_high": round(target + half, 2),
+            }
+        else:
+            data = {"entity_id": entity_id, "temperature": target}
+
+        await hass.services.async_call("climate", "set_temperature", data, blocking=False)
+        return True, ""
+
+    if "mode" in body:
+        requested = str(body["mode"])
+        hvac_modes = attrs.get("hvac_modes") or []
+        if requested == "auto":
+            if "auto" in hvac_modes:
+                target_mode: str | None = "auto"
+            elif "heat_cool" in hvac_modes:
+                target_mode = "heat_cool"
+            else:
+                target_mode = None
+        else:
+            target_mode = requested if requested in hvac_modes else None
+
+        if target_mode is not None:
+            await hass.services.async_call(
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": entity_id, "hvac_mode": target_mode},
+                blocking=False,
+            )
+        # Unsupported mode is silently ignored; the watch reconciles on poll.
+        return True, ""
+
+    return False, "bad body"
+
+
 def _safe(handler: Callable) -> Callable:
     """Wrap a handler so an unexpected error becomes a 500, never a crash."""
 
@@ -229,103 +370,22 @@ async def handle_set(request: web.Request) -> web.Response:
     conf = _conf(request)
     obj_id = request.match_info["object_id"]
 
-    if obj_id in _exclude_set(conf):
-        return web.json_response({"error": "unknown entity"}, status=404)
-
-    entity_id = f"climate.{obj_id}"
-    state = hass.states.get(entity_id)
-    if state is None:
-        return web.json_response({"error": "unknown entity"}, status=404)
-
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 - malformed JSON is a client error, not a bug
         return web.json_response({"error": "bad body"}, status=400)
-    if not isinstance(body, dict):
-        return web.json_response({"error": "bad body"}, status=400)
 
-    attrs = state.attributes
-
-    if "set" in body:
-        try:
-            target = float(body["set"])
-        except (ValueError, TypeError):
-            return web.json_response({"error": "bad body"}, status=400)
-
-        low = _num(attrs.get("target_temp_low"))
-        high = _num(attrs.get("target_temp_high"))
-        single = _num(attrs.get("temperature"))
-        # Dual-setpoint (heat_cool) when the entity currently exposes low/high
-        # and no single temperature, or its state is explicitly heat_cool.
-        dual = low is not None and high is not None and (single is None or state.state == "heat_cool")
-
-        if dual:
-            spread = high - low
-            if spread <= 0:
-                spread = 4.0  # default ±2°F if no current spread
-            half = spread / 2.0
-            data = {
-                "entity_id": entity_id,
-                "target_temp_low": round(target - half, 2),
-                "target_temp_high": round(target + half, 2),
-            }
-        else:
-            data = {"entity_id": entity_id, "temperature": target}
-
-        await hass.services.async_call("climate", "set_temperature", data, blocking=False)
+    ok, reason = await apply_climate_set(hass, conf, obj_id, body)
+    if ok:
         return web.json_response({"ok": True})
-
-    if "mode" in body:
-        requested = str(body["mode"])
-        hvac_modes = attrs.get("hvac_modes") or []
-        if requested == "auto":
-            if "auto" in hvac_modes:
-                target_mode: str | None = "auto"
-            elif "heat_cool" in hvac_modes:
-                target_mode = "heat_cool"
-            else:
-                target_mode = None
-        else:
-            target_mode = requested if requested in hvac_modes else None
-
-        if target_mode is not None:
-            await hass.services.async_call(
-                "climate",
-                "set_hvac_mode",
-                {"entity_id": entity_id, "hvac_mode": target_mode},
-                blocking=False,
-            )
-        # Unsupported mode is silently ignored; the watch reconciles on poll.
-        return web.json_response({"ok": True})
-
-    return web.json_response({"error": "bad body"}, status=400)
+    status = 404 if reason == "unknown entity" else 400
+    return web.json_response({"error": reason}, status=status)
 
 
 @_safe
 async def handle_energy(request: web.Request) -> web.Response:
     """GET /watch/energy → the parse_energy summary shape."""
-    hass = _hass(request)
-    conf = _conf(request)
-
-    battery = _read_state_float(hass, conf.get(CONF_BATTERY_PCT_ENTITY, DEFAULT_BATTERY_PCT_ENTITY))
-    solar = _read_state_float(hass, conf.get(CONF_SOLAR_W_ENTITY, DEFAULT_SOLAR_W_ENTITY))
-    grid = _read_state_float(hass, conf.get(CONF_GRID_W_ENTITY, DEFAULT_GRID_W_ENTITY))
-
-    charging = False
-    charging_entity = conf.get(CONF_CHARGING_ENTITY)
-    if charging_entity:
-        charging_state = hass.states.get(charging_entity)
-        if charging_state is not None and str(charging_state.state).lower() in _TRUTHY:
-            charging = True
-
-    return web.json_response(
-        {
-            "battery_pct": None if battery is None else max(0, min(100, int(round(battery)))),
-            "solar_w": None if solar is None else int(round(solar)),
-            "grid_w": None if grid is None else int(round(grid)),
-            "charging": charging,
-        }
-    )
+    return web.json_response(energy_payload(_hass(request), _conf(request)))
 
 
 @_safe

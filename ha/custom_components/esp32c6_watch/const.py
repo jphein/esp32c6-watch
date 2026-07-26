@@ -6,7 +6,9 @@ DOMAIN = "esp32c6_watch"
 
 # Kept in lock-step with the ``version`` field in manifest.json and surfaced by
 # GET /watch/version so the firmware / realm-sigil tooling can probe liveness.
-VERSION = "0.2.0"
+# 0.3.0 (#60): adds the MQTT bridge — publishes the watch/* retained topics the
+# firmware parser reads, alongside the existing HTTP endpoints.
+VERSION = "0.3.0"
 
 # --- Config / options keys -------------------------------------------------
 CONF_PORT = "port"

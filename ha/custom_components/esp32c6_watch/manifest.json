@@ -4,9 +4,10 @@
   "codeowners": ["@jphein"],
   "config_flow": true,
   "dependencies": ["ffmpeg", "http", "media_source"],
+  "after_dependencies": ["mqtt"],
   "documentation": "https://github.com/jphein/esp32c6-watch/blob/main/ha/custom_components/esp32c6_watch/README.md",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/jphein/esp32c6-watch/issues",
   "requirements": [],
-  "version": "0.2.0"
+  "version": "0.3.0"
 }
