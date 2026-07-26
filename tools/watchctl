@@ -59,8 +59,8 @@ FLEET = {
 ESPRESSIF_VID = "303a"          # USB-Serial-JTAG debug unit VID (PID 1001)
 
 # A/B app slots (partitions.csv). otadata decides which one BOOTS.
-SLOT_OFFSETS = {"ota_0": 0x10000, "ota_1": 0x410000}
-IMAGE_GATE = 4_128_768          # bytes — the espflash OTA-slot image cap
+SLOT_OFFSETS = {"ota_0": 0x10000, "ota_1": 0x610000}  # 6MB slots (#50)
+IMAGE_GATE = 6_225_920          # bytes — 6MB slot - 64KB (#50)
 
 # USB port paths that cannot enumerate a C6 (EPROTO -71): the 1-7.x hub, and
 # some mobo ports. Any hub (dotted) path gets a warning; 1-7 gets a loud one.
@@ -824,7 +824,7 @@ def _image_from(path: Path, tmpdir: str) -> tuple[Path | None, str]:
     if magic != b"\x7fELF":
         return path, "bin"
     out = Path(tmpdir) / (path.stem + ".bin")
-    p = espflash("save-image", "--chip", "esp32c6", str(path), str(out),
+    p = espflash("save-image", "--chip", "esp32c6", "--partition-table", str(PARTITIONS_CSV), str(path), str(out),
                  timeout=120)
     if p.returncode != 0:
         say(f"watchctl: espflash save-image failed: "
