@@ -26,7 +26,12 @@ from homeassistant.components.media_player import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_info import DeviceInfo
+
+try:
+    # HA < 2024.1 shipped DeviceInfo in its own short-lived module...
+    from homeassistant.helpers.device_info import DeviceInfo
+except ImportError:  # ...removed in modern HA — it lives in device_registry now.
+    from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .announce import AnnounceQueue

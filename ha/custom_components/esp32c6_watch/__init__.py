@@ -80,14 +80,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = {"runner": runner, "queue": queue}
     _LOGGER.info("esp32c6_watch: serving watch HTTP on 0.0.0.0:%s", port)
 
-    # The media_player platform reads the queue back out of hass.data on setup.
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     # #60: ALSO publish the watch/* retained MQTT topics the firmware parser
     # reads (the HTTP endpoints alone left Climate + Energy blank once the
     # Node-RED bridge was retired). Best-effort: a MQTT-less HA still serves
     # HTTP. Started after HA is running so the initial snapshot reads live
     # states, not boot-time `unavailable`.
+    #
+    # Registered BEFORE the platform forward on purpose: the MQTT bridge is the
+    # climate/energy critical path, so it must not depend on the (secondary)
+    # media_player platform loading — a platform import break must never take
+    # the watch's data path down with it.
     bridge = WatchMqttBridge(hass, entry)
     hass.data[DOMAIN][entry.entry_id]["bridge"] = bridge
     if hass.is_running:
@@ -99,6 +101,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.async_on_unload(
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_bridge)
         )
+
+    # The media_player platform reads the queue back out of hass.data on setup.
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Reload (rebind / re-read entity map) when the options flow saves changes.
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
