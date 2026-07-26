@@ -986,9 +986,15 @@ async fn main(_spawner: Spawner) -> ! {
     let mut esp_now = wifi_interfaces.esp_now;
 
     let net_config = embassy_net::Config::dhcpv4(Default::default());
-    // 4 sockets: DHCP + the always-on DNS socket + one transient TCP/UDP
-    // (NTP, MQTT, weather, OTA — never concurrent) + one spare.
-    static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
+    // 5 sockets: DHCP + the always-on DNS socket + one transient TCP/UDP
+    // (NTP, MQTT-burst, weather, OTA — sequential inside net_task) + the HA
+    // session TCP + one spare. The spare matters since #53/#22: the burst
+    // runs in net_task CONCURRENTLY with main's voice STT upload — and the
+    // #22 latch fires STT the instant the link is ready, exactly when the
+    // burst's NTP query starts. Worst overlap = DHCP + DNS + burst + session
+    // (draining) + STT = 5; SocketSet::add PANICS when full, so the headroom
+    // is correctness, not comfort (~200B of .bss).
+    static RESOURCES: StaticCell<embassy_net::StackResources<5>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
         wifi_interfaces.station,
         net_config,
@@ -1201,6 +1207,18 @@ async fn main(_spawner: Spawner) -> ! {
     // [LAT] "Finding your room…" duration: stamped on screen-open, consumed
     // (printed) on the first rendered state frame.
     let mut lights_opened_at: Option<Instant> = None;
+    // #22 press-once PTT: a Voice-screen press that lands before WiFi/DHCP is
+    // ready LATCHES instead of dropping — the capture auto-fires through the
+    // exact same entry path the moment `net.phase.ready()` lands, provided
+    // the finger is still down (release cancels; that's the contract: hold
+    // through "Connecting…"). `voice_latch` stamps the press; `voice_latch_up`
+    // is the 3-read release debounce (authoritative I2C finger count — the
+    // INT pin lies for still fingers, same lesson as the capture monitor).
+    // Bounded by VOICE_LATCH_WINDOW; a released finger cancels within ~300ms,
+    // so the latch can never survive into a dim/AOD/screen-off transition.
+    const VOICE_LATCH_WINDOW: Duration = Duration::from_secs(30);
+    let mut voice_latch: Option<Instant> = None;
+    let mut voice_latch_up: u8 = 0;
     // #28 sound-level meter: whether the ADC+METER gate are currently armed, and
     // the decaying peak-hold value (dBFS). Only touched while app_state==Sound.
     let mut meter_on = false;
@@ -1450,6 +1468,16 @@ async fn main(_spawner: Spawner) -> ! {
             } else {
                 tick.min(Duration::from_secs(3))
             }
+        } else {
+            tick
+        };
+        // #22 voice-latch cadence override: while an early PTT press waits
+        // for WiFi, tick ≤100ms so the release-cancel debounce (3 reads ≈
+        // 300ms) and the ready→auto-fire hop stay snappy. NET_WAKE already
+        // wakes us the instant the phase flips; this bounds the finger polls.
+        // Latch lifetime is ≤30s (and ≤~300ms once the finger lifts).
+        let tick = if voice_latch.is_some() {
+            tick.min(Duration::from_millis(100))
         } else {
             tick
         };
@@ -3045,16 +3073,61 @@ async fn main(_spawner: Spawner) -> ! {
                 // would cancel that mid-flush and drop the transcript.
                 let voice_pressed = shell.req.voice_ptt_pressed.take();
                 let _ = shell.req.voice_ptt_released.take();
-                // STT needs WiFi associated AND DHCP landed. Pressing before that is up
-                // is the "connect failed" bug — show "Connecting…" and DON'T attempt;
-                // WiFi bring-up keeps running in the loop, so a beat later the next press
-                // streams. (dream/mic-fix predates morpheus's gate; add it here.)
+                // STT needs WiFi associated AND DHCP landed. A press before
+                // that no longer drops (#22 press-once): it LATCHES — the
+                // Voice screen already holds Hold::Voice (raised on the
+                // screen-open edge above), so net_task is bringing the link
+                // up; when phase goes ready the latch fires the capture
+                // through the SAME entry below, exactly as if just pressed.
                 let voice_net_ready = net.phase.ready();
                 if app_state == AppState::Voice && voice_pressed && !voice_net_ready {
-                    shell.set_voice_state(5); // connecting (waiting for WiFi/DHCP)
+                    voice_latch = Some(now); // re-press refreshes the window
+                    voice_latch_up = 0;
+                    shell.set_voice_state(5); // connecting — keep holding
                     shell.request_redraw();
                 }
-                if app_state == AppState::Voice && voice_pressed && voice_net_ready {
+                // Latch upkeep (armed only, ≤30s, ticks capped at 100ms):
+                // fire when ready + finger still down; cancel on release
+                // (3-read debounce on the authoritative I2C finger count —
+                // the INT pin goes high for still fingers, the same trap the
+                // capture monitor dodges); fail visibly if the window lapses
+                // (the shade's "WiFi failed" card rides the existing
+                // connect_fails>=3 source, deduped — nothing extra posted).
+                let mut voice_latch_fire = false;
+                if let Some(t0) = voice_latch {
+                    if app_state != AppState::Voice {
+                        // Screen closed — Hold::Voice drops on the edge above;
+                        // the latch dies with it.
+                        voice_latch = None;
+                    } else {
+                        let finger_down = matches!(touch.read(), Ok(Some(_)));
+                        if finger_down {
+                            voice_latch_up = 0;
+                        } else {
+                            voice_latch_up = voice_latch_up.saturating_add(1);
+                        }
+                        if voice_net_ready && finger_down {
+                            // A transient I2C miss (finger_down false for a
+                            // tick or two) just defers the fire to the next
+                            // 100ms tick — never a junk 180ms capture.
+                            voice_latch = None;
+                            voice_latch_fire = true;
+                        } else if voice_latch_up >= 3 {
+                            voice_latch = None; // released while waiting → cancel
+                            shell.set_voice_state(0); // back to "Hold to talk"
+                            shell.request_redraw();
+                        } else if now.duration_since(t0) > VOICE_LATCH_WINDOW {
+                            voice_latch = None;
+                            shell.set_voice_error("WiFi failed");
+                            shell.set_voice_state(4);
+                            shell.request_redraw();
+                        }
+                    }
+                }
+                if app_state == AppState::Voice
+                    && (voice_pressed || voice_latch_fire)
+                    && voice_net_ready
+                {
                     use core::sync::atomic::Ordering;
                     // Mic is the ES7210 (inited at boot + kept alive); just arm the gate.
                     // Flush stale chunks + reset the live level so the meter starts low.
