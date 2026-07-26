@@ -254,7 +254,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
     <div class="section-head reveal">
       <div class="eyebrow">✅ Shipped</div>
       <h2>The release timeline</h2>
-      <p>Every tagged release, newest at the bottom — the line the firmware has actually walked, from a booting Slint shell to a self-updating fleet of two.</p>
+      <p>Every release, newest at the bottom — the line the firmware has actually walked, from a booting Slint shell to a self-updating fleet of two.</p>
     </div>
 
     <div class="timeline reveal">
@@ -265,8 +265,28 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
       </div>
       <div class="tl">
         <span class="dot"></span>
+        <div class="head"><span class="ver">v0.3.0</span><span class="cap">Migration tail — AOD, the Familiar &amp; a half-res framebuffer</span></div>
+        <p class="txt">The headline fix: games and Settings launch in <em>any</em> radio state, because the app framebuffer dropped to half resolution — 205×251 RGB332 (~51&nbsp;KB) instead of ~201&nbsp;KB, upscaled 2× on flush, with apps still drawing at full 410×502. The full-res buffer simply could not share the C6's single SRAM region with a resident Slint scene plus the radio stacks. Also: AOD rendered by the shell, the Mesh Familiar status cluster + gyro parallax on the clock, an LP-core power row, and the mesh radio decoupled from WiFi credentials (ESP-NOW needs only the STA PHY, not an association).</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.3.1</span><span class="cap">On-glass fixes</span></div>
+        <p class="txt">WiFi actually works: the toggle stopped dropping taps (a debounce window was silently eating a WIFI tap within 1&nbsp;s of the idle check) and now toasts “No WiFi credentials — set in Settings” instead of silently no-opping. The WIFI / BLE / MESH hit areas grew 66×44 → 78×64 (+72%) to be reliably finger-tappable, and the Sensors page shows step count.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
         <div class="head"><span class="ver">v0.4.0</span><span class="cap">Sleep, sensors &amp; testable crates</span></div>
         <p class="txt">Light-sleep AOD, the WLED WiZmote remote, an RSSI treasure hunt, a home-energy screen, die-temperature, and host-tested <span class="mono">no_std</span> workspace crates.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.5.0</span><span class="cap">Home Assistant climate &amp; live energy</span></div>
+        <p class="txt">Real thermostats, driven from the wrist: a bidirectional MQTT climate session behind a Climate list screen plus a per-device detail overlay (setpoint steppers, mode picker), with <span class="mono">crates/climate-model</span> as the pure <span class="mono">no_std</span> state core — host-tested against golden vectors, including panic-safety on untrusted device names. The home-energy screen went live on real battery/solar/grid values, fed by Node-RED bridge flows. Under the hood, the main heap was trimmed 240&nbsp;KB → 228&nbsp;KB <em>to grow the stack</em>: on the C6 the stack is whatever the linker leaves between <span class="mono">_bss_end</span> and <span class="mono">_stack_start</span>, so shrinking the heap is what grows it.</p>
+      </div>
+      <div class="tl">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.5.1</span><span class="cap">Stack-floor guardrail &amp; climate polish</span></div>
+        <p class="txt">A boot-time check on the stack gap, so a future heap bump can't silently eat the stack again. Setpoints apply optimistically and flush any unsent change when the screen closes; Energy gates on a live connection instead of rendering <span class="mono">-1</span> placeholders; and a shared <span class="mono">BackChevron</span> + 72&nbsp;px setpoint steppers brought uniform 78×64 back targets across climate, energy, wled, and hunt.</p>
       </div>
       <div class="tl">
         <span class="dot"></span>
@@ -386,6 +406,18 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/28" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#28</span></span>
             <span class="txt"><b>AOD pixel-shift</b> (burn-in) + typography token sweep</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/45" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#45</span></span>
+            <span class="txt"><b>Face Manager</b> — long-press the clock to pick faces, reorder / add / remove carousel pages</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/52" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#52</span></span>
+            <span class="txt"><b>Complication Manager</b> — editable watchface slots that can render any plugin or system surface</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/44" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#44</span></span>
+            <span class="txt"><b>Plugin Manager</b> — toggle + configure plugins on-glass, registry-driven</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/48" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#48</span></span>
+            <span class="txt"><b>Power-button long-press</b> → SHUTDOWN / REBOOT menu (AXP2101 PWRON events)</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/10" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#10</span></span>
             <span class="txt"><b>Emoji-expression face</b> (vendor parity)</span></a>
@@ -401,6 +433,9 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         </div>
         <p class="rg-sub">The TX playback seam shipped in v0.8.5 (<a href="https://github.com/jphein/esp32c6-watch/issues/23" target="_blank" rel="noopener" style="color:var(--ga)">#23</a>) — now climb it, from a spectrum analyzer to a music player to a full spoken-conversation loop.</p>
         <div class="iss-list">
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/49" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#49</span></span>
+            <span class="txt"><b>Touch sounds everywhere</b> + a persisted toggle, and a Settings overhaul</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#30</span></span>
             <span class="txt"><b>Real FFT spectrum analyzer</b> in the Sound app</span></a>
@@ -470,6 +505,15 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/21" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#21</span></span>
             <span class="txt"><b>USB-JTAG wedge auto-recovery</b> script</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/46" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#46</span></span>
+            <span class="txt"><b>Persist user toggles</b> across reboots (BLE / mesh / WiFi intent, mic gain) — a presence prerequisite</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/51" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#51</span></span>
+            <span class="txt"><b>Firmware TCP debug server</b> (<span class="mono">:5555</span>, token-gated) — the WiFi half of the debug rig</span></a>
+          <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/50" target="_blank" rel="noopener">
+            <span class="nums"><span class="num">#50</span></span>
+            <span class="txt"><b>Grow the OTA slots</b> 4&nbsp;MB → 6&nbsp;MB (the ROM budget is nearly full) — needs one cabled reflash per watch</span></a>
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/19" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#19</span></span>
             <span class="txt"><b>Rust + Embassy ESP32-C3/C6 ecosystem survey</b> (prior art)</span></a>
