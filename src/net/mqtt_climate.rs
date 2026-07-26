@@ -368,6 +368,14 @@ static LIGHTS_TOPICS: LazyLock<LightsTopics> = LazyLock::new(|| {
 const NOTIFY_TOPIC: &str = "watch/notify";
 /// `watch/` (6) + sigil (≤20) + `/notify` (7) = ≤33.
 const NOTIFY_TOPIC_CAP: usize = 40;
+/// Notify topic pair (fleet, per-device) for subscribers: this session AND
+/// the boot-burst window (`mqtt_ha::check_ota_announce`), so a RETAINED
+/// notify is picked up on the next hourly NTP burst, not only when an HA
+/// screen opens a session.
+pub(crate) fn notify_topics() -> (&'static str, &'static str) {
+    (NOTIFY_TOPIC, NOTIFY_DEVICE_TOPIC.get().as_str())
+}
+
 /// `watch/<sigil>/notify` — per-device, built once (classify_topic runs per
 /// inbound PUBLISH and must not re-assemble strings).
 static NOTIFY_DEVICE_TOPIC: LazyLock<String<NOTIFY_TOPIC_CAP>> = LazyLock::new(|| {

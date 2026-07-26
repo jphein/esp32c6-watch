@@ -138,10 +138,19 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
 /// [`crate::net::ota_http::handle_announce`] (gate + post for main.rs); no
 /// retained message just times the wait out — that is the common case and not
 /// an error. Frame decode reuses [`crate::net::mqtt_climate::read_frame`].
+///
+/// Notifications (#32) ride the same window: `watch/notify` (fleet) +
+/// `watch/<sigil>/notify` are subscribed too, so a RETAINED notify reaches
+/// the wrist on the next boot/NTP burst — offline pickup without waiting for
+/// an HA screen to open a full session. (The ring's duplicate-of-newest
+/// guard absorbs the re-delivery on every subsequent window.)
 async fn check_ota_announce(socket: &mut TcpSocket<'_>) -> Result<(), &'static str> {
+    let (notify_fleet, notify_device) = crate::net::mqtt_climate::notify_topics();
     let topics = [
         crate::net::ota_http::ANNOUNCE_TOPIC,
         crate::net::sigil::get().ota_topic.as_str(),
+        notify_fleet,
+        notify_device,
     ];
 
     // SUBSCRIBE (packet id 1, QoS 0) -> SUBACK.
@@ -159,20 +168,22 @@ async fn check_ota_announce(socket: &mut TcpSocket<'_>) -> Result<(), &'static s
     }
     write_all(socket, &pkt).await?;
 
-    // Announce frame = topic (~30 B max) + payload (`OTA|epoch|url<=96`) — 192
-    // is roomy. SUBACK reuses the same buffer first.
-    let mut buf = [0u8; 192];
+    // Largest expected frame: a notify — topic ≤35 + `NOTIFY|title|body`
+    // ≤ 7+32+1+96 (caps in notify.rs; longer payloads are foreign and may
+    // error the drain — the burst's telemetry is already on the wire by
+    // then). SUBACK reuses the same buffer first.
+    let mut buf = [0u8; 256];
     let (ty, n) = crate::net::mqtt_climate::read_frame(socket, &mut buf).await?;
     if ty & 0xF0 != 0x90 || n < 2 + topics.len() || buf[2..n].contains(&0x80) {
         return Err("bad SUBACK (announce)");
     }
 
-    // Retained announces, if any, arrive immediately after the SUBACK — with
-    // both topics subscribed there can be up to two (fleet + targeted), so
-    // drain frames until the window closes. handle_announce's BUILD_EPOCH gate
-    // arbitrates duplicates. The deadline expiring = no (more) retained
-    // announces (fine); read_frame is cancel-safe enough here — on expiry we
-    // only ever DISCONNECT + close.
+    // Retained messages, if any, arrive immediately after the SUBACK — up to
+    // four with the announce + notify pairs subscribed, so drain frames until
+    // the window closes. handle_announce's BUILD_EPOCH gate and notify's
+    // duplicate-of-newest guard arbitrate re-deliveries. The deadline
+    // expiring = no (more) retained messages (fine); read_frame is
+    // cancel-safe enough here — on expiry we only ever DISCONNECT + close.
     let deadline = Instant::now() + ANNOUNCE_WAIT;
     loop {
         match embassy_time::with_deadline(
@@ -190,8 +201,9 @@ async fn check_ota_announce(socket: &mut TcpSocket<'_>) -> Result<(), &'static s
     Ok(())
 }
 
-/// Minimal QoS-0 PUBLISH body split (topic + payload) for the announce frame.
-/// Checked slicing throughout — a malformed frame is dropped, never a panic.
+/// Minimal QoS-0 PUBLISH body split (topic + payload) for the burst window's
+/// retained frames: OTA announces + notifies (#32). Checked slicing
+/// throughout — a malformed frame is dropped, never a panic.
 fn handle_announce_frame(body: &[u8]) {
     if body.len() < 2 {
         return;
@@ -202,10 +214,15 @@ fn handle_announce_frame(body: &[u8]) {
         return; // topic overruns frame — malformed
     }
     let topic = &body[2..idx];
+    let (notify_fleet, notify_device) = crate::net::mqtt_climate::notify_topics();
+    if topic == notify_fleet.as_bytes() || topic == notify_device.as_bytes() {
+        crate::notify::handle_mqtt(&body[idx..]);
+        return;
+    }
     if topic != crate::net::ota_http::ANNOUNCE_TOPIC.as_bytes()
         && topic != crate::net::sigil::get().ota_topic.as_bytes()
     {
-        return; // only the two announce topics are subscribed; anything else is noise
+        return; // only the subscribed topics are expected; anything else is noise
     }
     crate::net::ota_http::handle_announce(&body[idx..]);
 }
