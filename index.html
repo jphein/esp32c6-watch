@@ -6,7 +6,7 @@
 <title>esp32c6-watch — 100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch</title>
 <meta name="description" content="A 100% Rust, no_std firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.06 smartwatch — Slint UI with a four-scheme theme system, tactile pressed-state feedback, wake gesture hints, a paged launcher, ESP-NOW mesh, a migrating Mesh Familiar, push-to-talk voice, an edge-gesture shell with an app switcher and notification shade, a realtime network task that keeps the UI responsive through an outage, firmware WiFi roaming, sigil-named watch-to-watch pings, speaker volume with mappable hardware buttons, live Home Assistant climate and energy, restored speaker SFX with an FFT spectrum analyzer, room-aware Home Assistant lights, games, BLE, WiFi, and reliable zero-touch OTA across a two-watch fleet with per-device sigil identities, all on a RISC-V microcontroller.">
 <meta name="theme-color" content="#000000">
-<meta property="og:title" content="esp32c6-watch — v0.12.0">
+<meta property="og:title" content="esp32c6-watch — v0.12.1">
 <meta property="og:description" content="100% Rust no_std firmware for the Waveshare ESP32-C6 AMOLED smartwatch — a self-updating two-watch fleet (eldritch-lantern & mythic-throne) with per-device sigil identities, restored speaker SFX, room-aware Home Assistant lights, and a fastpath reliability release. Slint UI, four themes, tactile pressed states, wake gesture hints, ESP-NOW mesh, a migrating Familiar, push-to-talk voice, reliable zero-touch OTA, and more.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -606,6 +606,14 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
         <p><b>One-tap self-serve</b>: the update button raises WiFi itself, pulls the new build over HTTP, and flips slots — no pre-connect needed. <b>Zero-touch push</b>: <span class="mono">tools/ota_push.sh</span> publishes a retained MQTT announce that a monotonic build gate accepts only if it's newer. v0.8.3 made it <b>dependable</b> — retry that survives link drops, mesh traffic suppressed during the flash so bandwidth goes to the download, and tightened stall margins. Both land in the A/B layout — flash <span class="mono">ota_1</span> while running from <span class="mono">ota_0</span>, then flip, with rollback safety.</p>
       </article>
 
+      <!-- Stability SHIPPED v0.12.1 -->
+      <article class="feat done reveal">
+        <span class="kbadge">shipped · v0.12.1</span>
+        <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2v6"/><path d="M5.6 5.6a9 9 0 1 0 12.8 0"/></svg></div>
+        <h3>The freezing, cured</h3>
+        <p>Both watches started freezing, and the cause wasn't in our code: esp-radio&nbsp;0.18's WiFi blob null-dereferences inside <span class="mono">ppRxFragmentProc</span> during scan and associate — a deterministic panic ~2.2&nbsp;s into boot, <b>100% of the time</b>, into a reboot loop (<a href="https://github.com/jphein/esp32c6-watch/issues/61" target="_blank" rel="noopener">#61</a>). Disabling AMPDU&nbsp;RX — the one aggregation knob 0.18 exposes — took the crash rate <b>100% to 0%</b> on both watches with roaming intact. Cable-flashed, since crash-looping firmware can't update itself over the air.</p>
+      </article>
+
       <!-- Unmissable SHIPPED v0.12.0 -->
       <article class="feat done reveal">
         <span class="kbadge">shipped · v0.12.0</span>
@@ -821,7 +829,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:70px 0 5
             <div class="rows" style="gap:1.5cqw">
               <div class="srow"><span class="k">CHIP</span><span class="v">ESP32-C6 · RISC-V</span></div>
               <div class="srow"><span class="k">DISPLAY</span><span class="v">410x502 AMOLED</span></div>
-              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.12.0</span></div>
+              <div class="srow"><span class="k">FIRMWARE</span><span class="v">v0.12.1</span></div>
               <div class="srow"><span class="k">HEAP</span><span class="v acc">123k free</span></div>
               <div class="srow"><span class="k">UPTIME</span><span class="v">02:41:07</span></div>
               <div class="srow"><span class="k">BATTERY</span><span class="v">78% · 4012 mV</span></div>

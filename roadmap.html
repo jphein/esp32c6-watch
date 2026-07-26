@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Roadmap — esp32c6-watch · shipped timeline & open issues</title>
-<meta name="description" content="The esp32c6-watch roadmap — a shipped-release timeline from v0.2.0 through v0.12.0, plus the open issue tracker grouped into six themes: gesture shell & UI, audio pipeline, the fleet, Home Assistant, platform & tooling, and the radio frontier. Every open item links to its GitHub issue.">
+<meta name="description" content="The esp32c6-watch roadmap — a shipped-release timeline from v0.2.0 through v0.12.1, plus the open issue tracker grouped into six themes: gesture shell & UI, audio pipeline, the fleet, Home Assistant, platform & tooling, and the radio frontier. Every open item links to its GitHub issue.">
 <meta name="theme-color" content="#000000">
-<meta property="og:title" content="esp32c6-watch — Roadmap (v0.12.0)">
-<meta property="og:description" content="Shipped from v0.2.0 → v0.12.0, and where the watch goes next — six themed groups of open issues, each linking to GitHub. Mirrors the issue tracker.">
+<meta property="og:title" content="esp32c6-watch — Roadmap (v0.12.1)">
+<meta property="og:description" content="Shipped from v0.2.0 → v0.12.1, and where the watch goes next — six themed groups of open issues, each linking to GitHub. Mirrors the issue tracker.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/fonts.css">
@@ -366,11 +366,16 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
         <div class="head"><span class="ver">v0.11.0</span><span class="cap">The fleet greets by name</span></div>
         <p class="txt">Press the hero button and the other watch knows. Additive mesh <span class="mono">PING</span>/<span class="mono">PINGACK</span> frames carry a sigil-identified greeting (<a href="https://github.com/jphein/esp32c6-watch/issues/35" target="_blank" rel="noopener">#35</a>); the receiver wakes from always-on, blooms a full-screen accent-ring pulse with the sender's name, and plays a rising two-tone chime — or, if the panel is off or a game holds the framebuffer, chimes and drops a card in the notification shade. Delivery is confirmed, and silence times out honestly at 2&nbsp;s. Voice also stopped asking twice: an early push-to-talk press now <b>latches</b> and fires itself the moment the link lands, cancelling cleanly if you lift your finger first (<a href="https://github.com/jphein/esp32c6-watch/issues/22" target="_blank" rel="noopener">#22</a>). And <span class="mono">mythic-throne</span> took this release <b>over the air, zero-touch</b> — the first such self-update since the v0.10.1 flash-safety fix, and the payoff for the network task, the slot guard and the roaming all landing together.</p>
       </div>
-      <div class="tl now">
+      <div class="tl">
         <span class="dot"></span>
-        <div class="head"><span class="ver">v0.12.0</span><span class="cap">Unmissable</span><span class="badge">latest</span></div>
+        <div class="head"><span class="ver">v0.12.0</span><span class="cap">Unmissable</span></div>
         <p class="txt">A ping you cannot miss (<a href="https://github.com/jphein/esp32c6-watch/issues/58" target="_blank" rel="noopener">#58</a>). The chime became a four-note rising major arpeggio — C5→E5→G5→C6, the top note held as the arrival — host-tested for pop-free edges and for strictly-rising note <em>order</em>. The pulse now lands over framebuffer games too: a ping <b>suspends</b> the running app through the session manager, frees the ~51&nbsp;KB framebuffer so the Slint pulse can composite, then re-launches it exactly where it was on dismiss. A fully dark panel wakes for it. And every ping leaves an RTC-stamped card in the shade, so there's a record after the pulse fades.</p>
         <p class="txt">Sound got a volume you control (<a href="https://github.com/jphein/esp32c6-watch/issues/59" target="_blank" rel="noopener">#59</a>): a 0–15 level plus mute that <em>every</em> chime, beep, click and touch tick honours, a touch HUD that auto-dismisses, and BOOT/POWER short- and long-presses bound to actions you pick in Settings › Buttons — all persisted in config record v6. One nuance worth the words: a short press only acts if the screen was already bright, so a press in the dark just wakes the watch. And <b>Climate and Energy are live again</b> (<a href="https://github.com/jphein/esp32c6-watch/issues/60" target="_blank" rel="noopener">#60</a>) — the HA component now publishes the retained MQTT topics the firmware actually reads, no reflash required, with the speaker entity restored along the way.</p>
+      </div>
+      <div class="tl now">
+        <span class="dot"></span>
+        <div class="head"><span class="ver">v0.12.1</span><span class="cap">The freezing, cured</span><span class="badge">latest</span></div>
+        <p class="txt">Both watches had started freezing, and the cause wasn't in our code at all: esp-radio&nbsp;0.18's WiFi blob null-dereferences inside <span class="mono">ppRxFragmentProc</span> during scan and associate — a deterministic panic about 2.2&nbsp;seconds into boot, <b>100% of the time</b>, straight into a reboot loop (<a href="https://github.com/jphein/esp32c6-watch/issues/61" target="_blank" rel="noopener">#61</a>). The fix is the single RX-aggregation knob 0.18 exposes: disable AMPDU&nbsp;RX at WiFi bring-up. Crash rate went <b>100% to 0%</b> on both watches, with association, DHCP and roaming intact — cable-flashed, because crash-looping firmware can't update itself over the air. The harness that measured it (<span class="mono">tools/watch_soak.py</span>: reset N times, classify every boot, report crash-rate and time-to-crash) is now part of the tooling.</p>
       </div>
     </div>
   </div>
@@ -449,7 +454,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
           <h3>Audio pipeline</h3>
           <span class="cnt">5 open</span>
         </div>
-        <p class="rg-sub">The TX playback seam shipped in v0.8.5 (<a href="https://github.com/jphein/esp32c6-watch/issues/23" target="_blank" rel="noopener" style="color:var(--ga)">#23</a>) — and the spectrum analyzer in v0.10.0 (<a href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener" style="color:var(--ga)">#30</a>) — now climb the rest, from a music player to a full spoken-conversation loop.</p>
+        <p class="rg-sub">The TX playback seam shipped in v0.8.5 (<a href="https://github.com/jphein/esp32c6-watch/issues/23" target="_blank" rel="noopener" style="color:var(--ga)">#23</a>) — and the spectrum analyzer in v0.10.0 (<a href="https://github.com/jphein/esp32c6-watch/issues/30" target="_blank" rel="noopener" style="color:var(--ga)">#30</a>) — now climb the rest, from a music player to a full spoken-conversation loop. Bluetooth earbuds are <em>not</em> on that list: the C6 silicon has no ISO link layer, so LE Audio is a permanent no-go here (<a href="https://github.com/jphein/esp32c6-watch/issues/62" target="_blank" rel="noopener" style="color:var(--ga)">#62</a>) and classic A2DP never worked either — audio off the wrist goes to room speakers or a custom PCM receiver instead.</p>
         <div class="iss-list">
           <a class="iss" href="https://github.com/jphein/esp32c6-watch/issues/33" target="_blank" rel="noopener">
             <span class="nums"><span class="num">#33</span></span>
@@ -551,7 +556,7 @@ footer{border-top:1px solid var(--line); background:var(--bg2); padding:56px 0 6
       <a href="https://github.com/jphein/esp32c6-watch" target="_blank" rel="noopener">GitHub ↗</a>
     </div>
   </div>
-  <div class="foot-note">Roadmap mirrors the GitHub issue tracker · shipped through <b class="mono" style="color:var(--soft)">v0.12.0</b> · dual-licensed MIT OR Apache-2.0</div>
+  <div class="foot-note">Roadmap mirrors the GitHub issue tracker · shipped through <b class="mono" style="color:var(--soft)">v0.12.1</b> · dual-licensed MIT OR Apache-2.0</div>
 </footer>
 
 <!-- shared logo symbol -->
