@@ -424,8 +424,12 @@ export component WatchShell inherits Window {
 
     // Top edge: edge-swipe down → notification shade (#32). Mirror of the
     // bottom handle, hugging the top bezel above the radio dots' visible
-    // row (~y38); the echo "descends" toward the content.
-    if root.hint-down && !root.aod && !root.launcher-open: Rectangle {
+    // row (~y38); the echo "descends" toward the content. `visible:`-gated
+    // rather than `if` like its siblings: same zero-render when hidden
+    // (visible:false culls), without the ~4KB generated inner component —
+    // the ROM margin is thinner than when the side strips were written.
+    Rectangle {
+        visible: root.hint-down && !root.aod && !root.launcher-open;
         x: (parent.width - self.width) / 2; y: 2px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -528,11 +532,13 @@ export component WatchShell inherits Window {
 
     // ==================== status cluster (#31/#32) ====================
     // ONE corner spot for shell badges — top-right, tucked under the battery
-    // pill (the only chrome-free corner strip; #32's unread chip joins this
-    // row). Theme-tokened; AOD-excluded (gated, and the AOD overlay paints
-    // over the chrome anyway). The chip is a tappable shortcut: Recipe B
-    // halo, opens the switcher.
-    if root.suspended-count > 0 && !root.aod: susp-chip := IconButton {
+    // pill (the only chrome-free corner strip). Theme-tokened; AOD-excluded
+    // (gated, and the AOD overlay paints over the chrome anyway). Chips are
+    // tappable shortcuts (Recipe B halo) and are `visible:`-gated rather
+    // than `if`-gated: chrome is resident anyway, and each `if` would cost
+    // a ~3-6KB generated inner component (see shade.slint's ROM note).
+    susp-chip := IconButton {
+        visible: root.suspended-count > 0 && !root.aod;
         x: parent.width - self.width - Theme.safe-corner;
         y: 64px;
         width: 58px;
@@ -562,7 +568,8 @@ export component WatchShell inherits Window {
 
     // Unread notifications chip (#32): warm dot + count, left of the
     // suspended chip when both show — one cluster row. Tap opens the shade.
-    if root.notif-unread > 0 && !root.aod: unread-chip := IconButton {
+    unread-chip := IconButton {
+        visible: root.notif-unread > 0 && !root.aod;
         x: parent.width - self.width - Theme.safe-corner
             - (root.suspended-count > 0 ? 62px : 0px);
         y: 64px;

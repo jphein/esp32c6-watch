@@ -1,4 +1,4 @@
-import { Theme, PageTitle } from "theme.slint";
+import { Theme } from "theme.slint";
 import { PressTile, BackChevron } from "controls.slint";
 import { LauncherTile, AppIcon } from "launcher.slint";
 
@@ -12,6 +12,11 @@ import { LauncherTile, AppIcon } from "launcher.slint";
 //   swipe Right/Down / chevron → close
 // Card geometry is FIXED (top/height/gap) — Rust maps a kill-swipe's start_y
 // back to a slot with the CARD_* constants in slint_shell.rs; keep in sync.
+//
+// ROM note: `if` conditionals here generate dynamically-instantiated inner
+// components (~3-6KB each); the overlay is already behind `if switcher-open`
+// in shell.slint, so slots gate with `visible:` and the footer line is one
+// ternary string (see shade.slint's matching note).
 
 export component SwitcherOverlay {
     // 4 fixed slots, padded with present:false (launcher-grid idiom).
@@ -31,18 +36,28 @@ export component SwitcherOverlay {
         font-size: 12px;
         letter-spacing: 3px;
     }
-    PageTitle { title: "SESSIONS"; }
+    Text { // launcher's PageTitle idiom, inlined (one Text, no extra component)
+        x: (parent.width - self.width) / 2;
+        y: 56px;
+        text: "SESSIONS";
+        color: Theme.soft;
+        font-size: Theme.t-title;
+        font-weight: 600;
+        letter-spacing: 5px;
+    }
     BackChevron { clicked => { root.close(); } }
 
-    // Empty state: honest about what earns a card.
-    if root.count == 0: Text {
+    // Empty state: honest about what earns a card (`visible:`, ROM note).
+    Text {
+        visible: root.count == 0;
         x: (parent.width - self.width) / 2;
         y: 230px;
         text: "Nothing suspended";
         color: Theme.dim;
         font-size: Theme.t-body;
     }
-    if root.count == 0: Text {
+    Text {
+        visible: root.count == 0;
         x: (parent.width - self.width) / 2;
         y: 262px;
         text: "leave a game with the side button";
@@ -52,55 +67,50 @@ export component SwitcherOverlay {
 
     // Session cards — fixed slots (y = 110 + i*96, h 84; see slint_shell.rs
     // SWITCHER_CARD_* constants). PressTile (Recipe A): fill lights to
-    // accent-bg + edge ignites in the app's own accent on finger-down.
-    for i in 4: Rectangle {
+    // accent-bg + edge ignites in the app's own accent on finger-down. Slot
+    // presence is a `visible:` gate, NOT an `if` (ROM note above).
+    for i in 4: PressTile {
+        visible: root.tiles[i].present;
         x: 35px;
         y: 110px + i * 96px;
         width: 340px;
         height: 84px;
-        if root.tiles[i].present: PressTile {
-            width: 100%; height: 100%;
-            ignite: root.tiles[i].accent;
-            clicked => { root.resume(root.tiles[i].idx); }
-            AppIcon {
-                x: 20px;
-                y: (parent.height - self.height) / 2;
-                id: root.tiles[i].icon-id;
-                tint: root.tiles[i].accent;
-            }
-            Text {
-                x: 86px;
-                y: 18px;
-                width: parent.width - 100px;
-                overflow: elide;
-                text: root.tiles[i].name;
-                color: Theme.ink;
-                font-size: Theme.t-body;
-                font-weight: 600;
-            }
-            Text {
-                x: 86px;
-                y: 46px;
-                text: "PAUSED";
-                color: Theme.faint;
-                font-size: Theme.t-caption;
-                letter-spacing: 2px;
-            }
+        ignite: root.tiles[i].accent;
+        clicked => { root.resume(root.tiles[i].idx); }
+        AppIcon {
+            x: 20px;
+            y: (parent.height - self.height) / 2;
+            id: root.tiles[i].icon-id;
+            tint: root.tiles[i].accent;
+        }
+        Text {
+            x: 86px;
+            y: 18px;
+            width: parent.width - 100px;
+            overflow: elide;
+            text: root.tiles[i].name;
+            color: Theme.ink;
+            font-size: Theme.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 86px;
+            y: 46px;
+            text: "PAUSED";
+            color: Theme.faint;
+            font-size: Theme.t-caption;
+            letter-spacing: 2px;
         }
     }
 
-    // Overflow honesty + the gesture legend.
-    if root.count > 4: Text {
+    // Footer line: overflow honesty or the gesture legend — one Text, the
+    // string is the only thing that changes ("" when empty).
+    Text {
         x: (parent.width - self.width) / 2;
         y: 452px;
-        text: "+\{root.count - 4} more";
-        color: Theme.faint;
-        font-size: Theme.t-caption;
-    }
-    if root.count > 0 && root.count <= 4: Text {
-        x: (parent.width - self.width) / 2;
-        y: 452px;
-        text: "TAP RESUME \u{00b7} SWIPE UP KILL";
+        text: root.count > 4
+            ? "+\{root.count - 4} more"
+            : (root.count > 0 ? "TAP RESUME \u{00b7} SWIPE UP KILL" : "");
         color: Theme.faint;
         font-size: Theme.t-caption;
         letter-spacing: 1px;
