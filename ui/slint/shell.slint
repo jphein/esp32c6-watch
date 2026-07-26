@@ -348,7 +348,7 @@ export component WatchShell inherits Window {
 
     // ==================== gesture hints (wake shimmer) ====================
     // First-glance affordances for the shell gestures, shown ~3s after a
-    // wake-to-bright transition. Three TIGHT edge strips — deliberately NOT
+    // wake-to-bright transition. Four TIGHT edge strips — deliberately NOT
     // one full-screen container — so the opacity tween's dirty region stays
     // small under the partial renderer (frame budget). Duo-tone "aurora":
     // accent glyph/handle with an accent2 echo, alpha-graded; every color is
@@ -356,9 +356,13 @@ export component WatchShell inherits Window {
     // page since #29 — the bottom handle means "edge-swipe up → launcher",
     // honest everywhere now — never in AOD, never under the launcher scrim.
     // Chrome (dots/pills) draws over these, hence this block sits before it.
+    // `visible:`-gated, not `if`-gated: visible:false culls draw + input
+    // identically, without the ~3-6KB generated inner component each `if`
+    // costs (the gesture-shell ROM diet — see shade.slint's note).
 
     // Left edge: page carousel, more content behind the left bezel.
-    if root.hint-sides && !root.aod && !root.launcher-open: Rectangle {
+    Rectangle {
+        visible: root.hint-sides && !root.aod && !root.launcher-open;
         x: 0; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -379,7 +383,8 @@ export component WatchShell inherits Window {
     }
 
     // Right edge: mirror of the left strip.
-    if root.hint-sides && !root.aod && !root.launcher-open: Rectangle {
+    Rectangle {
+        visible: root.hint-sides && !root.aod && !root.launcher-open;
         x: parent.width - self.width; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -405,7 +410,8 @@ export component WatchShell inherits Window {
     // Bottom edge: edge-swipe up → launcher (#29). A rising duo-tone "handle"
     // beam hugging the edge zone (start_y ≥ 427), tucked under the page dots
     // (visible dots end y473; this starts y479).
-    if root.hint-up && !root.aod && !root.launcher-open: Rectangle {
+    Rectangle {
+        visible: root.hint-up && !root.aod && !root.launcher-open;
         x: (parent.width - self.width) / 2; y: 474px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -424,10 +430,7 @@ export component WatchShell inherits Window {
 
     // Top edge: edge-swipe down → notification shade (#32). Mirror of the
     // bottom handle, hugging the top bezel above the radio dots' visible
-    // row (~y38); the echo "descends" toward the content. `visible:`-gated
-    // rather than `if` like its siblings: same zero-render when hidden
-    // (visible:false culls), without the ~4KB generated inner component —
-    // the ROM margin is thinner than when the side strips were written.
+    // row (~y38); the echo "descends" toward the content.
     Rectangle {
         visible: root.hint-down && !root.aod && !root.launcher-open;
         x: (parent.width - self.width) / 2; y: 2px;
@@ -590,8 +593,10 @@ export component WatchShell inherits Window {
         }
     }
 
-    // Toast (RAM-busy etc.): visible while toast-text != ""
-    if root.toast-text != "": Rectangle {
+    // Toast (RAM-busy, notification arrivals): shown while toast-text != ""
+    // (`visible:`-gated — same ROM rationale as the hint strips above).
+    Rectangle {
+        visible: root.toast-text != "";
         x: (parent.width - self.width) / 2;
         y: 420px;
         width: min(360px, toast-label.width + 40px);
