@@ -181,15 +181,27 @@ pub fn take_announce() -> Option<Announce> {
 /// the next boot. `url_override` (from a push announce) replaces the baked
 /// [`URL`] for this one download.
 ///
+/// `flash` is the shared [`crate::FlashMutex`]; it is locked **per operation**
+/// (the table/otadata reads, each 4 KB chunk write, the final otadata flip) —
+/// never across a socket await — so the main loop's config saves stay bounded
+/// while a download is in flight.
+///
 /// Never reboots by itself. On success logs
 /// `[OTA] update staged - reboot to apply`.
+///
+/// `progress` is called with `(bytes_flashed, content_length)` — once when the
+/// headers land (0, total) and after every 4 KB chunk — so a live UI (#53:
+/// net_task publishes it through the net-state signal) can render the download
+/// without polling. Must be cheap and non-blocking (it runs between socket
+/// reads); pass `|_, _| {}` to opt out.
 pub async fn ota_update(
     stack: Stack<'static>,
-    flash: &mut esp_storage::FlashStorage<'_>,
+    flash: &'static crate::FlashMutex,
     url_override: Option<&str>,
+    progress: fn(u32, u32),
 ) -> Result<(), &'static str> {
     let url = url_override.unwrap_or(URL);
-    match with_timeout(TIMEOUT, run(stack, flash, url)).await {
+    match with_timeout(TIMEOUT, run(stack, flash, url, progress)).await {
         Ok(result) => result,
         Err(_) => Err("timeout (5 min overall)"),
     }
@@ -197,12 +209,15 @@ pub async fn ota_update(
 
 async fn run(
     stack: Stack<'static>,
-    flash: &mut esp_storage::FlashStorage<'_>,
+    flash: &'static crate::FlashMutex,
     url: &str,
+    progress: fn(u32, u32),
 ) -> Result<(), &'static str> {
     // --- Slot selection: read the partition table + otadata -----------------
+    // The returned table borrows `pt_mem`, NOT the flash handle (same pattern
+    // as the boot-time scan in main.rs), so the lock guards can stay scoped.
     let mut pt_mem = vec![0u8; partitions::PARTITION_TABLE_MAX_LEN];
-    let pt = partitions::read_partition_table(flash, &mut pt_mem)
+    let pt = partitions::read_partition_table(&mut *flash.lock().await, &mut pt_mem)
         .map_err(|_| "partition table read failed")?;
 
     let otadata = pt
@@ -211,7 +226,8 @@ async fn run(
         .ok_or("no otadata partition")?;
 
     let current = {
-        let region = otadata.as_embedded_storage(flash);
+        let mut f = flash.lock().await;
+        let region = otadata.as_embedded_storage(&mut *f);
         let mut ota = Ota::new(region, 2).map_err(|_| "otadata invalid")?;
         ota.current_app_partition().map_err(|_| "otadata read failed")?
     };
@@ -285,9 +301,9 @@ async fn run(
         return Err("image larger than ota slot");
     }
     println!("[OTA] image size {content_len} bytes");
+    progress(0, content_len as u32);
 
     // --- Stream the body into the inactive slot -------------------------------
-    let mut region = target_entry.as_embedded_storage(flash);
     let mut chunk = vec![0u8; CHUNK];
     let leftover = &header[body_start..header_len];
     chunk[..leftover.len()].copy_from_slice(leftover);
@@ -301,11 +317,18 @@ async fn run(
             if flashed == 0 && chunk[0] != ESP_IMAGE_MAGIC {
                 return Err("not an esp app image (bad magic)");
             }
-            region
-                .write(flashed, &chunk[..chunk_len])
-                .map_err(|_| "flash write failed")?;
+            {
+                // One 4 KB sector per lock: a concurrent config save waits at
+                // most one program cycle, never the whole download.
+                let mut f = flash.lock().await;
+                let mut region = target_entry.as_embedded_storage(&mut *f);
+                region
+                    .write(flashed, &chunk[..chunk_len])
+                    .map_err(|_| "flash write failed")?;
+            }
             flashed += chunk_len as u32;
             chunk_len = 0;
+            progress(flashed, content_len as u32);
             if flashed >= next_log {
                 println!("[OTA] {flashed} / {content_len} bytes");
                 next_log += LOG_STEP;
@@ -330,17 +353,19 @@ async fn run(
         chunk_len += n;
         received += n as u64;
     }
-    drop(region);
     socket.abort();
     println!("[OTA] download complete ({flashed} bytes flashed)");
 
     // --- Image fully written: flip otadata to the new slot --------------------
-    let region = otadata.as_embedded_storage(flash);
-    let mut ota = Ota::new(region, 2).map_err(|_| "otadata invalid")?;
-    ota.set_current_app_partition(target)
-        .map_err(|_| "otadata slot switch failed")?;
-    ota.set_current_ota_state(OtaImageState::New)
-        .map_err(|_| "otadata state update failed")?;
+    {
+        let mut f = flash.lock().await;
+        let region = otadata.as_embedded_storage(&mut *f);
+        let mut ota = Ota::new(region, 2).map_err(|_| "otadata invalid")?;
+        ota.set_current_app_partition(target)
+            .map_err(|_| "otadata slot switch failed")?;
+        ota.set_current_ota_state(OtaImageState::New)
+            .map_err(|_| "otadata state update failed")?;
+    }
     println!("[OTA] update staged - reboot to apply");
     Ok(())
 }
