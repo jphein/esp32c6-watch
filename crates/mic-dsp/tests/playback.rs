@@ -144,7 +144,7 @@ fn crossings(buf: &[u8], from: usize, to: usize) -> usize {
         .count()
 }
 
-/// The chime fills exactly PING_CHIME_LEN bytes at 16 kHz (480 ms).
+/// The chime fills exactly PING_CHIME_LEN bytes at 16 kHz (700 ms).
 #[test]
 fn ping_chime_length() {
     let mut buf = [0u8; PING_CHIME_LEN];
@@ -168,27 +168,73 @@ fn ping_chime_edges_and_level() {
 
 /// A 4-note RISING arpeggio C5→E5→G5→C6 (#58): each note's window rings at a
 /// strictly higher rate than the last — verified by zero-crossing count.
-/// Windows sit inside each note's own span (each note starts 110 ms after the
-/// previous), so the newest, loudest note dominates the crossing rate.
+/// Windows sit just after each note's onset (notes are 125 ms apart), where the
+/// newest note leads: peaks now DESCEND with pitch (the #58b anti-shriek
+/// voicing), so dominance comes from the previous note having decayed, not from
+/// the new one being louder.
 #[test]
 fn ping_chime_rises_four_notes() {
     let mut buf = [0u8; PING_CHIME_LEN];
     fill_ping_chime_mono_s16le(&mut buf, 16_000);
     // ms → sample index at 16 kHz.
     let w = |a_ms: usize, b_ms: usize| crossings(&buf, a_ms * 16, b_ms * 16);
-    // C5 ~523 Hz: 30..95 ms, alone (E5 enters at 110). ~2*523*0.065 ≈ 68.
+    // C5 ~523 Hz: 30..95 ms, alone (E5 enters at 125). ~2*523*0.065 ≈ 68.
     let c1 = w(30, 95);
-    // E5 ~659 Hz: 140..205 ms. ~2*659*0.065 ≈ 86.
-    let c2 = w(140, 205);
-    // G5 ~784 Hz: 250..315 ms. ~2*784*0.065 ≈ 102.
-    let c3 = w(250, 315);
-    // C6 ~1047 Hz: 360..460 ms (the held arrival). ~2*1047*0.100 ≈ 209.
-    let c4 = w(360, 460);
+    // E5 ~659 Hz: 155..220 ms. ~2*659*0.065 ≈ 86.
+    let c2 = w(155, 220);
+    // G5 ~784 Hz: 280..345 ms. ~2*784*0.065 ≈ 102.
+    let c3 = w(280, 345);
+    // C6 ~1047 Hz: 405..505 ms (the shimmer). ~2*1047*0.100 ≈ 209.
+    let c4 = w(405, 505);
     assert!(c1 < c2, "C5 ({c1}) → E5 ({c2}) must rise");
     assert!(c2 < c3, "E5 ({c2}) → G5 ({c3}) must rise");
     assert!(c3 < c4, "G5 ({c3}) → C6 ({c4}) must rise");
     // Sanity on the octave leap: C6 is ~2x C5.
     assert!(c4 > 2 * c1, "top C6 ({c4}) should ring ~2x the root C5 ({c1})");
+}
+
+/// #58b anti-shriek voicing: the note peaks must DESCEND as the pitch climbs.
+/// The first cut put the loudest note (C6 @ 9500) at the top of the arpeggio,
+/// which a tiny watch speaker renders as a shriek — JP's "it's jarring". Lock
+/// the shape in: the early (low) half of the chime must carry more level than
+/// the late (high) half, so a future tweak can't silently re-invert it.
+#[test]
+fn ping_chime_weights_the_root_not_the_top() {
+    let mut buf = [0u8; PING_CHIME_LEN];
+    let n = fill_ping_chime_mono_s16le(&mut buf, 16_000);
+    let samples = n / 2;
+    let peak_in = |from: usize, to: usize| {
+        (from..to.min(samples))
+            .map(|i| s16(&buf, i).unsigned_abs())
+            .max()
+            .unwrap_or(0)
+    };
+    // Root region (C5 alone, 0..120 ms) vs the top-note region (C6, 375..700 ms).
+    let root = peak_in(0, 120 * 16);
+    let top = peak_in(390 * 16, samples);
+    assert!(
+        root > top,
+        "root C5 ({root}) must be louder than top C6 ({top}) — a louder top \
+         note is the shriek this voicing exists to avoid"
+    );
+    // And the top should be meaningfully softer, not marginally.
+    assert!(top * 3 < root * 2, "top ({top}) should sit well under the root ({root})");
+}
+
+/// The bell decay must actually ring: 300 ms after the last note's onset the
+/// chime is still sounding (a short/plucked tau reads as nervous and clipped,
+/// which was part of the jarring character).
+#[test]
+fn ping_chime_rings_out_rather_than_stopping_dead() {
+    let mut buf = [0u8; PING_CHIME_LEN];
+    let n = fill_ping_chime_mono_s16le(&mut buf, 16_000);
+    let samples = n / 2;
+    // 600 ms in — past every onset, before the 45 ms fade — must still ring.
+    let late = (600 * 16..(640 * 16).min(samples))
+        .map(|i| s16(&buf, i).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    assert!(late > 400, "chime should still be ringing at 600 ms, got {late}");
 }
 
 /// The every-touch tick is strictly QUIETER than the launch click (texture,
