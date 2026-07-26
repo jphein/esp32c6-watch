@@ -60,6 +60,33 @@
 //! Commands arriving while the task is parked in a bounded await (one 15 s
 //! connect attempt, one scan channel, an OTA read) queue up and apply right
 //! after — the old code blocked the whole UI in those same waits.
+//!
+//! ## Firmware roaming (#57 — esp-radio has no 802.11r FT)
+//!
+//! The C6 radio can't do seamless Fast Transition, and the whole house is one
+//! roaming SSID with a dozen APs. esp-radio's default connect uses
+//! `WIFI_FAST_SCAN`, which associates to the FIRST SSID-matching AP it hears
+//! (sort_method is ignored in fast-scan) — routinely a DISTANT BSSID, whose
+//! weak-link handshake times out as `AuthenticationExpired` even while a
+//! strong AP sits beside you. So we roam in firmware:
+//!
+//! - **Best-BSSID association**: [`attempt_connect`] runs a targeted candidate
+//!   scan ([`scan_candidates`]) and pins the STRONGEST BSSID for the SSID via
+//!   `StationConfig::with_bssid` + `with_channel` (`bssid_set=true` →
+//!   esp-radio targets exactly it). A pinned BSSID that fails
+//!   [`PIN_MAX_FAILS`] times falls back to one `ScanMethod::AllChannels`
+//!   driver-select attempt, then re-scans — so a vanished BSSID can't wedge.
+//! - **RSSI-triggered roam** ([`maybe_roam`]): while connected, sample
+//!   `rssi()`; sustained below [`ROAM_RSSI_THRESH`] AND a candidate ≥
+//!   [`ROAM_MARGIN_DB`] stronger (excluding the current BSSID) → disconnect,
+//!   pin the stronger one, reconnect (backoff reset). [`ROAM_COOLDOWN`] +
+//!   the margin hysteresis prevent ping-pong. Not seamless (~1–3 s drop) but
+//!   it follows you room to room.
+//! - **SSID-agnostic**: it pins strongest-of-whatever-`ssid`-is, so it works
+//!   for `roam`, the `jplovescl` stopgap, or any future network unchanged.
+//! - esp-radio's `wifi_sta_config_t` has NO FT/MDE fields — it always
+//!   negotiates plain WPA2-PSK (00-0F-AC:2), never FT-PSK. All watch-side; no
+//!   AP/infra config is touched.
 
 use core::cell::RefCell;
 use core::sync::atomic::Ordering;
@@ -416,6 +443,31 @@ const NTP_RETRY: Duration = Duration::from_secs(10);
 /// the executor if the radio glue ever wedges (review F6).
 const SET_CONFIG_RETRY: Duration = Duration::from_millis(500);
 
+// --- #57 firmware roaming policy -------------------------------------------
+/// A pinned BSSID that fails this many times in a row is dropped in favour of
+/// ONE driver-select (AllChannels + sort-by-signal) fallback attempt — so a
+/// BSSID that moved/vanished since the candidate scan can't wedge the connect.
+const PIN_MAX_FAILS: u8 = 2;
+/// Cadence for sampling the connected link RSSI (the roam trigger). Matches
+/// the connected idle poll so it costs no extra wakes.
+const RSSI_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+/// Sustained-weak threshold: connected RSSI at/below this for
+/// [`ROAM_LOW_SAMPLES`] consecutive samples arms a roam candidate scan.
+const ROAM_RSSI_THRESH: i32 = -75;
+/// Consecutive sub-threshold samples before a roam scan (≈ N×interval of
+/// sustained weak signal — rejects a single fade dip). 4×2 s = 8 s.
+const ROAM_LOW_SAMPLES: u8 = 4;
+/// Hysteresis: a candidate BSSID must beat the current link by at least this
+/// many dB to justify the ~1–3 s reassociation drop (anti-ping-pong).
+const ROAM_MARGIN_DB: i32 = 12;
+/// Minimum spacing between roams (anti-flap): even sustained-weak won't
+/// reassociate more than once per this window.
+const ROAM_COOLDOWN: Duration = Duration::from_secs(45);
+/// Targeted candidate-scan passes (per-BSSID, filtered to the connect SSID).
+/// Same multi-pass rationale as #56's picker sweep — a short dwell misses a
+/// present AP — but SSID-filtered so it's fast (only matching APs returned).
+const ROAM_SCAN_PASSES: u8 = 2;
+
 fn backoff_for(fails: u8) -> Duration {
     let idx = (fails.saturating_sub(1) as usize).min(BACKOFF_SECS.len() - 1);
     Duration::from_secs(BACKOFF_SECS[idx])
@@ -440,9 +492,6 @@ struct St {
     radio_started: bool,
     connected: bool,
     connecting: bool,
-    /// One-time full diagnostic scan before the first-ever connect (triage
-    /// gold under a dead AP: is it visible, what channel, what auth).
-    diag_scanned: bool,
     ntp_synced: bool,
     next_ntp: Instant,
     burst_since: Option<Instant>,
@@ -453,6 +502,24 @@ struct St {
     scanning: bool,
     ota: Option<OtaJob>,
     ota_phase: OtaPhase,
+    // #57 firmware roaming: the BSSID+channel to TARGET on the next connect.
+    // Filled by a best-BSSID candidate scan (or a roam decision); pinning it
+    // makes esp-radio associate to THAT specific AP instead of the first one
+    // WIFI_FAST_SCAN happens to hear (the AuthExpired-at-good-RSSI root cause).
+    // Cleared on success (re-picked fresh each reconnect — BSSIDs move).
+    pinned: Option<([u8; 6], u8)>,
+    /// Consecutive failures while a BSSID was pinned; at PIN_MAX_FAILS the pin
+    /// is dropped and ONE driver-select (AllChannels+sort-by-signal) fallback
+    /// attempt runs before re-scanning — so a vanished/moved BSSID can't wedge.
+    pin_fails: u8,
+    /// One deliberate SSID-only / AllChannels attempt (the pin-fail fallback).
+    force_ssid_only: bool,
+    /// Consecutive connected RSSI reads below ROAM_RSSI_THRESH (roam trigger).
+    rssi_low: u8,
+    /// Next time to sample the connected link RSSI (paces the roam check).
+    next_rssi: Instant,
+    /// Roam cooldown: no reassociation before this (anti-flap).
+    roam_after: Instant,
 }
 
 impl St {
@@ -532,7 +599,6 @@ pub async fn net_task(
         radio_started: false,
         connected: false,
         connecting: false,
-        diag_scanned: false,
         ntp_synced: false,
         next_ntp: now,
         burst_since: if boot_connect { Some(now) } else { None },
@@ -543,6 +609,12 @@ pub async fn net_task(
         scanning: false,
         ota: None,
         ota_phase: OtaPhase::Idle,
+        pinned: None,
+        pin_fails: 0,
+        force_ssid_only: false,
+        rssi_low: 0,
+        next_rssi: now,
+        roam_after: now,
     };
     println!(
         "[NET] task up (holds {:#04x}, creds={})",
@@ -658,6 +730,14 @@ pub async fn net_task(
                 run_burst(stack, &mut st).await;
                 continue;
             }
+            // #57 roam: sample the link; a sustained-weak association with a
+            // meaningfully stronger same-SSID BSSID available → reassociate.
+            // Runs only in the steady state (after burst/OTA) so it never
+            // fights the boot window; the reassoc pins the target and the
+            // top-of-loop connect machine lands it.
+            if maybe_roam(&mut controller, &mut st, stack).await {
+                continue;
+            }
         }
 
         // --- Nothing to do: wait for a command / link event / poll tick ----
@@ -707,6 +787,10 @@ fn apply_cmd(st: &mut St, cmd: NetCmd) {
             st.next_ntp = Instant::now();
             st.consec_fails = 0;
             st.backoff_until = None;
+            // A new SSID invalidates any BSSID pin from the old network (#57).
+            st.pinned = None;
+            st.pin_fails = 0;
+            st.force_ssid_only = false;
             st.holds |= Hold::User.bit() | Hold::Burst.bit();
             st.burst_since = Some(Instant::now());
             println!("[NET] credentials set (ssid={:?})", st.ssid.as_str());
@@ -728,22 +812,32 @@ fn apply_cmd(st: &mut St, cmd: NetCmd) {
     }
 }
 
-/// (Re)apply the station config — this is what starts the PHY in esp-radio
-/// 0.18 — and drop power save to Minimum (Maximum breaks DHCP under BLE
-/// coex; same setting the old inline machine used everywhere).
-fn apply_station_config(controller: &mut WifiController<'static>, st: &mut St) -> bool {
-    let cfg = esp_radio::wifi::Config::Station(
-        StationConfig::default()
-            .with_ssid(esp_radio::wifi::Ssid::from(st.ssid.as_str()))
-            .with_password(st.pass.as_str().into()),
-    );
-    match controller.set_config(&cfg) {
+/// Build + apply a station config. `pin = Some((bssid, ch))` targets exactly
+/// that AP (bssid_set=true → esp-radio associates to it, NOT the first one
+/// WIFI_FAST_SCAN hears — the #57 fix). `all_channels` selects
+/// `ScanMethod::AllChannels` so the driver full-scans every channel and
+/// sort-by-signal picks the strongest itself — the documented fallback when a
+/// pin fails or no candidate was found. `auth_method` stays the default
+/// Wpa2Personal (threshold floor WPA2-PSK; esp-radio has no FT surface, so
+/// this is always plain 00-0F-AC:2 — never FT-PSK).
+fn set_sta_config(
+    controller: &mut WifiController<'static>,
+    ssid: &str,
+    pass: &str,
+    pin: Option<([u8; 6], u8)>,
+    all_channels: bool,
+) -> bool {
+    let mut cfg = StationConfig::default()
+        .with_ssid(esp_radio::wifi::Ssid::from(ssid))
+        .with_password(pass.into());
+    if let Some((bssid, ch)) = pin {
+        cfg = cfg.with_bssid(bssid).with_channel(ch);
+    } else if all_channels {
+        cfg = cfg.with_scan_method(esp_radio::wifi::sta::ScanMethod::AllChannels);
+    }
+    match controller.set_config(&esp_radio::wifi::Config::Station(cfg)) {
         Ok(()) => {
             let _ = controller.set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
-            if !st.radio_started {
-                println!("[NET] STA radio started");
-            }
-            st.radio_started = true;
             true
         }
         Err(e) => {
@@ -753,42 +847,116 @@ fn apply_station_config(controller: &mut WifiController<'static>, st: &mut St) -
     }
 }
 
-/// One bounded association attempt + backoff bookkeeping.
+/// (Re)apply the station config for PHY start / creds change — SSID-only, no
+/// pin (starting the PHY or swapping creds doesn't need a target; the pin is
+/// chosen per-attempt in `attempt_connect`). This is what starts the PHY in
+/// esp-radio 0.18.
+fn apply_station_config(controller: &mut WifiController<'static>, st: &mut St) -> bool {
+    let ok = set_sta_config(controller, st.ssid.as_str(), st.pass.as_str(), None, false);
+    if ok {
+        if !st.radio_started {
+            println!("[NET] STA radio started");
+        }
+        st.radio_started = true;
+    }
+    ok
+}
+
+/// Targeted candidate scan: SSID-filtered (only matching APs returned → fast),
+/// multi-pass merged (strongest RSSI per BSSID — same short-dwell rationale as
+/// #56's picker sweep). Returns the strongest (bssid, channel, rssi) for the
+/// connect SSID, or None if none was heard. SSID-agnostic: whatever `ssid` is
+/// (`roam`, `jplovescl`, …), it picks the strongest BSSID advertising it.
+async fn scan_candidates(
+    controller: &mut WifiController<'static>,
+    ssid: &str,
+) -> Option<([u8; 6], u8, i8)> {
+    let mut best: Option<([u8; 6], u8, i8)> = None;
+    for _ in 0..ROAM_SCAN_PASSES {
+        let cfg = esp_radio::wifi::scan::ScanConfig::default()
+            .with_ssid(esp_radio::wifi::Ssid::from(ssid));
+        match controller.scan_async(&cfg).await {
+            Ok(aps) => {
+                for ap in aps.iter() {
+                    if ap.ssid.as_str() != ssid {
+                        continue; // defensive: filter is best-effort in the driver
+                    }
+                    if best.map(|(_, _, r)| ap.signal_strength > r).unwrap_or(true) {
+                        best = Some((ap.bssid, ap.channel, ap.signal_strength));
+                    }
+                }
+            }
+            Err(e) => println!("[NET] candidate scan failed: {e:?}"),
+        }
+    }
+    best
+}
+
+/// One bounded association attempt + backoff bookkeeping, with #57 best-BSSID
+/// targeting: unless a pin is already set (by a prior scan or a roam
+/// decision) or we're in the one-shot driver-select fallback, run a candidate
+/// scan and pin the STRONGEST BSSID for our SSID — so esp-radio associates to
+/// the near strong AP instead of whatever WIFI_FAST_SCAN hears first.
 async fn attempt_connect(
     controller: &mut WifiController<'static>,
     st: &mut St,
     stack: Stack<'static>,
 ) {
-    // One-time diagnostic scan (kept from the old machine): is the AP
-    // visible, on what channel, with what auth?
-    if !st.diag_scanned {
-        st.diag_scanned = true;
-        match controller
-            .scan_async(&esp_radio::wifi::scan::ScanConfig::default())
-            .await
-        {
-            Ok(aps) => {
-                println!("[SCAN] {} networks:", aps.len());
-                for ap in aps.iter().take(12) {
-                    println!(
-                        "[SCAN]   {:?} ch{} rssi{} auth={:?}",
-                        ap.ssid, ap.channel, ap.signal_strength, ap.auth_method
-                    );
-                }
-            }
-            Err(e) => println!("[SCAN] failed: {e:?}"),
+    // Choose the target. force_ssid_only = the deliberate driver-select
+    // fallback after a pin kept failing; otherwise pin the strongest BSSID.
+    let all_channels = st.force_ssid_only;
+    if !st.force_ssid_only && st.pinned.is_none() {
+        if let Some((bssid, ch, rssi)) = scan_candidates(controller, st.ssid.as_str()).await {
+            println!(
+                "[NET] best BSSID {} ch{} rssi{} (pinning)",
+                fmt_bssid(&bssid),
+                ch,
+                rssi
+            );
+            st.pinned = Some((bssid, ch));
+        } else {
+            // Nothing heard on a targeted scan — let the driver full-scan +
+            // sort-by-signal itself rather than fast-scan-first-hit.
+            println!("[NET] no candidate BSSID heard - driver AllChannels select");
+            st.force_ssid_only = true;
         }
     }
+    let pin = st.pinned;
+    let use_all_channels = all_channels || st.force_ssid_only;
+    if !set_sta_config(
+        controller,
+        st.ssid.as_str(),
+        st.pass.as_str(),
+        pin,
+        use_all_channels,
+    ) {
+        // Config apply failed — treat as a normal attempt failure (backoff).
+        st.consec_fails = st.consec_fails.saturating_add(1);
+        st.backoff_until = Some(Instant::now() + backoff_for(st.consec_fails));
+        return;
+    }
+
     st.connecting = true;
     publish(make_snap(st, stack)); // show Connecting before the 15 s wait
     let result = with_timeout(CONNECT_TIMEOUT, controller.connect_async()).await;
     st.connecting = false;
     match result {
         Ok(Ok(_)) => {
-            println!("[WIFI] connected");
+            match pin {
+                Some((b, ch)) => println!("[WIFI] connected (BSSID {} ch{ch})", fmt_bssid(&b)),
+                None => println!("[WIFI] connected (driver select)"),
+            }
             st.connected = true;
             st.consec_fails = 0;
+            st.pin_fails = 0;
             st.backoff_until = None;
+            // Re-pick fresh next reconnect (BSSIDs move); clear the fallback.
+            st.pinned = None;
+            st.force_ssid_only = false;
+            // Arm the roam sampler fresh (don't roam the instant we land).
+            st.rssi_low = 0;
+            st.next_rssi = Instant::now() + RSSI_SAMPLE_INTERVAL;
+            st.roam_after = Instant::now() + ROAM_COOLDOWN;
         }
         other => {
             st.consec_fails = st.consec_fails.saturating_add(1);
@@ -799,6 +967,25 @@ async fn attempt_connect(
                 ),
                 _ => println!("[WIFI] connect timeout (attempt {})", st.consec_fails),
             }
+            // Pin bookkeeping: a pinned BSSID that keeps failing (moved,
+            // congested, gone) is dropped for ONE driver-select fallback,
+            // then we re-scan fresh.
+            if pin.is_some() {
+                st.pin_fails = st.pin_fails.saturating_add(1);
+                if st.pin_fails >= PIN_MAX_FAILS {
+                    println!(
+                        "[NET] pinned BSSID failed {}x - falling back to driver select",
+                        st.pin_fails
+                    );
+                    st.pinned = None;
+                    st.pin_fails = 0;
+                    st.force_ssid_only = true;
+                }
+            } else {
+                // The driver-select fallback itself failed: clear it so the
+                // next attempt re-scans for a fresh candidate.
+                st.force_ssid_only = false;
+            }
             let b = backoff_for(st.consec_fails);
             println!(
                 "[WIFI] backoff {}s (consecutive fails: {})",
@@ -808,6 +995,81 @@ async fn attempt_connect(
             st.backoff_until = Some(Instant::now() + b);
         }
     }
+}
+
+/// Format a BSSID for logs (`a4:2b:b0:b7:93:2e`).
+fn fmt_bssid(b: &[u8; 6]) -> heapless::String<17> {
+    use core::fmt::Write as _;
+    let mut s = heapless::String::new();
+    let _ = write!(
+        s,
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5]
+    );
+    s
+}
+
+/// #57 RSSI-triggered roam: sample the connected link; if it stays weak, scan
+/// for a same-SSID BSSID that's meaningfully stronger and reassociate to it.
+/// Returns true if it initiated a reassociation (caller should `continue` so
+/// the connect machine re-associates to the freshly pinned BSSID). Bounded by
+/// [`ROAM_COOLDOWN`] and gated by hysteresis ([`ROAM_MARGIN_DB`]) so it never
+/// ping-pongs. For a radio with no 802.11r this IS roaming (a brief drop).
+async fn maybe_roam(
+    controller: &mut WifiController<'static>,
+    st: &mut St,
+    stack: Stack<'static>,
+) -> bool {
+    let now = Instant::now();
+    if now < st.next_rssi {
+        return false;
+    }
+    st.next_rssi = now + RSSI_SAMPLE_INTERVAL;
+
+    let cur_rssi = match controller.rssi() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    if cur_rssi > ROAM_RSSI_THRESH {
+        st.rssi_low = 0;
+        return false;
+    }
+    st.rssi_low = st.rssi_low.saturating_add(1);
+    if st.rssi_low < ROAM_LOW_SAMPLES || now < st.roam_after {
+        return false; // not sustained yet, or still cooling down
+    }
+
+    // Sustained weak: is there a better AP for our SSID? Current BSSID (from
+    // the last beacon) excludes roaming to ourselves.
+    let cur_bssid = controller.ap_info().ok().map(|i| i.bssid);
+    st.rssi_low = 0; // consume the trigger regardless of outcome
+    let Some((bssid, ch, cand_rssi)) = scan_candidates(controller, st.ssid.as_str()).await else {
+        st.roam_after = now + ROAM_COOLDOWN;
+        return false;
+    };
+    let same = cur_bssid == Some(bssid);
+    if same || (cand_rssi as i32) < cur_rssi + ROAM_MARGIN_DB {
+        // No candidate worth the ~1-3 s drop — hold and cool down.
+        st.roam_after = now + ROAM_COOLDOWN;
+        return false;
+    }
+
+    println!(
+        "[ROAM] {}→{} switching {}→{} ch{}",
+        cur_rssi,
+        cand_rssi,
+        cur_bssid.map(|b| fmt_bssid(&b)).unwrap_or_else(|| heapless::String::new()),
+        fmt_bssid(&bssid),
+        ch
+    );
+    let _ = controller.disconnect_async().await;
+    st.connected = false;
+    st.pinned = Some((bssid, ch)); // attempt_connect targets it (no re-scan)
+    st.force_ssid_only = false;
+    st.consec_fails = 0; // a roam-triggered reconnect resets the backoff
+    st.backoff_until = None;
+    st.roam_after = now + ROAM_COOLDOWN;
+    true
 }
 
 /// Streaming scan sweep: one `scan_async` per 2.4 GHz channel, rows published
