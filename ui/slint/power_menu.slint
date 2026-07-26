@@ -1,0 +1,116 @@
+import { Theme, PageTitle } from "theme.slint";
+import { PillButton, BackChevron } from "controls.slint";
+
+// Power menu overlay (#48) — summoned by the HARDWARE power key (AXP2101
+// PWRON long-press IRQ at 1.5s), never by the launcher, so it is NOT a
+// registry app: shell.slint hosts it topmost via `power-menu-open`, which
+// main.rs raises from the PMIC poll and which stacks over whatever is open
+// (launcher, overlays, settings) without disturbing their state or WiFi
+// holds. Right-swipe / chevron / CANCEL close it back to exactly where the
+// user was.
+//
+// Press ladder (documented contract): 1.5s hold -> this menu (firmware);
+// keep holding to 4s -> AXP2101 hardware poweroff — the hung-firmware
+// failsafe (vendor reg 0x22/0x27 config, deliberately untouched).
+//
+// Design system: three big rows per the pressed-state standard (Recipe D
+// PillButton — 1-frame invert, no animate). SHUTDOWN wears the danger
+// variant (solid warn on press). CANCEL is the neutral ghost idiom (scan
+// overlay CANCEL: hairline border, Theme.pressed held fill). Existing glyph
+// sizes only (t-title 26 / t-body 17 / 16 / t-caption 13) — no new font
+// rasters (v0.9.0 ROM squeeze).
+export component PowerMenu {
+    // Battery status for the header line — the same properties the chrome
+    // pill shows, plus VBUS for the honesty caption: on USB the PMIC
+    // re-powers right after poweroff, so SHUTDOWN behaves like a reboot.
+    in property <int> battery-percent: -1;
+    in property <bool> charging: false;
+    in property <bool> vbus-on: false;
+    callback reboot-tap();
+    callback shutdown-tap();
+    callback close();
+
+    // Opaque backdrop in the active scheme (same idiom as the Theme picker).
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    // Input swallow: a plain Rectangle doesn't consume clicks in Slint, so
+    // without this the shell chrome UNDER the menu (radio dots y8-72, page
+    // dots y448-492) stays hit-testable through the menu's dead zones — an
+    // invisible WiFi toggle from inside a power menu. Declared before the
+    // rows/chevron so they stay topmost. (The other overlays share the
+    // quirk shell-wide; hardened here first because this menu is the one
+    // a user opens with destructive intent.)
+    TouchArea {}
+
+    PageTitle { title: "POWER"; }
+    BackChevron { clicked => { root.close(); } }
+
+    // Battery line, centered under the title: "82% · CHARGING" / "82%".
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 112px;
+        text: root.battery-percent < 0 ? "BATTERY --"
+            : (root.charging
+                ? "BATTERY \{root.battery-percent}% \u{00b7} CHARGING"
+                : "BATTERY \{root.battery-percent}%");
+        color: root.charging ? Theme.accent : Theme.soft;
+        font-size: Theme.t-body;
+        letter-spacing: 2px;
+    }
+
+    // REBOOT — accent pill. Same drain as the power page's button: stages a
+    // pending OTA first when WiFi is up, then software_reset() (OTA-proven).
+    PillButton {
+        x: (parent.width - self.width) / 2;
+        y: 172px;
+        width: 300px; height: 64px;
+        text: "REBOOT";
+        text-size: 18px;
+        tracking: 3px;
+        clicked => { root.reboot-tap(); }
+    }
+
+    // SHUTDOWN — danger variant: pressed inverts to solid warn with
+    // on-accent text, unmistakable before a power cut.
+    PillButton {
+        x: (parent.width - self.width) / 2;
+        y: 256px;
+        width: 300px; height: 64px;
+        danger: true;
+        text: "SHUT DOWN";
+        text-size: 18px;
+        tracking: 3px;
+        clicked => { root.shutdown-tap(); }
+    }
+
+    // Honesty caption (t-caption tier): only shown while VBUS is live.
+    if root.vbus-on: Text {
+        x: (parent.width - self.width) / 2;
+        y: 330px;
+        text: "on USB power \u{2014} restarts after shutdown";
+        color: Theme.dim;
+        font-size: Theme.t-caption;
+        letter-spacing: 1px;
+    }
+
+    // CANCEL — neutral ghost row (the scan-overlay idiom): hairline border,
+    // Theme.pressed held fill. Also reachable via chevron / right-swipe.
+    cancel := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 376px;
+        width: 300px; height: 56px;
+        border-radius: 28px;
+        border-width: 1px;
+        border-color: cancel-ta.pressed ? Theme.soft : Theme.line;
+        background: cancel-ta.pressed ? Theme.pressed : transparent;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: "CANCEL";
+            color: cancel-ta.pressed ? Theme.soft : Theme.dim;
+            font-size: 16px;
+            letter-spacing: 2px;
+        }
+        cancel-ta := TouchArea { clicked => { root.close(); } }
+    }
+}

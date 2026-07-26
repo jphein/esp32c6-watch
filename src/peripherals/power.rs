@@ -2,8 +2,14 @@
 // We deliberately do NOT touch the DCDC/LDO rail configuration: the boot
 // state Waveshare ships already powers the panel, and a wrong rail write
 // can brown-out the board. Writes are limited to: the ADC-enable register
-// (telemetry), the ALDO1 mic rail (read-modify-write enable bit only), and
-// the charger profile regs 0x61-0x64 (issue #16, field-masked RMW).
+// (telemetry), the ALDO1 mic rail (read-modify-write enable bit only),
+// the charger profile regs 0x61-0x64 (issue #16, field-masked RMW), and
+// the PWRON key-event plumbing (#48): 0x27 IRQLEVEL field + 0x41 IRQ
+// enables (both field-masked RMW), 0x49 status write-1-to-clear, and the
+// 0x10 poweroff bit — user-invoked SHUTDOWN only. The vendor's hardware
+// failsafe config (0x22 poweroff-source, 0x27 OFFLEVEL=4s) is never
+// written; note it is residual vendor state, like the rails: a battery-
+// dead PMIC cold boot would revert 0x22 to chip defaults.
 
 use embedded_hal::i2c::I2c;
 
@@ -18,6 +24,43 @@ const REG_VBUS_H: u8 = 0x38;
 const REG_VBUS_L: u8 = 0x39;
 const REG_BAT_PERCENT: u8 = 0xA4;
 const REG_CHG_STATUS: u8 = 0x01;
+
+// === PWRON power-key events (#48) ===
+// The side button is wired to the PMIC's PWRON input, NOT a SoC GPIO, and the
+// PMIC INT line is not routed to the C6 either (vendor config.h has no IRQ
+// pin) — so the ONLY way the firmware sees the button is by polling the
+// AXP2101's latched IRQ status over I2C.
+//
+// Register map (verified against XPowersLib master src/REG/AXP2101Constants.h
+// + src/XPowersParams.hpp `xpowers_axp2101_irq_t`):
+//   0x41 INTEN2  — IRQ enable bank 2
+//   0x49 INTSTS2 — IRQ status bank 2, WRITE-1-TO-CLEAR (XPowersLib
+//                  clearIrqStatus() writes 0xFF to 0x48..0x4A to clear)
+//   IRQ2 bits: 0 ponpe (PWRON positive edge) · 1 ponne (negative edge) ·
+//              2 ponlp (LONG press, fires at the 0x27 IRQLEVEL time) ·
+//              3 ponsp (SHORT press) · 4 bremove · 5 binsert · 6 vremove ·
+//              7 vinsert
+//   0x27 IRQ_OFF_ON_LEVEL_CTRL — [5:4] IRQLEVEL (0:1s 1:1.5s 2:2s 3:2.5s),
+//        [3:2] OFFLEVEL (0:4s..3:10s hardware poweroff), [1:0] ONLEVEL
+//        (power-on press time). The vendor writes 0x27=0x10 ("hold 4s to
+//        power off", board .cc:30) — which is IRQLEVEL=1.5s + OFFLEVEL=4s.
+const REG_INTEN2: u8 = 0x41;
+const REG_INTSTS2: u8 = 0x49;
+const REG_IRQ_OFF_ON_LEVEL: u8 = 0x27;
+const REG_COMMON_CONFIG: u8 = 0x10;
+
+const PKEY_LONG_BIT: u8 = 1 << 2; // ponlp — XPOWERS_AXP2101_PKEY_LONG_IRQ = _BV(10)
+const PKEY_SHORT_BIT: u8 = 1 << 3; // ponsp — XPOWERS_AXP2101_PKEY_SHORT_IRQ = _BV(11)
+
+/// A latched PWRON key event, drained by [`Axp2101Power::poll_power_key`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PowerKey {
+    /// Pressed + released before the IRQLEVEL time (1.5s).
+    Short,
+    /// Held past the IRQLEVEL time (1.5s) — latches while the key is still
+    /// down, so the firmware can react before the 4s hardware OFFLEVEL cutoff.
+    Long,
+}
 
 pub struct Axp2101Power<I> {
     i2c: I,
@@ -80,6 +123,59 @@ impl<I: I2c> Axp2101Power<I> {
         // 0x63 ITERM[3:0]: 25mA/step -> 0x01 = 25mA (vendor `.cc:52`)
         let v = self.read_reg(0x63)?;
         self.write_reg(0x63, (v & !0x0F) | 0x01)
+    }
+
+    /// Arm the PWRON short/long-press event latches (#48). Call once at boot.
+    ///
+    /// 1. Pins the long-press IRQ threshold: field-masked RMW of 0x27 bits
+    ///    [5:4] to 01 = **1.5s** (XPowersLib `setIrqLevelTime`: `val & 0xCF |
+    ///    opt<<4`). This is the SAME value the vendor's wholesale 0x27=0x10
+    ///    write sets, but ours survives a battery-dead PMIC cold boot (same
+    ///    residual-state class as the mic rail). Bits [3:2] OFFLEVEL — the 4s
+    ///    hardware-poweroff failsafe — and [1:0] ONLEVEL are NOT touched, and
+    ///    reg 0x22 (poweroff-source enables) is not written at all.
+    /// 2. Enables the short+long press IRQs in INTEN2 (RMW, other banks/bits
+    ///    untouched). The INT pin goes nowhere on this board, so the enables
+    ///    only serve to arm the status latches for polling — XPowersLib's
+    ///    `isPekeyShortPressIrq` likewise requires the enable bit.
+    /// 3. Clears any stale latched PWRON events (write-1-to-clear) so a press
+    ///    from before this boot can't ghost a menu.
+    pub fn enable_pwron_events(&mut self) -> Result<(), I::Error> {
+        let v = self.read_reg(REG_IRQ_OFF_ON_LEVEL)?;
+        self.write_reg(REG_IRQ_OFF_ON_LEVEL, (v & 0xCF) | 0x10)?;
+        let v = self.read_reg(REG_INTEN2)?;
+        self.write_reg(REG_INTEN2, v | PKEY_LONG_BIT | PKEY_SHORT_BIT)?;
+        self.write_reg(REG_INTSTS2, PKEY_LONG_BIT | PKEY_SHORT_BIT)
+    }
+
+    /// Drain the latched PWRON key event, if any (#48). Reads INTSTS2 and
+    /// write-1-clears ONLY the PWRON bits it consumed (other latched events in
+    /// the bank stay latched for any future consumer). If both short and long
+    /// latched inside one poll window, Long wins — it is the destructive-
+    /// intent signal and the menu subsumes the short-press wake.
+    pub fn poll_power_key(&mut self) -> Result<Option<PowerKey>, I::Error> {
+        let sts = self.read_reg(REG_INTSTS2)?;
+        let hit = sts & (PKEY_LONG_BIT | PKEY_SHORT_BIT);
+        if hit == 0 {
+            return Ok(None);
+        }
+        self.write_reg(REG_INTSTS2, hit)?;
+        Ok(Some(if hit & PKEY_LONG_BIT != 0 {
+            PowerKey::Long
+        } else {
+            PowerKey::Short
+        }))
+    }
+
+    /// AXP2101 software poweroff (#48): COMMON_CONFIG (0x10) bit 0 — byte-for-
+    /// byte the vendor firmware's `Axp2101::PowerOff()` (`ReadReg(0x10)|0x01`,
+    /// axp2101.cc:37-41) and XPowersLib's `shutdown()` (`setRegisterBit(
+    /// COMMON_CONFIG, 0)`). On battery this cuts every rail until PWRON is
+    /// pressed again (ONLEVEL). On USB the PMIC re-powers immediately, so it
+    /// behaves like a reboot — the power menu says so in its caption.
+    pub fn shutdown(&mut self) -> Result<(), I::Error> {
+        let v = self.read_reg(REG_COMMON_CONFIG)?;
+        self.write_reg(REG_COMMON_CONFIG, v | 0x01)
     }
 
     pub fn read_chip_id(&mut self) -> Result<u8, I::Error> {
