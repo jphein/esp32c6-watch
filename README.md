@@ -29,11 +29,12 @@ The renderer streams two-line RGB565 strips (~1.6 KB) straight to panel GRAM, so
 
 - **SMOLv1 ESP-NOW mesh** — routerless fleet networking (`HELLO`/`ACK`/`TIME`/`CFG`/`RELAY` frames). Loop-free time authority: the watch runs its own NTP and both adopts time from and serves it to the fleet.
 - **Sixteen-app launcher** — a paged 3×3 grid in three sections. *GAMES:* six `embedded-graphics` titles (Snake, World Snake, 2048, Tetris, Flappy Bird, a tilt-controlled Maze) plus the RSSI treasure **Hunt**. *SYSTEM:* the **Settings** hub (five paged sections, with a scan-based WiFi picker and a QWERTY keyboard for credentials), **Lights**, **Climate**, **Energy**, **Ping**, the **WLED** remote, and the **Theme** picker. *AUDIO:* **Voice** and **Sound**.
-- **Watch-to-watch ping** — a hero button greets the other watch by sigil over the mesh (additive SMOLv1 `PING`/`PINGACK` frames with delivery confirmation). The receiver wakes from AOD, blooms a full-screen accent-ring pulse naming the sender, and plays a rising two-tone chime; if the panel is off or a game holds the framebuffer, it gets the chime plus a notification-shade card.
+- **Watch-to-watch ping** — a hero button greets the other watch by sigil over the mesh (additive SMOLv1 `PING`/`PINGACK` frames with delivery confirmation). The receiver is unmissable: it wakes from always-on *or* fully off, **suspends a running game** to take the whole screen, blooms a full-screen accent-ring pulse naming the sender, plays a four-note rising major arpeggio, and always leaves a timestamped card in the notification shade — then puts the game back exactly where it was.
 - **Edge-gesture shell** — a bottom-edge swipe-up opens the launcher from any watchface page; a bottom-edge *hold* raises an **app switcher** (suspend / resume / kill, with a corner badge for what's still running); a top-edge swipe-down pulls down a **notification shade** fed by MQTT plus system events. A power-button long-press opens a **SHUTDOWN / REBOOT** menu, with the AXP2101's 4-second hardware failsafe still intact underneath.
 - **A realtime UI** — WiFi, OTA and scanning live in a dedicated `net_task` that exclusively owns the radio, behind a hold-mask + exponential-backoff state machine; the render loop never blocks on the network. Measured on glass *under a dead-AP outage*: worst frame **202 ms**, `arm_max` **135 ms** — the same outage used to freeze the watch for **15 seconds**. A loop-budget rule (>10 ms of blocking in any arm is a bug) plus a per-arm watchdog keep it that way. Association is deliberate rather than lucky: esp-radio has no 802.11r, so the watch **roams in firmware** — a multi-pass candidate scan pins the strongest BSSID explicitly, and it reassociates when the link sits weak and a better AP is available.
 - **Connectivity** — WiFi STA with NTP, a BLE GATT server ([`trouble-host`](https://github.com/embassy-rs/trouble)), MQTT → Home Assistant, and a live **weather** fetch.
 - **Voice & audio** — an **AUDIO** launcher section (Voice / Sound tiles). **Voice push-to-talk** streams live ES7210 mic capture over WiFi to a LAN STT gateway and shows the transcript on-glass — pressing before the link is up latches and fires itself the moment WiFi lands, so it is never press-twice; the **Sound** app is a live dB meter, waveform, and a 12-band FFT **spectrum analyzer** (log-spaced, factory parity), with a digital gain stepper.
+- **Volume and mappable buttons** — a speaker level (0–15, plus mute) that every chime, beep and touch tick honours, a touch **volume HUD**, and BOOT/POWER short- and long-presses bound to actions from *Settings › Buttons* (default: tap = volume ∓, hold = launcher / power menu). The power button always wakes the watch first, so a press in the dark can never trigger an action you can't see.
 - **Pedometer** — hardware step counting on the QMI8658 IMU's dedicated engine (keeps counting while the IMU is otherwise idle).
 - **Power management** — CPU clock control, live per-subsystem current estimation, battery monitoring, and a brightness slider.
 - **OTA updates** — HTTP over-the-air firmware into an A/B partition layout (two 6 MB slots), pull *and* push, surviving a mid-download reconnect. The running slot is derived from the **MMU** rather than from `otadata`, and every flash write is range-checked — an update can never overwrite the image it is executing from.
@@ -114,7 +115,7 @@ src/
 ├── drivers/       co5300 (AMOLED), qspi_bus, framebuffer (on-demand)
 ├── peripherals/   ble, imu, touch, rtc, power, power_stats, cpu_clock, die_temp,
 │                  audio (shared I²S + ES8311), audio_out (playback seam),
-│                  es7210 (mic ADC), mic_capture, config (dual-slot record)
+│                  es7210 (mic ADC), mic_capture, config (dual-slot record, v6)
 ├── net/           net_task (the sole radio owner), smol_mesh, familiar, weather,
 │                  mqtt_ha, mqtt_climate, voice_stt, ota_http, sigil, names
 ├── ui/            slint_shell, slint_platform
@@ -132,12 +133,13 @@ crates/           pure-logic `no_std` crates, host-unit-tested: climate-model, h
 ui/slint/         the Slint scene: shell.slint, controls.slint (shared components),
                   theme.slint / theme_overlay.slint, and one file per page or overlay —
                   clock, sensors, system, power, mesh, launcher, settings, keyboard,
-                  switcher, shade, power_menu, ping, climate, energy, lights, voice,
+                  switcher, shade, power_menu, ping, volume, climate, energy, lights, voice,
                   soundlevel, wled, hunt, scan
 tools/            watchctl (USB/WiFi debug rig), ota_push.sh (push OTA),
                   ui_test.py (UI automator)
 ha/               the `esp32c6_watch` Home Assistant custom component
-ha-bridge/        Node-RED climate + energy bridge flows
+ha-bridge/        Node-RED climate + energy flows — superseded in v0.12.0 by the
+                  HA component's own MQTT bridge; kept for reference
 docs/             debugging.md (agent field guide), deploy notes,
                   vendor-firmware analysis, design specs + plans
 ```
@@ -171,9 +173,11 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 - *v0.10.0* — **the realtime release**: WiFi/OTA/scan move off the render loop into a dedicated `net_task` ([#53](https://github.com/jphein/esp32c6-watch/issues/53)) — *worst frame 202 ms under a dead-AP outage, where the old code froze for 15 s*; the **edge-gesture shell** (swipe-up launcher [#29](https://github.com/jphein/esp32c6-watch/issues/29), bottom-hold **app switcher** [#31](https://github.com/jphein/esp32c6-watch/issues/31), top-swipe **notification shade** [#32](https://github.com/jphein/esp32c6-watch/issues/32)); a **power-button SHUTDOWN/REBOOT menu** ([#48](https://github.com/jphein/esp32c6-watch/issues/48)); a **12-band FFT spectrum analyzer** ([#30](https://github.com/jphein/esp32c6-watch/issues/30)); and **OTA slots grown 4 MB → 6 MB** ([#50](https://github.com/jphein/esp32c6-watch/issues/50), cable-deployed — the margin was down to 5.4 KB).
 - *v0.10.1* — **the safety release**: a CRITICAL fix for OTA overwriting the *running* slot ([#55](https://github.com/jphein/esp32c6-watch/issues/55) — it boot-loop-bricked a watch; the running slot now comes from the MMU, never `otadata`, behind a range-checking flash guard), overlays that swallow taps ([#54](https://github.com/jphein/esp32c6-watch/issues/54)), a multi-pass WiFi scan ([#56](https://github.com/jphein/esp32c6-watch/issues/56)), and **firmware WiFi roaming** ([#57](https://github.com/jphein/esp32c6-watch/issues/57), shipped as `v0.10.1-roam`) — esp-radio has no 802.11r, so the watch pins the strongest BSSID itself and reassociates on a weak link.
 - *v0.11.0* — **press-once voice** ([#22](https://github.com/jphein/esp32c6-watch/issues/22): an early PTT press latches and auto-fires when the link lands) and **watch-to-watch ping** ([#35](https://github.com/jphein/esp32c6-watch/issues/35): mesh `PING`/`PINGACK`, a sigil-named full-screen pulse and two-tone chime on the receiver). `mythic-throne` took this release **over the air, zero-touch** — the first such self-update since the v0.10.1 flash-safety fix, and the payoff for the net_task, the slot guard, and roaming all landing together.
+- *v0.12.0* — **the unmissable ping** ([#58](https://github.com/jphein/esp32c6-watch/issues/58): a four-note rising arpeggio, and a received ping now suspends a running game to take the whole screen and always logs a timestamped shade card), **volume + mappable buttons** ([#59](https://github.com/jphein/esp32c6-watch/issues/59): a speaker level every sound honours, a touch volume HUD, and BOOT/POWER short/long bound to actions in *Settings › Buttons*, persisted in config record v6), and **live Climate + Energy** ([#60](https://github.com/jphein/esp32c6-watch/issues/60)) — the `esp32c6_watch` HA component (v0.3.0) now publishes the retained `watch/*` MQTT topics the firmware actually reads, replacing the retired Node-RED bridge, with the `media_player` speaker restored.
 
 ### 🧭 Gesture shell & UI
 
+- [#59](https://github.com/jphein/esp32c6-watch/issues/59) — **Button volume + touch HUD + button remapping** *(shipped in v0.12.0 — issue awaiting close)*
 - [#28](https://github.com/jphein/esp32c6-watch/issues/28) — AOD pixel-shift (burn-in) + typography token sweep
 - [#45](https://github.com/jphein/esp32c6-watch/issues/45) — **Face Manager**: long-press the clock to pick faces, reorder/add/remove carousel pages
 - [#52](https://github.com/jphein/esp32c6-watch/issues/52) — **Complication Manager**: editable watchface slots rendering any plugin or system surface (builds on [#45](https://github.com/jphein/esp32c6-watch/issues/45))
@@ -192,6 +196,7 @@ The roadmap lives in the [issue tracker](https://github.com/jphein/esp32c6-watch
 
 ### ⌚⌚ Fleet (two watches)
 
+- [#58](https://github.com/jphein/esp32c6-watch/issues/58) — **Unmissable ping**: arpeggio chime, pops over framebuffer games, always logged *(shipped in v0.12.0 — issue awaiting close)*
 - [#37](https://github.com/jphein/esp32c6-watch/issues/37) — **Super Find**: multi-radio watch finder (mesh + BLE + HA + WiFi + 802.15.4 + LoRa fusion, Find-My scream mode)
 - [#38](https://github.com/jphein/esp32c6-watch/issues/38) — **Meshtastic BLE client**: GPS, LoRa messaging, nodes list
 - [#36](https://github.com/jphein/esp32c6-watch/issues/36) — *Epic:* smol parity — peer-sourced mesh OTA, RELAY/CFG downlink, mesh multiplayer games

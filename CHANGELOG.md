@@ -4,6 +4,52 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-07-26
+
+- **The unmissable ping** (#58) — three upgrades to the #35 receiver. The chime is now a
+  four-note rising **major arpeggio** (C5→E5→G5→C6, ~480 ms, soft 8 ms attack and
+  exponential decay per note, legato overlap, the top C6 held as the arrival), host-tested
+  for pop-free edges, bounded level, and strictly-rising note *order* by per-note
+  zero-crossing rate. It plays on receive regardless of screen state. The pulse now lands
+  over **framebuffer games** too: a ping suspends the running app through #31's session
+  path (state preserved), frees the ~51 KB framebuffer, resumes the Slint scene so the
+  pulse can composite — and on dismiss re-launches the app exactly where it was. A fully
+  off panel now wakes to the pulse as well, not just AOD/dim. And **every** received ping
+  logs an RTC-stamped shade card, whose timestamped body keeps distinct pings from being
+  swallowed by notify's consecutive-duplicate suppression, so there's a persistent record
+  after the pulse auto-dismisses.
+- **Volume and mappable buttons** (#59), persisted in one config extension — **v6**
+  (`SWCFG6`, 118 B): a volume byte (0–15 level plus a mute bit) and four button-map bytes
+  (BOOT/PWRON × short/long → `ButtonAction`, one of none / volume up / volume down / mute /
+  power menu / shutdown / launcher / ping / voice). v1–v5 records load with defaults and
+  the first save rewrites v6. Volume applies to **all** codec playback — the master
+  register is set at boot and on every change, and re-applied after unmute, so every
+  chime, beep, click and touch tick honours the level. A **volume HUD** overlay appears on
+  any change and auto-dismisses after ~2 s (dragging re-arms it). Button dispatch is a
+  single pending-action path fed by a BOOT press state machine (600 ms long threshold —
+  long fires while held, short on release) plus the PWRON poll, with one deliberate
+  nuance: a short press acts **only** if the screen was already bright, so a press in the
+  dark just wakes the watch. Long always acts after waking, preserving #48's
+  hold → power menu. Leaving a game via a mapped action suspends the session first.
+- **Climate and Energy are live again** (#60) — and the root cause was not what it looked
+  like. The firmware reads *retained MQTT*, but the deployed HA component served HTTP only
+  and the old Node-RED MQTT bridge had been retired, so `watch/climate/+/state`,
+  `watch/climate/roster`, `watch/energy/state` and `watch/energy/avail` were simply empty
+  on the broker. Deploy verification then exposed the deeper reason they stayed empty:
+  `media_player.py` imported `homeassistant.helpers.device_info`, a module removed in
+  modern HA, so a `ModuleNotFoundError` was thrown *during entry setup* — the HTTP site
+  starts before that line, which is why `/watch/*` answered and looked healthy, while
+  everything after it never ran. Fixed by importing `DeviceInfo` from its modern home in
+  `device_registry` (with a fallback for older HA), which also **restored the
+  `media_player` speaker entity**, and by starting the MQTT bridge *before* forwarding the
+  media_player platform so the data path can never again be taken down by a secondary
+  platform's import break. Component **v0.3.0** now republishes the same data the HTTP
+  endpoints compute onto the retained topics the parser reads, and subscribes to
+  `watch/climate/+/set` so a watch-side command runs the same dispatch as the HTTP POST
+  (retained deliveries ignored, so a stale command can't replay). Verified on live HA:
+  all four topic families populate retained, energy live-updates, and a watch→HA command
+  is processed cleanly with zero component errors — **no firmware reflash needed**.
+
 ## [0.11.0] — 2026-07-26
 
 - **Press-once voice** (#22): a PTT press before WiFi/DHCP was ready used to show
