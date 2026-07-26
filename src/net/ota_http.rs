@@ -188,13 +188,20 @@ pub fn take_announce() -> Option<Announce> {
 ///
 /// Never reboots by itself. On success logs
 /// `[OTA] update staged - reboot to apply`.
+///
+/// `progress` is called with `(bytes_flashed, content_length)` — once when the
+/// headers land (0, total) and after every 4 KB chunk — so a live UI (#53:
+/// net_task publishes it through the net-state signal) can render the download
+/// without polling. Must be cheap and non-blocking (it runs between socket
+/// reads); pass `|_, _| {}` to opt out.
 pub async fn ota_update(
     stack: Stack<'static>,
     flash: &'static crate::FlashMutex,
     url_override: Option<&str>,
+    progress: fn(u32, u32),
 ) -> Result<(), &'static str> {
     let url = url_override.unwrap_or(URL);
-    match with_timeout(TIMEOUT, run(stack, flash, url)).await {
+    match with_timeout(TIMEOUT, run(stack, flash, url, progress)).await {
         Ok(result) => result,
         Err(_) => Err("timeout (5 min overall)"),
     }
@@ -204,6 +211,7 @@ async fn run(
     stack: Stack<'static>,
     flash: &'static crate::FlashMutex,
     url: &str,
+    progress: fn(u32, u32),
 ) -> Result<(), &'static str> {
     // --- Slot selection: read the partition table + otadata -----------------
     // The returned table borrows `pt_mem`, NOT the flash handle (same pattern
@@ -293,6 +301,7 @@ async fn run(
         return Err("image larger than ota slot");
     }
     println!("[OTA] image size {content_len} bytes");
+    progress(0, content_len as u32);
 
     // --- Stream the body into the inactive slot -------------------------------
     let mut chunk = vec![0u8; CHUNK];
@@ -319,6 +328,7 @@ async fn run(
             }
             flashed += chunk_len as u32;
             chunk_len = 0;
+            progress(flashed, content_len as u32);
             if flashed >= next_log {
                 println!("[OTA] {flashed} / {content_len} bytes");
                 next_log += LOG_STEP;

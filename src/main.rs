@@ -2133,7 +2133,9 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.render(&mut display);
                 }
                 let url = ota_push_url.take();
-                match crate::net::ota_http::ota_update(stack, flash, url.as_deref()).await {
+                match crate::net::ota_http::ota_update(stack, flash, url.as_deref(), |_, _| {})
+                    .await
+                {
                     Ok(()) => {
                         println!("[OTA] staged - rebooting to apply");
                         ota_status_text = "Staged \u{2013} rebooting";
@@ -3663,7 +3665,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // try to stage an OTA update first; reboot either way.
                     if wifi_connected && crate::net::ota_http::URL_SET {
                         if let Err(e) =
-                            crate::net::ota_http::ota_update(stack, flash, None).await
+                            crate::net::ota_http::ota_update(stack, flash, None, |_, _| {}).await
                         {
                             println!("[OTA] failed: {e}");
                         }
