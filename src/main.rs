@@ -576,7 +576,7 @@ async fn main(_spawner: Spawner) -> ! {
     // with margin; heap keeps ~38KB spare above the 51KB fb need (#35 gets the
     // RAM-busy toast fallback if squeezed). Real fix on the books: box the
     // session/voice socket buffers out of .bss.
-    esp_alloc::heap_allocator!(size: 198 * 1024);
+        esp_alloc::heap_allocator!(size: 198 * 1024);
     // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
     // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
     // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
@@ -1006,7 +1006,26 @@ async fn main(_spawner: Spawner) -> ! {
     // our session. Throughput loss is irrelevant on a watch. NOTE: esp-radio
     // 0.18's ControllerConfig exposes NO amsdu_rx / raw-802.11-fragment knob;
     // `ampdu_rx_enable` is the only RX-aggregation lever the init API has.
-    let wifi_config = esp_radio::wifi::ControllerConfig::default().with_ampdu_rx_enable(false);
+    // #65: `rx_ba_win` MUST go to 0 alongside it. esp-radio's default is 6 and
+    // it is passed straight into the blob's `wifi_init_config_t` next to
+    // `ampdu_rx_enable: false` — a combination ESP-IDF itself never produces:
+    //
+    //   #if CONFIG_ESP_WIFI_AMPDU_RX_ENABLED
+    //   #define WIFI_RX_BA_WIN   CONFIG_ESP_WIFI_RX_BA_WIN
+    //   #else
+    //   #define WIFI_RX_BA_WIN   0 /* unused if ampdu_rx_disabled */
+    //   #endif
+    //
+    // A non-zero Block-Ack window with aggregation OFF leaves the blob holding
+    // BA reorder state with no aggregation buffers behind it — and
+    // `ppRxFragmentProc`, the RX-fragment handler, is exactly what walks that
+    // state. That is the crash site for BOTH #61 (null deref) and the
+    // `Store/AMO access fault` that made release builds panic 100% at 2.7 s
+    // while flipping on and off with a few bytes of `.bss` (layout moved which
+    // garbage the stale pointer landed on).
+    let wifi_config = esp_radio::wifi::ControllerConfig::default()
+        .with_ampdu_rx_enable(false)
+        .with_rx_ba_win(0);
     let (wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, wifi_config).expect("WiFi init failed");
     log_heap("post-wifi"); // confirms the RX-pool carve isn't starving a region
