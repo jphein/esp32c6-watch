@@ -1206,8 +1206,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("watch")
     p.add_argument("-n", "--trials", type=int, default=6,
                    help="boot trials (default 6)")
-    p.add_argument("-s", "--seconds", type=float, default=12.0,
-                   help="watch seconds per boot (default 12)")
+    p.add_argument("-s", "--seconds", type=float, default=50.0,
+                   help="watch seconds per boot (default 50 — must exceed the "
+                        "failure latency or the soak reports false 'stable'; #65)")
 
     p = sub.add_parser("ota-status", parents=[common],
                        help="ubox0 watch-ota journal + retained OTA announce")

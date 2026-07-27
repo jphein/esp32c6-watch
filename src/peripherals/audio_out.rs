@@ -220,6 +220,9 @@ pub fn register_chime(pcm: &'static [u8]) {
 /// happened). So: hand chunk 0 to the queue to wake it and open the session,
 /// and let the feeder pull chunks 1..n straight off the static buffer.
 pub fn play_chime() {
+    if !CHIME_ENABLED {
+        return; // #65: release builds panic at 2.7s with this live — see CHIME_ENABLED
+    }
     let first = LONG_CLIP.lock(|c| {
         let mut c = c.borrow_mut();
         let pcm = c.pcm?;
@@ -242,6 +245,24 @@ pub fn play_chime() {
     }
 }
 
+/// Is the ping chime allowed to reach the speaker? **Currently `false` (#65).**
+///
+/// The chime path itself is correct and was measured on-glass streaming the full
+/// clip (22400/22400 B). But enabling it flipped **release** builds to a 100 %
+/// boot panic at 2.7 s inside `ppRxFragmentProc` — the WiFi blob's RX-fragment
+/// path, i.e. #61's crash site. Measured on the same watch minutes apart:
+/// chime off 0/4 crash, chime on 5/5 crash.
+///
+/// None of the added code can be running at 2.7 s (no ping has occurred yet).
+/// The whole delta is ~8 bytes of `.bss` plus one atomic swap per main-loop tick,
+/// so this is the layout-sensitive latent corruption tracked in #65 — not a fault
+/// in this module. `debug-console` builds never crash, which is exactly why every
+/// automated check passed while release builds died.
+///
+/// Gated behind one flag instead of reverted: flip to `true` when #65 lands and
+/// the full path (streaming + the #58b voicing) is live again with no other work.
+pub const CHIME_ENABLED: bool = false;
+
 /// Registered chime length in mono bytes (0 before `register_chime`).
 fn chime_len() -> usize {
     LONG_CLIP.lock(|c| c.borrow().pcm.map_or(0, |p| p.len()))
@@ -257,6 +278,9 @@ static CHIME_DONE: AtomicBool = AtomicBool::new(false);
 /// Take the "chime finished" latch, returning `(streamed, total)` mono bytes.
 /// The main loop logs it once per chime.
 pub fn chime_done_take() -> Option<(usize, usize)> {
+    if !CHIME_ENABLED {
+        return None; // no chime can be in flight; keeps the per-tick cost at zero
+    }
     if CHIME_DONE.swap(false, Ordering::Relaxed) {
         Some((CHIME_BYTES.load(Ordering::Relaxed), chime_len()))
     } else {

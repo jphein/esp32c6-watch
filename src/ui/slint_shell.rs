@@ -284,6 +284,19 @@ pub struct ShellUi {
     /// platform are set-once globals and stay put; only the component is
     /// droppable (the window holds a weak ref, so `= None` frees it).
     ui: Option<WatchShell>,
+    /// True while a framebuffer game owns the panel. The scene stays ALIVE and
+    /// simply stops rendering/receiving touch (#66).
+    ///
+    /// It used to be dropped instead (`ui = None`) to free heap for the fb —
+    /// but tearing down the Slint component tree hit heap free-list corruption
+    /// (`Freed node aliases existing hole! Bad free?` inside
+    /// `PropertyHandle::drop`), crashing the watch 100 % of the time on game
+    /// launch, including on shipped v0.12.1. The drop was already vestigial:
+    /// the half-res fb is ~51KB and `Framebuffer::try_new` is fallible and can
+    /// draw from the reclaimed pool, so the scene never needed to go. Not
+    /// dropping it both dodges the corrupt teardown and makes game exit
+    /// instant (no scene rebuild).
+    suspended: bool,
     pub req: Rc<ShellRequests>,
     /// Long-lived roster model: set_mesh_rows swaps its contents in place
     /// instead of allocating a fresh ModelRc per push.
@@ -396,6 +409,7 @@ impl ShellUi {
             touch_down: false,
             last_pos: slint::LogicalPosition::new(0.0, 0.0),
             last_second: 0xFF,
+            suspended: false,
             saved_page: PAGE_CLOCK,
             scheme: 0,
             hint_armed_at: None,
@@ -417,22 +431,41 @@ impl ShellUi {
     /// the recreate. Idempotent — safe to call when already suspended.
     pub fn suspend_scene(&mut self) {
         // Retire any running hint window: a stale armed-instant would other-
-        // wise resume ticking against the fresh (hint-free) scene on return.
+        // wise resume ticking while the game owns the panel.
         self.hints_cancel();
-        // Same for a running ping pulse (#35): the fresh scene comes up
-        // pulse-free, so the choreography clock must not keep ticking.
+        // Same for a running ping pulse (#35): its choreography clock must not
+        // keep ticking behind the game.
         self.ping_pulse_dismiss();
         if let Some(ui) = self.ui.as_ref() {
             self.saved_page = ui.get_current_page();
-            let _ = ui.hide();
         }
-        self.ui = None;
+        // #66: park the scene instead of dropping it. `ui = None` here is what
+        // ran the Slint teardown that corrupts the heap free-list. Parked means
+        // render() and handle_touch() bail, so the game owns the panel and the
+        // input stream exactly as before — we simply stop touching Slint's
+        // allocation graph.
+        self.suspended = true;
     }
 
     /// Recreate the scene after a game exits: fresh component, callbacks
     /// re-registered, mesh model re-bound, page restored. The caller re-pushes
     /// live data (battery/time/radios/fam/page-data) after this. Idempotent.
     pub fn resume_scene(&mut self) {
+        // #66 fast path: the scene was parked, not dropped — just un-park it.
+        // No rebuild, no callback re-registration, no allocation: game exit is
+        // now instant instead of reconstructing the whole component tree.
+        if self.suspended {
+            self.suspended = false;
+            if let Some(ui) = self.ui.as_ref() {
+                ui.set_current_page(self.saved_page);
+            }
+            // The game painted straight to the panel, so the renderer's idea of
+            // what is on-screen is stale — force a full repaint, and clear the
+            // 1Hz clock gate so the next set_time lands.
+            self.last_second = 0xFF;
+            self.request_redraw();
+            return;
+        }
         if self.ui.is_some() {
             return;
         }
@@ -474,7 +507,12 @@ impl ShellUi {
         swipe: Option<SwipeDirection>,
         swipe_start_y: u16,
     ) {
-        // No scene to route touches to while a game holds the framebuffer.
+        // The game owns the input stream while it holds the framebuffer. The
+        // scene is parked (still allocated) rather than dropped since #66, so
+        // the parked flag — not `ui.is_none()` — is what gates touch routing.
+        if self.suspended {
+            return;
+        }
         let Some(ui) = self.ui.as_ref() else {
             return;
         };
@@ -1694,7 +1732,10 @@ impl ShellUi {
     /// Run timers/animations and repaint if the scene is dirty. No-op while the
     /// scene is suspended (a game owns the panel via the framebuffer).
     pub fn render(&mut self, display: &mut Co5300Display) {
-        if self.ui.is_none() {
+        // `suspended` = a game owns the panel (#66). Previously this was implied
+        // by `ui.is_none()`; the scene now stays alive, so check it explicitly
+        // or the shell would repaint over the game's framebuffer.
+        if self.ui.is_none() || self.suspended {
             return;
         }
         // Advance the wake gesture-hint choreography on the render clock
