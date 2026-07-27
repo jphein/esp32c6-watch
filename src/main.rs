@@ -576,7 +576,7 @@ async fn main(_spawner: Spawner) -> ! {
     // with margin; heap keeps ~38KB spare above the 51KB fb need (#35 gets the
     // RAM-busy toast fallback if squeezed). Real fix on the books: box the
     // session/voice socket buffers out of .bss.
-        esp_alloc::heap_allocator!(size: 198 * 1024);
+        esp_alloc::heap_allocator!(size: 186 * 1024);
     // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
     // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
     // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
@@ -608,7 +608,31 @@ async fn main(_spawner: Spawner) -> ! {
         // the 39.6 KB crash. The v0.5.0 fix boots at 51.6 KB (~5.6 KB headroom).
         // Any future .bss creep that drops the gap into the untested (39.6, 46.5]
         // band trips this at boot instead of corrupting WPA state at WiFi-connect.
-        const STACK_FLOOR: usize = 46 * 1024;
+        // #65: measured, not guessed. The old floor was 46KB — and the fleet
+        // crashed at a gap of 61KB, so this assert sat ~15KB BELOW the real
+        // requirement and never fired while the watch smashed itself.
+        //
+        // What actually breaks: the WiFi blob keeps globals at the TOP of .bss,
+        // immediately under the downward-growing stack. `ppRxFragmentProc`
+        // begins by loading a pointer from 0x4085E5C8 — with gap=63000,
+        // _bss_end is 0x4085EFF8, so that pointer is a mere 2,608 B below the
+        // stack floor. Overflow past the floor overwrites it with a spilled
+        // register, the blob null-checks it (non-null garbage passes), then
+        // dereferences → `Store/AMO access fault` at 2.7s, 100% reproducible.
+        //
+        // Measured on-glass, identical build otherwise:
+        //   gap 61KB -> 5/5 panic @2.7s      gap 73KB -> 0/5, clean
+        //
+        // That is also why the bug looked layout-sensitive and made unrelated
+        // edits (an 8-byte .bss change, a chime flag, .bss padding) appear to
+        // "cause" or "fix" a WiFi crash: they moved _bss_end, changing how far
+        // the stack had to run to reach the blob's pointer. #61's AMPDU change
+        // did the same — it relocated the collision rather than removing it.
+        //
+        // Keep this floor ABOVE the measured failure point with real margin.
+        // If it trips, GROW the stack (trim the MAIN heap_allocator!) — do not
+        // lower the floor.
+        const STACK_FLOOR: usize = 70 * 1024;
         println!("[STACK] gap = {} B ({} KB)", gap, gap / 1024);
         assert!(
             gap >= STACK_FLOOR,

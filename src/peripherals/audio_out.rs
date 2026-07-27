@@ -261,7 +261,7 @@ pub fn play_chime() {
 ///
 /// Gated behind one flag instead of reverted: flip to `true` when #65 lands and
 /// the full path (streaming + the #58b voicing) is live again with no other work.
-pub const CHIME_ENABLED: bool = false;
+pub const CHIME_ENABLED: bool = true;
 
 /// Registered chime length in mono bytes (0 before `register_chime`).
 fn chime_len() -> usize {
