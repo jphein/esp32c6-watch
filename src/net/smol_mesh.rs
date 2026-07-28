@@ -99,6 +99,79 @@ pub const PEER_STALE_MS: u64 = 3000;
 /// HELLO/TIME cadence.
 pub const TICK_MS: u64 = 2000;
 
+/// Hand an ESP-NOW send back to the driver WITHOUT waiting for its completion
+/// callback.
+///
+/// ## Why this exists: `SendWaiter::wait()` can hang the watch forever
+///
+/// esp-radio 0.18's waiter is an unbounded, non-yielding busy spin — and so is
+/// its `Drop`, so you cannot escape it by dropping the waiter either:
+///
+/// ```ignore
+/// pub fn wait(self) -> Result<(), EspNowError> {
+///     core::mem::forget(self);
+///     while !ESP_NOW_SEND_CB_INVOKED.load(Ordering::Acquire) {}   // no timeout
+/// }
+/// impl Drop for SendWaiter<'_> {
+///     fn drop(&mut self) { while !ESP_NOW_SEND_CB_INVOKED.load(..) {} }
+/// }
+/// ```
+///
+/// esp-radio's own doc comment states the failure mode: *"the waiter will block
+/// forever since the callback which signals the completion of sending will never
+/// be invoked."* Because `mesh.tick()` runs on the Embassy main loop — the same
+/// loop that renders the UI and services touch — one lost TX callback freezes
+/// the watch on its last drawn frame. There is no panic and no backtrace,
+/// because nothing faults: the CPU is spinning correctly on a flag that will
+/// never be set. esp-rtos threads (net_task, the WiFi blob) keep running and
+/// keep logging, which is why serial output continues from behind the wedge and
+/// makes it look like a display fault. See issue #75.
+///
+/// ## Why fire-and-forget is the right call here, not a wider async refactor
+///
+/// Every one of this module's send sites discarded the result already
+/// (`let _ = w.wait();`), so the spin bought the program no information
+/// whatsoever — it was pure latency plus a hang risk. `SendWaiter` is
+/// `PhantomData` with no runtime state, and `send()` keeps no in-flight
+/// bookkeeping (it just clears the flag and calls `esp_now_send`), so declining
+/// to wait leaks nothing and desynchronizes nothing. A back-to-back send while
+/// the radio is busy simply returns `Err` from `send()` and we skip that frame,
+/// which is the correct behaviour for a broadcast beacon protocol.
+///
+/// If a call site ever needs delivery status, use `esp_now.send_async().await`
+/// (a real `Future` with a waker) from an async context — never `wait()`.
+///
+/// ## VERDICT: kept as analysis, deliberately NOT wired up (2026-07-28)
+///
+/// This was implemented as a freeze fix and **measured against a control**, and
+/// the measurement went the wrong way. Both watches ran the same tree, differing
+/// only in these 12 waits, both with the `[LOOP]` heartbeat:
+///
+/// | watch    | build              | outcome                                  |
+/// |----------|--------------------|------------------------------------------|
+/// | mythic   | waits REMOVED      | froze — total serial silence, 0 beats    |
+/// | eldritch | waits INTACT       | alive past 328s, still beating           |
+///
+/// The build WITHOUT the spins died first. n=1, so this is not proof the removal
+/// is harmful — but there is a plausible mechanism (the wait also PACES TX; with
+/// fire-and-forget, `tick()` issues back-to-back sends and the second can be
+/// refused or stress the driver), and it is certainly not evidence of a fix.
+///
+/// The predicted signature also failed. A wedged Embassy loop should leave the
+/// esp-rtos threads logging `[NET]` from behind the wedge; mythic emitted
+/// NOTHING, which is a whole-SoC stop, not a UI-loop hang.
+///
+/// So the spin remains a genuine latent hazard worth fixing properly one day —
+/// via `send_async().await`, which yields and needs no pacing hack — but it is
+/// NOT the cause of the freezes, and swapping it in blind would repeat the
+/// `!mesh_enabled` mistake: shipping a plausible fix on a correlation.
+#[allow(dead_code)] // NOT WIRED UP — see the verdict note above.
+#[inline]
+pub fn release_send(waiter: esp_radio::esp_now::SendWaiter<'_>) {
+    core::mem::forget(waiter);
+}
+
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum LinkState {
     Idle,

@@ -543,6 +543,10 @@ fn update_power_stats(
 /// only with a reproduction that survives a soak on a BLE-OFF watch.
 const AOD_LIGHT_SLEEP: bool = false;
 
+/// UI-loop heartbeat interval (#75). 15s is frequent enough to catch a wedge
+/// inside a one-minute trial, sparse enough that it never dominates a log.
+const BEAT_SECS: u64 = 15;
+
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -1589,6 +1593,15 @@ async fn main(_spawner: Spawner) -> ! {
     let mut mesh_channel_pinned = false;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
+    // UI-loop heartbeat state (#75) — see the beat block in the loop below.
+    let mut loop_beats: u32 = 0;
+    let mut next_beat = Instant::now() + Duration::from_secs(BEAT_SECS);
+    // Heap LOW-WATER between beats. A 15s sample misses the trough: the beat
+    // series showed 51K -> 17K -> 32K while the watch was being used, so the
+    // real minimum during an app open is somewhere below what any beat printed.
+    // Sampling every iteration and reporting the floor is what tells us how
+    // close an interaction actually came to the OOM that panicked at 7168 B.
+    let mut heap_low: usize = usize::MAX;
     // Time-sync provenance for the DIAG record (tsrc/tage fields).
     let mut sync_src: &str = "none";
     let mut last_sync = Instant::now();
@@ -1996,6 +2009,40 @@ async fn main(_spawner: Spawner) -> ! {
         let now = Instant::now();
         let dt_ms = (now - last_frame).as_millis() as u32;
         last_frame = now;
+
+        // === UI-loop heartbeat (#75) ===
+        // This closes the observability gap that cost five wrong hypotheses
+        // about the "frozen watch". When this loop wedges, the panel holds its
+        // last drawn frame and serial goes quiet — but serial is ALSO quiet
+        // when the watch is merely idle with nothing to report, and the
+        // esp-rtos threads (net_task, the WiFi blob) keep logging in BOTH
+        // cases because they are not on this executor. From outside, "wedged"
+        // and "fine" were literally the same observation, which is why a hang
+        // was misread as AOD light sleep, then a bad USB hub, then a corrupt
+        // config, then dying hardware.
+        //
+        // A beat emitted FROM THIS LOOP is the discriminator: if beats stop
+        // while [NET] lines keep arriving, the UI loop is wedged and nothing
+        // else is. Prints once per BEAT_SECS, so it costs one line per beat
+        // and no measurable time — cheap enough to keep in release builds,
+        // where the freezes actually happen (debug-console builds disable AOD
+        // light sleep and so cannot reproduce them).
+        loop_beats = loop_beats.wrapping_add(1);
+        let heap_now = esp_alloc::HEAP.free();
+        if heap_now < heap_low {
+            heap_low = heap_now;
+        }
+        if now >= next_beat {
+            println!(
+                "[LOOP] beat={} up={}s heap={} low={}",
+                loop_beats,
+                now.as_secs(),
+                heap_now,
+                heap_low
+            );
+            next_beat = now + Duration::from_secs(BEAT_SECS);
+            heap_low = heap_now; // per-window floor, not lifetime
+        }
 
         // === Net snapshot (#53) ===
         // ONE read per tick: the only view of WiFi/scan/OTA state this loop
