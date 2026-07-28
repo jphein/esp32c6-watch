@@ -437,3 +437,68 @@ fn heat_cool_only_device_sets_auto_bit() {
     assert!(e.modes.contains(&HvacMode::Auto));
     assert_eq!(e.modes_mask(), 0b0000_1111); // off|heat|cool|auto = 15
 }
+
+// ---------------------------------------------------------------------------
+// render_fingerprint — the change-gate that stops the per-tick Slint model
+// rebuild that OOM-froze the Climate screen. STABLE when nothing rendered
+// changed; DIFFERENT on any rendered field. If a rendered field mutates without
+// moving the fingerprint, the UI would silently stop updating — so these lock
+// each field the card reads.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fingerprint_is_stable_for_identical_state() {
+    let mut a = ClimateState::new();
+    a.upsert("lr", entity_named("Living Room", 70.0));
+    a.upsert("br", entity_named("Bedroom", 68.0));
+    let mut b = ClimateState::new();
+    b.upsert("lr", entity_named("Living Room", 70.0));
+    b.upsert("br", entity_named("Bedroom", 68.0));
+    assert_eq!(a.render_fingerprint(), b.render_fingerprint());
+    // Idempotent across repeated calls (no interior mutability).
+    assert_eq!(a.render_fingerprint(), a.render_fingerprint());
+}
+
+#[test]
+fn fingerprint_changes_on_setpoint() {
+    let mut a = ClimateState::new();
+    a.upsert("lr", entity_named("Living Room", 70.0));
+    let f0 = a.render_fingerprint();
+    a.upsert("lr", entity_named("Living Room", 72.0)); // ±tap moves set
+    assert_ne!(f0, a.render_fingerprint());
+}
+
+#[test]
+fn fingerprint_changes_on_name_and_count() {
+    let mut a = ClimateState::new();
+    a.upsert("lr", entity_named("Living Room", 70.0));
+    let f_one = a.render_fingerprint();
+
+    let mut b = ClimateState::new();
+    b.upsert("lr", entity_named("Lounge", 70.0)); // different name, same set
+    assert_ne!(f_one, b.render_fingerprint());
+
+    a.upsert("br", entity_named("Bedroom", 70.0)); // count 1 → 2
+    assert_ne!(f_one, a.render_fingerprint());
+}
+
+#[test]
+fn fingerprint_distinguishes_none_from_zero_cur() {
+    // A device reporting cur:null must not collide with one reporting 0.0 —
+    // the card renders "--" vs "0", a real visible difference.
+    let null_cur = parse_state(br#"{"name":"X","cur":null,"set":70,"mode":"heat","action":"idle","min":50,"max":90,"step":1,"modes":["heat"]}"#).unwrap();
+    let zero_cur = parse_state(br#"{"name":"X","cur":0,"set":70,"mode":"heat","action":"idle","min":50,"max":90,"step":1,"modes":["heat"]}"#).unwrap();
+    let mut a = ClimateState::new();
+    a.upsert("x", null_cur);
+    let mut b = ClimateState::new();
+    b.upsert("x", zero_cur);
+    assert_ne!(a.render_fingerprint(), b.render_fingerprint());
+}
+
+#[test]
+fn fingerprint_empty_differs_from_populated() {
+    let empty = ClimateState::new();
+    let mut one = ClimateState::new();
+    one.upsert("lr", entity_named("LR", 70.0));
+    assert_ne!(empty.render_fingerprint(), one.render_fingerprint());
+}

@@ -1,0 +1,7 @@
+[package]
+name = "walkie-codec"
+version = "0.1.0"
+edition = "2021"
+description = "no_std G.711 mu-law + 16->8kHz decimation + VOX frame packing for the watch walkie-talkie (#71)"
+
+[dependencies]

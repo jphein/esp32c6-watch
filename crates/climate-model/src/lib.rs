@@ -240,6 +240,48 @@ impl ClimateState {
         self.entities.is_empty()
     }
 
+    /// A 64-bit fingerprint of everything the UI renders into a `ClimateCard`.
+    ///
+    /// The integrator (watch main loop) pushes the Slint climate model only when
+    /// this changes, instead of rebuilding a heap `Vec<ClimateCard>` + its
+    /// `SharedString`s every tick. That per-tick churn fragmented the allocator
+    /// until a routine ~7 KB allocation failed and the watch OOM-panicked while
+    /// the Climate screen was open (Energy/Lights push scalars, so they never
+    /// did). FNV-1a over each entity's rendered fields — name, cur, set, mode,
+    /// action, min/max/step, modes_mask — plus the count, in order.
+    pub fn render_fingerprint(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf29ce484222325;
+        const PRIME: u64 = 0x100000001b3;
+        let mut h = OFFSET;
+        let mix = |bytes: &[u8], h: &mut u64| {
+            for &b in bytes {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(PRIME);
+            }
+        };
+        mix(&(self.entities.len() as u64).to_le_bytes(), &mut h);
+        // `Option<f32>` → a tag byte then the bit pattern (NaN-stable via to_bits).
+        let opt_f32 = |v: Option<f32>, h: &mut u64| match v {
+            Some(f) => {
+                mix(&[1], h);
+                mix(&f.to_bits().to_le_bytes(), h);
+            }
+            None => mix(&[0], h),
+        };
+        for (_id, e) in self.entities.iter() {
+            mix(e.name.as_bytes(), &mut h);
+            mix(&[0xff], &mut h); // name terminator (avoids "ab"+"c" == "a"+"bc")
+            opt_f32(e.cur, &mut h);
+            opt_f32(e.set, &mut h);
+            mix(&[e.mode as i32 as u8, e.action as i32 as u8], &mut h);
+            mix(&e.min.to_bits().to_le_bytes(), &mut h);
+            mix(&e.max.to_bits().to_le_bytes(), &mut h);
+            mix(&e.step.to_bits().to_le_bytes(), &mut h);
+            mix(&e.modes_mask().to_le_bytes(), &mut h);
+        }
+        h
+    }
+
     /// Supported-modes mask for `object_id` (`0` if unknown). Convenience for the
     /// integrator mapping the collection → `ClimateCard`s.
     pub fn modes_mask(&self, object_id: &str) -> u16 {

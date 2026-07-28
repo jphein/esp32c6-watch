@@ -576,7 +576,7 @@ async fn main(_spawner: Spawner) -> ! {
     // with margin; heap keeps ~38KB spare above the 51KB fb need (#35 gets the
     // RAM-busy toast fallback if squeezed). Real fix on the books: box the
     // session/voice socket buffers out of .bss.
-    esp_alloc::heap_allocator!(size: 198 * 1024);
+        esp_alloc::heap_allocator!(size: 186 * 1024);
     // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
     // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
     // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
@@ -608,7 +608,31 @@ async fn main(_spawner: Spawner) -> ! {
         // the 39.6 KB crash. The v0.5.0 fix boots at 51.6 KB (~5.6 KB headroom).
         // Any future .bss creep that drops the gap into the untested (39.6, 46.5]
         // band trips this at boot instead of corrupting WPA state at WiFi-connect.
-        const STACK_FLOOR: usize = 46 * 1024;
+        // #65: measured, not guessed. The old floor was 46KB — and the fleet
+        // crashed at a gap of 61KB, so this assert sat ~15KB BELOW the real
+        // requirement and never fired while the watch smashed itself.
+        //
+        // What actually breaks: the WiFi blob keeps globals at the TOP of .bss,
+        // immediately under the downward-growing stack. `ppRxFragmentProc`
+        // begins by loading a pointer from 0x4085E5C8 — with gap=63000,
+        // _bss_end is 0x4085EFF8, so that pointer is a mere 2,608 B below the
+        // stack floor. Overflow past the floor overwrites it with a spilled
+        // register, the blob null-checks it (non-null garbage passes), then
+        // dereferences → `Store/AMO access fault` at 2.7s, 100% reproducible.
+        //
+        // Measured on-glass, identical build otherwise:
+        //   gap 61KB -> 5/5 panic @2.7s      gap 73KB -> 0/5, clean
+        //
+        // That is also why the bug looked layout-sensitive and made unrelated
+        // edits (an 8-byte .bss change, a chime flag, .bss padding) appear to
+        // "cause" or "fix" a WiFi crash: they moved _bss_end, changing how far
+        // the stack had to run to reach the blob's pointer. #61's AMPDU change
+        // did the same — it relocated the collision rather than removing it.
+        //
+        // Keep this floor ABOVE the measured failure point with real margin.
+        // If it trips, GROW the stack (trim the MAIN heap_allocator!) — do not
+        // lower the floor.
+        const STACK_FLOOR: usize = 70 * 1024;
         println!("[STACK] gap = {} B ({} KB)", gap, gap / 1024);
         assert!(
             gap >= STACK_FLOOR,
@@ -902,14 +926,22 @@ async fn main(_spawner: Spawner) -> ! {
         let n = mic_dsp::fill_tick_mono_s16le(buf, 16_000);
         &buf[..n]
     };
-    // Watch-ping receiver chime (#35): ~300 ms rising two-tone (E5→B5), the
+    // Watch-ping receiver chime (#58): the 700 ms rising C-major arpeggio, the
     // "someone's thinking of you" sound. HEAP-leaked rather than a StaticCell:
-    // 9.6KB of .bss would come straight out of the stack gap (stack =
-    // _stack_start − _bss_end, ≥46KB floor — the v0.5.0 crash class), while a
-    // one-time boot alloc from the heap costs nothing at runtime.
+    // .bss would come straight out of the stack gap (stack = _stack_start −
+    // _bss_end — the #65 crash class), while a one-time boot alloc costs nothing
+    // at runtime.
+    //
+    // Stored at **8 kHz** (11 200 B, half of the 16 kHz form); the playback
+    // feeder duplicates each sample up to the 16 kHz ring. Free quality-wise —
+    // the chime is pure sines topping out at C6 = 1046.5 Hz, so 8 kHz is still
+    // ~4x oversampled — and it repays 11 200 B of the 12 KB of main heap that
+    // growing the stack for #65 cost. Without this, the shade OOM'd on a
+    // swipe-down ("memory allocation of 4096 bytes failed"): stack safety and UI
+    // heap were competing for the same bytes.
     let ping_chime_pcm: &'static [u8] = {
-        let buf: &'static mut [u8] = alloc::vec![0u8; mic_dsp::PING_CHIME_LEN].leak();
-        let n = mic_dsp::fill_ping_chime_mono_s16le(buf, 16_000);
+        let buf: &'static mut [u8] = alloc::vec![0u8; mic_dsp::PING_CHIME_8K_LEN].leak();
+        let n = mic_dsp::fill_ping_chime_mono_s16le(buf, 8_000);
         &buf[..n]
     };
     println!(
@@ -918,6 +950,11 @@ async fn main(_spawner: Spawner) -> ! {
         tick_pcm.len(),
         ping_chime_pcm.len()
     );
+    // #58: hand the chime to the audio seam so the clock task's feeder can
+    // stream the FULL 480 ms melody off this static buffer. Deliberately NOT a
+    // dedicated task: an extra Embassy task here panicked the watch 100 % of the
+    // time under the debug-console build (see audio_out::LONG_CLIP docs).
+    audio_out::register_chime(ping_chime_pcm);
 
     // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
     let mut boot_button = Input::new(
@@ -1001,7 +1038,26 @@ async fn main(_spawner: Spawner) -> ! {
     // our session. Throughput loss is irrelevant on a watch. NOTE: esp-radio
     // 0.18's ControllerConfig exposes NO amsdu_rx / raw-802.11-fragment knob;
     // `ampdu_rx_enable` is the only RX-aggregation lever the init API has.
-    let wifi_config = esp_radio::wifi::ControllerConfig::default().with_ampdu_rx_enable(false);
+    // #65: `rx_ba_win` MUST go to 0 alongside it. esp-radio's default is 6 and
+    // it is passed straight into the blob's `wifi_init_config_t` next to
+    // `ampdu_rx_enable: false` — a combination ESP-IDF itself never produces:
+    //
+    //   #if CONFIG_ESP_WIFI_AMPDU_RX_ENABLED
+    //   #define WIFI_RX_BA_WIN   CONFIG_ESP_WIFI_RX_BA_WIN
+    //   #else
+    //   #define WIFI_RX_BA_WIN   0 /* unused if ampdu_rx_disabled */
+    //   #endif
+    //
+    // A non-zero Block-Ack window with aggregation OFF leaves the blob holding
+    // BA reorder state with no aggregation buffers behind it — and
+    // `ppRxFragmentProc`, the RX-fragment handler, is exactly what walks that
+    // state. That is the crash site for BOTH #61 (null deref) and the
+    // `Store/AMO access fault` that made release builds panic 100% at 2.7 s
+    // while flipping on and off with a few bytes of `.bss` (layout moved which
+    // garbage the stale pointer landed on).
+    let wifi_config = esp_radio::wifi::ControllerConfig::default()
+        .with_ampdu_rx_enable(false)
+        .with_rx_ba_win(0);
     let (wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, wifi_config).expect("WiFi init failed");
     log_heap("post-wifi"); // confirms the RX-pool carve isn't starving a region
@@ -1235,6 +1291,13 @@ async fn main(_spawner: Spawner) -> ! {
     let mut aod_entry_sod: u32 = 0;
     // Familiar UI snapshot push-guard: only set_fam when the snapshot changes.
     let mut prev_fam = FamUi::default();
+    // Climate render push-guard (#60 OOM fix): the fingerprint of the last model
+    // pushed to Slint. set_climate rebuilds a heap Vec<ClimateCard> + its
+    // SharedStrings; doing it every tick fragmented the allocator until a ~7 KB
+    // alloc failed and the watch OOM-panicked on the Climate screen. Push only
+    // when the rendered content actually changes. `None` = force the next push
+    // (reset on screen open).
+    let mut prev_climate_fp: Option<u64> = None;
     // Low-battery notification latch (#32): one warning per discharge.
     let mut low_batt_notified = false;
     // Last pushed step count, cached so the shell can be re-populated after a
@@ -2036,6 +2099,13 @@ async fn main(_spawner: Spawner) -> ! {
         // per-tick pass guarantees the DROP side (and any missed raise) even
         // when the queueing code path bails early.
         audio_out::service_amp(&mut amp_en, &mut audio_codec);
+        // #58b: prove the chime actually streamed (streamed/total mono bytes).
+        // The first feeder rework was SILENT — the clock task idles on
+        // PLAYBACK.receive() and nothing woke it — and the console's "ok chime"
+        // ack looked identical to success, so playback is now measurable.
+        if let Some((sent, total)) = audio_out::chime_done_take() {
+            println!("[AUDIO] ping chime streamed {sent}/{total} B");
+        }
 
         // === Touch ===
         // No swipe-preview animation on the C6: the full-frame RGB565
@@ -2657,7 +2727,16 @@ async fn main(_spawner: Spawner) -> ! {
                                 // (1) The chime IS the ping — ALWAYS play it,
                                 // wherever the greeting lands (bright, dim, AOD,
                                 // full-off, mid-game). Half-duplex is fine.
-                                audio_out::play_pcm(ping_chime_pcm);
+                                // Signal the feeder task to play the FULL 480 ms
+                                // melody: play_pcm here truncated it to the 128 ms
+                                // queue (73 % dropped → near-silent). chime_task /
+                                // play_all drain the whole clip; the per-tick
+                                // service_amp (below) raises the amp, the feeder
+                                // holds samples until it's up (pop insurance).
+                                let _ = audio_out::play_chime();
+                                // Same-tick amp raise, as every other SFX site
+                                // does — the per-tick pass would also catch it,
+                                // but not before the feeder's first push.
                                 audio_out::service_amp(&mut amp_en, &mut audio_codec);
                                 // (3) ALWAYS log a shade card (#58) — a persistent,
                                 // RTC-stamped record that survives the ~4s pulse.
@@ -2754,6 +2833,25 @@ async fn main(_spawner: Spawner) -> ! {
                                     ping_result.as_str()
                                 );
                             }
+                        }
+                        // A peer watch spoke: surface the transcription as a
+                        // shade card so it survives the moment (the sender's
+                        // own screen shows it live; this is the other wrist).
+                        Some(MeshEvent::Say { from_id, text, mac }) => {
+                            let from = ping_sigil(from_id, mac);
+                            let mut title: heapless::String<{ crate::notify::TITLE_CAP }> =
+                                heapless::String::new();
+                            use core::fmt::Write as _;
+                            let _ = write!(title, "{} said", from.as_str());
+                            crate::notify::push(
+                                crate::notify::Source::System,
+                                title.as_str(),
+                                text.as_str(),
+                            );
+                            // Same arrival cue as a ping so it can't be missed.
+                            let _ = audio_out::play_chime();
+                            audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                            println!("[SAY] from {}: {}", from.as_str(), text.as_str());
                         }
                         None => {}
                     }
@@ -3220,6 +3318,7 @@ async fn main(_spawner: Spawner) -> ! {
                     climate_pending = None; // optimistic state doesn't outlive the screen
                     climate_active = false;
                     shell.set_climate_open(false);
+                    println!("[HEAP] climate close: free={}", esp_alloc::HEAP.free());
                     if app_state == AppState::Climate {
                         app_state = AppState::Watchface;
                     }
@@ -3367,14 +3466,30 @@ async fn main(_spawner: Spawner) -> ! {
                     // reads its stepper base from this model, so the next ±tap
                     // accumulates from the optimistic value rather than the stale
                     // authoritative one.
+                    //
+                    // #60 OOM fix: gate the push on a fingerprint of exactly what
+                    // we'd render (state + optimistic override + conn). Rebuilding
+                    // the heap Vec<ClimateCard> + SharedStrings every tick
+                    // fragmented the allocator until a ~7 KB alloc OOM-panicked
+                    // the watch on this screen. Now the model is pushed only when
+                    // the rendered content actually changes.
+                    let conn_mix = (conn as u64).wrapping_mul(0x9E3779B97F4A7C15);
                     if let Some(p) = climate_pending.as_ref() {
                         let mut opt = st.clone();
                         if let Some((_, e)) = opt.entities.get_mut(p.id as usize) {
                             e.set = Some(p.temp);
                         }
-                        shell.set_climate(&opt, conn);
+                        let fp = opt.render_fingerprint() ^ conn_mix;
+                        if prev_climate_fp != Some(fp) {
+                            shell.set_climate(&opt, conn);
+                            prev_climate_fp = Some(fp);
+                        }
                     } else {
-                        shell.set_climate(&st, conn);
+                        let fp = st.render_fingerprint() ^ conn_mix;
+                        if prev_climate_fp != Some(fp) {
+                            shell.set_climate(&st, conn);
+                            prev_climate_fp = Some(fp);
+                        }
                     }
                 } else {
                     let _ = shell.req.climate_set_temp.take();
@@ -3746,6 +3861,11 @@ async fn main(_spawner: Spawner) -> ! {
                         Ok(t) if !t.is_empty() => {
                             shell.set_voice_transcript(t.as_str());
                             shell.set_voice_state(3); // result
+                            // Share it with the fleet: the other watch shows it
+                            // as a shade card. Broadcast, fire-and-forget — a
+                            // dropped frame just means no card, which beats a
+                            // retransmit protocol for a convenience feature.
+                            mesh.send_say(&mut esp_now, t.as_str());
                         }
                         Ok(_) => {
                             // 200 + empty text: tell the user WHY so they can act. A low
@@ -4417,6 +4537,12 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_climate_open(true);
                         climate_active = true; // Hold::Session rises on the edge above
                         app_state = AppState::Climate;
+                        // Force the first climate push (change-gate reset) + log the
+                        // heap the screen opens against, so the #60 OOM fix is
+                        // measurable on-glass (free should hold steady now, not
+                        // bleed down per tick).
+                        prev_climate_fp = None;
+                        println!("[HEAP] climate open: free={}", esp_alloc::HEAP.free());
                     } else if target == AppState::Lights {
                         // Lights (#39): raise the overlay + hold WiFi, riding the
                         // shared HA MQTT session exactly like Climate. The session

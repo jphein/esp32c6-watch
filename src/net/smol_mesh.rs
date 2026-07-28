@@ -61,6 +61,17 @@ const PING_PREFIX: &[u8] = b"SMOLv1 PING ";
 /// Delivery confirmation (#35): "SMOLv1 PINGACK NNN SSSSS" — NNN = the
 /// ACKER's node id, SSSSS echoes the ping's seq. Unicast back to the pinger.
 const PINGACK_PREFIX: &[u8] = b"SMOLv1 PINGACK ";
+/// Voice transcription pushed to the rest of the fleet: `"SMOLv1 SAY NNN <text>"`
+/// where NNN is the SENDER's node id and the rest of the frame is UTF-8 text.
+/// Broadcast, fire-and-forget (no ACK): a missed greeting is not worth a
+/// retransmit protocol, and the shade card is a convenience, not a delivery
+/// guarantee. Single frame — ESP-NOW caps a payload at 250 B, so the text is
+/// clipped to [`SAY_TEXT_CAP`] on send (a spoken sentence fits comfortably).
+const SAY_PREFIX: &[u8] = b"SMOLv1 SAY ";
+/// Max transcription bytes on the wire. 250 B ESP-NOW limit − prefix(11) −
+/// id(3) − space(1) leaves 235; clipped to the shade's body capacity since
+/// that is all the receiver can render anyway.
+pub const SAY_TEXT_CAP: usize = 96;
 
 /// CFG broadcast target sentinel — a fleet-global config (e.g. units).
 const CFG_TARGET_ALL: u8 = 255;
@@ -147,6 +158,9 @@ pub enum MeshEvent {
     /// A PINGACK answering one of OUR pings (#35): `from_id` is the ACKER,
     /// `seq` echoes the ping it confirms ("delivered to <sigil>").
     PingAck { from_id: u8, seq: u16, mac: [u8; 6] },
+    /// A voice transcription from another watch. The main loop turns it into a
+    /// shade card ("<sigil> said"). Text is already clipped + sanitized.
+    Say { from_id: u8, text: heapless::String<SAY_TEXT_CAP>, mac: [u8; 6] },
 }
 
 /// A leaf's single outstanding RELAY message (mode.rs RelayTx): retained so
@@ -301,6 +315,20 @@ fn encode_ping_frame(prefix: &[u8], id: u8, seq: u16, out: &mut [u8]) -> usize {
     n += 1;
     write_u5(seq as u32, &mut out[n..]);
     n + 5
+}
+
+/// Longest prefix of `s` that fits in `n` bytes, cut on a CHAR BOUNDARY.
+/// Slicing mid-codepoint would emit invalid UTF-8 that the receiver's
+/// `from_utf8` rejects, silently dropping the whole message.
+fn clip_str(s: &str, n: usize) -> &str {
+    if s.len() <= n {
+        return s;
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Parse a ping-family "NNN SSSSS" tail into `(id, seq)` (#35).
@@ -660,6 +688,31 @@ impl SmolMesh {
         println!("[MESH] ping sent (seq {seq})");
     }
 
+    /// Broadcast a voice transcription to the fleet: `"SMOLv1 SAY NNN <text>"`.
+    ///
+    /// Fire-and-forget, single frame. `text` is clipped to [`SAY_TEXT_CAP`] on a
+    /// CHAR BOUNDARY (a mid-codepoint cut would make the receiver's
+    /// `from_utf8` reject the whole frame and silently drop the message).
+    pub fn send_say(&mut self, esp_now: &mut EspNow<'_>, text: &str) {
+        let clipped = clip_str(text, SAY_TEXT_CAP);
+        if clipped.is_empty() {
+            return;
+        }
+        let mut buf = [0u8; SAY_PREFIX.len() + 4 + SAY_TEXT_CAP];
+        let mut n = SAY_PREFIX.len();
+        buf[..n].copy_from_slice(SAY_PREFIX);
+        write_id(self.id, &mut buf[n..]);
+        n += 3;
+        buf[n] = b' ';
+        n += 1;
+        buf[n..n + clipped.len()].copy_from_slice(clipped.as_bytes());
+        n += clipped.len();
+        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]) {
+            let _ = w.wait();
+        }
+        println!("[MESH] say sent ({} B)", clipped.len());
+    }
+
     /// Handle one received ESP-NOW payload.
     /// Broadcast a SMOLv1 FAM frame (heartbeat/handoff) for the familiar
     /// state machine. Fixed 29-byte binary frame, fleet wire format.
@@ -803,6 +856,21 @@ impl SmolMesh {
             }
             println!("[MESH] ping from id{from_id} (seq {seq}) - acked");
             return Some(MeshEvent::Ping { from_id, seq, mac: src });
+        }
+        // Voice transcription from a peer watch: "SMOLv1 SAY NNN <text>".
+        if let Some(rest) = data.strip_prefix(SAY_PREFIX) {
+            if rest.len() < 4 {
+                return None;
+            }
+            let from_id = parse_id(&rest[0..3])?;
+            // Malformed UTF-8 (a mid-codepoint clip upstream) drops the frame
+            // rather than rendering replacement characters in the shade.
+            let text = core::str::from_utf8(&rest[4..]).ok()?;
+            let mut s: heapless::String<SAY_TEXT_CAP> = heapless::String::new();
+            let _ = s.push_str(clip_str(text, SAY_TEXT_CAP));
+            self.upsert_peer(src, Some(from_id), now_ms, rssi);
+            println!("[MESH] say from id{from_id} ({} B)", s.len());
+            return Some(MeshEvent::Say { from_id, text: s, mac: src });
         }
         if data.starts_with(FAM_PREFIX) {
             if let Some(f) = parse_fam(data) {

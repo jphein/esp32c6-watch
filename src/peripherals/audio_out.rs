@@ -156,6 +156,301 @@ pub fn play_pcm(pcm: &[u8]) -> usize {
     queued
 }
 
+/// Queue ONE chunk, awaiting queue space — the backpressure seam for a source
+/// that is arbitrarily long and arrives over time (TTS read-aloud, #read-aloud;
+/// the HA-speaker follow-up will use it too).
+///
+/// Unlike [`play_pcm`] (synchronous, truncates the remainder once the 128 ms
+/// queue fills) this **cannot truncate**: it yields until the clock task's
+/// feeder has drained a slot. A TTS utterance is 2–10 s — 120–650 chunks — so
+/// truncation is not an edge case there, it is the default outcome.
+///
+/// Returns `false` if the queue did not drain within [`PUSH_TIMEOUT`]. The
+/// caller MUST abandon the clip on `false`: it means the clock task is wedged,
+/// and awaiting forever would park the main loop (and with it the UI, the
+/// touch scan, and `service_amp`) permanently.
+///
+/// # Why the gates are raised BEFORE the send, unlike `play_pcm`
+///
+/// `play_pcm` can raise `PLAYBACK_ACTIVE`/`AMP_REQUEST` after its enqueue loop
+/// because it never yields — the feeder cannot run in between. This function
+/// **awaits**, so the clock task can wake, take the chunk and start clocking it
+/// out before we ever get to the store. That would open a playback session with
+/// the mic gate still open and the amp still unrequested. So the gates go up
+/// first, and only for a non-empty clip (raising them for an empty one would
+/// suppress the mic forever, since nothing would ever arrive to release them).
+pub async fn push_chunk(pcm: &[u8]) -> bool {
+    if pcm.is_empty() {
+        return true;
+    }
+    PLAYBACK_ACTIVE.store(true, Ordering::Relaxed);
+    AMP_REQUEST.store(true, Ordering::Relaxed);
+    for chunk in pcm.chunks(PLAY_CHUNK) {
+        let Ok(v) = PcmChunk::from_slice(chunk) else {
+            return true; // chunks() guarantees <= PLAY_CHUNK; unreachable
+        };
+        if embassy_time::with_timeout(PUSH_TIMEOUT, PLAYBACK.send(v)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// How long [`push_chunk`] waits for a queue slot before declaring the consumer
+/// wedged. The queue drains in 128 ms when healthy, so this is ~16× headroom —
+/// long enough to ride out an executor hiccup, short enough that a genuinely
+/// stuck clock task cannot hang the main loop.
+const PUSH_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+
+/// Latched when [`PlaybackFeeder::abort`] tears a session down (DMA re-arm).
+///
+/// A streamed producer needs this: `abort` drains the queue and drops the
+/// session, so a producer that kept pushing would pour chunks into a channel
+/// nobody is draining *for its session* and narrate to a dead speaker. Cleared
+/// by [`begin_stream`] at the start of each utterance.
+static STREAM_ABORTED: AtomicBool = AtomicBool::new(false);
+
+/// "A queue-fed stream is mid-flight" — set by [`begin_stream`], cleared by
+/// [`end_stream`].
+///
+/// Distinguishes a STREAM (audio arriving over time; the bounded queue is the
+/// ONLY copy) from a static long clip (the whole thing sits in [`LONG_CLIP`]
+/// with a cursor, so the queue is redundant). [`PlaybackFeeder::resync`] must
+/// treat them oppositely: draining the queue is free for the chime and
+/// destroys undelivered audio for a stream.
+static STREAM_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// Arm a streamed utterance: clears the abort latch. Call once before the first
+/// [`push_chunk`].
+pub fn begin_stream() {
+    STREAM_ABORTED.store(false, Ordering::Relaxed);
+    STREAM_LIVE.store(true, Ordering::Relaxed);
+}
+
+/// Did the feeder abort the session we were streaming into?
+pub fn stream_aborted() -> bool {
+    STREAM_ABORTED.load(Ordering::Relaxed)
+}
+
+/// A long `&'static` clip streamed straight off its own buffer (the #58 ping
+/// chime): registered once at boot, played by arming `pos`/`playing`.
+struct LongClip {
+    pcm: Option<&'static [u8]>,
+    /// Mono bytes already handed to the feeder.
+    pos: usize,
+    playing: bool,
+}
+
+/// The long-clip source the feeder falls back to when the SFX queue is empty.
+///
+/// # Why not the queue, and why not a task
+///
+/// The chime is 480 ms (30 × [`PLAY_CHUNK`]) but the queue holds 128 ms (8), and
+/// [`play_pcm`] is synchronous — it cannot yield to let the clock task drain —
+/// so 73 % of the melody was rejected and the ping sounded silent. The first fix
+/// attempt streamed it from a dedicated Embassy task; that task made the watch
+/// panic **100 %** of the time under the `debug-console` build (`Instruction
+/// access fault mepc=0x2` inside `esp_rtos::task::task_wrapper` — one task too
+/// many for the RTOS's per-task resources). Streaming from the feeder that
+/// already exists needs no task, never blocks a caller, and can't truncate.
+static LONG_CLIP: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::RefCell<LongClip>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(LongClip {
+    pcm: None,
+    pos: 0,
+    playing: false,
+}));
+
+/// Register the ping-chime PCM (heap-leaked `&'static` built at boot). Must be
+/// called before [`play_chime`] can do anything.
+pub fn register_chime(pcm: &'static [u8]) {
+    LONG_CLIP.lock(|c| c.borrow_mut().pcm = Some(pcm));
+}
+
+/// Fire the ping chime: stream the FULL melody off its static buffer.
+///
+/// Non-blocking, safe from any task (the ping RX path and the debug console both
+/// use it). Re-arms from the start if one is already playing — a ping is a
+/// can't-miss event, and the RX site already dedups/gates repeats.
+///
+/// # The first chunk goes through the QUEUE on purpose
+///
+/// `silent_clock_task` idles in `select(next_clip(), rearm_requested())`, i.e.
+/// parked on `PLAYBACK.receive()`. It therefore only opens a playback session
+/// when a chunk arrives **through the channel** — arming [`LONG_CLIP`] alone
+/// left the task asleep and the chime SILENT (no `fill_stereo` call ever
+/// happened). So: hand chunk 0 to the queue to wake it and open the session,
+/// and let the feeder pull chunks 1..n straight off the static buffer.
+pub fn play_chime() -> (bool, usize, usize) {
+    if !CHIME_ENABLED {
+        return (false, 0, 0); // #65 gate — see CHIME_ENABLED
+    }
+    // Arm at the start, then pull chunk 0 through `next_long_chunk` like every
+    // other chunk. It must NOT be sliced straight out of the buffer: the clip is
+    // stored at 8 kHz and the ring runs at 16 kHz, so a raw slice plays the first
+    // 32 ms at DOUBLE SPEED and advances the cursor twice as far as it should.
+    let armed = LONG_CLIP.lock(|c| {
+        let mut c = c.borrow_mut();
+        if c.pcm.is_none() {
+            return false;
+        }
+        c.pos = 0;
+        c.playing = true;
+        true
+    });
+    if !armed {
+        return (false, 0, 1); // 1 = no pcm registered
+    }
+    CHIME_BYTES.store(0, Ordering::Relaxed);
+    CHIME_DONE.store(false, Ordering::Relaxed);
+    let Some(first) = next_long_chunk() else {
+        stop_long_clip();
+        return (false, 0, 2); // 2 = next_long_chunk yielded nothing
+    };
+    let n = first.len();
+    if PLAYBACK.try_send(first).is_ok() {
+        // Same ordering as play_pcm: suppress the mic and request the amp before
+        // the first sample can reach the speaker.
+        PLAYBACK_ACTIVE.store(true, Ordering::Relaxed);
+        AMP_REQUEST.store(true, Ordering::Relaxed);
+        (true, n, 0)
+    } else {
+        stop_long_clip(); // queue full — don't leave a half-armed clip behind
+        (false, n, 3) // 3 = PLAYBACK queue full
+    }
+}
+
+/// Is the ping chime allowed to reach the speaker? **Currently `false` (#65).**
+///
+/// The chime path itself is correct and was measured on-glass streaming the full
+/// clip (22400/22400 B). But enabling it flipped **release** builds to a 100 %
+/// boot panic at 2.7 s inside `ppRxFragmentProc` — the WiFi blob's RX-fragment
+/// path, i.e. #61's crash site. Measured on the same watch minutes apart:
+/// chime off 0/4 crash, chime on 5/5 crash.
+///
+/// None of the added code can be running at 2.7 s (no ping has occurred yet).
+/// The whole delta is ~8 bytes of `.bss` plus one atomic swap per main-loop tick,
+/// so this is the layout-sensitive latent corruption tracked in #65 — not a fault
+/// in this module. `debug-console` builds never crash, which is exactly why every
+/// automated check passed while release builds died.
+///
+/// Gated behind one flag instead of reverted: flip to `true` when #65 lands and
+/// the full path (streaming + the #58b voicing) is live again with no other work.
+pub const CHIME_ENABLED: bool = true;
+
+/// Registered chime length in mono bytes (0 before `register_chime`).
+fn chime_len() -> usize {
+    LONG_CLIP.lock(|c| c.borrow().pcm.map_or(0, |p| p.len()))
+}
+
+/// Mono bytes of the current chime handed to the ring so far, and a
+/// completion latch — telemetry so playback is provable from the serial log
+/// instead of only by ear (the first rework shipped silent and the console's
+/// "ok chime" ack proved nothing).
+static CHIME_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static CHIME_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Take the "chime finished" latch, returning `(streamed, total)` mono bytes.
+/// The main loop logs it once per chime.
+pub fn chime_done_take() -> Option<(usize, usize)> {
+    if !CHIME_ENABLED {
+        return None; // no chime can be in flight; keeps the per-tick cost at zero
+    }
+    if CHIME_DONE.swap(false, Ordering::Relaxed) {
+        Some((CHIME_BYTES.load(Ordering::Relaxed), chime_len()))
+    } else {
+        None
+    }
+}
+
+/// Next chunk of the streaming long clip, or `None` when idle/finished.
+/// Advances `pos`; clears `playing` on the last chunk.
+fn next_long_chunk() -> Option<PcmChunk> {
+    // CLAIM a source range under the lock; BUILD the samples outside it.
+    //
+    // The lock is a critical section (interrupts OFF). Expanding 8 kHz -> 16 kHz
+    // is a 128-iteration copy loop, and running that with interrupts disabled —
+    // every ~16 ms, from the feeder — starved the I2S DMA long enough to trip a
+    // `Late` error. `top_up` then failed, `silent_clock_task` called
+    // `feeder.abort()`, and abort drops the clip WITHOUT setting CHIME_DONE:
+    // the chime went silent with no completion line and no panic. Keep the
+    // critical section to pointer/index bookkeeping only.
+    let (pcm, start, end) = LONG_CLIP.lock(|c| {
+        let mut c = c.borrow_mut();
+        if !c.playing {
+            return None;
+        }
+        let pcm = c.pcm?;
+        if c.pos >= pcm.len() {
+            c.playing = false;
+            CHIME_DONE.store(true, Ordering::Relaxed);
+            return None;
+        }
+        let start = c.pos;
+        // Half a chunk of 8 kHz source -> a full 16 kHz chunk out.
+        let end = (start + PLAY_CHUNK / 2).min(pcm.len());
+        c.pos = end;
+        if end >= pcm.len() {
+            c.playing = false;
+            CHIME_DONE.store(true, Ordering::Relaxed);
+        }
+        Some((pcm, start, end))
+    })?;
+
+    // Zero-order hold 2x. Fine here: pure sines <= 1046 Hz, so the images land
+    // far above anything the watch speaker reproduces.
+    let mut chunk = PcmChunk::new();
+    for frame in pcm[start..end].chunks_exact(2) {
+        // Capacity is exact by construction: (PLAY_CHUNK/2) bytes in -> PLAY_CHUNK out.
+        let _ = chunk.extend_from_slice(frame);
+        let _ = chunk.extend_from_slice(frame);
+    }
+    if chunk.is_empty() {
+        return None;
+    }
+    CHIME_BYTES.fetch_add(end - start, Ordering::Relaxed);
+    Some(chunk)
+}
+
+/// Is a long clip still mid-stream? Used by the DMA-error recovery path to
+/// decide between resuming the melody and giving up on it.
+fn long_clip_live() -> bool {
+    LONG_CLIP.lock(|c| {
+        let c = c.borrow();
+        c.playing && c.pcm.is_some_and(|p| c.pos < p.len())
+    })
+}
+
+/// Is a queue-fed stream mid-flight?
+pub fn stream_live() -> bool {
+    STREAM_LIVE.load(Ordering::Relaxed)
+}
+
+/// Mark a queue-fed stream finished (producer done pushing). Idempotent.
+pub fn end_stream() {
+    STREAM_LIVE.store(false, Ordering::Relaxed);
+}
+
+/// A chunk to re-open a playback session with after a DMA `Late`.
+///
+/// Static long clip first (its cursor is authoritative), else whatever the queue
+/// still holds — that second case is what keeps a network-fed stream alive across
+/// a stall. `None` simply idles; `silent_clock_task` then waits on `next_clip()`
+/// and the next arriving frame reopens the session.
+pub fn next_resume_chunk() -> Option<PcmChunk> {
+    next_long_chunk().or_else(|| PLAYBACK.try_receive().ok())
+}
+
+/// Abandon any streaming long clip (transfer re-arm / abort path).
+fn stop_long_clip() {
+    LONG_CLIP.lock(|c| {
+        let mut c = c.borrow_mut();
+        c.playing = false;
+        c.pos = 0;
+    });
+}
+
 /// True while a clip (or its amp-release tail) is still in flight. Seam API
 /// for pacing streamed sources (HA speaker follow-up); SFX callers fire-and-
 /// forget, so nothing in-tree calls it yet.
@@ -245,10 +540,51 @@ impl PlaybackFeeder {
     /// briefly replay stale clip bytes after the re-arm (rare; amp drops on
     /// the next main tick) — accepted for a path that only fires when the
     /// executor stalled longer than the whole ring.
+    /// A DMA `Late` error killed the transfer, but a STREAMING long clip should
+    /// survive it: drop the in-flight ring state and let the caller re-arm, then
+    /// keep feeding from wherever [`LONG_CLIP`] left off.
+    ///
+    /// This exists because [`abort`] is too destructive for the case that
+    /// actually happens on this watch. A received ping wakes the screen and
+    /// forces a FULL-FRAME repaint (~200 ms — measured), which is far longer than
+    /// the 48 ms DMA ring, so `top_up` reliably hits `Late` on the ping path.
+    /// `abort` then threw the melody away and cleared the completion latch's
+    /// clip, so a ping produced NO sound and NO log line while the console's
+    /// identical `play_chime()` worked perfectly (nothing repaints after it).
+    ///
+    /// Returns true if a long clip is still live and worth resuming.
+    pub fn resync(&mut self) -> bool {
+        self.current = None;
+        self.tail = 0;
+        // For a STATIC long clip the queue is redundant (LONG_CLIP holds the whole
+        // melody with a cursor), so stale ring data is dropped. For a QUEUE-FED
+        // stream the queue is the only copy of audio that arrived over the
+        // network — draining it throws away speech that was never played. This
+        // distinction is the difference between the chime resuming and walkie-talkie
+        // RX being silent: `Late` fires on any >48 ms stall, the watchface repaints
+        // full-frame (~200 ms) at 1 Hz, so an unconditional drain kills reception
+        // roughly once per second.
+        if !stream_live() {
+            while PLAYBACK.try_receive().is_ok() {}
+        }
+        let live = long_clip_live() || stream_live();
+        if live {
+            // Keep the mic suppressed and the amp up: the melody continues on the
+            // fresh transfer. Re-stamp so the amp gate re-arms cleanly.
+            self.started = Instant::now();
+        }
+        live
+    }
+
     pub fn abort(&mut self) {
         self.current = None;
         self.tail = 0;
         while PLAYBACK.try_receive().is_ok() {}
+        stop_long_clip(); // don't resume a half-played melody after the re-arm
+        // Tell a streamed producer (TTS) its session died, so it stops pushing
+        // into a channel that is no longer feeding a live session — the same
+        // reason `stop_long_clip` exists for the chime.
+        STREAM_ABORTED.store(true, Ordering::Relaxed);
         PLAYBACK_ACTIVE.store(false, Ordering::Relaxed);
         AMP_REQUEST.store(false, Ordering::Relaxed);
     }
@@ -269,8 +605,13 @@ impl PlaybackFeeder {
         while i + 4 <= out.len() {
             // Stage the next chunk (only past the amp gate, so no audio is
             // spent into a muted DAC while the main loop raises the amp).
+            // Queue first, then the streaming long clip (#58) — a queued SFX is
+            // always short and shouldn't wait behind 480 ms of melody.
             if self.current.is_none() && self.gate_open() {
                 if let Ok(c) = PLAYBACK.try_receive() {
+                    self.current = Some(c);
+                    self.offset = 0;
+                } else if let Some(c) = next_long_chunk() {
                     self.current = Some(c);
                     self.offset = 0;
                 }

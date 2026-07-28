@@ -164,6 +164,25 @@ pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, ring: &'sta
                 Timer::after(Duration::from_millis(PUSH_POLL_MS)).await;
             };
             if !clean {
+                // A long clip (the #58 ping chime) SURVIVES a DMA error; only a
+                // queue-fed clip is abandoned.
+                //
+                // Why this matters: a received ping wakes the screen and forces a
+                // full-frame repaint (~200 ms measured) — four times the 48 ms
+                // ring — so `top_up` reliably hits `Late` on exactly the path the
+                // chime exists for. The old unconditional `abort()` threw the
+                // melody away, so a real ping made NO sound and logged NOTHING,
+                // while the debug console's identical `play_chime()` worked
+                // perfectly because nothing repaints after it.
+                if feeder.resync() {
+                    // Melody still has bytes left: re-arm and keep streaming from
+                    // where LONG_CLIP left off. `pending` stays None — the feeder
+                    // pulls the next chunk itself.
+                    drop(xfer);
+                    Timer::after(Duration::from_millis(2)).await;
+                    pending = audio_out::next_resume_chunk();
+                    continue;
+                }
                 feeder.abort();
                 drop(xfer); // stop the poisoned/stalled transfer …
                 Timer::after(Duration::from_millis(2)).await;

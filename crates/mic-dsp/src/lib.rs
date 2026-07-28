@@ -143,32 +143,72 @@ pub fn fill_tick_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
     fill_click_with_peak(buf, sample_rate, 6000.0)
 }
 
-/// Length of the watch-ping receiver chime in mono BYTES at 16 kHz (480 ms).
-pub const PING_CHIME_LEN: usize = 7680 * 2;
+/// Length of the watch-ping receiver chime in mono BYTES at 16 kHz (700 ms).
+/// Prefer [`PING_CHIME_8K_LEN`] on the watch — see why there.
+pub const PING_CHIME_LEN: usize = 11_200 * 2;
 
-/// Synthesize the watch-to-watch ping chime (#35, melodic upgrade #58): a
-/// bright, pleasant rising MAJOR ARPEGGIO — C5 → E5 → G5 → C6 (a C-major
-/// triad climbing an octave, the classic "good news" motif). Each note is a
-/// struck sine with a soft linear attack and an exponential decay, entering
-/// legato as the previous one rings down; the top C6 is held a beat longer as
-/// the arrival. ~480 ms total; a 12 ms master fade-out guarantees a pop-free
-/// tail (amp-release insurance, same discipline as the click/beep). Mono
-/// s16le at `sample_rate`; returns MONO bytes written. Unmistakable next to
-/// the 12 ms tap tick and the 50 ms snake beep — this is the "someone's
-/// thinking of you" sound (#58: the ping must be a can't-miss event).
+/// Length of the chime stored at **8 kHz** (700 ms) — 11 200 B, HALF of
+/// [`PING_CHIME_LEN`].
+///
+/// The watch stores the chime at 8 kHz and the playback feeder duplicates each
+/// sample back up to the 16 kHz TX ring. This is free quality-wise: the chime is
+/// built from PURE SINES whose highest partial is the top C6 at 1046.5 Hz, so
+/// 8 kHz sampling (Nyquist 4 kHz) is still ~4x oversampled.
+///
+/// It matters because the buffer is heap-resident for the life of the firmware,
+/// and main-heap bytes are contested: growing the stack to clear the WiFi blob's
+/// globals (#65) cost 12 KB of heap, which made the notification shade OOM
+/// (`memory allocation of 4096 bytes failed` on a swipe-down). Halving this
+/// buffer repays 11 200 B of that debt, so the stack can stay safe WITHOUT
+/// starving the UI — instead of trading one crash for the other.
+pub const PING_CHIME_8K_LEN: usize = 5_600 * 2;
+
+/// Synthesize the watch-to-watch ping chime (#35, melody #58, voiced #58b): a
+/// warm rising MAJOR ARPEGGIO — C5 → E5 → G5 → C6 (a C-major triad climbing an
+/// octave, the classic "good news" motif) voiced like a struck bell rather than
+/// a beeper. ~700 ms; mono s16le at `sample_rate`; returns MONO bytes written.
+///
+/// # Voicing (why these numbers)
+///
+/// The first cut was **jarring on-glass** — the fault was the envelope and the
+/// balance, not the notes:
+/// - **Descending peaks.** The old version made the TOP note the LOUDEST
+///   (C6 @ 9500). High frequency at maximum amplitude is exactly what a tiny
+///   watch speaker turns into a shriek. Real chimes put the weight in the root
+///   and let the upper notes shimmer, so the peaks now fall 9500 → 5000 as the
+///   pitch climbs. This is the single biggest change.
+/// - **Raised-cosine attack (22 ms, was a linear 8 ms).** A fast linear ramp is
+///   a transient — heard as a click in front of each note. A half-cosine bloom
+///   over 22 ms has no corner in it, so notes arrive instead of hitting.
+/// - **Long bell decay (tau 210-300 ms, was 70-90 ms).** Short taus read as
+///   "plucked" and leave the arpeggio feeling clipped and nervous; a long tail
+///   rings, and the top C6 gets the longest (300 ms) so it blooms and fades out
+///   as the arrival rather than stopping dead.
+/// - **Slower arpeggio (125 ms apart, was 110) + 45 ms cosine fade-out**
+///   (was a 12 ms linear cut) — unhurried, and the tail lands on true silence.
+///
+/// Peaks are chosen so even a worst-case all-in-phase sum stays under ~12 000
+/// (well below clip) — no normalization pass, no clipping, deterministic level.
 pub fn fill_ping_chime_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
     /// One struck note: (start ms, length ms, freq Hz, peak, decay tau ms).
-    /// Notes are strictly ascending in pitch AND start time (the rising
-    /// arpeggio — host-tested by zero-crossing rate per note window).
+    /// Pitch and start time both ascend (the rising arpeggio — host-tested by
+    /// zero-crossing rate per window); PEAK DESCENDS (see voicing notes).
     const NOTES: [(u32, u32, f32, f32, f32); 4] = [
-        (0, 150, 523.25, 9_000.0, 70.0),    // C5
-        (110, 150, 659.25, 9_000.0, 70.0),  // E5
-        (220, 160, 783.99, 8_800.0, 75.0),  // G5
-        (330, 200, 1046.50, 9_500.0, 90.0), // C6 — held, the arrival
+        (0, 420, 523.25, 9_500.0, 200.0),   // C5 — the root carries the level
+        (125, 380, 659.25, 6_800.0, 200.0), // E5
+        (250, 340, 783.99, 4_600.0, 220.0), // G5
+        (375, 325, 1046.50, 3_200.0, 300.0), // C6 — softest + longest: shimmer
     ];
-    const TOTAL_MS: u32 = 480;
-    const ATTACK_MS: f32 = 8.0;
-    const FADE_MS: u32 = 12;
+    const TOTAL_MS: u32 = 700;
+    const ATTACK_MS: f32 = 22.0;
+    const FADE_MS: u32 = 45;
+    /// Global ring-down applied over the WHOLE chime (tau, ms). Descending
+    /// per-note peaks alone are NOT enough: four overlapping notes SUM, and the
+    /// late region (where the high notes live) measured louder than the root
+    /// even with the top note at half its level. This taper makes "later" mean
+    /// "quieter" unconditionally, and is also just how a struck bell behaves —
+    /// the whole body decays, not each partial independently.
+    const RING_TAU_MS: f32 = 1_100.0;
 
     let sr = sample_rate as f32;
     let total = ((sample_rate * TOTAL_MS / 1000) as usize).min(buf.len() / 2);
@@ -183,12 +223,22 @@ pub fn fill_ping_chime_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
                 continue;
             }
             let t = (i - s0) as f32;
-            let env = libm::expf(-t / (sr * tau_ms / 1000.0)) * (t / attack).min(1.0);
+            // Raised-cosine bloom (no corner) × exponential bell decay.
+            let bloom = if t < attack {
+                0.5 * (1.0 - libm::cosf(core::f32::consts::PI * t / attack))
+            } else {
+                1.0
+            };
+            let env = libm::expf(-t / (sr * tau_ms / 1000.0)) * bloom;
             let w = 2.0 * core::f32::consts::PI * freq / sr;
             a += peak * env * libm::sinf(w * t);
         }
+        // Global ring-down: the whole chime decays as one body.
+        a *= libm::expf(-(i as f32) / (sr * RING_TAU_MS / 1000.0));
         if i >= total - fade {
-            a *= (total - 1 - i) as f32 / fade as f32; // master fade-out
+            // Cosine fade-out — a linear cut still has a corner at the joint.
+            let x = (total - 1 - i) as f32 / fade as f32;
+            a *= 0.5 * (1.0 - libm::cosf(core::f32::consts::PI * x));
         }
         let s = a.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         let b = s.to_le_bytes();
