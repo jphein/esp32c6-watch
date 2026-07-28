@@ -2077,6 +2077,7 @@ dependencies = [
  "slint-build",
  "static_cell",
  "trouble-host",
+ "tts-proto",
  "u8g2-fonts",
  "wled-wizmote",
 ]
@@ -6136,6 +6137,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "tts-proto"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
 ]
 
 [[package]]

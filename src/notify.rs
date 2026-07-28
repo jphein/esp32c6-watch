@@ -154,6 +154,31 @@ pub fn take_arrival() -> Option<(heapless::String<TITLE_CAP>, u64)> {
     ARRIVAL.lock(|cell| cell.borrow_mut().take())
 }
 
+/// Clone the newest notification (index 0), or `None` when the ring is empty.
+///
+/// Read-aloud (#read-aloud) needs the BODY, which [`take_arrival`] doesn't
+/// carry — and it must not compose speech while holding this lock. So: one
+/// memcpy-sized clone under the critical section, all the string work outside.
+/// (The chime regression in #58 was a copy LOOP left inside a critical section
+/// starving the I2S DMA; a plain clone is the shape that was always fine.)
+#[cfg(feature = "tts")]
+pub fn newest() -> Option<Notification> {
+    RING.lock(|cell| cell.borrow().first().cloned())
+}
+
+/// Human label for a source, used as the spoken prefix ("Home Assistant.") so
+/// a listener gets the context a sighted user reads off the card glyph.
+#[cfg(feature = "tts")]
+pub fn source_label(source: Source) -> &'static str {
+    match source {
+        Source::System => "System",
+        Source::Battery => "Battery",
+        Source::Ota => "Firmware update",
+        Source::Wifi => "Wi-Fi",
+        Source::Ha => "Home Assistant",
+    }
+}
+
 /// Unread count (badge). Zeroed by [`mark_read`] when the shade opens.
 pub fn unread() -> u32 {
     UNREAD.load(Ordering::Relaxed)
