@@ -833,6 +833,52 @@ def _image_from(path: Path, tmpdir: str) -> tuple[Path | None, str]:
     return out, "elf"
 
 
+def warn_if_stale(image: Path) -> bool:
+    """Warn when `image` predates the newest tracked source file.
+
+    THREE separate incidents in one day came from acting on an artifact that had
+    silently not been rebuilt:
+      * a patched `memory.x` that cargo does not treat as a build input, so
+        `--revert` relinked nothing and left a 6 MiB-region binary on disk
+        looking current;
+      * a missing `v3-dbg.elf` that made a deploy a silent no-op and then
+        produced a bogus gate FAILURE against old firmware;
+      * a `fambuild ... Finished in 0.26s` cache hit reported as a build.
+
+    In every case the log said success and the bytes were stale. "Finished" is
+    not evidence that an artifact is current — the mtime is. Returns True when
+    the image looks stale (advisory only; never blocks a deliberate flash).
+    """
+    try:
+        img_mtime = image.stat().st_mtime
+    except OSError:
+        return False
+    newest_t, newest_p = 0.0, None
+    for sub in ("src", "crates", "ui"):
+        base = REPO / sub
+        if not base.is_dir():
+            continue
+        for f in base.rglob("*"):
+            if f.suffix not in (".rs", ".slint") or not f.is_file():
+                continue
+            try:
+                t = f.stat().st_mtime
+            except OSError:
+                continue
+            if t > newest_t:
+                newest_t, newest_p = t, f
+    if newest_p is None or newest_t <= img_mtime:
+        return False
+    age = int(newest_t - img_mtime)
+    say(f"watchctl: WARNING — image is STALE by {age}s: "
+        f"{newest_p.relative_to(REPO)} is newer than {image.name}. "
+        f"Rebuild before trusting this artifact (a build log saying "
+        f"'Finished' can be a cache hit).")
+    emit({"warning": "stale-image", "image": str(image),
+          "newer_source": str(newest_p.relative_to(REPO)), "stale_by_s": age})
+    return True
+
+
 def cmd_deploy(args) -> int:
     row = require_usb(args.watch)
     image = Path(args.image)
@@ -840,6 +886,7 @@ def cmd_deploy(args) -> int:
         say(f"watchctl: no such file: {image}")
         emit({"error": "not-found", "image": str(image)})
         return EXIT_NOTFOUND
+    warn_if_stale(image)
 
     with tempfile.TemporaryDirectory(prefix="watchctl-") as tmp:
         binp, kind = _image_from(image, tmp)
@@ -923,6 +970,7 @@ def cmd_flash_full(args) -> int:
         say(f"watchctl: no such file: {elf}")
         emit({"error": "not-found", "elf": str(elf)})
         return EXIT_NOTFOUND
+    warn_if_stale(elf)
     with open(elf, "rb") as f:
         if f.read(4) != b"\x7fELF":
             say("watchctl: flash-full needs an ELF (use deploy for a .bin)")
