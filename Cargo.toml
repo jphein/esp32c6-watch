@@ -27,6 +27,16 @@ path = "./src/bin/slint_demo.rs"
 # tools/ui_test.py.
 default = []
 debug-console = ["dep:embedded-io-async"]
+# `tts` (read notifications aloud) is OPT-IN and OFF BY DEFAULT — not because it
+# is unfinished, but because the firmware is OUT OF ROM. Measured 2026-07-27:
+# the 4 MiB ROM region esp-hal hardcodes for the C6 had only 6 952 B free at
+# 9363d52, and this feature needs ~9.9 KB, overflowing by ~3.0 KB. It links and
+# runs clean once the region is raised to the 6 MiB `partitions.csv` already
+# reserves for each OTA slot (verified: relinks with 2 094 128 B to spare).
+# Same discipline as audio_out::CHIME_ENABLED — gated behind one flag rather
+# than reverted, so it flips on in one line the moment the ROM budget exists.
+# See docs/superpowers/specs/2026-07-27-tts-notify-readaloud-design.md.
+tts = ["dep:tts-proto"]
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [
@@ -128,6 +138,10 @@ mic-dsp = { path = "crates/mic-dsp" }
 # both mesh peer names (src/net/names.rs re-export) and the device sigil
 # (src/net/sigil.rs).
 sigil-id = { path = "crates/sigil-id" }
+# Read-aloud protocol core: notification->speech composition, JSON request
+# encoding (escapes attacker-influenced MQTT text), bridge HTTP response
+# framing, 16 kHz chunk math. Host-unit-tested; feeds src/net/voice_tts.rs.
+tts-proto = { path = "crates/tts-proto", optional = true }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

@@ -60,6 +60,14 @@ const REC_LEN_V5: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 1 + 1 + 2;
 const MAGIC_V6: [u8; 6] = *b"SWCFG6";
 const REC_LEN_V6: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 2;
 
+/// v7 record (#read-aloud): v6 + a READ-ALOUD MODE byte at offset 116, before
+/// the checksum.
+///   116: [`SpeakMode`] as u8 — 0 off · 1 on-demand · 2 auto
+/// Older records still load and take the default (on-demand), so an OTA never
+/// makes a watch start talking on its own; the first save rewrites v7 in place.
+const MAGIC_V7: [u8; 6] = *b"SWCFG7";
+const REC_LEN_V7: usize = REC_LEN_V6 + 1;
+
 /// Volume byte (offset 111, v6): step level is the low nibble; bit 4 is mute.
 const VOL_LEVEL_MASK: u8 = 0x0F;
 const VOL_MUTED_BIT: u8 = 0x10;
@@ -81,11 +89,15 @@ pub enum ButtonAction {
     Launcher,
     Ping,
     Voice,
+    /// Read the newest notification aloud (#read-aloud). The on-demand
+    /// trigger for [`SpeakMode::OnDemand`] until the shade grows a speaker
+    /// control — mapping a button needs no .slint change.
+    Speak,
 }
 
 impl ButtonAction {
     /// Total variants — the cycle-picker wraps through `0..COUNT`.
-    pub const COUNT: u8 = 9;
+    pub const COUNT: u8 = 10;
 
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -102,6 +114,7 @@ impl ButtonAction {
             6 => ButtonAction::Launcher,
             7 => ButtonAction::Ping,
             8 => ButtonAction::Voice,
+            9 => ButtonAction::Speak,
             _ => ButtonAction::None,
         }
     }
@@ -123,6 +136,7 @@ impl ButtonAction {
             ButtonAction::Launcher => "Launcher",
             ButtonAction::Ping => "Ping",
             ButtonAction::Voice => "Voice",
+            ButtonAction::Speak => "Read aloud",
         }
     }
 }
@@ -185,6 +199,8 @@ pub struct WatchConfig {
     pub boot_long: ButtonAction,
     pub pwron_short: ButtonAction,
     pub pwron_long: ButtonAction,
+    /// Read notifications aloud (#read-aloud, v7). Defaults to on-demand.
+    pub speak: SpeakMode,
 }
 
 impl Default for WatchConfig {
@@ -213,7 +229,46 @@ impl Default for WatchConfig {
             boot_long: ButtonAction::Launcher,
             pwron_short: ButtonAction::VolDown,
             pwron_long: ButtonAction::PowerMenu,
+            // On-demand, not Auto — see SpeakMode's docs for why.
+            speak: SpeakMode::OnDemand,
         }
+    }
+}
+
+/// Read notifications aloud through the TTS bridge (#read-aloud).
+///
+/// Default is [`OnDemand`](SpeakMode::OnDemand), deliberately not `Auto`:
+/// speaking an utterance parks the main loop for seconds (a notification
+/// arriving mid-game would freeze a framebuffer app), the watch is worn in
+/// rooms with other people, and the ping chime already provides the ambient
+/// "something arrived" cue. Speech should be asked for, not assumed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpeakMode {
+    /// Never speak. The TTS path is inert.
+    Off = 0,
+    /// Speak only when the user asks (speaker control on the notification card).
+    OnDemand = 1,
+    /// Speak on arrival — but only when every gate in `should_auto_speak` holds
+    /// (screen on · watchface/shade only · not muted · nothing already speaking).
+    Auto = 2,
+}
+
+impl SpeakMode {
+    pub const fn from_u8(b: u8) -> Self {
+        match b {
+            0 => SpeakMode::Off,
+            2 => SpeakMode::Auto,
+            // Unknown/corrupt values fall back to the default rather than to
+            // Auto — an unreadable byte must never make the watch talk.
+            _ => SpeakMode::OnDemand,
+        }
+    }
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+    /// May a notification be spoken at all in this mode?
+    pub const fn enabled(self) -> bool {
+        !matches!(self, SpeakMode::Off)
     }
 }
 
@@ -236,23 +291,25 @@ pub fn load(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
 }
 
 fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
-    let mut buf = [0u8; REC_LEN_V6];
+    let mut buf = [0u8; REC_LEN_V7];
     flash.read(offset, &mut buf).ok()?;
     // v2plus = has default_page + units (v2+); v3plus = also the theme byte;
     // v4plus = also the radios flags byte; v5plus = also the mic-gain byte;
-    // v6 = also the volume + button-map bytes.
-    let (rec_len, v2plus, v3plus, v4plus, v5plus, v6) = if buf[..6] == MAGIC_V6 {
-        (REC_LEN_V6, true, true, true, true, true)
+    // v6plus = also the volume + button-map bytes; v7 = also the speak byte.
+    let (rec_len, v2plus, v3plus, v4plus, v5plus, v6plus, v7) = if buf[..6] == MAGIC_V7 {
+        (REC_LEN_V7, true, true, true, true, true, true)
+    } else if buf[..6] == MAGIC_V6 {
+        (REC_LEN_V6, true, true, true, true, true, false)
     } else if buf[..6] == MAGIC_V5 {
-        (REC_LEN_V5, true, true, true, true, false)
+        (REC_LEN_V5, true, true, true, true, false, false)
     } else if buf[..6] == MAGIC_V4 {
-        (REC_LEN_V4, true, true, true, false, false)
+        (REC_LEN_V4, true, true, true, false, false, false)
     } else if buf[..6] == MAGIC_V3 {
-        (REC_LEN_V3, true, true, false, false, false)
+        (REC_LEN_V3, true, true, false, false, false, false)
     } else if buf[..6] == MAGIC_V2 {
-        (REC_LEN_V2, true, false, false, false, false)
+        (REC_LEN_V2, true, false, false, false, false, false)
     } else if buf[..6] == MAGIC_V1 {
-        (REC_LEN_V1, false, false, false, false, false)
+        (REC_LEN_V1, false, false, false, false, false, false)
     } else {
         return None;
     };
@@ -306,7 +363,7 @@ fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
         )
     };
     let mic_gain = if v5plus { buf[110] } else { defaults.mic_gain };
-    let (volume, muted, boot_short, boot_long, pwron_short, pwron_long) = if v6 {
+    let (volume, muted, boot_short, boot_long, pwron_short, pwron_long) = if v6plus {
         let v = buf[111];
         (
             (v & VOL_LEVEL_MASK).min(VOL_MAX),
@@ -326,6 +383,9 @@ fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
             defaults.pwron_long,
         )
     };
+    // v7: read-aloud mode. Pre-v7 records take the default (on-demand) so an
+    // OTA can never turn a quiet watch into a talking one.
+    let speak = if v7 { SpeakMode::from_u8(buf[116]) } else { defaults.speak };
     Some(WatchConfig {
         node_id,
         brightness,
@@ -346,6 +406,7 @@ fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
         boot_long,
         pwron_short,
         pwron_long,
+        speak,
     })
 }
 
@@ -364,8 +425,8 @@ pub fn save(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result<
 }
 
 fn save_slot(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
-    let mut buf = [0u8; REC_LEN_V6];
-    buf[..6].copy_from_slice(&MAGIC_V6);
+    let mut buf = [0u8; REC_LEN_V7];
+    buf[..6].copy_from_slice(&MAGIC_V7);
     buf[6] = cfg.node_id;
     buf[7] = cfg.brightness;
     let sb = cfg.ssid.as_bytes();
@@ -394,7 +455,9 @@ fn save_slot(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result
     buf[113] = cfg.boot_long.as_u8();
     buf[114] = cfg.pwron_short.as_u8();
     buf[115] = cfg.pwron_long.as_u8();
-    let sum = checksum(&buf[..REC_LEN_V6 - 2]);
-    buf[REC_LEN_V6 - 2..].copy_from_slice(&sum.to_le_bytes());
+    // Read-aloud mode (offset 116, v7).
+    buf[116] = cfg.speak.as_u8();
+    let sum = checksum(&buf[..REC_LEN_V7 - 2]);
+    buf[REC_LEN_V7 - 2..].copy_from_slice(&sum.to_le_bytes());
     flash.write(offset, &buf).map_err(|_| ())
 }

@@ -71,6 +71,8 @@ use crate::drivers::co5300::Co5300Display;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::net::voice_stt;
+#[cfg(feature = "tts")]
+use crate::net::voice_tts;
 use crate::drivers::framebuffer::Framebuffer;
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::Es8311;
@@ -1478,6 +1480,8 @@ async fn main(_spawner: Spawner) -> ! {
     // Button map (#59): BOOT/PWRON × short/long → action. Restored like the
     // radio toggles; each hub cycle re-persists.
     use crate::peripherals::config::ButtonAction;
+    #[cfg(feature = "tts")]
+    use crate::peripherals::config::SpeakMode;
     let mut boot_short = watch_cfg.boot_short;
     let mut boot_long = watch_cfg.boot_long;
     let mut pwron_short = watch_cfg.pwron_short;
@@ -1486,6 +1490,12 @@ async fn main(_spawner: Spawner) -> ! {
     // in a single place BEFORE the app-state match (so it can freely set
     // app_state / launcher / power-menu / volume regardless of which arm runs).
     let mut pending_button: Option<ButtonAction> = None;
+    // Read-aloud request (#read-aloud), raised by ButtonAction::Speak or by an
+    // auto-mode arrival, serviced at the single speak site below. A flag rather
+    // than an inline call because that site holds the amp + codec borrows and
+    // parks the loop for seconds — it must be the only place that can do so.
+    #[cfg(feature = "tts")]
+    let mut speak_request = false;
     // BOOT press state machine (short vs long): press start, long-fired latch,
     // and "this press only woke the screen" (so a wake press never also acts).
     let mut boot_press_start: Option<Instant> = None;
@@ -3055,6 +3065,15 @@ async fn main(_spawner: Spawner) -> ! {
                         app_state = AppState::Watchface;
                         shell.req.launch.set(Some(AppState::Voice));
                     }
+                    ButtonAction::Speak => {
+                        // On-demand read-aloud. Serviced at the speak site (it
+                        // owns the amp/codec borrows), on this pass or the next.
+                        // Inert without `tts` (out of ROM — see Cargo.toml).
+                        #[cfg(feature = "tts")]
+                        {
+                            speak_request = true;
+                        }
+                    }
                 }
             }
             if vol_changed {
@@ -3886,6 +3905,72 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.request_redraw(); // paint the transcript/error promptly
                 }
 
+                // === Read the newest notification aloud (#read-aloud) ========
+                //
+                // THE single speak site. Parks this loop for the utterance BY
+                // DESIGN — same as the PTT hold above, and for a sharper reason:
+                // `PlaybackFeeder::gate_open()` withholds every sample until
+                // AMP_READY, which ONLY `audio_out::service_amp` sets, and that
+                // needs the amp GPIO + the codec's I2C, both owned here. If the
+                // stream ran anywhere that couldn't pump it, every chunk would
+                // wait out the 1 s AMP_WAIT_MS failsafe and then drain into a
+                // MUTED DAC: silent in the room, fully "successful" in the log.
+                // `speak_text` pumps it per chunk — hence the borrows below.
+                //
+                // No render happens during the call: painting blocks the
+                // single-threaded executor for tens of ms and would starve the
+                // audio DMA behind a 128 ms queue (same rule the PTT path
+                // documents at its monitor future).
+                #[cfg(feature = "tts")]
+                if speak_request {
+                    speak_request = false;
+                    if watch_cfg.speak.enabled() && !muted && net.phase.ready() {
+                        if let Some(n) = crate::notify::newest() {
+                            let text = tts_proto::compose_utterance(
+                                crate::notify::source_label(n.source),
+                                n.title.as_str(),
+                                n.body.as_str(),
+                            );
+                            // The utterance parks the loop for seconds; keep it
+                            // out of the arm watchdog so `perf` stays signal.
+                            #[cfg(feature = "debug-console")]
+                            debug_console::arm_exempt();
+                            // Tell the user this is speech, not a freeze, and
+                            // that a tap ends it. Painted BEFORE any audio is
+                            // queued — a render mid-stream would starve the
+                            // audio DMA behind the 128 ms queue.
+                            shell.set_toast("Reading aloud — tap to stop");
+                            toast_active = true;
+                            toast_until = now + Duration::from_secs(3);
+                            shell.render(&mut display);
+                            // Finger down = stop. `touch` is borrowed only by
+                            // this closure; `amp_en`/`audio_codec` are distinct
+                            // bindings, so the borrows don't overlap.
+                            let mut stop_on_tap =
+                                || matches!(touch.read(), Ok(Some(_)));
+                            match voice_tts::speak_text(
+                                stack,
+                                text.as_str(),
+                                &mut amp_en,
+                                &mut audio_codec,
+                                &mut stop_on_tap,
+                            )
+                            .await
+                            {
+                                Ok(s) => println!(
+                                    "[TTS] {} {} B ({} ms)",
+                                    s.label(),
+                                    s.bytes(),
+                                    s.duration_ms()
+                                ),
+                                Err(e) => println!("[TTS] failed: {e}"),
+                            }
+                        } else {
+                            println!("[TTS] nothing to read");
+                        }
+                    }
+                }
+
                 // #28 sound-level meter + #30 spectrum: drain the SHARED ES7210
                 // capture → dBFS bar + peak-hold + 12-band FFT spectrum on
                 // SoundLevel. Non-blocking (unlike the PTT flow, which parks the
@@ -4490,6 +4575,22 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_toast(title.as_str());
                         toast_active = true;
                         toast_until = now + Duration::from_secs(3);
+                    }
+                    // Auto read-aloud (#read-aloud) — deliberately narrow. Every
+                    // gate maps to a specific failure it prevents: speaking parks
+                    // the main loop for SECONDS, so an arrival mid-game would
+                    // freeze a framebuffer app (hence Watchface-only); the watch
+                    // is worn in rooms with people (hence screen-on, i.e. the
+                    // user is already looking at it); and stacking a second
+                    // utterance over a live one would just fight for the queue.
+                    #[cfg(feature = "tts")]
+                    if watch_cfg.speak == SpeakMode::Auto
+                        && screen_state >= 2
+                        && app_state == AppState::Watchface
+                        && !muted
+                        && !audio_out::busy()
+                    {
+                        speak_request = true;
                     }
                 }
 

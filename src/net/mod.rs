@@ -30,4 +30,12 @@ pub mod smol_mesh;
 // silence dead-code until then rather than churn per-item attributes.
 #[allow(dead_code)]
 pub mod voice_stt;
+// Text-to-speech playback (same bridge, reverse direction): notification text
+// -> Azure -> raw mono 16 kHz PCM streamed into audio_out. Gated on `tts`
+// because the binary is out of ROM, NOT because it is incomplete — see the
+// feature's comment in Cargo.toml. Some of the seam (explicit-address entry
+// point, Spoken accessors) has no in-tree caller yet.
+#[cfg(feature = "tts")]
+#[allow(dead_code)]
+pub mod voice_tts;
 pub mod weather;
