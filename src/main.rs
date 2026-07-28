@@ -92,6 +92,34 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// The embassy-net stack runner (smoltcp poll loop). Distinct from
 /// `net::net_task::net_task`, the #53 network OWNER that drives the WiFi
 /// controller/scan/burst/OTA — this one just pumps packets.
+/// Decode one VOX payload (224 B G.711 µ-law @ 8 kHz) into the 16 kHz playback
+/// queue (#71). Free function so it borrows nothing from the main loop.
+///
+/// # Whole frame or nothing
+///
+/// `play_pcm` fills what it can and rejects the remainder, so calling it with a
+/// full queue would emit HALF a voice frame and click. One frame decodes to 896 B
+/// = 2 queue slots, so we check for 2 free slots and drop the entire frame
+/// otherwise.
+///
+/// # Why dropping the NEWEST audio is correct here
+///
+/// A full queue means we are already ~128 ms behind live. For realtime voice,
+/// bounded latency beats completeness: growing the backlog would make the
+/// conversation drift further from realtime forever, whereas dropping 28 ms is
+/// one blip. (This is the opposite of the TTS/chime case, where the clip is
+/// finite and completeness wins — hence `push_chunk`'s awaiting behaviour there.)
+fn vox_play_frame(payload: &[u8]) -> bool {
+    const FRAME_SLOTS: usize = walkie_codec::VOX_SRC_BYTES.div_ceil(audio_out::PLAY_CHUNK);
+    if audio_out::queue_free() < FRAME_SLOTS {
+        return false;
+    }
+    let mut pcm = [0u8; walkie_codec::VOX_SRC_BYTES];
+    let n = walkie_codec::decode_frame_to_16k(payload, &mut pcm);
+    audio_out::play_pcm(&pcm[..n]);
+    true
+}
+
 #[embassy_executor::task]
 async fn net_stack_task(
     mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>,
@@ -1486,6 +1514,23 @@ async fn main(_spawner: Spawner) -> ! {
     // in a single place BEFORE the app-state match (so it can freely set
     // app_state / launcher / power-menu / volume regardless of which arm runs).
     let mut pending_button: Option<ButtonAction> = None;
+    // === #71 walkie RX state ===============================================
+    // Last VOX sequence seen, and the last payload, retained for packet-loss
+    // concealment: on a gap we repeat the previous 28 ms frame rather than
+    // emitting silence — a blip reads as interference, a hole reads as a click.
+    // Held here (not in SmolMesh) so the wire layer stays stateless.
+    let mut vox_last_seq: Option<u16> = None;
+    let mut vox_last: Option<crate::net::smol_mesh::VoxPayload> = None;
+    // Who we last heard, for the Vox screen.
+    let mut vox_peer: u8 = 0;
+    let mut vox_rssi: i32 = -127;
+    // Frames received / concealed this session — telemetry, because "frames
+    // arrived" is NOT evidence of sound (the feeder will happily drain into a
+    // muted DAC after the 1s amp failsafe).
+    let mut vox_rx_frames: u32 = 0;
+    let mut vox_concealed: u32 = 0;
+    // Frames dropped because the queue was full (we are behind live).
+    let mut vox_dropped: u32 = 0;
     // BOOT press state machine (short vs long): press start, long-fired latch,
     // and "this press only woke the screen" (so a wake press never also acts).
     let mut boot_press_start: Option<Instant> = None;
@@ -2653,6 +2698,45 @@ async fn main(_spawner: Spawner) -> ! {
                         uptime_secs,
                     );
                     match event {
+                        // === #71 push-to-talk audio =====================
+                        // Decode µ-law -> 16 kHz and hand it to the playback
+                        // queue. Non-blocking on purpose: this runs inside the
+                        // ESP-NOW drain in the main loop, and awaiting here
+                        // would stall the drain while ~36 frames/s keep
+                        // arriving.
+                        Some(MeshEvent::Vox { from_id, seq, payload, rssi }) => {
+                            vox_peer = from_id;
+                            vox_rssi = rssi;
+                            let step = walkie_codec::seq_step(vox_last_seq, seq);
+                            if step != walkie_codec::SeqStep::Stale {
+                                // Conceal losses BEFORE this frame so audio stays
+                                // monotonic in time. Capped: a long dropout should
+                                // fall silent rather than stutter one frame for a
+                                // second (past ~3 repeats it stops sounding like
+                                // speech and starts sounding like a fault).
+                                if let walkie_codec::SeqStep::Gap(n) = step {
+                                    let repeats = n.min(3);
+                                    if let Some(prev) = vox_last.as_ref() {
+                                        for _ in 0..repeats {
+                                            if vox_play_frame(prev) {
+                                                vox_concealed += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                if vox_play_frame(&payload) {
+                                    vox_rx_frames += 1;
+                                } else {
+                                    vox_dropped += 1; // queue full: behind live
+                                }
+                                vox_last_seq = Some(seq);
+                                vox_last = Some(payload);
+                                // Same-tick amp raise, exactly like every other
+                                // play_pcm call site: the feeder holds samples
+                                // until AMP_READY, which only service_amp sets.
+                                audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                            }
+                        }
                         Some(MeshEvent::TimeAdopted { unix, from_id }) => {
                             let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
                             sync_src = "mesh";

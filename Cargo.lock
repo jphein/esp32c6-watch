@@ -2078,6 +2078,7 @@ dependencies = [
  "static_cell",
  "trouble-host",
  "u8g2-fonts",
+ "walkie-codec",
  "wled-wizmote",
 ]
 
@@ -6406,6 +6407,10 @@ dependencies = [
  "same-file",
  "winapi-util",
 ]
+
+[[package]]
+name = "walkie-codec"
+version = "0.1.0"
 
 [[package]]
 name = "wasip2"

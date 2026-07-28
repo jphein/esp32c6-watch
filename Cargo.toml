@@ -128,6 +128,10 @@ mic-dsp = { path = "crates/mic-dsp" }
 # both mesh peer names (src/net/names.rs re-export) and the device sigil
 # (src/net/sigil.rs).
 sigil-id = { path = "crates/sigil-id" }
+# #71: push-to-talk voice codec — G.711 µ-law + 16->8 kHz decimation + VOX frame
+# packing. Integer-only (the C6 has no FPU); host-unit-tested. Feeds the
+# SMOLv1 VOX frame in src/net/smol_mesh.rs and the RX decode in main.
+walkie-codec = { path = "crates/walkie-codec" }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

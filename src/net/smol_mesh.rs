@@ -73,6 +73,35 @@ const SAY_PREFIX: &[u8] = b"SMOLv1 SAY ";
 /// that is all the receiver can render anyway.
 pub const SAY_TEXT_CAP: usize = 96;
 
+/// Push-to-talk audio frame (#71): `"SMOLv1 VOX NNN SSSSS <payload>"` where
+/// payload is [`walkie_codec::VOX_PAYLOAD`] bytes of 8 kHz G.711 µ-law.
+/// Fire-and-forget broadcast like PING/SAY — **no ACK**: at ~36 frames/s a
+/// retransmit protocol costs more than the 28 ms it would recover, and a late
+/// frame is worse than a missing one (the receiver conceals gaps instead).
+const VOX_PREFIX: &[u8] = b"SMOLv1 VOX ";
+
+/// ESP-NOW's hard payload ceiling. Not ours to raise.
+const ESP_NOW_MAX_PAYLOAD: usize = 250;
+
+/// Header bytes before the audio: prefix + id(3) + space + seq(5) + space.
+const VOX_HEADER_LEN: usize = VOX_PREFIX.len() + 3 + 1 + 5 + 1;
+
+/// Whole VOX frame on the wire.
+const VOX_FRAME_LEN: usize = VOX_HEADER_LEN + walkie_codec::VOX_PAYLOAD;
+
+/// The frame MUST fit ESP-NOW's 250 B payload, and this is the assert that
+/// keeps it true. `walkie-codec` picked 224 samples/frame precisely because 240
+/// did not fit (240 + header = 254 > 250) — that was found by hand, at cost.
+/// Encoding it here means any future change to the header or the frame size
+/// fails the BUILD instead of silently truncating audio on the radio.
+const _: () = assert!(
+    VOX_FRAME_LEN <= ESP_NOW_MAX_PAYLOAD,
+    "VOX frame exceeds the 250 B ESP-NOW payload limit"
+);
+
+/// One frame's µ-law payload, as carried on a [`MeshEvent::Vox`].
+pub type VoxPayload = heapless::Vec<u8, { walkie_codec::VOX_PAYLOAD }>;
+
 /// CFG broadcast target sentinel — a fleet-global config (e.g. units).
 const CFG_TARGET_ALL: u8 = 255;
 /// Max CFG value bytes (mode.rs CFG_VALUE_MAX).
@@ -161,6 +190,14 @@ pub enum MeshEvent {
     /// A voice transcription from another watch. The main loop turns it into a
     /// shade card ("<sigil> said"). Text is already clipped + sanitized.
     Say { from_id: u8, text: heapless::String<SAY_TEXT_CAP>, mac: [u8; 6] },
+    /// One push-to-talk audio frame (#71): µ-law payload plus the sequence
+    /// number the receiver needs for loss/reorder detection
+    /// (`walkie_codec::seq_step`), and the RSSI the Vox screen displays.
+    ///
+    /// The payload is carried RAW and undecoded on purpose: this module is a
+    /// wire codec and knows nothing about audio, exactly as `Say` carries text
+    /// rather than a rendered card. Decode + enqueue happens at the call site.
+    Vox { from_id: u8, seq: u16, payload: VoxPayload, rssi: i32 },
 }
 
 /// A leaf's single outstanding RELAY message (mode.rs RelayTx): retained so
@@ -713,6 +750,39 @@ impl SmolMesh {
         println!("[MESH] say sent ({} B)", clipped.len());
     }
 
+    /// Broadcast one push-to-talk audio frame (#71).
+    ///
+    /// `seq` is the CALLER's counter (like [`send_ping`](Self::send_ping)) so
+    /// this stays stateless and adds no `.bss` — the PTT session owns it and
+    /// wraps naturally at u16.
+    ///
+    /// Returns false if `payload` is not exactly [`walkie_codec::VOX_PAYLOAD`]
+    /// bytes: a short frame would decode to a burst of garbage at the far end,
+    /// which is worse than dropping it.
+    pub fn send_vox(&mut self, esp_now: &mut EspNow<'_>, seq: u16, payload: &[u8]) -> bool {
+        if payload.len() != walkie_codec::VOX_PAYLOAD {
+            return false;
+        }
+        let mut buf = [0u8; VOX_FRAME_LEN];
+        // Same header layout as PING (prefix + id + space + seq), then a space
+        // and the audio.
+        let mut n = encode_ping_frame(VOX_PREFIX, self.id, seq, &mut buf);
+        buf[n] = b' ';
+        n += 1;
+        buf[n..n + payload.len()].copy_from_slice(payload);
+        n += payload.len();
+        // No `println!` here: at ~36 frames/s a per-frame log would flood the
+        // console and, worse, the UART write itself can stall the executor past
+        // the 48 ms DMA ring and trip the `Late` path this feature depends on.
+        match esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]) {
+            Ok(w) => {
+                let _ = w.wait();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Handle one received ESP-NOW payload.
     /// Broadcast a SMOLv1 FAM frame (heartbeat/handoff) for the familiar
     /// state machine. Fixed 29-byte binary frame, fleet wire format.
@@ -871,6 +941,25 @@ impl SmolMesh {
             self.upsert_peer(src, Some(from_id), now_ms, rssi);
             println!("[MESH] say from id{from_id} ({} B)", s.len());
             return Some(MeshEvent::Say { from_id, text: s, mac: src });
+        }
+        // VOX audio (#71). Checked before FAM only because it is by far the
+        // highest-rate frame on the air during a transmission (~36/s).
+        if let Some(rest) = data.strip_prefix(VOX_PREFIX) {
+            // id(3) + space + seq(5) + space = 10 before the payload.
+            if rest.len() < 10 + walkie_codec::VOX_PAYLOAD {
+                return None; // truncated on the air — drop, never decode partial
+            }
+            let from_id = parse_id(&rest[0..3])?;
+            // parse_u5 yields u32; the wire field is 5 digits so a value past
+            // u16 can only be a corrupt/foreign frame — reject rather than wrap.
+            let seq = u16::try_from(parse_u5(&rest[4..9])?).ok()?;
+            let payload = VoxPayload::from_slice(&rest[10..10 + walkie_codec::VOX_PAYLOAD]).ok()?;
+            self.upsert_peer(src, Some(from_id), now_ms, rssi);
+            // Same -127 floor as the FAM path: absent RSSI reads as "worst",
+            // so the Vox screen's bar never shows a missing value as a strong one.
+            let rssi = rssi.unwrap_or(-127) as i32;
+            // Deliberately no per-frame println — see `send_vox`.
+            return Some(MeshEvent::Vox { from_id, seq, payload, rssi });
         }
         if data.starts_with(FAM_PREFIX) {
             if let Some(f) = parse_fam(data) {

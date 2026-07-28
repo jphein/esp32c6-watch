@@ -215,3 +215,87 @@ pub fn seq_step(last: Option<u16>, seq: u16) -> SeqStep {
         }
     }
 }
+
+/// Repacks arbitrary-length captured audio into whole VOX frames.
+///
+/// # Why this exists
+///
+/// The mic path delivers **512 B** chunks (`mic_capture::MONO_CHUNK`) but a VOX
+/// frame needs exactly [`VOX_SRC_BYTES`] = **896 B** of 16 kHz audio. 896 is
+/// 1.75 chunks, so frames straddle chunk boundaries forever — there is no
+/// alignment to fall back on. Getting that carry wrong produces audio that is
+/// subtly wrong rather than obviously broken (a click per frame, or a slow drift
+/// as samples are dropped), which is exactly the failure that is hard to hear
+/// and hard to attribute. So it lives here, where it is host-tested, instead of
+/// as an ad-hoc cursor in the firmware.
+///
+/// 224 samples/frame is not negotiable at this layer — see [`VOX_SAMPLES`]; the
+/// alternative (128 samples to match the chunk size) would align perfectly but
+/// raise the frame rate to 62.5/s and the header overhead from 8.6 % to 14 % on a
+/// time-shared radio.
+pub struct VoxAccumulator {
+    buf: [u8; VOX_SRC_BYTES],
+    len: usize,
+}
+
+impl Default for VoxAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VoxAccumulator {
+    pub const fn new() -> Self {
+        Self { buf: [0; VOX_SRC_BYTES], len: 0 }
+    }
+
+    /// Bytes currently carried over, waiting for the rest of a frame.
+    pub fn pending(&self) -> usize {
+        self.len
+    }
+
+    /// Drop the carry — call when a transmission ends, so the next one does not
+    /// begin with a fragment of the last (which would be heard as a click).
+    pub fn reset(&mut self) {
+        self.len = 0;
+    }
+
+    /// Feed captured **16 kHz mono s16le** bytes.
+    ///
+    /// Returns `(consumed, frame_len)`. When `frame_len` > 0 a complete µ-law
+    /// payload of that length is in `payload`. Callers loop until `consumed` is
+    /// 0 or the input is exhausted, since one `src` can complete more than one
+    /// frame:
+    ///
+    /// ```ignore
+    /// let mut off = 0;
+    /// while off < src.len() {
+    ///     let (used, n) = acc.feed(&src[off..], &mut payload);
+    ///     if used == 0 { break; }
+    ///     off += used;
+    ///     if n > 0 { send(&payload[..n]); }
+    /// }
+    /// ```
+    ///
+    /// `consumed` is always EVEN: a 16-bit sample must never be split across
+    /// frames, or every subsequent sample in the transmission is byte-swapped
+    /// into noise. An odd-length `src` therefore leaves its last byte
+    /// unconsumed (and returns 0 if that is all there was) rather than silently
+    /// desynchronising the stream. In practice the mic always delivers even
+    /// chunks, so this is a guard, not a code path.
+    pub fn feed(&mut self, src: &[u8], payload: &mut [u8]) -> (usize, usize) {
+        let want = VOX_SRC_BYTES - self.len;
+        let take = want.min(src.len()) & !1; // whole samples only
+        if take == 0 {
+            return (0, 0);
+        }
+        self.buf[self.len..self.len + take].copy_from_slice(&src[..take]);
+        self.len += take;
+        if self.len < VOX_SRC_BYTES {
+            return (take, 0);
+        }
+        let n = encode_frame(&self.buf, payload);
+        self.len = 0;
+        (take, n)
+    }
+}
