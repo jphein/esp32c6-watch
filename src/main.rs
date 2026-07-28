@@ -926,14 +926,22 @@ async fn main(_spawner: Spawner) -> ! {
         let n = mic_dsp::fill_tick_mono_s16le(buf, 16_000);
         &buf[..n]
     };
-    // Watch-ping receiver chime (#35): ~300 ms rising two-tone (E5→B5), the
+    // Watch-ping receiver chime (#58): the 700 ms rising C-major arpeggio, the
     // "someone's thinking of you" sound. HEAP-leaked rather than a StaticCell:
-    // 9.6KB of .bss would come straight out of the stack gap (stack =
-    // _stack_start − _bss_end, ≥46KB floor — the v0.5.0 crash class), while a
-    // one-time boot alloc from the heap costs nothing at runtime.
+    // .bss would come straight out of the stack gap (stack = _stack_start −
+    // _bss_end — the #65 crash class), while a one-time boot alloc costs nothing
+    // at runtime.
+    //
+    // Stored at **8 kHz** (11 200 B, half of the 16 kHz form); the playback
+    // feeder duplicates each sample up to the 16 kHz ring. Free quality-wise —
+    // the chime is pure sines topping out at C6 = 1046.5 Hz, so 8 kHz is still
+    // ~4x oversampled — and it repays 11 200 B of the 12 KB of main heap that
+    // growing the stack for #65 cost. Without this, the shade OOM'd on a
+    // swipe-down ("memory allocation of 4096 bytes failed"): stack safety and UI
+    // heap were competing for the same bytes.
     let ping_chime_pcm: &'static [u8] = {
-        let buf: &'static mut [u8] = alloc::vec![0u8; mic_dsp::PING_CHIME_LEN].leak();
-        let n = mic_dsp::fill_ping_chime_mono_s16le(buf, 16_000);
+        let buf: &'static mut [u8] = alloc::vec![0u8; mic_dsp::PING_CHIME_8K_LEN].leak();
+        let n = mic_dsp::fill_ping_chime_mono_s16le(buf, 8_000);
         &buf[..n]
     };
     println!(
@@ -2725,7 +2733,7 @@ async fn main(_spawner: Spawner) -> ! {
                                 // play_all drain the whole clip; the per-tick
                                 // service_amp (below) raises the amp, the feeder
                                 // holds samples until it's up (pop insurance).
-                                audio_out::play_chime();
+                                let _ = audio_out::play_chime();
                                 // Same-tick amp raise, as every other SFX site
                                 // does — the per-tick pass would also catch it,
                                 // but not before the feeder's first push.
@@ -2825,6 +2833,25 @@ async fn main(_spawner: Spawner) -> ! {
                                     ping_result.as_str()
                                 );
                             }
+                        }
+                        // A peer watch spoke: surface the transcription as a
+                        // shade card so it survives the moment (the sender's
+                        // own screen shows it live; this is the other wrist).
+                        Some(MeshEvent::Say { from_id, text, mac }) => {
+                            let from = ping_sigil(from_id, mac);
+                            let mut title: heapless::String<{ crate::notify::TITLE_CAP }> =
+                                heapless::String::new();
+                            use core::fmt::Write as _;
+                            let _ = write!(title, "{} said", from.as_str());
+                            crate::notify::push(
+                                crate::notify::Source::System,
+                                title.as_str(),
+                                text.as_str(),
+                            );
+                            // Same arrival cue as a ping so it can't be missed.
+                            let _ = audio_out::play_chime();
+                            audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                            println!("[SAY] from {}: {}", from.as_str(), text.as_str());
                         }
                         None => {}
                     }
@@ -3834,6 +3861,11 @@ async fn main(_spawner: Spawner) -> ! {
                         Ok(t) if !t.is_empty() => {
                             shell.set_voice_transcript(t.as_str());
                             shell.set_voice_state(3); // result
+                            // Share it with the fleet: the other watch shows it
+                            // as a shade card. Broadcast, fire-and-forget — a
+                            // dropped frame just means no card, which beats a
+                            // retransmit protocol for a convenience feature.
+                            mesh.send_say(&mut esp_now, t.as_str());
                         }
                         Ok(_) => {
                             // 200 + empty text: tell the user WHY so they can act. A low

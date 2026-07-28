@@ -3,7 +3,7 @@
 
 use mic_dsp::{
     fill_click_mono_s16le, fill_ping_chime_mono_s16le, fill_tick_mono_s16le,
-    fill_tone_mono_s16le, mono_to_stereo_le, CLICK_LEN, PING_CHIME_LEN,
+    fill_tone_mono_s16le, mono_to_stereo_le, CLICK_LEN, PING_CHIME_8K_LEN, PING_CHIME_LEN,
 };
 
 fn s16(buf: &[u8], i: usize) -> i16 {
@@ -250,4 +250,39 @@ fn tick_is_quieter_than_click() {
     assert!(tp > 2_500, "tick should still be audible, got peak {tp}");
     assert!(tp <= 6_000, "tick must stay subtle, got peak {tp}");
     assert!(tp < cp, "tick ({tp}) must be quieter than click ({cp})");
+}
+
+/// The watch stores the chime at 8 kHz (PING_CHIME_8K_LEN) to halve its heap
+/// footprint — the #65 stack fix cost 12KB of main heap and the shade started
+/// OOM'ing, so this buffer had to shrink. Pure sines <= 1046 Hz means 8 kHz is
+/// still ~4x oversampled, but the SHAPE must survive the lower rate: same
+/// duration, still a rising arpeggio, still root-weighted, still pop-free.
+#[test]
+fn ping_chime_at_8k_is_half_the_bytes_and_same_shape() {
+    let mut b8 = [0u8; PING_CHIME_8K_LEN];
+    let n8 = fill_ping_chime_mono_s16le(&mut b8, 8_000);
+    assert_eq!(n8, PING_CHIME_8K_LEN, "8k form fills its buffer exactly");
+    assert_eq!(PING_CHIME_8K_LEN * 2, PING_CHIME_LEN, "8k is exactly half");
+
+    // Same wall-clock duration at the lower rate.
+    assert_eq!(n8 / 2 * 1000 / 8_000, 700, "still 700 ms");
+
+    // Pop-free edges, as at 16 kHz.
+    assert_eq!(s16(&b8, 0), 0, "attack starts at zero");
+    let samples = n8 / 2;
+    let tail = (samples - 8..samples).map(|i| s16(&b8, i).unsigned_abs()).max().unwrap();
+    assert!(tail < 500, "tail near-silent, got {tail}");
+
+    // Root still outweighs the top note (the #58b anti-shriek property).
+    let peak_in = |from: usize, to: usize| {
+        (from..to.min(samples)).map(|i| s16(&b8, i).unsigned_abs()).max().unwrap_or(0)
+    };
+    let root = peak_in(0, 120 * 8);          // ms -> samples at 8 kHz
+    let top = peak_in(390 * 8, samples);
+    assert!(root > top, "root ({root}) must outweigh top ({top}) at 8k too");
+
+    // Still a RISING arpeggio: zero-crossing rate climbs note to note.
+    let w = |a_ms: usize, b_ms: usize| crossings(&b8, a_ms * 8, b_ms * 8);
+    let (c1, c2, c3, c4) = (w(30, 95), w(155, 220), w(280, 345), w(405, 505));
+    assert!(c1 < c2 && c2 < c3 && c3 < c4, "must rise: {c1} {c2} {c3} {c4}");
 }

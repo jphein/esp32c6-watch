@@ -144,7 +144,24 @@ pub fn fill_tick_mono_s16le(buf: &mut [u8], sample_rate: u32) -> usize {
 }
 
 /// Length of the watch-ping receiver chime in mono BYTES at 16 kHz (700 ms).
+/// Prefer [`PING_CHIME_8K_LEN`] on the watch — see why there.
 pub const PING_CHIME_LEN: usize = 11_200 * 2;
+
+/// Length of the chime stored at **8 kHz** (700 ms) — 11 200 B, HALF of
+/// [`PING_CHIME_LEN`].
+///
+/// The watch stores the chime at 8 kHz and the playback feeder duplicates each
+/// sample back up to the 16 kHz TX ring. This is free quality-wise: the chime is
+/// built from PURE SINES whose highest partial is the top C6 at 1046.5 Hz, so
+/// 8 kHz sampling (Nyquist 4 kHz) is still ~4x oversampled.
+///
+/// It matters because the buffer is heap-resident for the life of the firmware,
+/// and main-heap bytes are contested: growing the stack to clear the WiFi blob's
+/// globals (#65) cost 12 KB of heap, which made the notification shade OOM
+/// (`memory allocation of 4096 bytes failed` on a swipe-down). Halving this
+/// buffer repays 11 200 B of that debt, so the stack can stay safe WITHOUT
+/// starving the UI — instead of trading one crash for the other.
+pub const PING_CHIME_8K_LEN: usize = 5_600 * 2;
 
 /// Synthesize the watch-to-watch ping chime (#35, melody #58, voiced #58b): a
 /// warm rising MAJOR ARPEGGIO — C5 → E5 → G5 → C6 (a C-major triad climbing an

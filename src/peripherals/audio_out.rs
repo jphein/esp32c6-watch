@@ -156,19 +156,6 @@ pub fn play_pcm(pcm: &[u8]) -> usize {
     queued
 }
 
-/// Queue an ENTIRE clip, awaiting queue space so an arbitrarily long clip plays
-/// in full. Unlike [`play_pcm`] (non-blocking, truncates the remainder when the
-/// 128 ms queue fills), this yields between chunks so the clock task drains the
-/// queue as fast as we refill it — the 480 ms ping chime (#58) was 73 % dropped
-/// by `play_pcm` because a 30-chunk clip can't fit an 8-chunk queue and the
-/// synchronous enqueue can't yield to let the consumer drain. Runs on the
-/// executor (it awaits); the ping chime drives it from a dedicated task so the
-/// mesh/UI path never blocks on the melody.
-///
-/// The amp/mic gates are raised up front (before the first sample can reach the
-/// speaker); the main loop's [`service_amp`] brings the amp up on its next pass,
-/// and the feeder's [`TAIL_STEREO_BYTES`] pad bridges the tiny refill gaps so
-/// the session never ends mid-clip when the queue momentarily drains to empty.
 /// A long `&'static` clip streamed straight off its own buffer (the #58 ping
 /// chime): registered once at boot, played by arming `pos`/`playing`.
 struct LongClip {
@@ -219,29 +206,42 @@ pub fn register_chime(pcm: &'static [u8]) {
 /// left the task asleep and the chime SILENT (no `fill_stereo` call ever
 /// happened). So: hand chunk 0 to the queue to wake it and open the session,
 /// and let the feeder pull chunks 1..n straight off the static buffer.
-pub fn play_chime() {
+pub fn play_chime() -> (bool, usize, usize) {
     if !CHIME_ENABLED {
-        return; // #65: release builds panic at 2.7s with this live — see CHIME_ENABLED
+        return (false, 0, 0); // #65 gate — see CHIME_ENABLED
     }
-    let first = LONG_CLIP.lock(|c| {
+    // Arm at the start, then pull chunk 0 through `next_long_chunk` like every
+    // other chunk. It must NOT be sliced straight out of the buffer: the clip is
+    // stored at 8 kHz and the ring runs at 16 kHz, so a raw slice plays the first
+    // 32 ms at DOUBLE SPEED and advances the cursor twice as far as it should.
+    let armed = LONG_CLIP.lock(|c| {
         let mut c = c.borrow_mut();
-        let pcm = c.pcm?;
-        let end = PLAY_CHUNK.min(pcm.len());
-        let first = PcmChunk::from_slice(&pcm[..end]).ok()?;
-        c.pos = end; // chunk 0 is in flight via the queue
+        if c.pcm.is_none() {
+            return false;
+        }
+        c.pos = 0;
         c.playing = true;
-        Some(first)
+        true
     });
-    let Some(first) = first else { return };
+    if !armed {
+        return (false, 0, 1); // 1 = no pcm registered
+    }
+    CHIME_BYTES.store(0, Ordering::Relaxed);
+    CHIME_DONE.store(false, Ordering::Relaxed);
+    let Some(first) = next_long_chunk() else {
+        stop_long_clip();
+        return (false, 0, 2); // 2 = next_long_chunk yielded nothing
+    };
+    let n = first.len();
     if PLAYBACK.try_send(first).is_ok() {
-        CHIME_BYTES.store(PLAY_CHUNK.min(chime_len()), Ordering::Relaxed);
-        CHIME_DONE.store(false, Ordering::Relaxed);
         // Same ordering as play_pcm: suppress the mic and request the amp before
         // the first sample can reach the speaker.
         PLAYBACK_ACTIVE.store(true, Ordering::Relaxed);
         AMP_REQUEST.store(true, Ordering::Relaxed);
+        (true, n, 0)
     } else {
         stop_long_clip(); // queue full — don't leave a half-armed clip behind
+        (false, n, 3) // 3 = PLAYBACK queue full
     }
 }
 
@@ -291,7 +291,16 @@ pub fn chime_done_take() -> Option<(usize, usize)> {
 /// Next chunk of the streaming long clip, or `None` when idle/finished.
 /// Advances `pos`; clears `playing` on the last chunk.
 fn next_long_chunk() -> Option<PcmChunk> {
-    LONG_CLIP.lock(|c| {
+    // CLAIM a source range under the lock; BUILD the samples outside it.
+    //
+    // The lock is a critical section (interrupts OFF). Expanding 8 kHz -> 16 kHz
+    // is a 128-iteration copy loop, and running that with interrupts disabled —
+    // every ~16 ms, from the feeder — starved the I2S DMA long enough to trip a
+    // `Late` error. `top_up` then failed, `silent_clock_task` called
+    // `feeder.abort()`, and abort drops the clip WITHOUT setting CHIME_DONE:
+    // the chime went silent with no completion line and no panic. Keep the
+    // critical section to pointer/index bookkeeping only.
+    let (pcm, start, end) = LONG_CLIP.lock(|c| {
         let mut c = c.borrow_mut();
         if !c.playing {
             return None;
@@ -302,17 +311,30 @@ fn next_long_chunk() -> Option<PcmChunk> {
             CHIME_DONE.store(true, Ordering::Relaxed);
             return None;
         }
-        let end = (c.pos + PLAY_CHUNK).min(pcm.len());
-        // from_slice cannot overflow: end - pos <= PLAY_CHUNK == PcmChunk cap.
-        let chunk = PcmChunk::from_slice(&pcm[c.pos..end]).ok()?;
-        CHIME_BYTES.fetch_add(end - c.pos, Ordering::Relaxed);
+        let start = c.pos;
+        // Half a chunk of 8 kHz source -> a full 16 kHz chunk out.
+        let end = (start + PLAY_CHUNK / 2).min(pcm.len());
         c.pos = end;
-        if c.pos >= pcm.len() {
+        if end >= pcm.len() {
             c.playing = false;
             CHIME_DONE.store(true, Ordering::Relaxed);
         }
-        Some(chunk)
-    })
+        Some((pcm, start, end))
+    })?;
+
+    // Zero-order hold 2x. Fine here: pure sines <= 1046 Hz, so the images land
+    // far above anything the watch speaker reproduces.
+    let mut chunk = PcmChunk::new();
+    for frame in pcm[start..end].chunks_exact(2) {
+        // Capacity is exact by construction: (PLAY_CHUNK/2) bytes in -> PLAY_CHUNK out.
+        let _ = chunk.extend_from_slice(frame);
+        let _ = chunk.extend_from_slice(frame);
+    }
+    if chunk.is_empty() {
+        return None;
+    }
+    CHIME_BYTES.fetch_add(end - start, Ordering::Relaxed);
+    Some(chunk)
 }
 
 /// Abandon any streaming long clip (transfer re-arm / abort path).

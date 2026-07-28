@@ -405,9 +405,9 @@ fn handle_line(bytes: &[u8]) {
             // path a received ping takes (chime_task → play_all streams the whole
             // 480 ms melody, not play_pcm's 128 ms-truncated stub). Wakes the main
             // loop so the per-tick service_amp raises the amp promptly.
-            crate::peripherals::audio_out::play_chime();
+            let (sent, n, err) = crate::peripherals::audio_out::play_chime();
             let _ = queue(Inject::Touch { point: None, swipe: None, start_y: 0, tap: false });
-            println!("[DBGCON] ok chime (streaming full melody)");
+            println!("[DBGCON] ok chime sent={} first={}B err={}", sent, n, err);
         }
         "ping" => println!("[DBGCON] ok pong"),
         "help" => println!(
