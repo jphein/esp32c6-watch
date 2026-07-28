@@ -232,6 +232,27 @@ pub fn stream_aborted() -> bool {
     STREAM_ABORTED.load(Ordering::Relaxed)
 }
 
+/// Drop every queued chunk without touching the amp or the half-duplex gate.
+///
+/// The interruption path (tap-to-stop during TTS): the feeder finishes its staged
+/// chunk and pads silence, which scrubs the ring to all-zero and clears both
+/// flags on its own. That is the POP-FREE path and reuses proven machinery.
+/// Hard-cutting the amp mid-sample is exactly the "reverse order pops" failure
+/// [`service_amp`] documents, and would put a click on every interruption; ~64 ms
+/// of trailing silence is the better trade.
+///
+/// Only pointer/index work runs inside the channel's critical section — at most
+/// [`PLAY_QUEUE_DEPTH`] pops, never a per-sample loop (#58's lesson: a 128-
+/// iteration copy inside a critical section starved the I2S DMA into a `Late`).
+///
+/// Restored after a merge dropped it: resolving an `audio_out.rs` conflict with
+/// `--ours` kept my `STREAM_LIVE` work but discarded this, breaking
+/// `--features tts` compilation. Losing a function that only a feature-gated
+/// build references is exactly what a default-off feature hides.
+pub fn drain_queue() {
+    while PLAYBACK.try_receive().is_ok() {}
+}
+
 /// A long `&'static` clip streamed straight off its own buffer (the #58 ping
 /// chime): registered once at boot, played by arming `pos`/`playing`.
 struct LongClip {

@@ -189,6 +189,23 @@ impl Spoken {
     }
 }
 
+/// Clears `STREAM_LIVE` on EVERY exit from the streaming section.
+///
+/// `speak_text` leaves that section by many routes — socket error, stall, cancel,
+/// interrupt, `Content-Length` reached, bridge close, byte cap — and one missed
+/// path latches the flag forever. That is not a harmless leak:
+/// `PlaybackFeeder::resync` keys off it, so a stuck flag silently gives every
+/// LATER chime and SFX stream semantics on a DMA `Late` (skip the drain, resume)
+/// when a finite clip wants drain-and-abort. A Drop guard makes the pairing
+/// structural rather than something to remember.
+struct StreamGuard;
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        audio_out::end_stream();
+    }
+}
+
 /// Speak `text` through the bridge, streaming the reply into the speaker.
 ///
 /// Runs **on the main loop** and parks it for the duration (precedent: the STT
@@ -290,6 +307,8 @@ pub async fn speak_text_to<I: I2c>(
     // Arm the abort latch AFTER the (possibly long) synthesis wait, so a stale
     // abort from an earlier clip can't kill this utterance before it starts.
     audio_out::begin_stream();
+    // Pairs with begin_stream on every exit path (see StreamGuard).
+    let _stream_guard = StreamGuard;
     let mut played = 0usize;
     let mut outcome = Spoken::Complete { bytes: 0 };
 
