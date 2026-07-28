@@ -208,13 +208,19 @@ upstream failure. The watch surfaces the string, same as STT does today.
 4. **Hard duration cap** — reject/truncate above ~30 s of audio so a malformed notification cannot
    hold the amp up indefinitely.
 
-### 4.2 Standing risk to flag
+### 4.2 Vendored (was: standing risk)
 
-`watch_bridge.py` **is not in this repository, and not in any repository.** It exists only on
-familiar and ubox0. The STT integration already depends on it; TTS doubles that exposure. Recommend
-vendoring it into `esp32c6-watch/tools/` (or into speech-to-cli proper) with a deploy script.
-**Calling this out rather than silently deepening the dependency** — it is a decision for JP, not
-for me.
+`watch_bridge.py` used to exist **only** on ubox0 and familiar — in no repository at all, while two
+shipped firmware features depended on it. A host rebuild would have taken the watch's voice with it.
+
+Now vendored at **`tools/watch-bridge/`** (approved by the orchestrator): the patched bridge, a
+`deploy.sh` that backs up → deploys → restarts → health-checks with **automatic rollback**, and a
+README. Both hosts' copies were verified byte-identical (`md5` match) before vendoring, so there is
+no fork to reconcile.
+
+**No secret is vendored, and none ever should be.** The bridge still reads the Azure key from
+`~/.config/speech-to-cli/config.json` *on the bridge host at runtime*; `deploy.sh` refuses to ship a
+file that looks like it picked up a credential.
 
 ---
 
@@ -253,9 +259,12 @@ pub async fn speak_text<I: I2c>(
     text: &str,
     amp: &mut Output<'static>,
     codec: &mut Es8311<I>,
-    cancel: &impl Fn() -> bool,
-) -> Result<usize, Error>;
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<Spoken, Error>;
 ```
+
+`should_stop` is `dyn` rather than generic on purpose: one instantiation instead of one per closure
+type, and this binary is out of ROM (§6.7).
 
 Loop shape:
 
@@ -441,7 +450,29 @@ during.** TTS sacrifices nothing to comply (there is no live meter to animate).
 windows for the duration — no AEC needed, the existing gate covers it. A TTS utterance and a PTT
 capture can never overlap: both are driven from the same main loop, serially.
 
-### 6.6 Cancellation
+### 6.6 Cancellation — a correctness requirement, not polish
+
+**Raised to required by the orchestrator, and the reason is sharper than "nice to have":** JP has
+been chasing repeated "the watch is frozen" reports today, several of which turned out to be
+responsive firmware behind a stuck-looking UI. Speaking parks the main loop for **seconds**. Ship
+that without an escape hatch and read-aloud becomes a new source of exactly the symptom he is
+already hunting.
+
+So a **tap stops speech**. `speak_text` takes `should_stop`, polled every `CANCEL_POLL_CHUNKS` (4)
+chunks — a **64 ms** worst-case reaction, inside the window where a tap still feels instant. It is
+rate-limited because the poll reads the touch controller over the I2C bus the codec shares; polling
+all 62 chunks/second would triple bus traffic for no perceptible gain.
+
+On stop: `audio_out::drain_queue()` drops what is still queued, the socket aborts, and the amp is
+**not** hard-cut — the feeder finishes its staged chunk and pads silence, which scrubs the ring and
+releases the amp itself. Hard-cutting mid-sample is the "reverse order pops" failure `service_amp`
+documents; it would put a click on the end of every interruption. Costs ~64 ms of trailing silence.
+
+The user-visible half matters too: a toast reading **"Reading aloud — tap to stop"** is painted
+*before* any audio is queued (never during — that would starve the DMA), so the pause is legible as
+speech rather than as a hang.
+
+### 6.6.1 Other cancellation sources
 
 Long utterances (up to ~7 s from a maximal notification) must be interruptible. `speak_text` takes a
 `cancel` closure checked each chunk: screen-off, app change, a second notification arriving, or the
@@ -517,7 +548,8 @@ Per the brief: **build only, do not flash — both watches are in use.**
 | all 11 host crates | **178 passed, 0 failed** — no regressions |
 | `fambuild --release` (default, `tts` off) | **links clean**; +136 B `.bss`, +116 B ROM |
 | `fambuild --release --features debug-console` | **links clean** |
-| `fambuild --release --features tts` | **ROM overflow by 3,024 B** — expected, §6.7 |
+| `fambuild --release --features tts` | ROM overflow by **2,938 B** — expected, §6.7 |
+| `fambuild --release --features tts,debug-console` | ROM overflow by **8,750 B** (debug-console is itself ~5.8 KB) |
 | stack gap (default build) | 75,040 B — **+3,360 B over the floor** |
 | stack gap (with `tts`) | 74,760 B — **+3,080 B over the floor** |
 | bridge `POST /tts` end-to-end | **verified on a throwaway instance**, §8.2 |
@@ -564,7 +596,7 @@ pop. Plus, if the ROM region is raised: a clean boot and a full OTA cycle at 6 M
 | `src/peripherals/config.rs` | `SWCFG7` + `speak_notifications` + migration |
 | `src/notify.rs` | expose a "speak this card" hook; no change to the ring itself |
 | `src/main.rs` | trigger + call site in the existing loop; **no new task, no new static** |
-| `watch_bridge.py` (ubox0, out-of-repo) | `POST /tts` route; `/health` extension |
+| `tools/watch-bridge/**` | **new** — vendored bridge (`POST /tts` + `/health`), `deploy.sh`, README |
 
 Callers affected: none existing. `play_pcm`, `play_chime`, `LONG_CLIP` and the whole SFX path are
 untouched — `push_chunk` is additive alongside them.
