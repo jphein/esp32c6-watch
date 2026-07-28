@@ -1541,6 +1541,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut vox_concealed: u32 = 0;
     // Frames dropped because the queue was full (we are behind live).
     let mut vox_dropped: u32 = 0;
+    // `now_ms` of the last VOX frame, for closing the receive session on
+    // silence. 0 = no session open.
+    let mut vox_last_rx_ms: u64 = 0;
     // BOOT press state machine (short vs long): press start, long-fired latch,
     // and "this press only woke the screen" (so a wake press never also acts).
     let mut boot_press_start: Option<Instant> = None;
@@ -2688,6 +2691,37 @@ async fn main(_spawner: Spawner) -> ! {
                     mesh.relay_emit(&mut esp_now, tele.as_bytes(), now_ms);
                 }
                 mesh.relay_retransmit(&mut esp_now, now_ms);
+                // Close a receive session after silence (#71). This is what
+                // makes the ca4794d `resync` fix apply to us: it keys off
+                // STREAM_LIVE, and `play_pcm` never sets it — so without an
+                // explicit begin/end a DMA `Late` would still drain our jitter
+                // buffer and abort the session.
+                //
+                // Ending it also matters in the other direction: leaving
+                // STREAM_LIVE set would make every later chime or SFX inherit
+                // stream semantics on a `Late`, which is not what those want.
+                //
+                // VOX_IDLE_MS is ~9 frames at 28 ms. Shorter risks cutting a
+                // talker mid-sentence over a lossy link; much longer keeps the
+                // mic suppressed after they stop.
+                const VOX_IDLE_MS: u64 = 250;
+                if vox_last_rx_ms != 0 && now_ms.saturating_sub(vox_last_rx_ms) > VOX_IDLE_MS {
+                    audio_out::end_stream();
+                    vox_last_rx_ms = 0;
+                    // Start the next transmission clean: no stale concealment
+                    // frame, and seq_step sees `First` rather than a huge Gap.
+                    vox_last_seq = None;
+                    vox_last = None;
+                    if vox_rx_frames > 0 {
+                        println!(
+                            "[VOX] rx session end: {vox_rx_frames} frames, \
+                             {vox_concealed} concealed, {vox_dropped} dropped"
+                        );
+                    }
+                    vox_rx_frames = 0;
+                    vox_concealed = 0;
+                    vox_dropped = 0;
+                }
                 while let Some(rx) = esp_now.receive() {
                     // SNK frames route to World Snake when it's active; they
                     // also fall through to mesh.handle_rx (peer proof of life).
@@ -2717,6 +2751,12 @@ async fn main(_spawner: Spawner) -> ! {
                         Some(MeshEvent::Vox { from_id, seq, payload, rssi }) => {
                             vox_peer = from_id;
                             vox_rssi = rssi;
+                            // Open the session on the first frame so `resync`
+                            // preserves our jitter buffer across a DMA `Late`.
+                            if vox_last_rx_ms == 0 {
+                                audio_out::begin_stream();
+                            }
+                            vox_last_rx_ms = now_ms;
                             let step = walkie_codec::seq_step(vox_last_seq, seq);
                             if step != walkie_codec::SeqStep::Stale {
                                 // Conceal losses BEFORE this frame so audio stays
