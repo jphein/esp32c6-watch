@@ -69,29 +69,18 @@ ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py $DEST_DIR/watch_bridge.py.bak 2>/de
 scp -q "$SRC" "$HOST:/tmp/watch_bridge.py.new"
 ssh "$HOST" "mv -f /tmp/watch_bridge.py.new $DEST_DIR/watch_bridge.py"
 
-# The bridge is NOT a systemd service: on ubox0 it runs as a bare process with
-# PPID 1, started by hand (observed 2026-07-28: PID 44384, up since Jul 22, no
-# unit / cron / tmux). So "restart" means kill-and-relaunch, and it does NOT
-# survive a reboot. See README — installing a unit is a separate, deliberate
-# infra change, not something a deploy script should do behind your back.
-echo "== restarting the bridge (bare process, no unit) =="
-ssh "$HOST" "pkill -f 'python3 .*watch_bridge\.py' || true; sleep 1; \
-  cd $DEST_DIR && setsid nohup python3 watch_bridge.py >> /tmp/watch_bridge.log 2>&1 < /dev/null & \
-  sleep 2; pgrep -f 'python3 .*watch_bridge\.py' >/dev/null" || {
+echo "== restarting $SERVICE =="
+ssh "$HOST" "sudo systemctl restart $SERVICE" || {
   echo "restart failed — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py; \
-    pkill -f 'python3 .*watch_bridge\.py' || true; sleep 1; \
-    cd $DEST_DIR && setsid nohup python3 watch_bridge.py >> /tmp/watch_bridge.log 2>&1 < /dev/null &" || true
-  exit 5
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo systemctl restart $SERVICE" || true
+  exit 1
 }
 
 echo "== health =="
 sleep 2
 if ! ssh "$HOST" "curl -fsS --max-time 10 http://127.0.0.1:$PORT/health"; then
   echo; echo "health check FAILED — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py; \
-    pkill -f 'python3 .*watch_bridge\.py' || true; sleep 1; \
-    cd $DEST_DIR && setsid nohup python3 watch_bridge.py >> /tmp/watch_bridge.log 2>&1 < /dev/null &" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo systemctl restart $SERVICE" || true
   exit 5
 fi
 echo
