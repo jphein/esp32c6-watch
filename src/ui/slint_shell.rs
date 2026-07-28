@@ -164,6 +164,7 @@ const OVERLAYS: &[Overlay] = &[
     Overlay { state: AppState::Lights, is_open: WatchShell::get_lights_open, set_open: WatchShell::set_lights_open, close: OverlayClose::Cell(|r| r.lights_closed.set(true)) },
     Overlay { state: AppState::Ping, is_open: WatchShell::get_ping_open, set_open: WatchShell::set_ping_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Voice, is_open: WatchShell::get_voice_open, set_open: WatchShell::set_voice_open, close: OverlayClose::Flag },
+    Overlay { state: AppState::Vox, is_open: WatchShell::get_vox_open, set_open: WatchShell::set_vox_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Sound, is_open: WatchShell::get_mic_open, set_open: WatchShell::set_mic_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Theme, is_open: WatchShell::get_theme_open, set_open: WatchShell::set_theme_open, close: OverlayClose::Flag },
     // Settings hub (v0.9.0): listed for the mirror/reconcile plumbing; its
@@ -212,6 +213,9 @@ pub struct ShellRequests {
     /// by the loop when app_state == Voice). `released` is advisory — the loop's
     /// release watcher keys off the physical touch INT pin, since the Slint
     /// release callback can't fire while the loop is parked streaming the hold.
+    /// Walkie PTT (#71): finger down / up on the Vox screen's hero.
+    pub vox_ptt_pressed: Cell<bool>,
+    pub vox_ptt_released: Cell<bool>,
     pub voice_ptt_pressed: Cell<bool>,
     pub voice_ptt_released: Cell<bool>,
     pub mic_gain_up: Cell<bool>,
@@ -1295,6 +1299,36 @@ impl ShellUi {
         }
     }
 
+    /// Walkie screen open/close (#71).
+    pub fn set_vox_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_vox_open(open);
+    }
+
+    /// 0 idle · 1 transmitting · 2 receiving · 3 no radio.
+    pub fn set_vox_state(&self, state: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_vox_state(state);
+    }
+
+    /// Last peer heard + its RSSI. `-127` is the "nothing heard yet" sentinel
+    /// the screen renders as "no peer heard yet" rather than a very weak signal.
+    pub fn set_vox_peer(&self, peer: &str, rssi: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_vox_peer(SharedString::from(peer));
+        ui.set_vox_rssi(rssi);
+    }
+
+    /// 0..1 level bar (mic while transmitting, receive level while hearing).
+    /// Unused while transmitting: the loop is parked in the capture loop for the
+    /// whole hold and a repaint there would starve the DMA — same trade the Voice
+    /// screen documents. Kept as the hook for a future level-meter pass.
+    #[allow(dead_code)]
+    pub fn set_vox_level(&self, level: f32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_vox_level(level.clamp(0.0, 1.0));
+    }
+
     pub fn set_voice_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_voice_open(open);
@@ -1842,6 +1876,13 @@ fn build_scene(
 
         let r = req.clone();
         ui.on_ping_pulse_tap(move || r.ping_pulse_tap.set(true));
+
+        let r = req.clone();
+        let r = req.clone();
+        ui.on_vox_ptt_pressed(move || r.vox_ptt_pressed.set(true));
+
+        let r = req.clone();
+        ui.on_vox_ptt_released(move || r.vox_ptt_released.set(true));
 
         let r = req.clone();
         ui.on_voice_ptt_pressed(move || r.voice_ptt_pressed.set(true));

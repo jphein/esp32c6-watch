@@ -1,0 +1,157 @@
+import { Theme, PageTitle } from "theme.slint";
+import { OverlaySwallow, BackChevron } from "controls.slint";
+
+// Walkie-talkie screen (#71) — hold to talk, release to listen. Standalone
+// overlay-style component like VoicePage, whose PTT hero this deliberately
+// mirrors so the two audio screens feel like one family.
+//
+// Pure presentation + PTT input events. Everything real lives in the Rust loop:
+// mic capture, µ-law encode (`walkie-codec`), the SMOLv1 VOX broadcast, the RX
+// jitter buffer and its loss concealment.
+//
+// === Rust↔Slint contract (ShellUi::set_vox_*) ===
+//   in  vox-state  // 0 idle · 1 transmitting · 2 receiving · 3 no radio
+//   in  peer       // sigil of the last watch heard ("" until one is)
+//   in  rssi       // dBm of the last frame (-127 = nothing heard yet)
+//   in  level      // 0..1 mic/receive level, for the ring
+//   callback ptt-pressed()   // finger down  → open the radio, start capture
+//   callback ptt-released()  // finger up    → advisory; the loop's authoritative
+//                            // release is the DEBOUNCED I2C finger count, because
+//                            // the touch INT is a data-ready PULSE that goes high
+//                            // ~20ms into a still hold and truncated captures
+//   callback close()         // chevron / right-swipe → watchface
+//
+// Feedback contract (2026-07-23 spec): press feedback is a hard 1-frame token
+// swap — no `animate` on press at 6-11 fps. The transmit ring is the sanctioned
+// exception (a state indicator, not press feedback), and even that is a property
+// animation Slint drives, never per-frame Rust state.
+export component VoxPage {
+    in property <int> vox-state: 0;
+    in property <string> peer: "";
+    in property <int> rssi: -127;
+    in property <float> level: 0.0;
+    callback ptt-pressed();
+    callback ptt-released();
+    callback close();
+
+    property <bool> talking: root.vox-state == 1;
+    property <bool> hearing: root.vox-state == 2;
+    property <bool> no-radio: root.vox-state == 3;
+
+    // Shared PTT geometry (circle, ring, glyph, hit area) — same 148px as the
+    // Voice screen's mic button.
+    property <length> btn: 148px;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow { }
+
+    PageTitle { title: "WALKIE"; }
+    BackChevron { clicked => { root.close(); } }
+
+    // --- receive ring: blooms while a peer is talking -----------------------
+    // Only animated while HEARING: nothing is animating during transmit, when
+    // the executor is busy capturing and every repaint costs ~200ms.
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 226px - self.height / 2;
+        width: root.hearing ? root.btn + 56px : root.btn;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: root.hearing ? 3px : 0px;
+        border-color: Theme.accent;
+        opacity: root.hearing ? 0.45 : 0.0;
+        animate width, opacity { duration: 260ms; }
+    }
+
+    // --- the PTT hero -------------------------------------------------------
+    button := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 226px - self.height / 2;
+        width: root.btn;
+        height: root.btn;
+        border-radius: self.width / 2;
+
+        // Lit the instant the finger lands, BEFORE the Rust loop round-trips
+        // vox-state to 1 — the same trick VoicePage uses to kill perceived lag
+        // on a 6-11 fps panel. Hard 1-frame swap, no animation.
+        property <bool> lit: root.talking || (ptt.pressed && !root.no-radio);
+        border-width: 3px;
+        background: self.lit ? Theme.accent
+            : (root.no-radio ? Theme.warn-panel : Theme.panel);
+        border-color: root.no-radio ? Theme.warn
+            : (root.hearing ? Theme.accent : Theme.accent);
+
+        // Minimal speaker glyph: cone + two waves. Waves brighten while
+        // receiving, so idle/transmit/receive are distinguishable at a glance
+        // without reading the caption.
+        cone := Rectangle {
+            x: parent.width / 2 - 26px;
+            y: (parent.height - self.height) / 2;
+            width: 18px;
+            height: 30px;
+            border-radius: 3px;
+            background: button.lit ? Theme.on-accent
+                : (root.no-radio ? Theme.warn : Theme.accent);
+        }
+        Rectangle { // near wave
+            x: cone.x + cone.width + 8px;
+            y: parent.height / 2 - 13px;
+            width: 4px; height: 26px; border-radius: 2px;
+            background: cone.background;
+            opacity: root.hearing ? 1.0 : 0.55;
+        }
+        Rectangle { // far wave
+            x: cone.x + cone.width + 20px;
+            y: parent.height / 2 - 20px;
+            width: 4px; height: 40px; border-radius: 2px;
+            background: cone.background;
+            opacity: root.hearing ? 1.0 : 0.3;
+        }
+
+        ptt := TouchArea {
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) { root.ptt-pressed(); }
+                if (ev.kind == PointerEventKind.up) { root.ptt-released(); }
+                if (ev.kind == PointerEventKind.cancel) { root.ptt-released(); }
+            }
+        }
+    }
+
+    // --- level bar: mic level while talking, receive level while hearing ----
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 330px;
+        width: 220px; height: 6px; border-radius: 3px;
+        background: Theme.track;
+        Rectangle {
+            x: 0; y: 0;
+            width: parent.width * clamp(root.level, 0.0, 1.0);
+            height: parent.height;
+            border-radius: parent.border-radius;
+            background: Theme.accent;
+        }
+    }
+
+    // --- caption ------------------------------------------------------------
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 360px;
+        font-size: Theme.t-body;
+        color: root.no-radio ? Theme.warn : Theme.soft;
+        text: root.no-radio ? "radio unavailable"
+            : (root.talking ? "transmitting \u{2014} release to listen"
+            : (root.hearing ? "receiving" : "hold to talk"));
+    }
+
+    // --- who we last heard, and how well -----------------------------------
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 404px;
+        font-size: Theme.t-label;
+        color: Theme.dim;
+        // -127 is the "nothing heard yet" sentinel the Rust side uses, so it
+        // must never render as a real (very weak) reading.
+        text: root.peer == "" ? "no peer heard yet"
+            : root.peer + "  " + root.rssi + " dBm";
+    }
+}

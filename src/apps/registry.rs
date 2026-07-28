@@ -129,6 +129,15 @@ pub static REGISTRY: &[AppDescriptor] = &[
     AppDescriptor { state: AppState::Theme,      name: "Theme",       icon_id: 13, accent: 0xa78bfa, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 13
     AppDescriptor { state: AppState::Lights,     name: "Lights",      icon_id: 14, accent: 0xffb454, section: System, kind: Overlay,     flags: AppFlags::WIFI },    // idx 14
     AppDescriptor { state: AppState::Ping,       name: "Ping",        icon_id: 15, accent: 0xffd166, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 15
+    // Walkie-talkie (#71). APPENDED, not inserted next to Sound: `REGISTRY`
+    // order IS the launch index, so slotting it mid-table would renumber every
+    // app after it. Section grouping is by the `section` field, so it still
+    // renders under AUDIO.
+    //
+    // flags NONE, deliberately NOT WIFI — it wants `Hold::Vox` (radio up, no
+    // association: ESP-NOW rides the PHY and waiting on DHCP would be backwards
+    // for realtime audio), which the loop raises on the screen edge.
+    AppDescriptor { state: AppState::Vox,        name: "Walkie",      icon_id: 7,  accent: 0x4fd6ff, section: Audio,  kind: Overlay,     flags: AppFlags::NONE },    // idx 16
 ];
 
 /// Look up a launchable app's descriptor by state (linear scan, ≤15 entries).

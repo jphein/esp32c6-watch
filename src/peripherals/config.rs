@@ -93,11 +93,16 @@ pub enum ButtonAction {
     /// trigger for [`SpeakMode::OnDemand`] until the shade grows a speaker
     /// control — mapping a button needs no .slint change.
     Speak,
+    /// Open the walkie-talkie screen (#71). It only LAUNCHES — the actual
+    /// push-to-talk is the on-screen hero held with a finger, reusing the
+    /// debounced I2C finger-count release. A physical button cannot be the PTT
+    /// without colliding with its own short/long mapping.
+    Walkie,
 }
 
 impl ButtonAction {
     /// Total variants — the cycle-picker wraps through `0..COUNT`.
-    pub const COUNT: u8 = 10;
+    pub const COUNT: u8 = 11;
 
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -115,6 +120,7 @@ impl ButtonAction {
             7 => ButtonAction::Ping,
             8 => ButtonAction::Voice,
             9 => ButtonAction::Speak,
+            10 => ButtonAction::Walkie,
             _ => ButtonAction::None,
         }
     }
@@ -137,6 +143,7 @@ impl ButtonAction {
             ButtonAction::Ping => "Ping",
             ButtonAction::Voice => "Voice",
             ButtonAction::Speak => "Read aloud",
+            ButtonAction::Walkie => "Walkie",
         }
     }
 }

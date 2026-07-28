@@ -103,6 +103,13 @@ pub enum AppState {
     /// resident (no framebuffer); capture runs in the shared `mic_capture_task`,
     /// streamed by `voice_stt::stream_utterance` while the button is held.
     Voice,
+    /// Walkie-talkie (#71) — hold-to-talk voice between watches over ESP-NOW.
+    /// A Slint overlay (scene-resident, no framebuffer). Holds the radio for
+    /// ESP-NOW via `Hold::Vox` (PHY only — NOT an association: ESP-NOW rides the
+    /// PHY, and waiting on DHCP would be backwards for realtime audio).
+    /// Capture runs in the shared `mic_capture_task`; frames are µ-law encoded
+    /// by `walkie-codec` and broadcast as SMOLv1 VOX.
+    Vox,
     /// Sound-level meter (#28) — a Slint overlay (SoundLevel) showing live dBFS +
     /// peak-hold. Subscribes to the SAME shared `mic_capture_task`/MIC_CH as Voice
     /// (METER gate), draining chunks through `mic_dsp::rms_dbfs`. No WiFi (local).

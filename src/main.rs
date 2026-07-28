@@ -33,7 +33,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join;
 // Both build variants use fully-qualified embassy_futures::select at the main
 // wake point (the debug-console build nests select for the synthetic-input wake).
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::RgbColor;
 use embedded_hal_bus::i2c::RefCellDevice;
@@ -1544,6 +1544,10 @@ async fn main(_spawner: Spawner) -> ! {
     // `now_ms` of the last VOX frame, for closing the receive session on
     // silence. 0 = no session open.
     let mut vox_last_rx_ms: u64 = 0;
+    // TX: our own frame counter (SmolMesh stays stateless for VOX, like PING).
+    let mut vox_tx_seq: u16 = 0;
+    // Radio-hold edge tracking for the Vox screen (mirrors voice_hold_up).
+    let mut vox_hold_up = false;
     // BOOT press state machine (short vs long): press start, long-fired latch,
     // and "this press only woke the screen" (so a wake press never also acts).
     let mut boot_press_start: Option<Instant> = None;
@@ -3189,6 +3193,14 @@ async fn main(_spawner: Spawner) -> ! {
                         app_state = AppState::Watchface;
                         shell.req.launch.set(Some(AppState::Voice));
                     }
+                    ButtonAction::Walkie => {
+                        if fb.is_some() {
+                            sessions.suspend(app_state);
+                            fb = None;
+                        }
+                        app_state = AppState::Watchface;
+                        shell.req.launch.set(Some(AppState::Vox));
+                    }
                     ButtonAction::Speak => {
                         // On-demand read-aloud. Serviced at the speak site (it
                         // owns the amp/codec borrows), on this pass or the next.
@@ -3497,6 +3509,21 @@ async fn main(_spawner: Spawner) -> ! {
                     };
                     if crate::net::net_task::send(cmd) {
                         session_hold_up = climate_session_want;
+                    }
+                }
+                // Walkie (#71) holds the radio PHY-only — Hold::Vox is outside
+                // ASSOC_HOLDS, so this never waits on DHCP and never fights WiFi
+                // for the air. Raised/dropped on the screen edge, exactly like
+                // Hold::Voice, so a right-swipe close releases deterministically.
+                let vox_want = app_state == AppState::Vox;
+                if vox_want != vox_hold_up {
+                    let cmd = if vox_want {
+                        crate::net::net_task::NetCmd::Raise(crate::net::net_task::Hold::Vox)
+                    } else {
+                        crate::net::net_task::NetCmd::Drop(crate::net::net_task::Hold::Vox)
+                    };
+                    if crate::net::net_task::send(cmd) {
+                        vox_hold_up = vox_want;
                     }
                 }
                 let voice_want = app_state == AppState::Voice;
@@ -3869,6 +3896,99 @@ async fn main(_spawner: Spawner) -> ! {
                 // `RECORDING` clears, so `stream_utterance` self-terminates on release,
                 // flushes the final HTTP chunk, and does the STT round-trip. `select`
                 // would cancel that mid-flush and drop the transcript.
+                // === #71 walkie TRANSMIT ==========================
+                // Hold-to-talk: park this loop for the whole transmission, the
+                // same shape as the Voice PTT flow below. Parking is not a
+                // compromise here — it is what stops the 1 Hz repaint from
+                // stalling the executor past the 48 ms DMA ring while we are
+                // capturing.
+                let vox_pressed = shell.req.vox_ptt_pressed.take();
+                let _ = shell.req.vox_ptt_released.take(); // advisory only; see below
+                if app_state == AppState::Vox && vox_pressed {
+                    // Half-duplex (no AEC on the C6): stop receiving before we
+                    // capture, or the mic hears the speaker. Close the RX session
+                    // properly rather than just muting — a live STREAM_LIVE would
+                    // otherwise keep giving later SFX stream semantics.
+                    audio_out::drain_queue();
+                    audio_out::end_stream();
+                    vox_last_rx_ms = 0;
+                    vox_last_seq = None;
+                    vox_last = None;
+
+                    let rx = MIC_CH.receiver();
+                    while rx.try_receive().is_ok() {} // drop stale pre-press audio
+                    mic_capture::MIC_LEVEL
+                        .store(mic_dsp::DBFS_FLOOR as i32, core::sync::atomic::Ordering::Relaxed);
+                    mic_capture::RECORDING.store(true, core::sync::atomic::Ordering::Relaxed);
+                    shell.set_vox_state(1);
+                    // Paint TRANSMITTING exactly ONCE, before any capture. A
+                    // repaint mid-transmission blocks the executor for ~200 ms
+                    // and starves the capture DMA — the live level bar is
+                    // sacrificed for clean audio, the same trade the Voice
+                    // screen documents.
+                    shell.render(&mut display);
+
+                    let mut acc = walkie_codec::VoxAccumulator::new();
+                    let mut payload = [0u8; walkie_codec::VOX_PAYLOAD];
+                    let mut sent = 0u32;
+                    let mut up = 0u8;
+                    let t0 = Instant::now();
+                    loop {
+                        // Bounded wait so the finger is still polled if capture
+                        // stalls; a miss just means no frame this pass.
+                        if let Ok(chunk) =
+                            with_timeout(Duration::from_millis(60), rx.receive()).await
+                        {
+                            let mut off = 0;
+                            while off < chunk.len() {
+                                let (used, n) = acc.feed(&chunk[off..], &mut payload);
+                                if used == 0 {
+                                    break; // odd tail — cannot split a sample
+                                }
+                                off += used;
+                                if n > 0 {
+                                    if mesh.send_vox(&mut esp_now, vox_tx_seq, &payload[..n]) {
+                                        sent += 1;
+                                    }
+                                    vox_tx_seq = vox_tx_seq.wrapping_add(1);
+                                }
+                            }
+                        }
+                        // Release detection is the DEBOUNCED I2C FINGER COUNT,
+                        // not the touch INT and not Slint's ptt-released. The INT
+                        // is a data-ready PULSE that goes high once a still
+                        // finger stops generating reports, which read as "lifted"
+                        // ~20 ms into a hold and truncated captures (#42). Three
+                        // no-finger reads ~= 180 ms of real absence.
+                        if matches!(touch.read(), Ok(Some(_))) {
+                            up = 0;
+                        } else {
+                            up += 1;
+                            if up >= 3 {
+                                break;
+                            }
+                        }
+                        // Hard cap: a stuck finger or an I2C fault must not hold
+                        // the radio and the mic open indefinitely on a battery
+                        // device sharing one radio with WiFi/BLE/mesh.
+                        if Instant::now() - t0 > Duration::from_secs(30) {
+                            println!("[VOX] tx cap reached (30s)");
+                            break;
+                        }
+                    }
+                    mic_capture::RECORDING.store(false, core::sync::atomic::Ordering::Relaxed);
+                    // Drop the partial frame so the next transmission does not
+                    // open with a fragment of this one.
+                    acc.reset();
+                    shell.set_vox_state(0);
+                    shell.render(&mut display); // safe now: capture has stopped
+                    println!("[VOX] tx {sent} frames ({} ms)", t0.elapsed().as_millis());
+                    // The PTT hold parks this loop by design — keep it out of the
+                    // arm watchdog so `perf` regressions stay signal.
+                    #[cfg(feature = "debug-console")]
+                    debug_console::arm_exempt();
+                }
+
                 let voice_pressed = shell.req.voice_ptt_pressed.take();
                 let _ = shell.req.voice_ptt_released.take();
                 // STT needs WiFi associated AND DHCP landed. A press before
@@ -4794,6 +4914,14 @@ async fn main(_spawner: Spawner) -> ! {
                         ping_prev_push = None;
                         shell.set_ping_open(true);
                         app_state = AppState::Ping;
+                    } else if target == AppState::Vox {
+                        // Walkie-talkie (#71): scene-resident overlay, no fb.
+                        // Open idle; the PTT flow below drives capture + TX.
+                        shell.set_vox_state(0);
+                        shell.set_vox_level(0.0);
+                        shell.set_vox_peer("", -127);
+                        shell.set_vox_open(true);
+                        app_state = AppState::Vox;
                     } else if target == AppState::Voice {
                         // Voice-to-text (#42): a Slint overlay (scene-resident, no
                         // fb). Open in idle; the PTT flow below drives capture +

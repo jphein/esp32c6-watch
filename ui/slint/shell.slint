@@ -12,6 +12,7 @@ import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { LightsOverlay } from "lights.slint";
 import { PingOverlay, PingPulse } from "ping.slint";
+import { VoxPage } from "vox.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
@@ -160,6 +161,14 @@ export component WatchShell inherits Window {
     // from the Rust loop; the PTT button emits pressed/released, driven by
     // physical touch (release detected off the INT pin while the loop streams).
     in-out property <bool> voice-open: false;
+
+    // Walkie-talkie (#71): hold-to-talk voice over ESP-NOW. Rust owns the radio
+    // hold, capture, µ-law encode and the RX jitter buffer; this is presentation.
+    in-out property <bool> vox-open: false;
+    in property <int> vox-state: 0;        // 0 idle · 1 tx · 2 rx · 3 no radio
+    in property <string> vox-peer: "";
+    in property <int> vox-rssi: -127;
+    in property <float> vox-level: 0.0;
     in property <int> voice-state: 0;   // 0 idle 1 listening 2 sending 3 result 4 error 5 connecting
     in property <float> voice-level: 0.0;
     in property <string> voice-transcript;
@@ -267,6 +276,8 @@ export component WatchShell inherits Window {
     callback lights-closed();              // back-chevron / right-swipe → mesh
     callback ping-send();                  // hero tap → one PING broadcast (#35)
     callback ping-pulse-tap();             // tap on the receiver pulse → dismiss
+    callback vox-ptt-pressed();    // finger down on the walkie PTT → open radio + capture
+    callback vox-ptt-released();   // finger up → advisory; the loop uses the I2C finger count
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
     callback mic-gain-down();      // Sound app − : lower digital mic gain
@@ -760,6 +771,20 @@ export component WatchShell inherits Window {
         // the right-swipe Flag path in OVERLAYS). reconcile_overlay picks it up
         // and the Rust loop tears down Voice on the app_state transition.
         close => { root.voice-open = false; }
+    }
+
+    // ==================== Walkie-talkie overlay ====================
+    if root.vox-open: VoxPage {
+        width: 100%; height: 100%;
+        vox-state: root.vox-state;
+        peer: root.vox-peer;
+        rssi: root.vox-rssi;
+        level: root.vox-level;
+        ptt-pressed => { root.vox-ptt-pressed(); }
+        ptt-released => { root.vox-ptt-released(); }
+        // Flag-idiom close, same as Voice/Theme: reconcile_overlay picks it up
+        // and the Rust loop drops Hold::Vox on the app_state transition.
+        close => { root.vox-open = false; }
     }
 
     // ==================== SoundLevel meter overlay ====================
