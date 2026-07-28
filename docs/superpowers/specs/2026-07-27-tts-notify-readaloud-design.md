@@ -528,8 +528,8 @@ pressed-state standard from `2026-07-23-ui-overhaul-design.md`. This spec define
 
 Per the brief: **build only, do not flash — both watches are in use.**
 
-1. `cargo test -p tts-proto` — host tests green (the pure logic).
-2. `cargo test --workspace` — no regression in existing host crates.
+1. `cargo test -p tts-proto --target x86_64-unknown-linux-gnu` — host tests green.
+2. Each host crate with `-p`. **Do NOT use `cargo test --workspace`** — see §8.4.
 3. `fambuild build --release --bin esp32c6-watch` — clean.
 4. `fambuild build --release --bin esp32c6-watch --features debug-console` — clean. **Both**
    configurations, because release and debug-console builds have historically diverged on exactly
@@ -554,6 +554,23 @@ Per the brief: **build only, do not flash — both watches are in use.**
 | stack gap (with `tts`) | 74,760 B — **+3,080 B over the floor** |
 | bridge `POST /tts` end-to-end | **verified on a throwaway instance**, §8.2 |
 
+### 8.1.1 Running the host tests — two papercuts
+
+**`cargo test --workspace` does not work in this repo**, and the failure is confusing rather than
+obvious: the workspace root member is the *firmware* crate, so `--workspace` tries to build it for
+the host and dies inside `esp-sync` with ``cannot find module or crate `riscv` ``. Nothing to do
+with the crate under test. Test host crates individually instead:
+
+```sh
+cargo test -p tts-proto --target x86_64-unknown-linux-gnu
+```
+
+`--target` is required too: `.cargo/config.toml` sets the default target to
+`riscv32imac-unknown-none-elf`, so a bare `cargo test -p <crate>` fails with ``can't find crate for
+`test` `` / "`#[panic_handler]` function required". Both messages point away from the real cause.
+
+(Pre-existing, not introduced here — recorded so the next person loses minutes instead of an hour.)
+
 ### 8.2 Bridge verified end-to-end (no watch touched)
 
 Ran the patched bridge as a disposable instance on `familiar:8097`, exercised it, tore it down.
@@ -571,10 +588,21 @@ The loopback is the strongest evidence available without hardware: feeding the o
 the existing `/stt` route simultaneously proves the bytes really are mono 16 kHz s16le, that the
 level is right, and that the speech is intelligible.
 
-One near-miss worth recording: the first test instance bound port 8091, which answered
-`{"status":"ok"}` — that was **llama-server**, while the bridge had actually crashed on an import
-error. A green health check from the wrong process is exactly the kind of false pass that ends up in
-a report; port ownership is now checked with `ss -ltnp` before anything is trusted.
+#### RULE: verify port OWNERSHIP before believing a health check
+
+The first test instance bound port **8091** and answered `{"status":"ok"}`. That was
+**llama-server** — my bridge had already crashed on an import error. The health check was green and
+completely meaningless.
+
+**A health endpoint answering from a *different service* while your process is dead is a false
+success, and this project keeps getting bitten by that exact shape:** the debug console's `ok chime`
+ack while zero samples reached the speaker; a soak reporting `0 % stable` against an unplugged
+watch; `feeder.abort()` dropping a clip without setting the completion latch, making failure
+indistinguishable from success at every observation point.
+
+So: **`ss -ltnp` to confirm which PID owns the port before trusting anything it says.** On familiar,
+**8090 and 8091 are already taken** (the STT bridge and llama-server). Generalised: a check that
+cannot distinguish "working" from "something else answered" is not a check.
 
 ### 8.3 Still requires on-glass verification (orchestrator / JP)
 
