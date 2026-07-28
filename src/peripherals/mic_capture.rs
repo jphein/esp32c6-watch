@@ -180,7 +180,7 @@ pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, ring: &'sta
                     // pulls the next chunk itself.
                     drop(xfer);
                     Timer::after(Duration::from_millis(2)).await;
-                    pending = audio_out::next_long_chunk_pub();
+                    pending = audio_out::next_resume_chunk();
                     continue;
                 }
                 feeder.abort();

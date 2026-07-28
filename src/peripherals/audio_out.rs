@@ -210,10 +210,21 @@ const PUSH_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(2
 /// by [`begin_stream`] at the start of each utterance.
 static STREAM_ABORTED: AtomicBool = AtomicBool::new(false);
 
+/// "A queue-fed stream is mid-flight" — set by [`begin_stream`], cleared by
+/// [`end_stream`].
+///
+/// Distinguishes a STREAM (audio arriving over time; the bounded queue is the
+/// ONLY copy) from a static long clip (the whole thing sits in [`LONG_CLIP`]
+/// with a cursor, so the queue is redundant). [`PlaybackFeeder::resync`] must
+/// treat them oppositely: draining the queue is free for the chime and
+/// destroys undelivered audio for a stream.
+static STREAM_LIVE: AtomicBool = AtomicBool::new(false);
+
 /// Arm a streamed utterance: clears the abort latch. Call once before the first
 /// [`push_chunk`].
 pub fn begin_stream() {
     STREAM_ABORTED.store(false, Ordering::Relaxed);
+    STREAM_LIVE.store(true, Ordering::Relaxed);
 }
 
 /// Did the feeder abort the session we were streaming into?
@@ -411,11 +422,24 @@ fn long_clip_live() -> bool {
     })
 }
 
-/// Next long-clip chunk, for `silent_clock_task`'s DMA-error resume path: it
-/// needs a chunk to re-open a session with after a `Late` error, and the feeder
-/// only pulls chunks once a session is live.
-pub fn next_long_chunk_pub() -> Option<PcmChunk> {
-    next_long_chunk()
+/// Is a queue-fed stream mid-flight?
+pub fn stream_live() -> bool {
+    STREAM_LIVE.load(Ordering::Relaxed)
+}
+
+/// Mark a queue-fed stream finished (producer done pushing). Idempotent.
+pub fn end_stream() {
+    STREAM_LIVE.store(false, Ordering::Relaxed);
+}
+
+/// A chunk to re-open a playback session with after a DMA `Late`.
+///
+/// Static long clip first (its cursor is authoritative), else whatever the queue
+/// still holds — that second case is what keeps a network-fed stream alive across
+/// a stall. `None` simply idles; `silent_clock_task` then waits on `next_clip()`
+/// and the next arriving frame reopens the session.
+pub fn next_resume_chunk() -> Option<PcmChunk> {
+    next_long_chunk().or_else(|| PLAYBACK.try_receive().ok())
 }
 
 /// Abandon any streaming long clip (transfer re-arm / abort path).
@@ -532,9 +556,18 @@ impl PlaybackFeeder {
     pub fn resync(&mut self) -> bool {
         self.current = None;
         self.tail = 0;
-        // Queued chunks are stale ring data; the long clip is the source of truth.
-        while PLAYBACK.try_receive().is_ok() {}
-        let live = long_clip_live();
+        // For a STATIC long clip the queue is redundant (LONG_CLIP holds the whole
+        // melody with a cursor), so stale ring data is dropped. For a QUEUE-FED
+        // stream the queue is the only copy of audio that arrived over the
+        // network — draining it throws away speech that was never played. This
+        // distinction is the difference between the chime resuming and walkie-talkie
+        // RX being silent: `Late` fires on any >48 ms stall, the watchface repaints
+        // full-frame (~200 ms) at 1 Hz, so an unconditional drain kills reception
+        // roughly once per second.
+        if !stream_live() {
+            while PLAYBACK.try_receive().is_ok() {}
+        }
+        let live = long_clip_live() || stream_live();
         if live {
             // Keep the mic suppressed and the amp up: the melody continues on the
             // fresh transfer. Re-stamp so the amp gate re-arms cleanly.
