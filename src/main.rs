@@ -552,6 +552,11 @@ const BEAT_SECS: u64 = 15;
 /// adjustment persists once, just after the HUD closes, instead of once per step.
 const CFG_SETTLE_MS: u64 = 2_500;
 
+/// Hard ceiling on how long a pending config change may sit unwritten (#75).
+/// The quiet-moment gate is the normal path; this guarantees termination so a
+/// setting can never be silently lost to an audio path that stays busy.
+const CFG_MAX_DEFER_S: u64 = 30;
+
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -3249,14 +3254,33 @@ async fn main(_spawner: Spawner) -> ! {
         if let Some(dirty_at) = cfg_dirty_at {
             let settled = now >= dirty_at + Duration::from_millis(CFG_SETTLE_MS);
             let quiet = !audio_out::busy() && !meter_on;
-            if settled && quiet {
+            // Staleness cap, deliberately ASYMMETRIC. `quiet` is normally true
+            // within a tick or two, but a write must never be deferrable forever
+            // or a setting is silently lost — so after CFG_MAX_DEFER_S the cap
+            // overrides `busy()` (a playback tail is short and the erase can wait
+            // it out or ride over it).
+            //
+            // It does NOT override `meter_on`. The mic meter means I2S RX DMA is
+            // streaming continuously, which is half of the reproduction this
+            // whole block exists for (SoundLevel open + volume change). Erasing
+            // flash there is the hazard, so the meter stays a hard block; it
+            // clears as soon as the user leaves that screen, which bounds the
+            // wait by an action the user is already taking.
+            let stale = now >= dirty_at + Duration::from_secs(CFG_MAX_DEFER_S);
+            if settled && !meter_on && (quiet || stale) {
                 if cfg_save(flash, config_offset, &watch_cfg).await {
                     println!(
-                        "[CFG] volume={} muted={} saved (deferred)",
-                        watch_cfg.volume, watch_cfg.muted
+                        "[CFG] saved (deferred{}): vol={} muted={} page={} theme={} ble={} mesh={}",
+                        if stale && !quiet { ", staleness cap" } else { "" },
+                        watch_cfg.volume,
+                        watch_cfg.muted,
+                        watch_cfg.default_page,
+                        watch_cfg.theme,
+                        watch_cfg.ble_on,
+                        watch_cfg.mesh_on,
                     );
                 } else {
-                    println!("[CFG] deferred save failed");
+                    println!("[CFG] deferred save FAILED — setting not persisted");
                 }
                 cfg_dirty_at = None;
             }
