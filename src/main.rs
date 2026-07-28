@@ -2443,11 +2443,9 @@ async fn main(_spawner: Spawner) -> ! {
                 // intent alone, so this stays edge-triggered and flash-cheap.
                 if watch_cfg.wifi_off != !turn_on {
                     watch_cfg.wifi_off = !turn_on;
-                    if cfg_save(flash, config_offset, &watch_cfg).await {
-                        println!("[CFG] wifi_off={} saved to flash", watch_cfg.wifi_off)
-                    } else {
-                        println!("[CFG] wifi_off save failed")
-                    }
+                    // Deferred (#75): mark dirty; the flush block writes once at a
+                    // quiet moment. An inline erase here can hang the watch.
+                    cfg_dirty_at = Some(now);
                 }
                 shell.set_wifi_intent(!watch_cfg.wifi_off);
             } else {
@@ -2799,11 +2797,9 @@ async fn main(_spawner: Spawner) -> ! {
                             shell.set_page(page as i32);
                             if watch_cfg.default_page != page {
                                 watch_cfg.default_page = page;
-                                if cfg_save(flash, config_offset, &watch_cfg).await {
-                                    println!("[CFG] default page {page} saved")
-                                } else {
-                                    println!("[CFG] save failed")
-                                }
+                                // Deferred (#75): mark dirty; the flush block writes once at a
+                                // quiet moment. An inline erase here can hang the watch.
+                                cfg_dirty_at = Some(now);
                             }
                         }
                         // CFG `U`: store + persist (edge-triggered, as above).
@@ -2813,11 +2809,9 @@ async fn main(_spawner: Spawner) -> ! {
                             {
                                 watch_cfg.units_temp_f = temp_f;
                                 watch_cfg.units_clk_24h = clk_24h;
-                                if cfg_save(flash, config_offset, &watch_cfg).await {
-                                    println!("[CFG] units saved")
-                                } else {
-                                    println!("[CFG] save failed")
-                                }
+                                // Deferred (#75): mark dirty; the flush block writes once at a
+                                // quiet moment. An inline erase here can hang the watch.
+                                cfg_dirty_at = Some(now);
                             }
                         }
                         // CFG `R`: transient, never persisted. Boot-debounced
@@ -3077,11 +3071,9 @@ async fn main(_spawner: Spawner) -> ! {
             if watch_cfg.ble_on != persist_intent {
                 watch_cfg.ble_on = persist_intent;
                 if config_offset.is_some() {
-                    if cfg_save(flash, config_offset, &watch_cfg).await {
-                        println!("[CFG] ble_on={} saved to flash", watch_cfg.ble_on)
-                    } else {
-                        println!("[CFG] ble_on save failed")
-                    }
+                    // Deferred (#75): mark dirty; the flush block writes once at a
+                    // quiet moment. An inline erase here can hang the watch.
+                    cfg_dirty_at = Some(now);
                 }
             }
             power_stats.ble_on = ble_on;
@@ -4280,11 +4272,9 @@ async fn main(_spawner: Spawner) -> ! {
                     // triggered; a rail-clamped repeat tap doesn't wear flash.
                     if watch_cfg.mic_gain != gain_idx as u8 {
                         watch_cfg.mic_gain = gain_idx as u8;
-                        if cfg_save(flash, config_offset, &watch_cfg).await {
-                            println!("[CFG] mic_gain={} saved to flash", watch_cfg.mic_gain)
-                        } else {
-                            println!("[CFG] mic_gain save failed")
-                        }
+                        // Deferred (#75): mark dirty; the flush block writes once at a
+                        // quiet moment. An inline erase here can hang the watch.
+                        cfg_dirty_at = Some(now);
                     }
                 }
                 if let Some(scheme) = shell.req.theme.take() {
@@ -4295,11 +4285,9 @@ async fn main(_spawner: Spawner) -> ! {
                     if watch_cfg.theme != scheme as u8 {
                         watch_cfg.theme = scheme as u8;
                         if config_offset.is_some() {
-                            if cfg_save(flash, config_offset, &watch_cfg).await {
-                                println!("[CFG] theme {} saved to flash", scheme)
-                            } else {
-                                println!("[CFG] theme save failed")
-                            }
+                            // Deferred (#75): mark dirty; the flush block writes once at a
+                            // quiet moment. An inline erase here can hang the watch.
+                            cfg_dirty_at = Some(now);
                         }
                     }
                 }
@@ -4311,11 +4299,9 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_touch_sound(touch_sound);
                     if watch_cfg.touch_sound != touch_sound {
                         watch_cfg.touch_sound = touch_sound;
-                        if cfg_save(flash, config_offset, &watch_cfg).await {
-                            println!("[CFG] touch_sound={touch_sound} saved to flash")
-                        } else {
-                            println!("[CFG] touch_sound save failed")
-                        }
+                        // Deferred (#75): mark dirty; the flush block writes once at a
+                        // quiet moment. An inline erase here can hang the watch.
+                        cfg_dirty_at = Some(now);
                     }
                 }
                 // === Volume + buttons hub drains (#59) ===
@@ -4378,11 +4364,9 @@ async fn main(_spawner: Spawner) -> ! {
                         pwron_short.label(),
                         pwron_long.label(),
                     );
-                    if cfg_save(flash, config_offset, &watch_cfg).await {
-                        println!("[CFG] button map saved (slot {slot})");
-                    } else {
-                        println!("[CFG] button map save failed");
-                    }
+                    // Deferred (#75): mark dirty; the flush block writes once at a
+                    // quiet moment. An inline erase here can hang the watch.
+                    cfg_dirty_at = Some(now);
                 }
                 // UPDATE FIRMWARE (SYSTEM page): same semantics, one queue —
                 // net_task raises the WiFi hold, runs the 45 s window and the
@@ -4571,11 +4555,9 @@ async fn main(_spawner: Spawner) -> ! {
                     // Connecting IS wifi intent — clear a forced-off bit in
                     // the same (single) save as the creds.
                     watch_cfg.wifi_off = false;
-                    if cfg_save(flash, config_offset, &watch_cfg).await {
-                        println!("[CFG] credentials saved to flash")
-                    } else {
-                        println!("[CFG] save failed")
-                    }
+                    // Deferred (#75): mark dirty; the flush block writes once at a
+                    // quiet moment. An inline erase here can hang the watch.
+                    cfg_dirty_at = Some(now);
                     wifi_has_creds = !watch_cfg.ssid.is_empty();
                     let sent = crate::net::net_task::send(crate::net::net_task::NetCmd::SetCreds {
                         ssid: watch_cfg.ssid.clone(),
@@ -4624,11 +4606,9 @@ async fn main(_spawner: Spawner) -> ! {
                     // triggered like the BLE/theme saves.
                     if watch_cfg.mesh_on != mesh_enabled {
                         watch_cfg.mesh_on = mesh_enabled;
-                        if cfg_save(flash, config_offset, &watch_cfg).await {
-                            println!("[CFG] mesh_on={} saved to flash", watch_cfg.mesh_on)
-                        } else {
-                            println!("[CFG] mesh_on save failed")
-                        }
+                        // Deferred (#75): mark dirty; the flush block writes once at a
+                        // quiet moment. An inline erase here can hang the watch.
+                        cfg_dirty_at = Some(now);
                     }
                     shell.set_mesh_enabled(mesh_enabled);
                 }
