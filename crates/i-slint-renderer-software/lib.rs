@@ -2199,6 +2199,14 @@ impl ProcessScene for PrepareScene {
     }
 }
 
+/// Reserved depth of [`SceneBuilder::state_stack`] (esp32c6-watch fork, #75).
+///
+/// 160 entries = 4,480 B, one allocation of a fixed size per scene. Chosen above
+/// the 128 the hardware panic was reaching for, so the observed depth has room
+/// without another doubling; small enough to be far cheaper than the ~51 KB
+/// framebuffer it shares a heap with.
+const STATE_STACK_RESERVE: usize = 160;
+
 struct SceneBuilder<'a, T> {
     processor: T,
     state_stack: Vec<RenderState>,
@@ -2221,7 +2229,34 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
     ) -> Self {
         Self {
             processor,
-            state_stack: Vec::new(),
+            // WATCH FORK (esp32c6-watch #75): reserve the clip/offset save-state
+            // stack up front instead of letting it grow at render time.
+            //
+            // A captured OOM panic on hardware, resolved from its backtrace:
+            //
+            //     memory allocation of 3584 bytes failed
+            //     handle_alloc_error
+            //     RawVec<RenderState>::grow_one
+            //     SceneBuilder::draw_text_paragraph
+            //     ItemRenderer::draw_text
+            //
+            // `RenderState` is 28 bytes and 3584 / 28 = 128 EXACTLY, so this is
+            // `grow_one` doubling 64 -> 128 while drawing text on the apps menu,
+            // the most deeply nested screen in the UI. The watch had ~54 KB free
+            // at the time (`[LOOP] beat=152 up=79s heap=54400 low=54396`), so this
+            // was not exhaustion — a 3.5 KB CONTIGUOUS block was unavailable.
+            //
+            // Growing from empty walks a doubling ladder (28, 56, 112 ... 3584 B)
+            // every single frame, and each rung leaves a differently-sized hole.
+            // That churn is what manufactures the fragmentation that then fails.
+            // Reserving once makes the per-frame allocation a CONSTANT size, so
+            // the allocator hands back the same block it just freed.
+            //
+            // On this target the alternative is a hard freeze, not a slow frame:
+            // esp-alloc has no fallible path here, so the failure is a panic, and
+            // the panic handler halts — the screen holds its last frame and only a
+            // power cycle recovers it.
+            state_stack: Vec::with_capacity(STATE_STACK_RESERVE),
             current_state: RenderState {
                 alpha: 1.,
                 offset: LogicalPoint::default(),
