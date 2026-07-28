@@ -6416,6 +6416,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "walkie-codec"
+version = "0.1.0"
+
+[[package]]
 name = "wasip2"
 version = "1.0.4+wasi-0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
