@@ -46,6 +46,16 @@ jobs:
           [build]
           target = "riscv32imac-unknown-none-elf"
           rustflags = ["-C", "force-frame-pointers"]
+
+          [env]
+          ESP_LOG = "info"
+          WIFI_SSID = "ci-preflight"
+          WIFI_PASS = "ci-placeholder-not-a-secret"
+          MQTT_BROKER = "10.0.0.1:1883"
+          MQTT_USER = "ci"
+          MQTT_PASS = "ci-placeholder-not-a-secret"
+          HA_HTTP = "10.0.0.1:8124"
+          OTA_URL = "http://10.0.0.1:8000/watch.bin"
           EOF
       - name: Host crate tests
         run: tools/preflight.sh --tests-only
@@ -56,7 +66,11 @@ jobs:
   # stack/ROM budget, so a combo that links but overruns a ceiling still fails.
   link:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # MEASURED, not estimated: the first cold run (no cache) took 3.9-4.5 min per
+    # leg. 15 gives ~3x headroom for runner variance while still catching a hung
+    # leg promptly — a too-generous timeout hides a hang, which is the whole
+    # reason not to leave this at the original 40-minute guess.
+    timeout-minutes: 15
     strategy:
       fail-fast: false # one broken combo must not hide the state of the others
       matrix:
@@ -74,10 +88,27 @@ jobs:
           # shared key would thrash.
           key: ${{ matrix.features }}
 
-      # `.cargo/config.toml` is gitignored (it can hold WIFI_SSID/WIFI_PASS), so
-      # a fresh checkout has none. Recreate only the build-relevant parts, as
-      # firmware.yml does. NO credentials: main.rs reads them via `option_env!`
-      # and falls back to empty, so a credential-free build is correct.
+      # `.cargo/config.toml` is gitignored (it can hold real WIFI/MQTT values), so
+      # a fresh checkout has none and we recreate it.
+      #
+      # THE `[env]` BLOCK IS LOAD-BEARING FOR THE BUDGETS, and the values are
+      # deliberately fake. Measured on this branch, tts+debug-console:
+      #
+      #   ESP_LOG unset  -> stack gap 78,160 B  (margin +6,480)
+      #   ESP_LOG="info" -> stack gap 74,096 B  (margin +2,416)   <- what ships
+      #
+      # `ESP_LOG` alone is **4,064 bytes of .bss** (it compiles the logging
+      # machinery in). Omit it and CI measures a binary with 4 KB MORE headroom
+      # than the real one — so the gate would happily pass a change that violates
+      # the boot-time stack floor on a developer's build. A gate measuring a
+      # different artifact than what ships is worse than no gate.
+      #
+      # The other vars reach `option_env!` (WIFI/MQTT/HA/OTA). Absent, they are
+      # `None` and some code becomes unreachable and is stripped; present, the
+      # same code is linked as in a real build. They only need to EXIST and be
+      # representative in shape — these are obvious placeholders and NOT
+      # credentials. Never put real secrets here; the watch takes its creds at
+      # runtime via the Settings app.
       - name: Write .cargo/config.toml
         run: |
           mkdir -p .cargo
@@ -85,6 +116,16 @@ jobs:
           [build]
           target = "riscv32imac-unknown-none-elf"
           rustflags = ["-C", "force-frame-pointers"]
+
+          [env]
+          ESP_LOG = "info"
+          WIFI_SSID = "ci-preflight"
+          WIFI_PASS = "ci-placeholder-not-a-secret"
+          MQTT_BROKER = "10.0.0.1:1883"
+          MQTT_USER = "ci"
+          MQTT_PASS = "ci-placeholder-not-a-secret"
+          HA_HTTP = "10.0.0.1:8124"
+          OTA_URL = "http://10.0.0.1:8000/watch.bin"
           EOF
 
       # nm/readelf read _bss_end / _stack_start and the ROM high-water straight
