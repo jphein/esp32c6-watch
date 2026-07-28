@@ -99,13 +99,13 @@ pub const PEER_STALE_MS: u64 = 3000;
 /// HELLO/TIME cadence.
 pub const TICK_MS: u64 = 2000;
 
-/// Hand an ESP-NOW send back to the driver WITHOUT waiting for its completion
-/// callback.
+/// Send one ESP-NOW frame, waiting for completion with a BOUNDED, YIELDING wait.
 ///
-/// ## Why this exists: `SendWaiter::wait()` can hang the watch forever
+/// ## The bug this replaces (#75) — measured, not theorised
 ///
-/// esp-radio 0.18's waiter is an unbounded, non-yielding busy spin — and so is
-/// its `Drop`, so you cannot escape it by dropping the waiter either:
+/// Every send site here used `esp_now.send(..)` followed by `SendWaiter::wait()`.
+/// That waiter is an unbounded, non-yielding busy spin, and so is its `Drop`, so
+/// there was no way to escape it once started:
 ///
 /// ```ignore
 /// pub fn wait(self) -> Result<(), EspNowError> {
@@ -117,59 +117,60 @@ pub const TICK_MS: u64 = 2000;
 /// }
 /// ```
 ///
-/// esp-radio's own doc comment states the failure mode: *"the waiter will block
-/// forever since the callback which signals the completion of sending will never
-/// be invoked."* Because `mesh.tick()` runs on the Embassy main loop — the same
-/// loop that renders the UI and services touch — one lost TX callback freezes
-/// the watch on its last drawn frame. There is no panic and no backtrace,
-/// because nothing faults: the CPU is spinning correctly on a flag that will
-/// never be set. esp-rtos threads (net_task, the WiFi blob) keep running and
-/// keep logging, which is why serial output continues from behind the wedge and
-/// makes it look like a display fault. See issue #75.
+/// esp-radio's own doc says it "will block forever since the callback which
+/// signals the completion of sending will never be invoked." `tick()` runs on the
+/// Embassy main loop — the loop that renders the UI and reads touch — so one lost
+/// TX completion froze the watch on its last drawn frame with no panic.
 ///
-/// ## Why fire-and-forget is the right call here, not a wider async refactor
+/// A within-device A/B on mythic-throne settled it. Identical tree, identical
+/// trials, the ONLY difference being these waits, judged by whether the `[LOOP]`
+/// heartbeat appeared at all:
 ///
-/// Every one of this module's send sites discarded the result already
-/// (`let _ = w.wait();`), so the spin bought the program no information
-/// whatsoever — it was pure latency plus a hang risk. `SendWaiter` is
-/// `PhantomData` with no runtime state, and `send()` keeps no in-flight
-/// bookkeeping (it just clears the flag and calls `esp_now_send`), so declining
-/// to wait leaks nothing and desynchronizes nothing. A back-to-back send while
-/// the radio is busy simply returns `Err` from `send()` and we skip that frame,
-/// which is the correct behaviour for a broadcast beacon protocol.
+/// | arm            | result                                                   |
+/// |----------------|----------------------------------------------------------|
+/// | waits INTACT   | **0/4 alive** — every trial's last line `[MESH] up as node id236` |
+/// | waits REMOVED  | alive, heartbeat running                                 |
 ///
-/// If a call site ever needs delivery status, use `esp_now.send_async().await`
-/// (a real `Future` with a waker) from an async context — never `wait()`.
+/// The death line is the print immediately before the first `tick()` after
+/// `add_peer` succeeds, i.e. the first mesh HELLO of the boot.
 ///
-/// ## VERDICT: kept as analysis, deliberately NOT wired up (2026-07-28)
+/// An earlier CROSS-watch A/B appeared to refute this and was invalid: the other
+/// watch runs BLE-on with a different mesh toggle, so it never entered the path
+/// under test. A control must differ in one variable.
 ///
-/// This was implemented as a freeze fix and **measured against a control**, and
-/// the measurement went the wrong way. Both watches ran the same tree, differing
-/// only in these 12 waits, both with the `[LOOP]` heartbeat:
+/// ## Why bounded-select rather than fire-and-forget
 ///
-/// | watch    | build              | outcome                                  |
-/// |----------|--------------------|------------------------------------------|
-/// | mythic   | waits REMOVED      | froze — total serial silence, 0 beats    |
-/// | eldritch | waits INTACT       | alive past 328s, still beating           |
+/// Fire-and-forget (`mem::forget` on the waiter) also removes the hang, but the
+/// spin was incidentally PACING TX — dropping it lets `tick()` fire back-to-back
+/// sends. `send_async` is a real `Future` with a waker (`ESP_NOW_TX_WAKER`), so
+/// awaiting it yields the executor instead of burning the CPU, and racing it
+/// against a timer makes the wait bounded. Dropping a `SendFuture` early is safe:
+/// unlike `SendWaiter`, it has **no `Drop` impl**, so an abandoned wait costs
+/// nothing (the next `send_async` resets the completion flag anyway).
 ///
-/// The build WITHOUT the spins died first. n=1, so this is not proof the removal
-/// is harmful — but there is a plausible mechanism (the wait also PACES TX; with
-/// fire-and-forget, `tick()` issues back-to-back sends and the second can be
-/// refused or stress the driver), and it is certainly not evidence of a fix.
-///
-/// The predicted signature also failed. A wedged Embassy loop should leave the
-/// esp-rtos threads logging `[NET]` from behind the wedge; mythic emitted
-/// NOTHING, which is a whole-SoC stop, not a UI-loop hang.
-///
-/// So the spin remains a genuine latent hazard worth fixing properly one day —
-/// via `send_async().await`, which yields and needs no pacing hack — but it is
-/// NOT the cause of the freezes, and swapping it in blind would repeat the
-/// `!mesh_enabled` mistake: shipping a plausible fix on a correlation.
-#[allow(dead_code)] // NOT WIRED UP — see the verdict note above.
-#[inline]
-pub fn release_send(waiter: esp_radio::esp_now::SendWaiter<'_>) {
-    core::mem::forget(waiter);
+/// Returns true if the frame completed within the deadline. Callers may ignore
+/// it — these are broadcast beacons, and a dropped one is corrected by the next.
+pub async fn send_bounded(
+    esp_now: &mut EspNow<'_>,
+    addr: &[u8; 6],
+    data: &[u8],
+) -> bool {
+    use embassy_futures::select::{select, Either};
+    match select(
+        esp_now.send_async(addr, data),
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(TX_WAIT_MS)),
+    )
+    .await
+    {
+        Either::First(r) => r.is_ok(),
+        Either::Second(_) => false, // deadline hit: abandon the frame, never hang
+    }
 }
+
+/// Deadline for one ESP-NOW frame completion. A broadcast normally completes in
+/// single-digit milliseconds; this only has to be generous enough not to abandon
+/// healthy frames, and short enough that a stuck radio cannot stall the UI loop.
+const TX_WAIT_MS: u64 = 30;
 
 
 #[derive(Clone, Copy, PartialEq)]
@@ -614,7 +615,7 @@ impl SmolMesh {
     }
 
     /// The ~2s HELLO/TIME tick. Call from the main loop; no-ops until due.
-    pub fn tick(&mut self, esp_now: &mut EspNow<'_>, now_ms: u64, uptime_secs: u64) {
+    pub async fn tick(&mut self, esp_now: &mut EspNow<'_>, now_ms: u64, uptime_secs: u64) {
         if now_ms.saturating_sub(self.last_tick_ms) < TICK_MS {
             return;
         }
@@ -623,9 +624,7 @@ impl SmolMesh {
         let mut hello = [0u8; 16];
         hello[..HELLO_PREFIX.len()].copy_from_slice(HELLO_PREFIX);
         write_id(self.id, &mut hello[HELLO_PREFIX.len()..]);
-        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &hello) {
-            let _ = w.wait();
-        }
+        send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &hello).await;
 
         if let Some(unix) = self.unix_now(uptime_secs) {
             let mut time = [0u8; 37];
@@ -640,16 +639,14 @@ impl SmolMesh {
             time[n] = b' ';
             n += 1;
             write_u10(self.synced_at, &mut time[n..]);
-            if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &time) {
-                let _ = w.wait();
-            }
+            send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &time).await;
         }
     }
 
     /// Broadcast a DIAG record ("SMOLv1 DIAG NNN" + verbatim key=val record).
     /// The fleet gateway caches it and republishes retained to smol/<id>/diag,
     /// which is how the watch shows up in Home Assistant without MQTT.
-    pub fn broadcast_diag(&mut self, esp_now: &mut EspNow<'_>, record: &[u8]) {
+    pub async fn broadcast_diag(&mut self, esp_now: &mut EspNow<'_>, record: &[u8]) {
         const DIAG_PREFIX: &[u8] = b"SMOLv1 DIAG ";
         let mut msg = [0u8; 250];
         msg[..DIAG_PREFIX.len()].copy_from_slice(DIAG_PREFIX);
@@ -657,9 +654,7 @@ impl SmolMesh {
         let base = DIAG_PREFIX.len() + 3;
         let n = record.len().min(250 - base);
         msg[base..base + n].copy_from_slice(&record[..n]);
-        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &msg[..base + n]) {
-            let _ = w.wait();
-        }
+        send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &msg[..base + n]).await;
     }
 
     /// Handle one received ESP-NOW payload. `rssi` is the per-frame receive
@@ -675,7 +670,7 @@ impl SmolMesh {
     }
 
     /// Send one staged fragment as a broadcast RELAY frame.
-    fn relay_send_frag(&mut self, esp_now: &mut EspNow<'_>, frag: u8) {
+    async fn relay_send_frag(&mut self, esp_now: &mut EspNow<'_>, frag: u8) {
         let off = frag as usize * RELAY_CHUNK;
         let end = (off + RELAY_CHUNK).min(self.relay_tx.total_len);
         let mut fb = [0u8; 96]; // ≤ 27-byte header + RELAY_CHUNK(64) = 91
@@ -687,15 +682,13 @@ impl SmolMesh {
             &self.relay_tx.buf[off..end],
             &mut fb,
         );
-        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &fb[..len]) {
-            let _ = w.wait();
-        }
+        send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &fb[..len]).await;
     }
 
     /// Leaf uplink: fragment `telemetry` into RELAY frames and broadcast them
     /// all, staging the message for bounded retransmit (mode.rs `relay_emit`
     /// + `stage_tx`, single-hop only). A fresh emit supersedes the previous.
-    pub fn relay_emit(&mut self, esp_now: &mut EspNow<'_>, telemetry: &[u8], now_ms: u64) {
+    pub async fn relay_emit(&mut self, esp_now: &mut EspNow<'_>, telemetry: &[u8], now_ms: u64) {
         let len = telemetry.len().min(RELAY_MAX_MSG);
         self.last_relay_emit_ms = now_ms;
         if len == 0 {
@@ -712,7 +705,7 @@ impl SmolMesh {
         self.relay_tx.last_ms = now_ms;
         self.relay_tx.buf[..len].copy_from_slice(&telemetry[..len]);
         for frag in 0..count {
-            self.relay_send_frag(esp_now, frag);
+            self.relay_send_frag(esp_now, frag).await;
         }
         println!(
             "[MESH] relay emit msgid {} ({count} frag, {len} B)",
@@ -723,7 +716,7 @@ impl SmolMesh {
     /// Leaf uplink: retransmit the fragments a RELAYACK hasn't confirmed,
     /// bounded to RELAY_MAX_TRIES with RELAY_RETX_MS between rounds (mode.rs
     /// `relay_retransmit`). No-op once fully acked / out of tries / too soon.
-    pub fn relay_retransmit(&mut self, esp_now: &mut EspNow<'_>, now_ms: u64) {
+    pub async fn relay_retransmit(&mut self, esp_now: &mut EspNow<'_>, now_ms: u64) {
         if !self.relay_tx.active {
             return;
         }
@@ -742,7 +735,7 @@ impl SmolMesh {
             if self.relay_tx.acked & (1u8 << frag) != 0 {
                 continue; // already confirmed
             }
-            self.relay_send_frag(esp_now, frag);
+            self.relay_send_frag(esp_now, frag).await;
         }
         self.relay_tx.tries += 1;
         self.relay_tx.last_ms = now_ms;
@@ -752,12 +745,10 @@ impl SmolMesh {
     /// node id + the caller's seq. Broadcast is deliberate (2-watch fleet —
     /// and a fleet-wide greeting is the charming failure mode); delivery
     /// confirmation comes back as a unicast PINGACK ([`MeshEvent::PingAck`]).
-    pub fn send_ping(&mut self, esp_now: &mut EspNow<'_>, seq: u16) {
+    pub async fn send_ping(&mut self, esp_now: &mut EspNow<'_>, seq: u16) {
         let mut buf = [0u8; 24]; // PINGACK-sized; PING uses 21
         let n = encode_ping_frame(PING_PREFIX, self.id, seq, &mut buf);
-        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]) {
-            let _ = w.wait();
-        }
+        send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]).await;
         println!("[MESH] ping sent (seq {seq})");
     }
 
@@ -766,7 +757,7 @@ impl SmolMesh {
     /// Fire-and-forget, single frame. `text` is clipped to [`SAY_TEXT_CAP`] on a
     /// CHAR BOUNDARY (a mid-codepoint cut would make the receiver's
     /// `from_utf8` reject the whole frame and silently drop the message).
-    pub fn send_say(&mut self, esp_now: &mut EspNow<'_>, text: &str) {
+    pub async fn send_say(&mut self, esp_now: &mut EspNow<'_>, text: &str) {
         let clipped = clip_str(text, SAY_TEXT_CAP);
         if clipped.is_empty() {
             return;
@@ -780,27 +771,23 @@ impl SmolMesh {
         n += 1;
         buf[n..n + clipped.len()].copy_from_slice(clipped.as_bytes());
         n += clipped.len();
-        if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]) {
-            let _ = w.wait();
-        }
+        send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]).await;
         println!("[MESH] say sent ({} B)", clipped.len());
     }
 
     /// Handle one received ESP-NOW payload.
     /// Broadcast a SMOLv1 FAM frame (heartbeat/handoff) for the familiar
     /// state machine. Fixed 29-byte binary frame, fleet wire format.
-    pub fn broadcast_fam(&mut self, esp_now: &mut EspNow<'_>, f: &FamFrame) {
+    pub async fn broadcast_fam(&mut self, esp_now: &mut EspNow<'_>, f: &FamFrame) {
         let mut buf = [0u8; FAM_FRAME_LEN];
         if let Some(len) = encode_fam(f, &mut buf) {
-            if let Ok(w) = esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..len]) {
-                let _ = w.wait();
-            }
+            send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..len]).await;
         }
     }
 
     /// Handle one received ESP-NOW payload. `rssi` comes from the frame's RX
     /// control info and feeds the familiar's takeover weighting.
-    pub fn handle_rx(
+    pub async fn handle_rx(
         &mut self,
         esp_now: &mut EspNow<'_>,
         src: [u8; 6],
@@ -820,9 +807,7 @@ impl SmolMesh {
             let mut ack = [0u8; 14];
             ack[..ACK_PREFIX.len()].copy_from_slice(ACK_PREFIX);
             write_id(id, &mut ack[ACK_PREFIX.len()..]);
-            if let Ok(w) = esp_now.send(&src, &ack) {
-                let _ = w.wait();
-            }
+            send_bounded(esp_now, &src, &ack).await;
             return None;
         }
         if let Some(rest) = data.strip_prefix(ACK_PREFIX) {
@@ -924,9 +909,7 @@ impl SmolMesh {
             Self::ensure_unicast_peer(esp_now, src);
             let mut ack = [0u8; 24];
             let n = encode_ping_frame(PINGACK_PREFIX, self.id, seq, &mut ack);
-            if let Ok(w) = esp_now.send(&src, &ack[..n]) {
-                let _ = w.wait();
-            }
+            send_bounded(esp_now, &src, &ack[..n]).await;
             println!("[MESH] ping from id{from_id} (seq {seq}) - acked");
             return Some(MeshEvent::Ping { from_id, seq, mac: src });
         }

@@ -2691,7 +2691,7 @@ async fn main(_spawner: Spawner) -> ! {
             if esp_now_peer_added && mesh_enabled {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
-                mesh.tick(&mut esp_now, now_ms, uptime_secs);
+                mesh.tick(&mut esp_now, now_ms, uptime_secs).await;
                 let peers = mesh.peer_count(now_ms) as u8;
                 if peers != last_mesh_peers {
                     last_mesh_peers = peers;
@@ -2715,7 +2715,7 @@ async fn main(_spawner: Spawner) -> ! {
                         tage,
                         sync_src,
                     );
-                    mesh.broadcast_diag(&mut esp_now, rec.as_bytes());
+                    mesh.broadcast_diag(&mut esp_now, rec.as_bytes()).await;
                     next_diag = now + Duration::from_secs(60);
                 }
                 // World Snake mesh service (only while the app is active):
@@ -2727,11 +2727,12 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                     let mut snk = [0u8; crate::apps::world_snake::SNK_TX_BUF];
                     if let Some(n) = world_snake.pending_tx(&mut snk) {
-                        if let Ok(w) =
-                            esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &snk[..n])
-                        {
-                            let _ = w.wait();
-                        }
+                        crate::net::smol_mesh::send_bounded(
+                            &mut esp_now,
+                            &esp_radio::esp_now::BROADCAST_ADDRESS,
+                            &snk[..n],
+                        )
+                        .await;
                     }
                 }
                 // RELAY leaf uplink: a fresh DIAG-style stat message every
@@ -2752,9 +2753,9 @@ async fn main(_spawner: Spawner) -> ! {
                         page_scr_name(shell.page()),
                         shell.page() as u8,
                     );
-                    mesh.relay_emit(&mut esp_now, tele.as_bytes(), now_ms);
+                    mesh.relay_emit(&mut esp_now, tele.as_bytes(), now_ms).await;
                 }
-                mesh.relay_retransmit(&mut esp_now, now_ms);
+                mesh.relay_retransmit(&mut esp_now, now_ms).await;
                 while let Some(rx) = esp_now.receive() {
                     // SNK frames route to World Snake when it's active; they
                     // also fall through to mesh.handle_rx (peer proof of life).
@@ -2773,7 +2774,8 @@ async fn main(_spawner: Spawner) -> ! {
                         Some(rssi),
                         now_ms,
                         uptime_secs,
-                    );
+                    )
+                    .await;
                     match event {
                         Some(MeshEvent::TimeAdopted { unix, from_id }) => {
                             let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
@@ -3003,7 +3005,7 @@ async fn main(_spawner: Spawner) -> ! {
                     let mut ids = [0u8; 16];
                     let n = mesh.live_peer_ids(now_ms, &mut ids);
                     if let Some(frame) = familiar.tick(&ids[..n], now_ms, unix_now) {
-                        mesh.broadcast_fam(&mut esp_now, &frame);
+                        mesh.broadcast_fam(&mut esp_now, &frame).await;
                     }
                     // Push the creature UI snapshot to the Slint clock nook
                     // (task 12), gated on change so we don't churn properties.
@@ -3414,11 +3416,12 @@ async fn main(_spawner: Spawner) -> ! {
                         if net.radio_started && esp_now_peer_added {
                             wled_seq = wled_seq.wrapping_add(1);
                             let frame = wled_wizmote::encode_wizmote(btn, wled_seq, batt_pct);
-                            if let Ok(w) =
-                                esp_now.send(&esp_radio::esp_now::BROADCAST_ADDRESS, &frame)
-                            {
-                                let _ = w.wait();
-                            }
+                            crate::net::smol_mesh::send_bounded(
+                                &mut esp_now,
+                                &esp_radio::esp_now::BROADCAST_ADDRESS,
+                                &frame,
+                            )
+                            .await;
                             shell.set_wled_status(wled_status(act));
                             println!("[WLED] act={act} seq={wled_seq}");
                         } else {
@@ -3839,7 +3842,7 @@ async fn main(_spawner: Spawner) -> ! {
                     && ping_outstanding.is_none()
                 {
                     ping_seq = ping_seq.wrapping_add(1);
-                    mesh.send_ping(&mut esp_now, ping_seq);
+                    mesh.send_ping(&mut esp_now, ping_seq).await;
                     ping_outstanding = Some((ping_seq, now));
                     ping_state = 1; // "sending…" + the static sent ring
                     ping_result.clear();
@@ -4045,7 +4048,7 @@ async fn main(_spawner: Spawner) -> ! {
                             // as a shade card. Broadcast, fire-and-forget — a
                             // dropped frame just means no card, which beats a
                             // retransmit protocol for a convenience feature.
-                            mesh.send_say(&mut esp_now, t.as_str());
+                            mesh.send_say(&mut esp_now, t.as_str()).await;
                         }
                         Ok(_) => {
                             // 200 + empty text: tell the user WHY so they can act. A low
