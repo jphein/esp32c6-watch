@@ -547,6 +547,11 @@ const AOD_LIGHT_SLEEP: bool = false;
 /// inside a one-minute trial, sparse enough that it never dominates a log.
 const BEAT_SECS: u64 = 15;
 
+/// Quiet period after the last volume change before the config is written to
+/// flash (#75). Slightly longer than the 2s volume-HUD dismissal, so a normal
+/// adjustment persists once, just after the HUD closes, instead of once per step.
+const CFG_SETTLE_MS: u64 = 2_500;
+
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -1596,6 +1601,9 @@ async fn main(_spawner: Spawner) -> ! {
     // UI-loop heartbeat state (#75) — see the beat block in the loop below.
     let mut loop_beats: u32 = 0;
     let mut next_beat = Instant::now() + Duration::from_secs(BEAT_SECS);
+    // Deferred config persistence (#75). `Some(t)` = `watch_cfg` differs from
+    // flash and last changed at `t`; the flush block below picks a quiet moment.
+    let mut cfg_dirty_at: Option<Instant> = None;
     // Heap LOW-WATER between beats. A 15s sample misses the trough: the beat
     // series showed 51K -> 17K -> 32K while the watch was being used, so the
     // real minimum during an app open is somewhere below what any beat printed.
@@ -3212,16 +3220,51 @@ async fn main(_spawner: Spawner) -> ! {
                 if watch_cfg.volume != volume || watch_cfg.muted != muted {
                     watch_cfg.volume = volume;
                     watch_cfg.muted = muted;
-                    if cfg_save(flash, config_offset, &watch_cfg).await {
-                        println!("[CFG] volume={} muted={} saved", volume, muted);
-                    } else {
-                        println!("[CFG] volume save failed");
-                    }
+                    // DEFERRED, not written here — see the flush block below (#75).
+                    cfg_dirty_at = Some(now);
                 }
                 if vol_feedback && !audio_out::busy() {
                     audio_out::play_pcm(tick_pcm);
                     audio_out::service_amp(&mut amp_en, &mut audio_codec);
                 }
+            }
+        }
+
+        // === Deferred config flush (#75) ===
+        // A config save is TWO 4 KB sector erase+program cycles (primary +
+        // backup mirror, `config::save`). esp-storage performs each as a
+        // read-modify-write with interrupts disabled and the flash cache
+        // suspended, so for the duration nothing executing from flash runs —
+        // no DMA completion handler, no radio-blob servicing.
+        //
+        // Both volume paths used to do that INLINE, per change. The slider drag
+        // path fired per drag SAMPLE, so dragging volume meant dozens of erase
+        // pairs back to back. JP's reproduction was exactly this: open the
+        // SoundLevel meter (I2S RX DMA streaming, plus a 256-point softfloat FFT
+        // per tick) and then adjust the volume — the watch hard-freezes with no
+        // panic and TOTAL serial silence from every thread, recoverable only by
+        // a physical power cycle. Interrupts being off is precisely why nothing
+        // can log it. This project already has a precedent for erases colliding
+        // with live execution: the #55 brick, where erasing the sector holding
+        // live WiFi rodata killed the app mid-read-modify-write.
+        //
+        // So: coalesce, and pick a quiet moment. One adjustment = one save,
+        // taken once the HUD has closed AND no audio is streaming AND the mic
+        // meter is off. `flash-guard` protects WHERE a write lands; this is the
+        // missing WHEN.
+        if let Some(dirty_at) = cfg_dirty_at {
+            let settled = now >= dirty_at + Duration::from_millis(CFG_SETTLE_MS);
+            let quiet = !audio_out::busy() && !meter_on;
+            if settled && quiet {
+                if cfg_save(flash, config_offset, &watch_cfg).await {
+                    println!(
+                        "[CFG] volume={} muted={} saved (deferred)",
+                        watch_cfg.volume, watch_cfg.muted
+                    );
+                } else {
+                    println!("[CFG] deferred save failed");
+                }
+                cfg_dirty_at = None;
             }
         }
 
@@ -4307,9 +4350,9 @@ async fn main(_spawner: Spawner) -> ! {
                         if watch_cfg.volume != volume || watch_cfg.muted != muted {
                             watch_cfg.volume = volume;
                             watch_cfg.muted = muted;
-                            if cfg_save(flash, config_offset, &watch_cfg).await {
-                                println!("[CFG] volume={} (drag) saved", volume);
-                            }
+                            // A DRAG fires this every sample. Writing here meant
+                            // dozens of erase pairs during the drag (#75).
+                            cfg_dirty_at = Some(now);
                         }
                     }
                     // Keep the HUD alive while dragging (re-arm the 2s window).
