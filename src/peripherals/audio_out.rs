@@ -156,6 +156,71 @@ pub fn play_pcm(pcm: &[u8]) -> usize {
     queued
 }
 
+/// Queue ONE chunk, awaiting queue space — the backpressure seam for a source
+/// that is arbitrarily long and arrives over time (TTS read-aloud, #read-aloud;
+/// the HA-speaker follow-up will use it too).
+///
+/// Unlike [`play_pcm`] (synchronous, truncates the remainder once the 128 ms
+/// queue fills) this **cannot truncate**: it yields until the clock task's
+/// feeder has drained a slot. A TTS utterance is 2–10 s — 120–650 chunks — so
+/// truncation is not an edge case there, it is the default outcome.
+///
+/// Returns `false` if the queue did not drain within [`PUSH_TIMEOUT`]. The
+/// caller MUST abandon the clip on `false`: it means the clock task is wedged,
+/// and awaiting forever would park the main loop (and with it the UI, the
+/// touch scan, and `service_amp`) permanently.
+///
+/// # Why the gates are raised BEFORE the send, unlike `play_pcm`
+///
+/// `play_pcm` can raise `PLAYBACK_ACTIVE`/`AMP_REQUEST` after its enqueue loop
+/// because it never yields — the feeder cannot run in between. This function
+/// **awaits**, so the clock task can wake, take the chunk and start clocking it
+/// out before we ever get to the store. That would open a playback session with
+/// the mic gate still open and the amp still unrequested. So the gates go up
+/// first, and only for a non-empty clip (raising them for an empty one would
+/// suppress the mic forever, since nothing would ever arrive to release them).
+pub async fn push_chunk(pcm: &[u8]) -> bool {
+    if pcm.is_empty() {
+        return true;
+    }
+    PLAYBACK_ACTIVE.store(true, Ordering::Relaxed);
+    AMP_REQUEST.store(true, Ordering::Relaxed);
+    for chunk in pcm.chunks(PLAY_CHUNK) {
+        let Ok(v) = PcmChunk::from_slice(chunk) else {
+            return true; // chunks() guarantees <= PLAY_CHUNK; unreachable
+        };
+        if embassy_time::with_timeout(PUSH_TIMEOUT, PLAYBACK.send(v)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// How long [`push_chunk`] waits for a queue slot before declaring the consumer
+/// wedged. The queue drains in 128 ms when healthy, so this is ~16× headroom —
+/// long enough to ride out an executor hiccup, short enough that a genuinely
+/// stuck clock task cannot hang the main loop.
+const PUSH_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+
+/// Latched when [`PlaybackFeeder::abort`] tears a session down (DMA re-arm).
+///
+/// A streamed producer needs this: `abort` drains the queue and drops the
+/// session, so a producer that kept pushing would pour chunks into a channel
+/// nobody is draining *for its session* and narrate to a dead speaker. Cleared
+/// by [`begin_stream`] at the start of each utterance.
+static STREAM_ABORTED: AtomicBool = AtomicBool::new(false);
+
+/// Arm a streamed utterance: clears the abort latch. Call once before the first
+/// [`push_chunk`].
+pub fn begin_stream() {
+    STREAM_ABORTED.store(false, Ordering::Relaxed);
+}
+
+/// Did the feeder abort the session we were streaming into?
+pub fn stream_aborted() -> bool {
+    STREAM_ABORTED.load(Ordering::Relaxed)
+}
+
 /// A long `&'static` clip streamed straight off its own buffer (the #58 ping
 /// chime): registered once at boot, played by arming `pos`/`playing`.
 struct LongClip {
@@ -337,6 +402,22 @@ fn next_long_chunk() -> Option<PcmChunk> {
     Some(chunk)
 }
 
+/// Is a long clip still mid-stream? Used by the DMA-error recovery path to
+/// decide between resuming the melody and giving up on it.
+fn long_clip_live() -> bool {
+    LONG_CLIP.lock(|c| {
+        let c = c.borrow();
+        c.playing && c.pcm.is_some_and(|p| c.pos < p.len())
+    })
+}
+
+/// Next long-clip chunk, for `silent_clock_task`'s DMA-error resume path: it
+/// needs a chunk to re-open a session with after a `Late` error, and the feeder
+/// only pulls chunks once a session is live.
+pub fn next_long_chunk_pub() -> Option<PcmChunk> {
+    next_long_chunk()
+}
+
 /// Abandon any streaming long clip (transfer re-arm / abort path).
 fn stop_long_clip() {
     LONG_CLIP.lock(|c| {
@@ -435,11 +516,42 @@ impl PlaybackFeeder {
     /// briefly replay stale clip bytes after the re-arm (rare; amp drops on
     /// the next main tick) — accepted for a path that only fires when the
     /// executor stalled longer than the whole ring.
+    /// A DMA `Late` error killed the transfer, but a STREAMING long clip should
+    /// survive it: drop the in-flight ring state and let the caller re-arm, then
+    /// keep feeding from wherever [`LONG_CLIP`] left off.
+    ///
+    /// This exists because [`abort`] is too destructive for the case that
+    /// actually happens on this watch. A received ping wakes the screen and
+    /// forces a FULL-FRAME repaint (~200 ms — measured), which is far longer than
+    /// the 48 ms DMA ring, so `top_up` reliably hits `Late` on the ping path.
+    /// `abort` then threw the melody away and cleared the completion latch's
+    /// clip, so a ping produced NO sound and NO log line while the console's
+    /// identical `play_chime()` worked perfectly (nothing repaints after it).
+    ///
+    /// Returns true if a long clip is still live and worth resuming.
+    pub fn resync(&mut self) -> bool {
+        self.current = None;
+        self.tail = 0;
+        // Queued chunks are stale ring data; the long clip is the source of truth.
+        while PLAYBACK.try_receive().is_ok() {}
+        let live = long_clip_live();
+        if live {
+            // Keep the mic suppressed and the amp up: the melody continues on the
+            // fresh transfer. Re-stamp so the amp gate re-arms cleanly.
+            self.started = Instant::now();
+        }
+        live
+    }
+
     pub fn abort(&mut self) {
         self.current = None;
         self.tail = 0;
         while PLAYBACK.try_receive().is_ok() {}
         stop_long_clip(); // don't resume a half-played melody after the re-arm
+        // Tell a streamed producer (TTS) its session died, so it stops pushing
+        // into a channel that is no longer feeding a live session — the same
+        // reason `stop_long_clip` exists for the chime.
+        STREAM_ABORTED.store(true, Ordering::Relaxed);
         PLAYBACK_ACTIVE.store(false, Ordering::Relaxed);
         AMP_REQUEST.store(false, Ordering::Relaxed);
     }
