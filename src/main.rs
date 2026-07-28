@@ -538,6 +538,11 @@ fn update_power_stats(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
+/// Master gate for AOD light sleep. **OFF**: `sleep_light` locks this hardware up
+/// (see the long note at the entry condition in the main loop). Flip to `true`
+/// only with a reproduction that survives a soak on a BLE-OFF watch.
+const AOD_LIGHT_SLEEP: bool = false;
+
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -1533,6 +1538,16 @@ async fn main(_spawner: Spawner) -> ! {
     // ends" — the fb was freed + the Slint scene brought up so the pulse could
     // composite; on dismiss we re-launch through #31's resume path (state kept).
     let mut ping_resume_app: Option<AppState> = None;
+    /// Deferred ping VISUAL (#58): `(fire_at, from_id, mac)`.
+    ///
+    /// The chime fires the instant a ping lands, but the pulse choreography does a
+    /// FULL-FRAME repaint (~200 ms) and the TX DMA ring only buffers 48 ms — so a
+    /// repaint anywhere inside the 700 ms melody starves the feeder and the chime
+    /// came out intermittently. The ring cannot grow: 16 KB of .bss trips the 70 KB
+    /// stack floor (#65) and 16 KB of heap starved the launcher into an allocation
+    /// failure (both tried, both reverted). So the repaint waits for the clip
+    /// instead — sound is instant, picture follows.
+    let mut ping_visual_due: Option<(Instant, u8, [u8; 6])> = None;
 
     // === Settings hub (v0.9.0, #49) — NETWORK flow state ===
     // The hub is scene-resident (no framebuffer); the WiFi creds flow is
@@ -1766,6 +1781,50 @@ async fn main(_spawner: Spawner) -> ! {
             && sleep_cal_ok
             && !ble_on
             && !net_radio_busy
+            // `!charging` (2026-07-28): do not light-sleep while on USB power.
+            //
+            // AOD light sleep parks the HP core and wakes on a 700 ms poll timer
+            // (AOD_POLL_MS), so every interaction can wait out that cycle — on the
+            // bench that reads as "super slow responding", which is exactly what JP
+            // hit. It only showed on ONE watch because the `!ble_on` guard above
+            // means a BLE-on watch never light-sleeps at all; the BLE-off one did,
+            // and felt sluggish while its twin felt fine on identical firmware.
+            //
+            // Light sleep exists to save battery. Plugged in there is no battery to
+            // save, so the trade is all cost and no benefit — and a watch on a
+            // bench is plugged in essentially always.
+            //
+            // NOTE `is_charging()` is the WRONG signal on its own: it reports
+            // "battery actively charging", which goes FALSE once the pack is full
+            // even with USB still attached. A topped-off watch on USB therefore
+            // still light-slept. Kept as a cheap early-out, but AOD_LIGHT_SLEEP
+            // below is what actually holds the line.
+            && !charging
+            // AOD_LIGHT_SLEEP: master gate, currently OFF — for RESPONSIVENESS.
+            //
+            // What this DOES fix (measured): AOD light sleep parks the HP core and
+            // wakes on a 700 ms poll (AOD_POLL_MS), so interactions wait out that
+            // cycle. On a BLE-OFF watch — the only kind that reaches this path,
+            // since `!ble_on` above blocks it otherwise — that reads as "super slow
+            // responding", observed 2026-07-28 with the serial spinning on
+            // `[AOD-SLEEP] woke cause=`. A BLE-ON watch never light-slept, so this
+            // flag makes an accidental split uniform rather than inventing a regime.
+            //
+            // What this does NOT fix, stated plainly: it was ALSO tried as a fix for
+            // mythic-throne's hard freezes and it did not work — that watch still
+            // froze 4/4 reboots with this flag false. Do not read this gate as a
+            // freeze fix; see issue #75, where five software hypotheses (AOD wake,
+            // mesh+sleep, bad USB hub, light sleep itself, corrupt config) were each
+            // tested and rejected, and the evidence points at hardware.
+            //
+            // Cost: standby battery when UNPLUGGED. Acceptable on bench units.
+            // Flipping it back to true should be paired with fixing whatever makes
+            // the wake latency user-visible, not just re-enabling it.
+            //
+            // (The "executor paused -> mesh quiesces" claim further down is wrong
+            // regardless: pausing the Embassy executor does not park the radio
+            // blob's esp-rtos tasks. Worth correcting separately.)
+            && AOD_LIGHT_SLEEP
         {
             // AOD light sleep (#29, now default — tap-wake confirmed on glass)
             // + WRIST-RAISE wake (polling): park the HP core in light sleep
@@ -2743,10 +2802,26 @@ async fn main(_spawner: Spawner) -> ! {
                                 // play_all drain the whole clip; the per-tick
                                 // service_amp (below) raises the amp, the feeder
                                 // holds samples until it's up (pop insurance).
+                                // INSTANT PING: clip released FIRST, and it now
+                                // SURVIVES the repaint because the TX ring holds
+                                // 256 ms (was 48 ms — see TX_RING_LEN).
+                                //
+                                // Order matters: queue the clip, raise the amp, then
+                                // yield briefly. The yield lets the clock task open
+                                // its session and push real samples into the ring
+                                // BEFORE the ~200 ms full-frame repaint starves the
+                                // executor. With 256 ms buffered, the DMA keeps
+                                // playing straight through that stall — which is
+                                // what made this unreliable at 48 ms.
+                                //
+                                // The wait also covers AMP_SETTLE_MS, so it is not
+                                // added latency: the amp has to settle anyway, and
+                                // skipping it is what made the FIRST ping after idle
+                                // silent (AMP_READY is a flag, not physical
+                                // readiness).
                                 let _ = audio_out::play_chime();
-                                // Same-tick amp raise, as every other SFX site
-                                // does — the per-tick pass would also catch it,
-                                // but not before the feeder's first push.
+                                audio_out::service_amp(&mut amp_en, &mut audio_codec);
+                                Timer::after(Duration::from_millis(140)).await;
                                 audio_out::service_amp(&mut amp_en, &mut audio_codec);
                                 // (3) ALWAYS log a shade card (#58) — a persistent,
                                 // RTC-stamped record that survives the ~4s pulse.
@@ -2781,45 +2856,12 @@ async fn main(_spawner: Spawner) -> ! {
                                         body.as_str(),
                                     );
                                 }
-                                // (2) Pop the pulse over EVERYTHING (#58). A
-                                // framebuffer game/app owns the panel + heap and
-                                // the Slint scene is suspended, so the pulse can't
-                                // composite over it. SUSPEND the app (state kept —
-                                // #31), free the fb, bring the scene back up, and
-                                // arm the resume: on dismiss we re-launch it right
-                                // where it was. Scene-resident overlays need none
-                                // of this — the pulse is just top-z above them.
-                                if fb.is_some() {
-                                    ping_resume_app = Some(app_state);
-                                    sessions.suspend(app_state);
-                                    fb = None; // free the ~51KB fb BEFORE the scene
-                                    shell.resume_scene(); // recreate so the pulse can draw
-                                    // The shell arm's return-from-game block
-                                    // re-pushes battery/time/radios/etc. (keyed on
-                                    // prev_app_state); resume_scene there no-ops.
-                                    app_state = AppState::Watchface;
-                                    println!(
-                                        "[PING] suspended {:?} for the pulse",
-                                        ping_resume_app
-                                    );
-                                }
-                                // Wake to bright from ANY sleep state — a ping is a
-                                // can't-miss event (#58). Panel fully off needs the
-                                // display_on() + warmup the touch-wake path uses.
-                                if screen_state < 3 {
-                                    if screen_state == 0 {
-                                        display.display_on();
-                                        Timer::after(Duration::from_millis(20)).await;
-                                    }
-                                    display.set_brightness(brightness);
-                                    screen_state = 3;
-                                    next_flush = now;
-                                    shell.set_aod(false);
-                                    shell.request_redraw();
-                                }
-                                // Keep the screen up through the ~4s pulse.
-                                last_interaction = Instant::now();
-                                shell.ping_pulse_show(from.as_str());
+                                // (2) DEFER the visual until the melody is out.
+                                // Sound is the ping; the pulse follows ~760 ms
+                                // later (clip 700 ms + tail). Deferring rather than
+                                // parking the loop keeps mesh/touch alive meanwhile.
+                                ping_visual_due =
+                                    Some((now + Duration::from_millis(760), from_id, mac));
                                 println!(
                                     "[PING] greeting from {} (id{from_id} seq {seq})",
                                     from.as_str()
@@ -2864,6 +2906,43 @@ async fn main(_spawner: Spawner) -> ! {
                             println!("[SAY] from {}: {}", from.as_str(), text.as_str());
                         }
                         None => {}
+                    }
+                }
+
+                // Deferred ping visual (#58): the melody has played out, so a
+                // full-frame repaint can no longer starve the audio feeder.
+                if let Some((at, vid, vmac)) = ping_visual_due {
+                    if now >= at {
+                        ping_visual_due = None;
+                        let vfrom = ping_sigil(vid, vmac);
+                        // A framebuffer game owns the panel + heap and the Slint
+                        // scene is parked, so the pulse cannot composite over it:
+                        // suspend the app (state kept, #31), free the fb, un-park
+                        // the scene, and arm the resume.
+                        if fb.is_some() {
+                            ping_resume_app = Some(app_state);
+                            sessions.suspend(app_state);
+                            fb = None;
+                            shell.resume_scene();
+                            app_state = AppState::Watchface;
+                            println!("[PING] suspended {:?} for the pulse", ping_resume_app);
+                        }
+                        // Wake to bright from ANY sleep state — a ping is a
+                        // can't-miss event. Panel fully off needs display_on() +
+                        // the warmup the touch-wake path uses.
+                        if screen_state < 3 {
+                            if screen_state == 0 {
+                                display.display_on();
+                                Timer::after(Duration::from_millis(20)).await;
+                            }
+                            display.set_brightness(brightness);
+                            screen_state = 3;
+                            next_flush = now;
+                            shell.set_aod(false);
+                            shell.request_redraw();
+                        }
+                        last_interaction = Instant::now(); // hold the screen through the pulse
+                        shell.ping_pulse_show(vfrom.as_str());
                     }
                 }
 

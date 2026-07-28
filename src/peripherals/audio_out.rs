@@ -42,7 +42,7 @@
 //! after the last sample — which also scrubs the ring back to all-zero (ring
 //! invariant: all-silence whenever idle) — before releasing the amp.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -66,7 +66,23 @@ pub const PLAY_CHUNK: usize = 512;
 /// whole (beep = 4 chunks) with headroom for a streamed source later (#HA-TTS).
 pub const PLAY_QUEUE_DEPTH: usize = 8;
 
-/// The TX clock ring in STEREO bytes. 3 descriptors × `STEREO_CHUNK` — the
+/// The TX clock ring in STEREO bytes. **16 descriptors = 16,384 B ≈ 256 ms.**
+///
+/// Was 3 (48 ms), which could not work: the #58 ping wakes the screen and does a
+/// FULL-FRAME repaint (~200 ms measured), so a 700 ms melody released around it
+/// spanned FOUR ring-lengths of executor starvation. The ring underran and the
+/// chime was audible only when the stall happened to miss it — JP: "I did hear a
+/// ring-like thing once or twice but not reliably". The 12 ms confirm tick always
+/// worked because it finishes before the stall begins.
+///
+/// 256 ms buys enough buffered audio to ride out a repaint, so the clip can be
+/// released FIRST (instant, as asked) and survive the UI work that follows.
+///
+/// It is HEAP-allocated, not a `StaticCell`: 16 KB of `.bss` would come straight
+/// out of the stack gap, which has only ~2.7 KB of margin over the 70 KB floor
+/// (#65) — the boot assert would fire. Heap has ~75 KB free post-WiFi.
+///
+/// Original note on descriptor geometry: 3 descriptors × `STEREO_CHUNK` — the
 /// same 3-descriptor circular geometry as the mic RX ring (whole-descriptor
 /// `available()` growth, no partial windows). 3072 B ≈ 48 ms @ 16 kHz stereo.
 pub const TX_RING_LEN: usize = 3 * STEREO_CHUNK;
@@ -132,6 +148,30 @@ static AMP_REQUEST: AtomicBool = AtomicBool::new(false);
 /// "Amp + codec ARE on" — set/cleared only by [`service_amp`]. The feeder
 /// holds clips until this is true so no audio is spent into a muted DAC.
 static AMP_READY: AtomicBool = AtomicBool::new(false);
+
+/// Millisecond stamp of when [`AMP_READY`] last went true.
+///
+/// `AMP_READY` records that the GPIO was driven and the codec unmuted — it is a
+/// FLAG, not physical readiness. The ES8311 leaving shutdown and the speaker amp
+/// settling take real time, so releasing samples the instant the flag flips
+/// plays the head of a clip into an amp that is not producing output yet.
+///
+/// Symptom this fixes: the FIRST ping chime after the screen had gone idle was
+/// inaudible while the log reported a full `11200/11200 B` streamed, and the
+/// SECOND ping — with the codec recently cycled and settling faster — was clearly
+/// audible. Byte counts prove the plumbing, never the sound.
+/// (u32 — riscv32 has no 64-bit atomics. Wraps after ~49 days of uptime; the
+/// worst case is one clip released early, once, which is harmless.)
+static AMP_READY_MS: AtomicU32 = AtomicU32::new(0);
+
+/// Driven-silence pre-roll after the amp is raised, before real samples are
+/// released. The ring is already streaming zeros, so this is silence into a
+/// settling amp — the same pop-insurance idea as the existing one-ring lead-in,
+/// just long enough for a COLD codec (full shutdown -> unmute).
+///
+/// Costs latency only on the first sound after idle: back-to-back SFX (touch
+/// ticks) find the amp already up and settled, so they are unaffected.
+const AMP_SETTLE_MS: u64 = 120;
 
 /// Queue mono 16 kHz s16le PCM for playback on the shared TX ring.
 ///
@@ -342,6 +382,23 @@ pub fn play_chime() -> (bool, usize, usize) {
     }
 }
 
+/// Raise the amp WITHOUT queueing audio, so it can power up and settle while the
+/// caller does something slow (the #58 ping's full-frame repaint).
+///
+/// Why this exists: a 700 ms clip cannot survive a ~200 ms executor stall with a
+/// 48 ms DMA ring — the ring underruns and the melody comes out intermittently
+/// ("heard a ring-like thing once or twice but not reliably"). The 12 ms tick
+/// always works because it finishes before the stall. So the ping path raises the
+/// amp first, lets the repaint happen while the amp settles into driven silence,
+/// and only THEN releases the clip into a quiet executor.
+///
+/// Does NOT set `PLAYBACK_ACTIVE`: no samples are queued yet, so there is nothing
+/// for the mic to overhear, and leaving capture suppressed for the whole repaint
+/// would be a needless half-duplex window.
+pub fn prearm_amp() {
+    AMP_REQUEST.store(true, Ordering::Relaxed);
+}
+
 /// Is the ping chime allowed to reach the speaker? **Currently `false` (#65).**
 ///
 /// The chime path itself is correct and was measured on-glass streaming the full
@@ -508,6 +565,7 @@ pub fn service_amp<I: I2c>(amp: &mut Output<'static>, codec: &mut Es8311<I>) {
         // (and stays silent when muted).
         let _ = codec.set_volume(MASTER_VOL_REG.load(Ordering::Relaxed));
         amp.set_high();
+        AMP_READY_MS.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
         AMP_READY.store(true, Ordering::Relaxed);
     } else if !want && have {
         amp.set_low();
@@ -613,7 +671,14 @@ impl PlaybackFeeder {
     /// The feeder releases real samples only once the amp is up ([`AMP_READY`])
     /// — or after [`AMP_WAIT_MS`], the drain-anyway failsafe (muted DAC).
     fn gate_open(&self) -> bool {
-        AMP_READY.load(Ordering::Relaxed)
+        // The amp must be up AND settled: see AMP_READY_MS. The failsafe still
+        // drains the queue after AMP_WAIT_MS so a missed raise can never wedge
+        // the mic-suppression flag.
+        let settled = AMP_READY.load(Ordering::Relaxed)
+            && (Instant::now().as_millis() as u32)
+                .wrapping_sub(AMP_READY_MS.load(Ordering::Relaxed)) as u64
+                >= AMP_SETTLE_MS;
+        settled
             || Instant::now() - self.started >= embassy_time::Duration::from_millis(AMP_WAIT_MS)
     }
 
