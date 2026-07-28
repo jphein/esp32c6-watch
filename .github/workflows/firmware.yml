@@ -55,6 +55,26 @@ jobs:
           [build]
           target = "riscv32imac-unknown-none-elf"
           rustflags = ["-C", "force-frame-pointers"]
+
+          # ESP_LOG is NOT a secret, and omitting it changed what we ship.
+          #
+          # It compiles the logging machinery in: measured at 4,064 B of `.bss`
+          # (78,160 B stack gap without it vs 74,096 B with). Without this line the
+          # released ELF/.bin had a DIFFERENT MEMORY LAYOUT from every binary we
+          # test and flash — and #65 proved layout shifts on this chip flip latent
+          # bugs on and off (the WiFi blob keeps globals at the top of .bss,
+          # directly under the stack; an 8-byte shift moved a crash from 0% to
+          # 100%). Shipping an untested layout is the risk, not the log volume.
+          #
+          # Credentials stay ABSENT deliberately (see the note at the top of this
+          # file): main.rs reads them via `option_env!` and falls back to empty, and
+          # the watch takes real creds at runtime from its config partition. Fake
+          # placeholders were considered and REJECTED — they would bake a bogus
+          # DEFAULT SSID/broker into the released artifact, which is worse than
+          # empty. Their layout cost is ~48 B `.bss` / ~918 B ROM, negligible next
+          # to ESP_LOG's 4 KB.
+          [env]
+          ESP_LOG = "info"
           EOF
 
       - name: Build firmware (release)
