@@ -142,6 +142,10 @@ sigil-id = { path = "crates/sigil-id" }
 # encoding (escapes attacker-influenced MQTT text), bridge HTTP response
 # framing, 16 kHz chunk math. Host-unit-tested; feeds src/net/voice_tts.rs.
 tts-proto = { path = "crates/tts-proto", optional = true }
+# #71: push-to-talk voice codec — G.711 µ-law + 16->8 kHz decimation + VOX frame
+# packing. Integer-only (the C6 has no FPU); host-unit-tested. Feeds the
+# SMOLv1 VOX frame in src/net/smol_mesh.rs and the RX decode in main.
+walkie-codec = { path = "crates/walkie-codec" }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

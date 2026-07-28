@@ -136,6 +136,14 @@ pub enum Hold {
     /// Never dropped in practice — esp-radio 0.18 has no controller stop,
     /// and mesh-off is a tick-level pause, not a teardown.
     Phy,
+    /// PHY-only: a push-to-talk voice session (#71) needs the radio up for
+    /// ESP-NOW, but **must not** associate — see [`ASSOC_HOLDS`].
+    ///
+    /// It gets its own bit rather than reusing [`Hold::Phy`] so the two
+    /// reference-count independently: ending a PTT session must not take the
+    /// radio away from a running mesh, and mesh-off must not cut a live
+    /// transmission.
+    Vox,
 }
 
 impl Hold {
@@ -150,12 +158,19 @@ impl Hold {
             Hold::Voice => "voice",
             Hold::Ota => "ota",
             Hold::Phy => "phy",
+            Hold::Vox => "vox",
         }
     }
 }
 
 /// Holds that want an *association* (PHY + connect); `Phy` wants the radio
 /// started only.
+/// Holds that want the radio STARTED but deliberately NOT associated —
+/// ESP-NOW rides the PHY. Associating for a PTT session would make it wait on
+/// DHCP and contend with WiFi traffic for the air, which is exactly backwards
+/// for realtime audio.
+const PHY_HOLDS: u8 = Hold::Phy.bit() | Hold::Vox.bit();
+
 const ASSOC_HOLDS: u8 = Hold::User.bit()
     | Hold::Burst.bit()
     | Hold::Session.bit()
@@ -530,7 +545,7 @@ impl St {
         self.has_creds() && (self.holds & ASSOC_HOLDS) != 0
     }
     fn phy_want(&self) -> bool {
-        self.assoc_want() || (self.holds & Hold::Phy.bit()) != 0 || self.scan_pending
+        self.assoc_want() || (self.holds & PHY_HOLDS) != 0 || self.scan_pending
     }
 }
 

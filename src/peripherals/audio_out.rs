@@ -227,6 +227,15 @@ pub fn begin_stream() {
     STREAM_LIVE.store(true, Ordering::Relaxed);
 }
 
+/// Free slots in the playback queue.
+///
+/// Lets a realtime producer decide WHOLE-FRAME: `play_pcm` fills what it can and
+/// rejects the rest, which for a voice frame means emitting half of it and
+/// clicking. #71 checks for room first and drops the whole frame instead.
+pub fn queue_free() -> usize {
+    PLAY_QUEUE_DEPTH - PLAYBACK.len()
+}
+
 /// Did the feeder abort the session we were streaming into?
 pub fn stream_aborted() -> bool {
     STREAM_ABORTED.load(Ordering::Relaxed)
