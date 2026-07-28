@@ -62,12 +62,26 @@ fi
 echo "== deploying to $HOST =="
 # Back up first — this host serves the live voice path.
 ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py $DEST_DIR/watch_bridge.py.bak 2>/dev/null || true"
-scp -q "$SRC" "$HOST:$DEST_DIR/watch_bridge.py"
+# scp does NOT expand $HOME in the destination (the ssh calls above DO, because
+# they run through a remote shell — which is why the cat/cp worked and this did
+# not, creating a literal "$HOME" directory). Stage in /tmp, then move it into
+# place with a shell that can expand the path.
+scp -q "$SRC" "$HOST:/tmp/watch_bridge.py.new"
+ssh "$HOST" "mv -f /tmp/watch_bridge.py.new $DEST_DIR/watch_bridge.py"
 
-echo "== restarting $SERVICE =="
-ssh "$HOST" "sudo systemctl restart $SERVICE" || {
+# The bridge is NOT a systemd service: on ubox0 it runs as a bare process with
+# PPID 1, started by hand (observed 2026-07-28: PID 44384, up since Jul 22, no
+# unit / cron / tmux). So "restart" means kill-and-relaunch, and it does NOT
+# survive a reboot. See README — installing a unit is a separate, deliberate
+# infra change, not something a deploy script should do behind your back.
+echo "== restarting the bridge (bare process, no unit) =="
+ssh "$HOST" "pkill -f 'python3 .*watch_bridge\.py' || true; sleep 1; \
+  cd $DEST_DIR && setsid nohup python3 watch_bridge.py >> /tmp/watch_bridge.log 2>&1 < /dev/null & \
+  sleep 2; pgrep -f 'python3 .*watch_bridge\.py' >/dev/null" || {
   echo "restart failed — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo systemctl restart $SERVICE" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py; \
+    pkill -f 'python3 .*watch_bridge\.py' || true; sleep 1; \
+    cd $DEST_DIR && setsid nohup python3 watch_bridge.py >> /tmp/watch_bridge.log 2>&1 < /dev/null &" || true
   exit 5
 }
 
@@ -75,7 +89,9 @@ echo "== health =="
 sleep 2
 if ! ssh "$HOST" "curl -fsS --max-time 10 http://127.0.0.1:$PORT/health"; then
   echo; echo "health check FAILED — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo systemctl restart $SERVICE" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py; \
+    pkill -f 'python3 .*watch_bridge\.py' || true; sleep 1; \
+    cd $DEST_DIR && setsid nohup python3 watch_bridge.py >> /tmp/watch_bridge.log 2>&1 < /dev/null &" || true
   exit 5
 fi
 echo
