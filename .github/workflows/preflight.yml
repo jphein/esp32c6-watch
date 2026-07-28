@@ -1,0 +1,109 @@
+name: preflight
+
+# Every feature combination, every host crate, and the two near-limit budgets.
+#
+# WHY: `--features tts` was broken on `main` for HOURS while every build was
+# green. A default-off cargo feature removes its own code from the compiler's
+# view, so `cargo build` cannot tell you that gated code still compiles — only
+# building that combination can. The #67 merge resolution silently dropped a
+# function `voice_tts` calls twice and nothing noticed.
+#
+# Both jobs run `tools/preflight.sh`, the SAME script used locally, so the gate
+# cannot drift between a developer's machine and CI. Everything asserted — the
+# link combos, the boot-time stack floor, the ROM ceiling — lives there together
+# with the reasoning; this file only supplies a toolchain and the fan-out.
+#
+# Complements firmware.yml, which publishes flashable artifacts on a tag. That
+# one builds `default` only and never runs on a PR — exactly the hole this fills.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch: {}
+
+# Nothing here consumes `github.event.*`, so there is no workflow-injection
+# surface (no issue/PR titles or bodies reach a `run:`).
+permissions:
+  contents: read
+
+jobs:
+  # Fast feedback: pure-logic crates, host target, seconds not minutes.
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+          targets: riscv32imac-unknown-none-elf
+      - uses: Swatinem/rust-cache@v2
+      - name: Write .cargo/config.toml
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [build]
+          target = "riscv32imac-unknown-none-elf"
+          rustflags = ["-C", "force-frame-pointers"]
+          EOF
+      - name: Host crate tests
+        run: tools/preflight.sh --tests-only
+
+  # One full fat-LTO link per combination, IN PARALLEL. Sequentially this would
+  # be hopeless: firmware.yml allows 30 minutes for a single build, so four in a
+  # row would exceed any reasonable timeout. Each matrix leg also asserts its own
+  # stack/ROM budget, so a combo that links but overruns a ceiling still fails.
+  link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false # one broken combo must not hide the state of the others
+      matrix:
+        features: ["default", "debug-console", "tts", "tts,debug-console"]
+    name: link (${{ matrix.features }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+          targets: riscv32imac-unknown-none-elf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the four legs' caches apart: they differ by feature set, so a
+          # shared key would thrash.
+          key: ${{ matrix.features }}
+
+      # `.cargo/config.toml` is gitignored (it can hold WIFI_SSID/WIFI_PASS), so
+      # a fresh checkout has none. Recreate only the build-relevant parts, as
+      # firmware.yml does. NO credentials: main.rs reads them via `option_env!`
+      # and falls back to empty, so a credential-free build is correct.
+      - name: Write .cargo/config.toml
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [build]
+          target = "riscv32imac-unknown-none-elf"
+          rustflags = ["-C", "force-frame-pointers"]
+          EOF
+
+      # nm/readelf read _bss_end / _stack_start and the ROM high-water straight
+      # out of the ELF. Present on ubuntu-latest; this is belt-and-braces.
+      - name: Ensure binutils
+        # `a || b && c` is LEFT-associative in sh, so the naive one-liner
+        # (`which ... || apt-get update && apt-get install`) would install
+        # unconditionally — `&&` binds to the whole `||` group, whose status is 0
+        # when `which` succeeds. Explicit `if` instead.
+        run: |
+          if ! command -v nm >/dev/null || ! command -v readelf >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y binutils
+          fi
+
+      # Fails on: a combo that will not link, or one whose stack gap is under
+      # STACK_FLOOR — which the script parses out of src/main.rs, so the gate and
+      # the firmware's own boot assert can never disagree.
+      - name: Link + budgets
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: tools/preflight.sh --skip-tests --only "$FEATURES"
