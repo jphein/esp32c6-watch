@@ -336,15 +336,45 @@ export component WatchShell inherits Window {
     // them on the rung the watchface alone already sustains (2 048 / 1 792 /
     // 1 664 B), which the watch has run for hours without a failure.
     //
-    // Deliberately NOT listed: `switcher-open`, `shade-open`, `ping-pulse-open`
-    // (translucent `Theme.scrim` by design — the watchface must read through),
-    // `volume-overlay-open` (a HUD card, not full-screen) and `aod` (touch
-    // routing while dimmed is owned by the Rust loop; left untouched).
-    property <bool> covered: root.launcher-open || root.settings-open
+    // `aod` belongs here too: it is a full-screen OPAQUE `#000000` rectangle, so
+    // culling under it is pixel-identical, and it is the state the watch spends
+    // most of its life in (measured: 106 items with the page built underneath,
+    // 14 without). An earlier revision of this gate left AOD out over a worry
+    // about touch routing. That worry does not hold — main.rs's wake block
+    // (`if any_touch || ...` → `shell.set_aod(false)`) runs BEFORE
+    // `shell.handle_touch`, so `aod == true` and a dispatched pointer event never
+    // coexist. And `visible: false` culls hit-testing as well as draw (verified
+    // by dispatching a pointer press at the WIFI dot with the chrome covered —
+    // the callback does not fire), so the only behaviour change would be to stop
+    // a wake-tap from also toggling whatever sat under the AOD face. That is a
+    // fix, not a regression.
+    property <bool> covered-invisibly: root.launcher-open || root.settings-open
         || root.wled-open || root.hunt-open || root.energy-open
         || root.climate-open || root.lights-open || root.ping-open
         || root.voice-open || root.mic-open || root.theme-open
-        || root.power-menu-open;
+        || root.power-menu-open || root.aod;
+
+    // Still excluded: `volume-overlay-open` — it is a 320x132 HUD card, not a
+    // full-screen surface, so the watchface around it is genuinely visible (its
+    // own cost is only ~18 of the frame's 110 items); `ping-pulse-open` — a ~4 s
+    // bloom that is MEANT to read over whatever you were doing; and
+    // `shade-open` / `switcher-open`, which paint the same 95 %-opaque
+    // `Theme.scrim` as the launcher and so would be a visible (if tiny) change —
+    // measured in tools/lunameter, JP's call, not ours.
+    property <bool> covered: root.covered-invisibly;
+
+    // ---- RULE, learned the hard way (0685985) ----------------------------------
+    // NEVER gate an element on `covered` if that element can only become visible
+    // BECAUSE a covered surface is up. The first version of this gate included the
+    // toast, reasoning purely from z-order — the toast is declared below the
+    // overlays, so under an opaque one it draws nothing. True, but irrelevant: the
+    // toast's EMIT SITES matter, and three of them fire only while an overlay is
+    // up. `"No WiFi credentials — set in Settings"` is raised by a WIFI tap, which
+    // by construction happens with `settings-open == true`, so gating it made that
+    // button silently dead — exactly the failure the toast exists to prevent.
+    // Before adding `!root.covered` to anything, grep for who SETS it, not just
+    // where it sits in z.
+    // ---------------------------------------------------------------------------
 
     // Page backdrop. On the dark schemes (Midnight/Amber/Violet) `Theme.bg` is
     // solid #000000 — crisp, self-emissive-black, battery-optimal on this
@@ -455,7 +485,7 @@ export component WatchShell inherits Window {
 
     // Left edge: page carousel, more content behind the left bezel.
     Rectangle {
-        visible: root.hint-sides && !root.aod && !root.covered;
+        visible: root.hint-sides && !root.covered;
         x: 0; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -477,7 +507,7 @@ export component WatchShell inherits Window {
 
     // Right edge: mirror of the left strip.
     Rectangle {
-        visible: root.hint-sides && !root.aod && !root.covered;
+        visible: root.hint-sides && !root.covered;
         x: parent.width - self.width; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -504,7 +534,7 @@ export component WatchShell inherits Window {
     // beam hugging the edge zone (start_y ≥ 427), tucked under the page dots
     // (visible dots end y473; this starts y479).
     Rectangle {
-        visible: root.hint-up && !root.aod && !root.covered;
+        visible: root.hint-up && !root.covered;
         x: (parent.width - self.width) / 2; y: 474px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -525,7 +555,7 @@ export component WatchShell inherits Window {
     // bottom handle, hugging the top bezel above the radio dots' visible
     // row (~y38); the echo "descends" toward the content.
     Rectangle {
-        visible: root.hint-down && !root.aod && !root.covered;
+        visible: root.hint-down && !root.covered;
         x: (parent.width - self.width) / 2; y: 2px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -646,7 +676,7 @@ export component WatchShell inherits Window {
     // than `if`-gated: chrome is resident anyway, and each `if` would cost
     // a ~3-6KB generated inner component (see shade.slint's ROM note).
     susp-chip := IconButton {
-        visible: root.suspended-count > 0 && !root.aod && !root.covered;
+        visible: root.suspended-count > 0 && !root.covered;
         x: parent.width - self.width - Theme.safe-corner;
         y: 64px;
         width: 58px;
@@ -677,7 +707,7 @@ export component WatchShell inherits Window {
     // Unread notifications chip (#32): warm dot + count, left of the
     // suspended chip when both show — one cluster row. Tap opens the shade.
     unread-chip := IconButton {
-        visible: root.notif-unread > 0 && !root.aod && !root.covered;
+        visible: root.notif-unread > 0 && !root.covered;
         x: parent.width - self.width - Theme.safe-corner
             - (root.suspended-count > 0 ? 62px : 0px);
         y: 64px;
