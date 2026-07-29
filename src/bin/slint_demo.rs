@@ -3,6 +3,23 @@
 
 include!("../panic_reboot.rs");
 
+// `heap-hooks` is a CRATE-WIDE feature that turns on `esp-alloc/alloc-hooks`, and
+// that contract requires BOTH `_esp_alloc_alloc` and `_esp_alloc_dealloc` to be
+// defined in every binary — otherwise the link fails. `heap_hooks.rs` defines them,
+// but it was declared only in `main.rs`, so
+//
+//     cargo build --features heap-hooks          # whole package
+//
+// linked the main bin and then failed on THIS one. `tools/preflight.sh` never hit it
+// because it passes `--bin esp32c6-watch`, which is exactly the kind of gap where a
+// footgun survives: the gate that would have caught it is scoped past it.
+//
+// Same shape and same fix as `panic_reboot.rs` above — a crate-wide feature needs its
+// symbols in every binary, and neither bin references the lib target.
+#[cfg(feature = "heap-hooks")]
+#[path = "../heap_hooks.rs"]
+mod heap_hooks;
+
 // Slint UI demo for the Waveshare ESP32-C6-Touch-AMOLED-2.06.
 //
 // A Slint-rendered watchface (time from the PCF85063 RTC) drawn with the

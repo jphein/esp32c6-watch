@@ -900,6 +900,9 @@ def say_image_sigil(binp: Path) -> dict:
             f"'{want}'")
         say("  if you just ran `fambuild`, check the ELF came back — a remote "
             "build that is not fetched leaves an OLDER binary at the local path")
+        say("  OR the tree simply moved since the build (several agents committing "
+            "faster than a 2-minute link). The IMAGE's hash above is the "
+            "self-consistent provenance — quote that, not a tree hash sampled later.")
         say("  " + "!" * 60)
     say("  ---------------------------------------------")
     say(f"   BUILD  {sig['build']}")
