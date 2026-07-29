@@ -2,6 +2,9 @@
 # ota_push.sh — push a firmware update to the watch over WiFi, zero-touch.
 #
 #   tools/ota_push.sh                  # stamp + build + image + upload + announce
+#   tools/ota_push.sh --features story # build WITH an opt-in feature. REQUIRED if
+#                                      # the target watch is running one, or the
+#                                      # OTA silently downgrades it away.
 #   tools/ota_push.sh --announce-only  # re-announce the already-uploaded image
 #   tools/ota_push.sh --target <sigil> # announce to ONE watch only, via its
 #                                      # per-watch topic watch/<sigil>/ota (#34)
@@ -53,6 +56,10 @@ TARGET=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --announce-only) ANNOUNCE_ONLY=1 ;;
+        --features)
+            FEATURES="$2"
+            [ -n "$FEATURES" ] || { echo "ota_push: --features needs a value" >&2; exit 2; }
+            shift ;;
         --clear) CLEAR=1 ;;
         --target)
             TARGET="${2:-}"
@@ -101,7 +108,23 @@ else
     echo "ota_push: stamped OTA_BUILD=$EPOCH"
 
     # 2. Build on familiar (fambuild syncs this worktree incl. .cargo/config.toml).
-    (cd "$ROOT" && fambuild build --release --bin esp32c6-watch)
+    # --features MATTERS AND ITS ABSENCE IS A TRAP. Opt-in features (`story`,
+    # `tts`) are OFF by default, so a plain push builds WITHOUT them and the
+    # zero-touch OTA then SILENTLY REMOVES a feature the watch was running. That
+    # is a downgrade the wearer never asked for and cannot see coming.
+    #
+    # Caught the first time an OTA was attempted for a watch running `--features
+    # story`: the push would have replaced it with a default image and taken the
+    # Story app away mid-use.
+    if [ -n "$FEATURES" ]; then
+        echo "ota_push: building WITH --features $FEATURES"
+        (cd "$ROOT" && fambuild build --release --bin esp32c6-watch --features "$FEATURES")
+    else
+        echo "ota_push: building with DEFAULT features (no --features given)"
+        echo "ota_push: NOTE if the target watch runs an opt-in feature (story/tts),"
+        echo "ota_push:      this push will REMOVE it. Pass --features to keep it."
+        (cd "$ROOT" && fambuild build --release --bin esp32c6-watch)
+    fi
 
     # 3. ELF -> app image. fambuild keeps target/ on familiar, so fetch the ELF.
     WORKTREE_NAME="$(basename "$ROOT")"
