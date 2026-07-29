@@ -110,6 +110,22 @@ export component StoryPage {
     // Director note by voice (push-to-talk → STT → POST /api/notes).
     callback note();
 
+    // ---- fixed geometry for the CHARACTER page (page 3) --------------------
+    // A literal, so every expression built from it is constant-folded and emits no
+    // binding at all. Swapping these three uses back to
+    // `root.width - 2 * Theme.safe-side` was measured: +6 allocations and +336 B
+    // on the host harness, and — worth knowing before optimising the wrong thing —
+    // ZERO change in dependency-node count, because `root.width` is itself
+    // compile-time constant on a fixed-size window, and a constant property is
+    // marked with `const_sentinel()` so reading it never registers a dependency
+    // (i-slint-core/properties.rs). The saving is one binding holder per row, not
+    // a dependency node per read.
+    //
+    // Affordable here only because the panel is a 410x502 AMOLED that never
+    // resizes, so the arithmetic is a fact rather than a measurement. Named rather
+    // than scattered so it stays auditable: if the panel changes, this is the edit.
+    property <length> content-w: 366px; // 410 - 2 * Theme.safe-side(22)
+
     Rectangle { width: 100%; height: 100%; background: Theme.bg; }
     OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
@@ -481,31 +497,96 @@ export component StoryPage {
     // Text-and-icon panel, NOT a composited portrait: a 410x502 RGB565 frame is
     // ~412 KB against 512 KB of SRAM with no PSRAM, and the layered art does not
     // exist. Reserved as Phase 2b (design §9.4.1).
-    if root.page == 3: Text {
+    //
+    // ===========================================================================
+    // WHY THIS PAGE SHOWS SIX ROWS AT A TIME AND NOT SEVENTEEN
+    // ===========================================================================
+    // Rendering all 17 slots at once is not a heavy screen, it is a REBOOT. Two of
+    // two hardware trials: populate every slot, tap CHAR, and the watch resets
+    // (`up=` 63s -> 17s, pools back at boot rungs, app back to Watchface).
+    //
+    // The mechanism is a doubling rung, not a slow leak. `PrepareScene` emits one
+    // scene item AND one texture per rendered GLYPH, and its vectors grow by
+    // powers of two, so crossing 256 textures asks esp-alloc for
+    // 512 x 28 = 14,336 B **contiguous**. `maxblk_main` is 0 — main cannot serve
+    // any block at all — so the request falls to the reclaimed pool, whose free
+    // bytes are a sum of holes. 23,748 B free with no single 14,336 B hole fails
+    // outright, and it fails during the tap, before a heartbeat can report a floor.
+    //
+    // So the budget is a hard count, and it was measured, not guessed
+    // (tools/lunameter/measure.sh, all 17 rows rendered):
+    //
+    //   fixed floor (tabs + title + chevron + 93 label glyphs)  =  149 items
+    //   ...which leaves 107 items for SEVENTEEN values:
+    //     6-char values -> 251 items   cap 256   (the last safe width)
+    //     7-char values -> 268 items   cap 512   CROSSED
+    //
+    // Six characters. The daemon's own naming style runs 22-28
+    // ("Shard of Divine Foundation"), so there is no value width that is both
+    // legible and safe while 17 rows paint. This page could not be tuned; only
+    // reshaped. Predicted counts matched the four measured arms to within 1 item,
+    // which is why the redesign was chosen over another round of trimming.
+    //
+    // ONE SECTION AT A TIME, six single-column rows. Worst window measures well
+    // inside cap 256 and tolerates 28-glyph values before it would cross — so the
+    // rung now has margin against the daemon's real naming width, not 11 glyphs of
+    // it. The single wide column also FIXES a display bug the two-column grid had:
+    // 111 px of value column elided a 24-character name to about thirteen
+    // characters, so the reader never saw the name they were being shown.
+    //
+    // Every slot stays reachable — that is the point of the view switcher. The
+    // previous single-column attempt ran 11 rows from y=344 to 596px on a 502px
+    // panel and put `main_hand`, `off_hand`, `ring1` and `ring2` entirely
+    // off-glass; the two-column grid fixed the reachability and hit the rung
+    // instead. A window fixes both.
+    //
+    // The empty state still reads as "no data yet" and not as "broken": every
+    // view renders its full complement of seeded em-dash rows, and the `known`
+    // counters stay on screen, so 0/11 with eleven dashes across two GEAR views is
+    // as unambiguous as eleven dashes in one grid was.
+
+    // Which slice of the character sheet is on screen: 0 appearance · 1 equipment
+    // 1-6 · 2 equipment 7-11. Local UI state — Rust neither sets nor needs it, so
+    // it stays out of the shell's property surface.
+    property <int> char-view: 0;
+    // Which half of the 11 equipment slots view 1/2 shows. Compared against
+    // `floor(i / 6)` per row, which is ONE read of the loop index instead of the
+    // two an `i >= start && i < start + 6` pair would take.
+    property <int> gear-page: root.char-view == 2 ? 1 : 0;
+
+    // View switcher. Replaces the two static section headers rather than adding to
+    // them, so the glyphs it costs are glyphs the headers gave back.
+    if root.page == 3: HorizontalLayout {
         x: Theme.safe-side;
-        y: 140px;
-        text: "APPEARANCE";
-        color: Theme.dim;
-        font-size: 13px;
-        letter-spacing: 3px;
+        y: 138px;
+        width: root.content-w;
+        height: 30px;
+        spacing: 6px;
+        Seg { label: "APPEAR";  active: root.char-view == 0; tapped => { root.char-view = 0; } }
+        Seg { label: "GEAR I";  active: root.char-view == 1; tapped => { root.char-view = 1; } }
+        Seg { label: "GEAR II"; active: root.char-view == 2; tapped => { root.char-view = 2; } }
     }
-    if root.page == 3: Text {
-        x: root.width - Theme.safe-side - self.width;
-        y: 140px;
-        text: root.appearance-count + "/6";
-        color: Theme.faint;
-        font-size: 13px;
-    }
-    if root.page == 3: VerticalLayout {
+
+    // The six appearance traits — all of them, so this view needs no window.
+    if root.page == 3 && root.char-view == 0: Rectangle {
         x: Theme.safe-side;
-        y: 160px;
-        width: root.width - 2 * Theme.safe-side;
-        spacing: 2px;
+        y: 182px;
+        width: root.content-w;
+        height: 240px; // 6 rows x 40px — ends at 422, clear of the count line
         for tr[i] in root.appearance: Rectangle {
-            height: 22px;
+            x: 0;
+            y: i * 40px;
+            width: root.content-w;
+            height: 40px;
+            // Centred by a LITERAL box height plus vertical-alignment, never by
+            // `(parent.height - self.height) / 2` — that reads two live properties,
+            // so on a repeated row it is two more 16 B dependency nodes per Text,
+            // per row, for a result that is identical on a fixed 30 px row.
             Text {
                 x: 0;
                 y: 0;
+                height: 40px;
+                vertical-alignment: center;
                 text: tr.label;
                 color: Theme.dim;
                 font-size: 14px;
@@ -513,7 +594,9 @@ export component StoryPage {
             Text {
                 x: 108px;
                 y: 0;
-                width: parent.width - 108px;
+                height: 40px;
+                vertical-alignment: center;
+                width: root.content-w - 108px;
                 text: tr.known ? tr.value : "—";
                 color: tr.known ? Theme.ink : Theme.faint;
                 font-size: 15px;
@@ -522,59 +605,64 @@ export component StoryPage {
         }
     }
 
-    if root.page == 3: Text {
+    // Equipment, windowed. The repeater still walks all eleven slots — one array
+    // stays the source of truth — but a row outside the current window renders NO
+    // Text children, and a glyph that is never emitted is never a scene item. This
+    // is the launcher's padded-slot result (AUDIO: 35 items with 7 padded slots),
+    // applied to a model instead of a page grid.
+    if root.page == 3 && root.char-view != 0: Rectangle {
         x: Theme.safe-side;
-        y: 308px;
-        text: "EQUIPMENT";
-        color: Theme.dim;
-        font-size: 13px;
-        letter-spacing: 3px;
-    }
-    if root.page == 3: Text {
-        x: root.width - Theme.safe-side - self.width;
-        y: 308px;
-        text: root.equipped-count + "/11";
-        color: Theme.faint;
-        font-size: 13px;
-    }
-    // Eleven slots in TWO COLUMNS of six.
-    //
-    // One column did not fit and the arithmetic is unforgiving: 11 rows from
-    // y=344 ended at 596px on a 502px panel, so `main_hand`, `off_hand`, `ring1`
-    // and `ring2` were entirely off-glass — the weapon and ring slots, which are
-    // the ones a LitRPG reader actually wants. It was invisible during
-    // development because every slot was null, so eleven identical em-dashes gave
-    // no clue that the last four were missing; it would have appeared the moment
-    // the ledger started emitting gear.
-    //
-    // Absolute positioning by loop index rather than two models: one array stays
-    // the source of truth and the column split is presentation, where it belongs.
-    if root.page == 3: Rectangle {
-        x: Theme.safe-side;
-        y: 330px;
-        width: root.width - 2 * Theme.safe-side;
-        height: 138px; // 6 rows x 23px — ends at 468, inside the 478px safe area
+        y: 182px;
+        width: root.content-w;
+        height: 240px;
         for sl[i] in root.equipment: Rectangle {
-            x: i < 6 ? 0px : parent.width / 2 + 4px;
-            y: (i < 6 ? i : i - 6) * 23px;
-            width: parent.width / 2 - 4px;
-            height: 22px;
-            Text {
-                x: 0;
-                y: 0;
-                text: sl.label;
-                color: Theme.dim;
-                font-size: 12px;
-            }
-            Text {
-                x: 68px;
-                y: 0;
-                width: parent.width - 68px;
-                text: sl.known ? sl.value : "—";
-                color: sl.known ? Theme.ink : Theme.faint;
-                font-size: 13px;
-                overflow: elide;
+            x: 0;
+            // mod()/floor() rather than `i < 6 ? i : i - 6`. Slint does not dedup
+            // dependency registrations — `register_as_dependency_to_current_binding`
+            // allocates unconditionally per read — so re-reading the loop index in
+            // the same expression allocates again. A/B measured on these 11 rows:
+            // the conditional form costs +22 nodes, 352 B on the device, for an
+            // identical result.
+            y: mod(i, 6) * 40px;
+            width: root.content-w;
+            height: 40px;
+            if floor(i / 6) == root.gear-page: Rectangle {
+                Text {
+                    x: 0;
+                    y: 0;
+                    height: 40px;
+                    vertical-alignment: center;
+                    text: sl.label;
+                    color: Theme.dim;
+                    font-size: 14px;
+                }
+                Text {
+                    x: 108px;
+                    y: 0;
+                    height: 40px;
+                    vertical-alignment: center;
+                    width: root.content-w - 108px;
+                    text: sl.known ? sl.value : "—";
+                    color: sl.known ? Theme.ink : Theme.faint;
+                    font-size: 15px;
+                    overflow: elide;
+                }
             }
         }
+    }
+
+    // How much of the sheet the ledger has actually filled. Kept visible in every
+    // view: it is the difference between "the fetch returned nothing" and "this
+    // character genuinely wears nothing", which em-dashes alone cannot say.
+    if root.page == 3: Text {
+        x: Theme.safe-side;
+        y: 434px;
+        width: root.content-w;
+        horizontal-alignment: center;
+        text: root.char-view == 0
+            ? root.appearance-count + "/6 traits known"
+            : root.equipped-count + "/11 slots known";
+        color: Theme.faint;
+        font-size: 13px;
     }
 }

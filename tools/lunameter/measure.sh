@@ -72,18 +72,49 @@ ceiling=256
 # When page 3 is fixed these should drop under the ceiling, and the gate says so
 # explicitly rather than silently passing — a gate that tells you when it can be
 # TIGHTENED is worth more than one that only tells you when it broke.
-known_over="story(page3,len08) story(page3,len24)"
+# Each entry MUST carry a tracking ref, and the count is capped. Both exist because
+# a "known failures" list rots into a permanent exemption — which is the one way this
+# gate could still end up lying. Requiring a ref makes an addition deliberate; capping
+# the count makes it visible in the diff. **NEVER RAISE known_over_max.** If a new
+# frame legitimately cannot meet the ceiling, that is a design decision, not a list
+# edit — and the fix is to change the frame, since crossing the ceiling reboots the
+# watch 10/10.
+# EMPTY, and it stayed empty by being earned. This held
+# `story(page3,len08):#75 story(page3,len24):#75` — the two frames that requested
+# 14,336 B contiguous and rebooted the watch 10/10. luna's windowed CHAR page
+# (PR #80) brought them to 136 and 220 textures, and this gate is what said so:
+# "a KNOWN-OVER frame is now UNDER the ceiling — remove it from known_over". The
+# list shrank on the gate's own instruction rather than on someone remembering to
+# check, which is the property it was designed for.
+known_over=""
+known_over_max=0
+
+n_known=$(printf '%s\n' $known_over | grep -c . || true)
+if [ "$n_known" -gt "$known_over_max" ]; then
+  echo "lunameter: known_over has $n_known entries, cap is $known_over_max." >&2
+  echo "  This list may only SHRINK. A frame that cannot meet the 256-texture" >&2
+  echo "  ceiling reboots the watch — change the frame, not this list." >&2
+  exit 1
+fi
+for e in $known_over; do
+  case "$e" in
+    *:\#*) ;;
+    *) echo "lunameter: known_over entry '$e' has no tracking ref (want 'frame:#NN')" >&2
+       exit 1 ;;
+  esac
+done
+known_frames=$(printf '%s\n' $known_over | sed 's/:#.*//' | tr '\n' ' ')
 
 pairs=$(paste -d'|' \
           <(grep -o '^--- FRAME .*' "$out" | sed 's/--- FRAME //; s/ ---//') \
           <(grep -o 'textures=[0-9]*' "$out" | cut -d= -f2))
-worst=$(printf '%s\n' "$pairs" | awk -F'|' -v k="$known_over" '
+worst=$(printf '%s\n' "$pairs" | awk -F'|' -v k="$known_frames" '
   BEGIN{split(k,a," "); for(i in a) ex[a[i]]=1}
   !($1 in ex) && $2+0>m {m=$2+0} END{print m+0}')
-new_over=$(printf '%s\n' "$pairs" | awk -F'|' -v c="$ceiling" -v k="$known_over" '
+new_over=$(printf '%s\n' "$pairs" | awk -F'|' -v c="$ceiling" -v k="$known_frames" '
   BEGIN{split(k,a," "); for(i in a) ex[a[i]]=1}
   !($1 in ex) && $2+0>c {printf "  %s = %s textures\n", $1, $2}')
-fixed=$(printf '%s\n' "$pairs" | awk -F'|' -v c="$ceiling" -v k="$known_over" '
+fixed=$(printf '%s\n' "$pairs" | awk -F'|' -v c="$ceiling" -v k="$known_frames" '
   BEGIN{split(k,a," "); for(i in a) ex[a[i]]=1}
   ($1 in ex) && $2+0<=c {printf "  %s = %s textures\n", $1, $2}')
 
@@ -103,4 +134,4 @@ if [ -n "$fixed" ]; then
   printf '%s\n' "$fixed" >&2
 fi
 echo "lunameter: texture ceiling OK — worst gated frame ${worst}/${ceiling}" >&2
-echo "  (known-over, the OPEN page-3 bug, not gated: $known_over)" >&2
+echo "  (known-over exemptions: ${known_frames:-none — every frame is gated})" >&2
