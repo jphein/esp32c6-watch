@@ -149,6 +149,14 @@ impl UiState {
 
 static UI_STATE: Mutex<RefCell<UiState>> = Mutex::new(RefCell::new(UiState::boot()));
 
+/// Mark for the `heap` command's bracketed histogram. `None` until the first
+/// `heap` call. Only compiled with `heap-hooks`, so a default build pays nothing
+/// -- which matters because `.bss` here steals from the stack gap measured
+/// against the 71,680 B floor.
+#[cfg(feature = "heap-hooks")]
+static HEAP_MARK: Mutex<RefCell<Option<crate::heap_hooks::Snapshot>>> =
+    Mutex::new(RefCell::new(None));
+
 /// Publish the current UI state (main loop, once per tick).
 pub fn publish_state(s: UiState) {
     critical_section::with(|cs| *UI_STATE.borrow(cs).borrow_mut() = s);
@@ -410,6 +418,36 @@ fn handle_line(bytes: &[u8]) {
             println!("[DBGCON] ok chime sent={} first={}B err={}", sent, n, err);
         }
         "ping" => println!("[DBGCON] ok pong"),
+        // Bracket an ARBITRARY runtime event with the heap-hooks size histogram
+        // (#75). `heap_mark`/`heap_span` in main.rs only bracket boot spans
+        // (scene / wifi / ble), so nothing could attribute an allocation burst
+        // caused by a tap. First call marks, each later call reports the delta
+        // since the mark and re-marks -- so `heap` / tap / `heap` yields the
+        // per-size-class cost of that tap alone.
+        //
+        // This exists to test whether the CHAR page's measured ~10.7 KB is
+        // `PartialRendererCache` (a slab doubling = ONE large-bucket alloc, plus
+        // one 16 B `Box<PropertyTracker>` per rendered item = a burst in bucket
+        // 0). `[POOL]` cannot answer it: that cache is a PRIVATE struct in
+        // i-slint-core, so it is not reachable from the vendored renderer and
+        // not addable to `pool_capacities()`.
+        #[cfg(feature = "heap-hooks")]
+        "heap" => {
+            let now = crate::heap_hooks::snapshot();
+            let prev = critical_section::with(|cs| HEAP_MARK.borrow(cs).replace(Some(now)));
+            match prev {
+                None => println!("[DBGCON] ok heap mark"),
+                Some(since) => crate::heap_hooks::report("dbgcon", &since),
+            }
+        }
+        // `heap` is listed only when it EXISTS. A help text that advertises a
+        // command which answers "err unknown" sends the reader looking for a typo
+        // in their own input rather than at their feature flags.
+        #[cfg(feature = "heap-hooks")]
+        "help" => println!(
+            "[DBGCON] cmds: tap <x> <y> | swipe up|down|left|right | launch <idx> | home | state | perf | beep | chime | ping | heap"
+        ),
+        #[cfg(not(feature = "heap-hooks"))]
         "help" => println!(
             "[DBGCON] cmds: tap <x> <y> | swipe up|down|left|right | launch <idx> | home | state | perf | beep | chime | ping"
         ),
