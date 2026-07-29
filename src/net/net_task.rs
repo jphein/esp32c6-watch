@@ -47,15 +47,19 @@
 //! [`BURST_GIVEUP`] so a credentialed watch on a dead AP eventually returns
 //! the radio to the mesh.
 //!
-//! ## Radio arbitration (v0.9.1 semantics, decided here)
+//! ## Radio arbitration (revised 2026-07-29)
 //!
-//! The ESP-NOW mesh channel pin **yields to any WiFi intent** (a5a4c27). The
-//! *decision* now lives in this task — `mesh_pin_ok` is true only when the
-//! radio is up, unassociated, not connecting/scanning, with no association
-//! holds and no OTA pending — while the mechanical `esp_now.set_channel`
-//! stays in main (the mesh owns the `esp_now` handle). Bonus over v0.9.1:
-//! after a scan sweep the pin verdict returns to true, so main re-pins ch6
-//! instead of leaving the radio wherever the scan stopped.
+//! The mesh yields the channel only to a radio operation that is ACTUALLY IN
+//! FLIGHT — a connect handshake or a scan sweep — never to mere *intent*.
+//! `mesh_pin_ok` is true whenever the radio is up, unassociated, and neither
+//! connecting nor scanning; the mechanical `esp_now.set_channel` stays in main
+//! (the mesh owns the `esp_now` handle).
+//!
+//! It previously also required `!assoc_want()` and no pending OTA, which meant a
+//! credentialed watch never tuned the mesh channel for the whole boot burst (up
+//! to [`BURST_GIVEUP`], 180 s). On an unreachable AP that was 180 s of no mesh
+//! on every boot — the reason watch-to-watch ping only started working after the
+//! burst gave up. A node retrying association must still be a mesh citizen.
 //!
 //! Commands arriving while the task is parked in a bounded await (one 15 s
 //! connect attempt, one scan channel, an OTA read) queue up and apply right
@@ -70,12 +74,14 @@
 //! weak-link handshake times out as `AuthenticationExpired` even while a
 //! strong AP sits beside you. So we roam in firmware:
 //!
-//! - **Best-BSSID association**: [`attempt_connect`] runs a targeted candidate
-//!   scan ([`scan_candidates`]) and pins the STRONGEST BSSID for the SSID via
-//!   `StationConfig::with_bssid` + `with_channel` (`bssid_set=true` →
-//!   esp-radio targets exactly it). A pinned BSSID that fails
-//!   [`PIN_MAX_FAILS`] times falls back to one `ScanMethod::AllChannels`
-//!   driver-select attempt, then re-scans — so a vanished BSSID can't wedge.
+//! - **Channel-hinted association, NEVER a BSSID pin** (2026-07-29): the old
+//!   fix pinned the strongest BSSID via `with_bssid` (`bssid_set=true`). That
+//!   made esp-radio accept an association only from that exact AP, which fights
+//!   the AP's own client steering on a roaming SSID — the likely cause of
+//!   `AuthenticationExpired` at -44 dBm. Now [`attempt_connect`] hints only the
+//!   CHANNEL (`with_channel`, `bssid_set=false`) and lets the driver pick the AP;
+//!   after [`HINT_MAX_FAILS`] it drops to one `ScanMethod::AllChannels`
+//!   driver-select attempt, so nothing can wedge. See [`set_sta_config`].
 //! - **RSSI-triggered roam** ([`maybe_roam`]): while connected, sample
 //!   `rssi()`; sustained below [`ROAM_RSSI_THRESH`] AND a candidate ≥
 //!   [`ROAM_MARGIN_DB`] stronger (excluding the current BSSID) → disconnect,
@@ -355,6 +361,82 @@ pub fn with_scan_rows<R>(f: impl FnOnce(&[ScanRow]) -> R) -> R {
     STATE.lock(|s| f(&s.borrow().rows))
 }
 
+// --- Mesh election handoff -------------------------------------------------
+// net_task owns the radio and therefore the scans; the mesh (in main) owns the
+// election. These two cells are the seam. Deliberately NOT part of NetSnapshot:
+// that struct is `Copy`-compared on every publish, and adding 14 bytes of
+// observation to it would make every scan churn the render wake.
+
+/// Strongest RSSI per 2.4 GHz channel for our SSID, newest scan wins. `i8::MIN`
+/// encodes "not heard" so the whole thing stays `Copy` and lock-free-ish.
+/// Costs 13 B of `.bss`.
+static SCAN_OBS: BlockingMutex<CriticalSectionRawMutex, RefCell<[i8; mesh_elect::N_CHANNELS]>> =
+    BlockingMutex::new(RefCell::new([i8::MIN; mesh_elect::N_CHANNELS]));
+
+/// The channel we ACTUALLY associated on, `0` = not associated. The election
+/// runs over reality, not over what we hinted — see [`attempt_connect`].
+static LANDED_CH: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Replace the WHOLE observation vector from an all-channel scan.
+///
+/// Authoritative, so absence is evidence: a channel the sweep did not hear our
+/// SSID on is cleared, not merely left alone. That matters for acceptance case 3
+/// ("kill the elected AP, the fleet re-converges"). An earlier version merged
+/// instead, which looked harmless and was not: the elector ages observations
+/// PER NODE, and our own slot is refreshed every mesh tick, so a channel heard
+/// once at boot would have kept voting for a dead AP forever. Only ever call this
+/// with the result of a scan that covered every channel.
+fn publish_scan_obs(obs: &[Option<i8>; mesh_elect::N_CHANNELS]) {
+    SCAN_OBS.lock(|s| {
+        let mut cell = s.borrow_mut();
+        for (i, r) in obs.iter().enumerate() {
+            cell[i] = r.unwrap_or(i8::MIN);
+        }
+    });
+}
+
+/// Update ONE channel from a single-channel scan (the picker's per-channel
+/// sweep). `rssi = None` clears it — the sweep did dwell on that channel, so not
+/// hearing our SSID there is real evidence, not a gap.
+fn publish_scan_obs_channel(ch: u8, rssi: Option<i8>) {
+    if let Some(i) = mesh_elect::ch_index(ch) {
+        SCAN_OBS.lock(|s| s.borrow_mut()[i] = rssi.unwrap_or(i8::MIN));
+    }
+}
+
+/// Latest per-channel observations for the election, `None` = never heard.
+pub fn scan_observations() -> [Option<i8>; mesh_elect::N_CHANNELS] {
+    SCAN_OBS.lock(|s| {
+        let cell = s.borrow();
+        let mut out = [None; mesh_elect::N_CHANNELS];
+        for i in 0..mesh_elect::N_CHANNELS {
+            if cell[i] != i8::MIN {
+                out[i] = Some(cell[i]);
+            }
+        }
+        out
+    })
+}
+
+/// The channel we are associated on, or `None` when unassociated.
+pub fn landed_channel() -> Option<u8> {
+    match LANDED_CH.load(Ordering::Relaxed) {
+        0 => None,
+        ch => Some(ch),
+    }
+}
+
+/// The mesh's elected channel, handed down so association can PREFER it.
+/// `net_task` never elects — it only reports observations and honours the result.
+pub fn set_preferred_channel(ch: u8) {
+    if mesh_elect::ch_index(ch).is_some() {
+        PREFER_CH.store(ch, Ordering::Relaxed);
+        NET_WAKE.signal(());
+    }
+}
+
+static PREFER_CH: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 fn publish(snap: NetSnapshot) {
     let changed = STATE.lock(|s| {
         let mut p = s.borrow_mut();
@@ -444,10 +526,12 @@ const NTP_RETRY: Duration = Duration::from_secs(10);
 const SET_CONFIG_RETRY: Duration = Duration::from_millis(500);
 
 // --- #57 firmware roaming policy -------------------------------------------
-/// A pinned BSSID that fails this many times in a row is dropped in favour of
-/// ONE driver-select (AllChannels + sort-by-signal) fallback attempt — so a
-/// BSSID that moved/vanished since the candidate scan can't wedge the connect.
-const PIN_MAX_FAILS: u8 = 2;
+/// A channel hint that fails this many times in a row is dropped in favour of
+/// ONE driver-select (AllChannels + sort-by-signal) fallback attempt — so an
+/// elected channel whose APs moved or vanished can't wedge the connect. The
+/// election is advisory to association, never binding: the watch must always be
+/// able to get online.
+const HINT_MAX_FAILS: u8 = 2;
 /// Cadence for sampling the connected link RSSI (the roam trigger). Matches
 /// the connected idle poll so it costs no extra wakes.
 const RSSI_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
@@ -502,17 +586,17 @@ struct St {
     scanning: bool,
     ota: Option<OtaJob>,
     ota_phase: OtaPhase,
-    // #57 firmware roaming: the BSSID+channel to TARGET on the next connect.
-    // Filled by a best-BSSID candidate scan (or a roam decision); pinning it
-    // makes esp-radio associate to THAT specific AP instead of the first one
-    // WIFI_FAST_SCAN happens to hear (the AuthExpired-at-good-RSSI root cause).
-    // Cleared on success (re-picked fresh each reconnect — BSSIDs move).
-    pinned: Option<([u8; 6], u8)>,
-    /// Consecutive failures while a BSSID was pinned; at PIN_MAX_FAILS the pin
-    /// is dropped and ONE driver-select (AllChannels+sort-by-signal) fallback
-    /// attempt runs before re-scanning — so a vanished/moved BSSID can't wedge.
-    pin_fails: u8,
-    /// One deliberate SSID-only / AllChannels attempt (the pin-fail fallback).
+    /// The ELECTED mesh channel to PREFER on the next connect (a scan hint, not
+    /// a target — see [`set_sta_config`]). Set by the mesh election, which is
+    /// how association and ESP-NOW end up on the same channel: one radio, so
+    /// choosing the AP *is* choosing the mesh channel. `None` = no preference,
+    /// let the driver range freely.
+    prefer_ch: Option<u8>,
+    /// Consecutive failures while a channel hint was in force; at
+    /// [`HINT_MAX_FAILS`] we drop to ONE driver-select (AllChannels +
+    /// sort-by-signal) attempt, so a channel whose APs vanished can't wedge us.
+    hint_fails: u8,
+    /// One deliberate SSID-only / AllChannels attempt (the hint-fail fallback).
     force_ssid_only: bool,
     /// Consecutive connected RSSI reads below ROAM_RSSI_THRESH (roam trigger).
     rssi_low: u8,
@@ -560,13 +644,28 @@ fn make_snap(st: &St, stack: Stack<'static>) -> NetSnapshot {
         // an in-flight connect/scan, a pending OTA. Scanning included (the
         // sweep walks channels); once it ends the verdict returns to true and
         // main re-pins ch6.
+        // The mesh yields only to a radio operation that is ACTUALLY IN FLIGHT —
+        // a connect handshake or a scan sweep, both of which move the channel
+        // out from under ESP-NOW. It no longer yields to mere *intent*.
+        //
+        // The old condition included `!st.assoc_want()` and `st.ota.is_none()`,
+        // which meant that for the entire boot burst — up to BURST_GIVEUP, 180 s
+        // — a watch with credentials never tuned the mesh channel at all. On a
+        // dead or unreachable AP that is 180 s of no mesh, every boot: exactly
+        // JP's report that watch-to-watch ping does not work until the WiFi
+        // burst gives up. Intent is not a radio operation, and a node retrying
+        // association forever must still be a mesh citizen.
+        //
+        // `!st.connected` stays, but as an optimisation rather than a yield:
+        // once associated we are already sitting on the AP's channel, so there
+        // is nothing to tune (and the elected channel IS that channel, by
+        // construction — the association hint and the mesh channel are the same
+        // decision).
         mesh_pin_ok: st.radio_started
             && !st.connected
             && !st.connecting
             && !st.scanning
-            && !st.scan_pending
-            && !st.assoc_want()
-            && st.ota.is_none(),
+            && !st.scan_pending,
         scanning: st.scanning,
         scan_seq: st.scan_seq,
         connect_fails: st.consec_fails,
@@ -609,8 +708,8 @@ pub async fn net_task(
         scanning: false,
         ota: None,
         ota_phase: OtaPhase::Idle,
-        pinned: None,
-        pin_fails: 0,
+        prefer_ch: None,
+        hint_fails: 0,
         force_ssid_only: false,
         rssi_low: 0,
         next_rssi: now,
@@ -787,10 +886,13 @@ fn apply_cmd(st: &mut St, cmd: NetCmd) {
             st.next_ntp = Instant::now();
             st.consec_fails = 0;
             st.backoff_until = None;
-            // A new SSID invalidates any BSSID pin from the old network (#57).
-            st.pinned = None;
-            st.pin_fails = 0;
+            // A new SSID invalidates the old network's channel preference — and
+            // the observation set with it, since those RSSIs described a
+            // different SSID's APs entirely.
+            st.prefer_ch = None;
+            st.hint_fails = 0;
             st.force_ssid_only = false;
+            SCAN_OBS.lock(|s| *s.borrow_mut() = [i8::MIN; mesh_elect::N_CHANNELS]);
             st.holds |= Hold::User.bit() | Hold::Burst.bit();
             st.burst_since = Some(Instant::now());
             println!("[NET] credentials set (ssid={:?})", st.ssid.as_str());
@@ -812,28 +914,47 @@ fn apply_cmd(st: &mut St, cmd: NetCmd) {
     }
 }
 
-/// Build + apply a station config. `pin = Some((bssid, ch))` targets exactly
-/// that AP (bssid_set=true → esp-radio associates to it, NOT the first one
-/// WIFI_FAST_SCAN hears — the #57 fix). `all_channels` selects
-/// `ScanMethod::AllChannels` so the driver full-scans every channel and
-/// sort-by-signal picks the strongest itself — the documented fallback when a
-/// pin fails or no candidate was found. `auth_method` stays the default
-/// Wpa2Personal (threshold floor WPA2-PSK; esp-radio has no FT surface, so
-/// this is always plain 00-0F-AC:2 — never FT-PSK).
+/// Build + apply a station config.
+///
+/// **No BSSID is ever set.** `prefer_ch = Some(ch)` sets only
+/// `wifi_sta_config_t.channel`, which with `bssid_set = false` is a *scan hint*
+/// ("start from this channel"), not a target: the driver still chooses which AP
+/// to associate to, and `sort_method` is hardwired to
+/// `WIFI_CONNECT_AP_BY_SIGNAL` in esp-radio, so it picks by signal. That gives us
+/// exactly what the mesh needs (the elected CHANNEL) while leaving the driver's
+/// roaming logic alone.
+///
+/// Why not `with_bssid` (the old #57 fix): `bssid_set = true` makes esp-radio
+/// accept an association ONLY from that exact AP. On a single roaming SSID
+/// spread over ~12 APs — which is this house — that fights the AP's own client
+/// steering, and a steered response is discarded rather than followed, so the
+/// handshake times out as `AuthenticationExpired` even at -44 dBm. A hint cannot
+/// wedge; a pin can. smol independently learned the same lesson: its boot
+/// association is deliberately unpinned (`net/wifi.rs`), with a note that a
+/// pinned reconnect during the ESP-NOW time-share never completes.
+///
+/// `all_channels` selects `ScanMethod::AllChannels` so the driver full-scans
+/// every channel and sort-by-signal picks the strongest itself — the fallback
+/// rung when the preferred channel yields nothing. `auth_method` stays the
+/// default Wpa2Personal (threshold floor WPA2-PSK; esp-radio has no FT surface,
+/// so this is always plain 00-0F-AC:2 — never FT-PSK).
 fn set_sta_config(
     controller: &mut WifiController<'static>,
     ssid: &str,
     pass: &str,
-    pin: Option<([u8; 6], u8)>,
+    prefer_ch: Option<u8>,
     all_channels: bool,
 ) -> bool {
     let mut cfg = StationConfig::default()
         .with_ssid(esp_radio::wifi::Ssid::from(ssid))
         .with_password(pass.into());
-    if let Some((bssid, ch)) = pin {
-        cfg = cfg.with_bssid(bssid).with_channel(ch);
-    } else if all_channels {
+    if all_channels {
+        // Widest net: full scan, driver picks the strongest. No channel hint —
+        // the two are contradictory (a hint narrows what an all-channel scan
+        // would consider first).
         cfg = cfg.with_scan_method(esp_radio::wifi::sta::ScanMethod::AllChannels);
+    } else if let Some(ch) = prefer_ch {
+        cfg = cfg.with_channel(ch);
     }
     match controller.set_config(&esp_radio::wifi::Config::Station(cfg)) {
         Ok(()) => {
@@ -863,15 +984,23 @@ fn apply_station_config(controller: &mut WifiController<'static>, st: &mut St) -
 }
 
 /// Targeted candidate scan: SSID-filtered (only matching APs returned → fast),
-/// multi-pass merged (strongest RSSI per BSSID — same short-dwell rationale as
-/// #56's picker sweep). Returns the strongest (bssid, channel, rssi) for the
-/// connect SSID, or None if none was heard. SSID-agnostic: whatever `ssid` is
-/// (`roam`, `jplovescl`, …), it picks the strongest BSSID advertising it.
-async fn scan_candidates(
+/// multi-pass merged (same short-dwell rationale as #56's picker sweep — one
+/// pass routinely misses a present AP).
+///
+/// Returns the strongest RSSI **per channel** for the connect SSID. This is the
+/// election's observation vector, and per-channel is the right shape for two
+/// reasons: it is what the mesh actually needs (any AP on the elected channel
+/// puts us there), and on a single roaming SSID two nodes usually favour
+/// *different* BSSIDs on the *same* channel — a per-BSSID view makes that shared
+/// majority invisible. See `mesh_elect`'s module docs.
+///
+/// SSID-agnostic: whatever `ssid` is (`roam`, `jplovescl`, …), it reports the
+/// channels advertising it.
+async fn scan_channels(
     controller: &mut WifiController<'static>,
     ssid: &str,
-) -> Option<([u8; 6], u8, i8)> {
-    let mut best: Option<([u8; 6], u8, i8)> = None;
+) -> [Option<i8>; mesh_elect::N_CHANNELS] {
+    let mut best = [None; mesh_elect::N_CHANNELS];
     for _ in 0..ROAM_SCAN_PASSES {
         let cfg = esp_radio::wifi::scan::ScanConfig::default()
             .with_ssid(esp_radio::wifi::Ssid::from(ssid));
@@ -881,8 +1010,11 @@ async fn scan_candidates(
                     if ap.ssid.as_str() != ssid {
                         continue; // defensive: filter is best-effort in the driver
                     }
-                    if best.map(|(_, _, r)| ap.signal_strength > r).unwrap_or(true) {
-                        best = Some((ap.bssid, ap.channel, ap.signal_strength));
+                    let Some(i) = mesh_elect::ch_index(ap.channel) else {
+                        continue; // 5 GHz / out-of-band row: not ours to elect
+                    };
+                    if best[i].map(|r| ap.signal_strength > r).unwrap_or(true) {
+                        best[i] = Some(ap.signal_strength);
                     }
                 }
             }
@@ -892,66 +1024,128 @@ async fn scan_candidates(
     best
 }
 
-/// One bounded association attempt + backoff bookkeeping, with #57 best-BSSID
-/// targeting: unless a pin is already set (by a prior scan or a roam
-/// decision) or we're in the one-shot driver-select fallback, run a candidate
-/// scan and pin the STRONGEST BSSID for our SSID — so esp-radio associates to
-/// the near strong AP instead of whatever WIFI_FAST_SCAN hears first.
+/// Strongest channel in an observation vector, for logging and for the
+/// association hint before any election has run.
+fn strongest_channel(obs: &[Option<i8>; mesh_elect::N_CHANNELS]) -> Option<(u8, i8)> {
+    let mut best: Option<(u8, i8)> = None;
+    for (i, r) in obs.iter().enumerate() {
+        if let Some(dbm) = r {
+            if best.map(|(_, b)| *dbm > b).unwrap_or(true) {
+                best = Some((i as u8 + 1, *dbm));
+            }
+        }
+    }
+    best
+}
+
+/// One bounded association attempt + backoff bookkeeping.
+///
+/// Two rungs, no BSSID pin on either:
+/// 1. **Channel hint** — prefer the elected mesh channel (or, before any
+///    election, the strongest channel a candidate scan heard). The driver still
+///    chooses the AP.
+/// 2. **Driver select** — after [`HINT_MAX_FAILS`], one `AllChannels` +
+///    sort-by-signal attempt with no hint at all.
+///
+/// The ladder always terminates in "let the driver do whatever works", so the
+/// election can never prevent the watch from getting online. That ordering is
+/// deliberate: the mesh's channel preference is advisory to association, and
+/// what the election consumes is the channel we ACTUALLY landed on — reality,
+/// not intent.
 async fn attempt_connect(
     controller: &mut WifiController<'static>,
     st: &mut St,
     stack: Stack<'static>,
 ) {
-    // Choose the target. force_ssid_only = the deliberate driver-select
-    // fallback after a pin kept failing; otherwise pin the strongest BSSID.
-    let all_channels = st.force_ssid_only;
-    if !st.force_ssid_only && st.pinned.is_none() {
-        if let Some((bssid, ch, rssi)) = scan_candidates(controller, st.ssid.as_str()).await {
-            println!(
-                "[NET] best BSSID {} ch{} rssi{} (pinning)",
-                fmt_bssid(&bssid),
-                ch,
-                rssi
-            );
-            st.pinned = Some((bssid, ch));
-        } else {
-            // Nothing heard on a targeted scan — let the driver full-scan +
-            // sort-by-signal itself rather than fast-scan-first-hit.
-            println!("[NET] no candidate BSSID heard - driver AllChannels select");
-            st.force_ssid_only = true;
+    // Claim the radio for the WHOLE attempt — candidate scan, config apply and
+    // handshake — not just the handshake. `connecting` is what clears
+    // `mesh_pin_ok`, so publishing it first is what stops main from calling
+    // `esp_now.set_channel` in the middle of an association.
+    //
+    // This closes a race the old code left open and is the reason the mesh can
+    // now be allowed to tune during association *intent* at all (see
+    // `make_snap`): a5a4c27 recorded that tuning ch6 "between attempts" dropped
+    // auth frames and produced AuthenticationExpired at -61 dBm, and the fix then
+    // was to yield for as long as any WiFi intent existed — which starved the
+    // mesh for the entire 180 s burst. The narrower correct rule is to yield for
+    // the duration of an in-flight attempt and to keep the long backoff windows
+    // for the mesh. That only holds if the yield actually covers the whole
+    // attempt, which is what this does.
+    st.connecting = true;
+    publish(make_snap(st, stack));
+
+    // An elected channel supersedes whatever we last hinted — the fleet's
+    // agreement outranks this node's local opinion. Not applied while we are in
+    // the deliberate driver-select fallback rung, or that rung could never run.
+    if !st.force_ssid_only {
+        match PREFER_CH.load(Ordering::Relaxed) {
+            0 => {}
+            ch if st.prefer_ch != Some(ch) => {
+                println!("[NET] elected ch{ch} is the new association preference");
+                st.prefer_ch = Some(ch);
+                st.hint_fails = 0;
+            }
+            _ => {}
         }
     }
-    let pin = st.pinned;
-    let use_all_channels = all_channels || st.force_ssid_only;
+    if !st.force_ssid_only && st.prefer_ch.is_none() {
+        // No elected channel yet — scan and prefer the strongest one we hear.
+        let obs = scan_channels(controller, st.ssid.as_str()).await;
+        publish_scan_obs(&obs);
+        match strongest_channel(&obs) {
+            Some((ch, rssi)) => {
+                println!("[NET] strongest ch{ch} rssi{rssi} (hint, no BSSID pin)");
+                st.prefer_ch = Some(ch);
+            }
+            None => {
+                // Nothing heard on a targeted scan — let the driver full-scan +
+                // sort-by-signal itself rather than fast-scan-first-hit.
+                println!("[NET] no candidate AP heard - driver AllChannels select");
+                st.force_ssid_only = true;
+            }
+        }
+    }
+    let prefer_ch = st.prefer_ch;
+    let use_all_channels = st.force_ssid_only;
     if !set_sta_config(
         controller,
         st.ssid.as_str(),
         st.pass.as_str(),
-        pin,
+        prefer_ch,
         use_all_channels,
     ) {
         // Config apply failed — treat as a normal attempt failure (backoff).
+        st.connecting = false;
         st.consec_fails = st.consec_fails.saturating_add(1);
         st.backoff_until = Some(Instant::now() + backoff_for(st.consec_fails));
         return;
     }
 
-    st.connecting = true;
-    publish(make_snap(st, stack)); // show Connecting before the 15 s wait
     let result = with_timeout(CONNECT_TIMEOUT, controller.connect_async()).await;
     st.connecting = false;
     match result {
         Ok(Ok(_)) => {
-            match pin {
-                Some((b, ch)) => println!("[WIFI] connected (BSSID {} ch{ch})", fmt_bssid(&b)),
-                None => println!("[WIFI] connected (driver select)"),
+            // Report REALITY into the election: whatever BSSID/channel the
+            // driver actually landed on, not what we hinted. The whole point of
+            // de-pinning is that the driver gets to choose; the election must
+            // then run over where we really are.
+            let info = controller.ap_info().ok();
+            let landed_ch = info.as_ref().map(|i| i.channel);
+            match (&info, landed_ch) {
+                (Some(i), Some(ch)) => println!(
+                    "[WIFI] connected (BSSID {} ch{ch}, hint {:?})",
+                    fmt_bssid(&i.bssid),
+                    prefer_ch
+                ),
+                _ => println!("[WIFI] connected (AP info unavailable)"),
+            }
+            if let Some(ch) = landed_ch {
+                LANDED_CH.store(ch, Ordering::Relaxed);
             }
             st.connected = true;
             st.consec_fails = 0;
-            st.pin_fails = 0;
+            st.hint_fails = 0;
             st.backoff_until = None;
-            // Re-pick fresh next reconnect (BSSIDs move); clear the fallback.
-            st.pinned = None;
             st.force_ssid_only = false;
             // Arm the roam sampler fresh (don't roam the instant we land).
             st.rssi_low = 0;
@@ -967,18 +1161,19 @@ async fn attempt_connect(
                 ),
                 _ => println!("[WIFI] connect timeout (attempt {})", st.consec_fails),
             }
-            // Pin bookkeeping: a pinned BSSID that keeps failing (moved,
-            // congested, gone) is dropped for ONE driver-select fallback,
-            // then we re-scan fresh.
-            if pin.is_some() {
-                st.pin_fails = st.pin_fails.saturating_add(1);
-                if st.pin_fails >= PIN_MAX_FAILS {
+            // Hint bookkeeping: a channel hint that keeps failing (its APs
+            // moved, congested, gone) is dropped for ONE driver-select fallback,
+            // then we re-scan fresh. The elected channel is a preference, never
+            // a cage — the watch must always be able to get online.
+            if prefer_ch.is_some() {
+                st.hint_fails = st.hint_fails.saturating_add(1);
+                if st.hint_fails >= HINT_MAX_FAILS {
                     println!(
-                        "[NET] pinned BSSID failed {}x - falling back to driver select",
-                        st.pin_fails
+                        "[NET] ch hint failed {}x - falling back to driver select",
+                        st.hint_fails
                     );
-                    st.pinned = None;
-                    st.pin_fails = 0;
+                    st.prefer_ch = None;
+                    st.hint_fails = 0;
                     st.force_ssid_only = true;
                 }
             } else {
@@ -1039,32 +1234,36 @@ async fn maybe_roam(
         return false; // not sustained yet, or still cooling down
     }
 
-    // Sustained weak: is there a better AP for our SSID? Current BSSID (from
-    // the last beacon) excludes roaming to ourselves.
-    let cur_bssid = controller.ap_info().ok().map(|i| i.bssid);
+    // Sustained weak: is there a better channel for our SSID? Our current
+    // channel is excluded — reassociating on the same channel is a coin flip on
+    // which AP the driver picks, so it is not worth a ~1-3 s drop.
+    let cur_ch = controller.ap_info().ok().map(|i| i.channel);
     st.rssi_low = 0; // consume the trigger regardless of outcome
-    let Some((bssid, ch, cand_rssi)) = scan_candidates(controller, st.ssid.as_str()).await else {
+    let obs = scan_channels(controller, st.ssid.as_str()).await;
+    publish_scan_obs(&obs);
+    let Some((ch, cand_rssi)) = strongest_channel(&obs) else {
         st.roam_after = now + ROAM_COOLDOWN;
         return false;
     };
-    let same = cur_bssid == Some(bssid);
-    if same || (cand_rssi as i32) < cur_rssi + ROAM_MARGIN_DB {
-        // No candidate worth the ~1-3 s drop — hold and cool down.
+    if cur_ch == Some(ch) || (cand_rssi as i32) < cur_rssi + ROAM_MARGIN_DB {
+        // Nothing worth the drop — hold and cool down.
         st.roam_after = now + ROAM_COOLDOWN;
         return false;
     }
 
     println!(
-        "[ROAM] {}→{} switching {}→{} ch{}",
-        cur_rssi,
-        cand_rssi,
-        cur_bssid.map(|b| fmt_bssid(&b)).unwrap_or_else(|| heapless::String::new()),
-        fmt_bssid(&bssid),
-        ch
+        "[ROAM] {}→{} switching ch{:?}→ch{}",
+        cur_rssi, cand_rssi, cur_ch, ch
     );
     let _ = controller.disconnect_async().await;
     st.connected = false;
-    st.pinned = Some((bssid, ch)); // attempt_connect targets it (no re-scan)
+    // Hint the better channel; the driver still picks the AP on it. NOTE: this
+    // trades away #57's *targeted* BSSID roam, which is the unavoidable cost of
+    // de-pinning. The driver's own sort-by-signal plus a one-channel scan is
+    // what replaces it. If room-to-room roaming regresses on glass, the answer
+    // is a narrowly-scoped exception, not restoring the default pin.
+    st.prefer_ch = Some(ch);
+    st.hint_fails = 0;
     st.force_ssid_only = false;
     st.consec_fails = 0; // a roam-triggered reconnect resets the backoff
     st.backoff_until = None;
@@ -1097,6 +1296,23 @@ async fn run_scan(controller: &mut WifiController<'static>, st: &mut St) {
         match controller.scan_async(&cfg).await {
             Ok(aps) => {
                 let mut changed = false;
+                // The user's picker sweep is also the best election input we ever
+                // get — a per-channel view of our OWN SSID, for free. Feed it in
+                // rather than making the election run its own scan. This pass
+                // dwelled on exactly `ch`, so it is authoritative for `ch` alone
+                // (hence the per-channel setter, and hence `None` clearing it).
+                if !st.ssid.is_empty() {
+                    let mut best: Option<i8> = None;
+                    for ap in aps.iter() {
+                        if ap.ssid.as_str() == st.ssid.as_str()
+                            && ap.channel == ch
+                            && best.map(|r| ap.signal_strength > r).unwrap_or(true)
+                        {
+                            best = Some(ap.signal_strength);
+                        }
+                    }
+                    publish_scan_obs_channel(ch, best);
+                }
                 for ap in aps.iter() {
                     let ssid = ap.ssid.as_str();
                     if ssid.is_empty() {

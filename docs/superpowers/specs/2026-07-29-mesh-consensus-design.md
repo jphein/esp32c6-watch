@@ -138,3 +138,108 @@ Cap the candidate list to what fits (~6-8 entries) and send the strongest first.
 3. Kill the elected AP: fleet re-converges on another and the mesh recovers.
 4. No flapping: with two comparable APs, the elected choice is stable for minutes.
 5. Association at -44 dBm succeeds (de-pinning validated).
+
+---
+
+# Addendum: revisions from implementation (Morpheus, 2026-07-29)
+
+Six places the design above needed correcting. Each is implemented and covered by
+a host test in `crates/mesh-elect/tests/`.
+
+## R1. Elect a CHANNEL, not a BSSID (§1, §6)
+
+Only the channel is load-bearing — any AP on the elected channel puts us on it,
+which is all the mesh needs — and enforcing a BSSID costs the driver its roaming
+freedom, i.e. it *is* the pinning we set out to remove.
+
+Worse, per-BSSID scoring picks wrong on precisely our network. With one roaming
+SSID over ~12 APs, node A's strongest ch6 AP is usually a *different* BSSID from
+node B's strongest ch6 AP, so a summed per-BSSID score cannot see that they agree
+on the channel: a weak AP both happen to share can outscore a channel both see
+strongly.
+
+Enforcement is therefore `with_channel()` with `bssid_set = false`, which in
+ESP-IDF is a scan *hint*, not a target. That also fails safe — a hint cannot
+wedge the connect, a pin can.
+
+## R2. Score count-first, not by plain sum (§1)
+
+The proposed `score = SUM of saturating per-node weights` does not deliver its own
+stated goal. On a 0..48 weight scale one node at -35 dBm scores 48 and beats three
+nodes at -70 dBm (16 each). Saturation alone cannot fix this; the comparison has
+to be lexicographic:
+
+    score(ch) = ( number of nodes that can USE ch , sum of their weights )
+    winner    = max score, tie-broken by LOWEST channel number
+
+Count dominates, so the winner is always the channel the most nodes can join —
+literally what "all nodes that see any other node join the same mesh" asks for.
+"Can use" is gated at -82 dBm (smol's proven `AP_USABLE_MIN`) so a barely-audible
+channel cannot win on headcount. Tie-break is the channel *number*, not a BSSID:
+a total order that is also stable across scans, since BSSIDs move and channel
+numbers do not.
+
+## R3. Margin must scale with fleet size (§2)
+
+A flat ">= 6 dB aggregate" gets *easier* to trip as the fleet grows — with five
+reporters it is barely 1 dB each. Implemented as
+`max(MARGIN_FLOOR, incumbent_sum / 8)`. Also: a challenger with strictly MORE
+voters is a connectivity win rather than a signal preference, so it needs only the
+settle window, not the dB margin.
+
+## R4. A monotonic epoch needs an escape hatch (§2) — NOT IN THE ORIGINAL
+
+"Higher epoch wins" unconditionally means one node holding a high persisted epoch
+for a channel that no longer exists can pin the whole fleet onto a dead channel
+**forever**. Added probation: an *adopted* decision that produces no peers for
+`PROBATION_MS` (45 s) is abandoned and we re-elect at a higher epoch. Adopted
+decisions only — our own persisted choice is not on probation.
+
+Related constraint discovered by a test that hung: staleness must outlive both
+decision windows (`OBS_STALE_MS > SETTLE_MS`, `> PROBATION_MS`), or a challenger's
+supporting observations expire before its settle window closes and the machine can
+never finish deciding. Asserted at compile time.
+
+## R5. One node is not a quorum — NOT IN THE ORIGINAL
+
+A node that has heard nobody knows only what its own antenna sees. That is enough
+to AGREE with a decision, never enough to move the fleet off one. Without this, a
+watch carried into another building elects its new local channel and abandons the
+fleet it left.
+
+This is also what makes the change **safe to deploy one repo at a time**: until
+smol also speaks ELECT, the watch hears no ELECT peers, so it stays on the
+rendezvous channel (ch6) instead of unilaterally walking off it and *causing* the
+partition this work exists to fix. The feature arms itself when the fleet is
+ready. Adoption is deliberately exempt, so a lone node can still rejoin.
+
+## R6. The wire frame is fixed-size, so there is nothing to cap
+
+Because we elect a channel, the candidate set is the 13 channels of the 2.4 GHz
+band — a constant. The frame is therefore exactly 61 bytes with no length field
+and no repetition, and the spec's "cap the candidate list to 6-8 entries" concern
+disappears by construction rather than by discipline:
+
+    "SMOLv1 ELECT " <id:3> ' ' <epoch:10> ' ' <ch:2> ' ' <gw:3> ' ' <w:26>
+
+Tag byte 7 is `'E'`, unused by every existing SMOLv1 frame in both repos, so old
+firmware ignores it harmlessly. Pinned against golden bytes in `tests/wire.rs` —
+a round-trip test alone would pass happily while both repos agreed on the wrong
+thing.
+
+## Security posture (unchanged, now explicit)
+
+ELECT frames are unauthenticated and that is accepted for a home fleet, but three
+mitigations are built in at zero cost: per-node dedupe by id, claimed weights
+clamped to the honest ceiling, and **refusal to adopt a channel our own scan found
+no usable AP on**. That last one defeats the most damaging attack (drag the fleet
+to a channel with no infrastructure) for one array read. A determined attacker
+forging multiple node ids can still influence the outcome; that is not fixable
+without a shared key.
+
+## Deliberate cost
+
+De-pinning trades away #57's *targeted* BSSID roam — without `bssid_set` we cannot
+force a specific AP, only a channel. The driver's own sort-by-signal plus a
+one-channel scan replaces it. If room-to-room roaming regresses on glass, the fix
+is a narrowly-scoped exception, not restoring the default pin.

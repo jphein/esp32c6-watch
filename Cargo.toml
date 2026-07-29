@@ -132,6 +132,13 @@ flash-guard = { path = "crates/flash-guard" }
 wled-wizmote = { path = "crates/wled-wizmote" }
 rssi = { path = "crates/rssi" }
 hunt = { path = "crates/hunt" }
+# Fleet-wide deterministic ESP-NOW channel + gateway election (2026-07-29). One
+# radio means choosing the AP IS choosing the mesh channel, so mesh partitions
+# are really AP-agreement failures. Pure `elect(observations) -> Decision` plus
+# the `SMOLv1 ELECT` wire codec, host-tested for convergence / tie-breaking /
+# hysteresis / partition merge — properties that cannot be observed on glass.
+# MUST stay byte-identical with smol's copy or the fleet partitions silently.
+mesh-elect = { path = "crates/mesh-elect" }
 # #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —
 # replaces src/net/climate_model_stub.rs.
 climate-model = { path = "crates/climate-model" }
