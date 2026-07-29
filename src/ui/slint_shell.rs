@@ -339,7 +339,6 @@ pub struct ShellUi {
     /// so paging costs a request rather than a scene full of hidden rows.
     story_chapters: Rc<VecModel<StoryChapter>>,
     /// Story inventory / equipment / appearance rows, all label+value pairs.
-    story_inventory: Rc<VecModel<StorySlot>>,
     story_equipment: Rc<VecModel<StorySlot>>,
     story_appearance: Rc<VecModel<StorySlot>>,
     /// Registry idx per visible switcher slot — maps a kill-swipe's start_y
@@ -405,7 +404,6 @@ impl ShellUi {
         let switcher_model: Rc<VecModel<LauncherTile>> = Rc::new(VecModel::default());
         let shade_model: Rc<VecModel<NotifCard>> = Rc::new(VecModel::default());
         let story_chapters: Rc<VecModel<StoryChapter>> = Rc::new(VecModel::default());
-        let story_inventory: Rc<VecModel<StorySlot>> = Rc::new(VecModel::default());
         let story_equipment: Rc<VecModel<StorySlot>> = Rc::new(VecModel::default());
         let story_appearance: Rc<VecModel<StorySlot>> = Rc::new(VecModel::default());
         let ui = build_scene(
@@ -417,7 +415,6 @@ impl ShellUi {
             &switcher_model,
             &shade_model,
             &story_chapters,
-            &story_inventory,
             &story_equipment,
             &story_appearance,
         );
@@ -438,7 +435,6 @@ impl ShellUi {
             switcher_model,
             shade_model,
             story_chapters,
-            story_inventory,
             story_equipment,
             story_appearance,
             switcher_rows: heapless::Vec::new(),
@@ -563,7 +559,6 @@ impl ShellUi {
             &self.switcher_model,
             &self.shade_model,
             &self.story_chapters,
-            &self.story_inventory,
             &self.story_equipment,
             &self.story_appearance,
         );
@@ -1566,27 +1561,32 @@ impl ShellUi {
         }
         ui.set_story_hp_text(SharedString::from(hp.as_str()));
 
-        let inv: Vec<StorySlot> = c
-            .inventory
-            .iter()
-            .map(|it| {
-                let mut n: heapless::String<8> = heapless::String::new();
-                let _ = story_proto::push_u32(&mut n, it.count as u32);
-                StorySlot {
-                    label: SharedString::from(it.name.as_str()),
-                    value: SharedString::from(n.as_str()),
-                    known: true,
-                }
-            })
-            .collect();
-        self.story_inventory.set_vec(inv);
+        // NOTE no inventory model is built here. `story-inventory` was declared,
+        // bound, and repopulated on every character update — and referenced by no
+        // element in any .slint file, so it rendered nowhere. Confirmed two ways: by
+        // elimination (page 2's scene counts were flat at 170/160 for inventory
+        // sizes 0, 2, 4 and 8, and page 3 measured 60/53 while the model held 8 rows
+        // of 25-char labels — impossible if drawn) and by grepping every .slint for
+        // the property. It cost 8 `SharedString` pairs per update, ~416-672 B
+        // steady-state and ~830-1,340 B transient, since `set_vec` builds the new
+        // generation before dropping the old.
 
         let equip: Vec<StorySlot> = story_proto::model::EQUIP_LABELS
             .iter()
             .enumerate()
             .map(|(i, label)| StorySlot {
                 label: SharedString::from(*label),
-                value: SharedString::from(c.equip_at(i).unwrap_or("")),
+                // `default()`, NOT `from("")`. `SharedString::from(&str)` calls
+                // `from_iter(bytes.chain(once(0)))`, and for "" that iterator still
+                // yields the NUL byte — so `with_capacity(1)` allocates ~16 B.
+                // `SharedVector::default()` points at the static `SHARED_NULL` and
+                // allocates nothing. Slint renders both as the empty string.
+                // All 11 equipment slots and 6 appearance traits are null on the
+                // live ledger, so these are 17 allocations that look free and are not.
+                value: match c.equip_at(i) {
+                    Some(v) => SharedString::from(v),
+                    None => SharedString::default(),
+                },
                 known: c.equip_at(i).is_some(),
             })
             .collect();
@@ -1597,7 +1597,10 @@ impl ShellUi {
             .enumerate()
             .map(|(i, label)| StorySlot {
                 label: SharedString::from(*label),
-                value: SharedString::from(c.appear_at(i).unwrap_or("")),
+                value: match c.appear_at(i) {
+                    Some(v) => SharedString::from(v),
+                    None => SharedString::default(),
+                },
                 known: c.appear_at(i).is_some(),
             })
             .collect();
@@ -2103,7 +2106,6 @@ fn build_scene(
     switcher_model: &Rc<VecModel<LauncherTile>>,
     shade_model: &Rc<VecModel<NotifCard>>,
     story_chapters: &Rc<VecModel<StoryChapter>>,
-    story_inventory: &Rc<VecModel<StorySlot>>,
     story_equipment: &Rc<VecModel<StorySlot>>,
     story_appearance: &Rc<VecModel<StorySlot>>,
 ) -> WatchShell {
@@ -2311,7 +2313,6 @@ fn build_scene(
     ui.set_wifi_nets(ModelRc::from(wifi_model.clone()));
     // #story: four long-lived models, swapped in place like the rest.
     ui.set_story_chapters(ModelRc::from(story_chapters.clone()));
-    ui.set_story_inventory(ModelRc::from(story_inventory.clone()));
     ui.set_story_equipment(ModelRc::from(story_equipment.clone()));
     ui.set_story_appearance(ModelRc::from(story_appearance.clone()));
     ui.set_switcher_tiles(ModelRc::from(switcher_model.clone()));

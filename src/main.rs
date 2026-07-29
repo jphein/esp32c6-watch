@@ -1772,11 +1772,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut story_need_list = false;
     #[cfg(feature = "story")]
     let mut story_need_char = false;
-    /// Chapter the user tapped, waiting for the playback call site (which owns
-    /// the amp/codec borrows) to pick it up.
+    // Chapter the user tapped, waiting for the playback call site (which owns
+    // the amp/codec borrows) to pick it up.
     #[cfg(feature = "story")]
     let mut story_play_req: Option<u16> = None;
-    /// `?since=` paging cursor for the chapter list.
+    // `?since=` paging cursor for the chapter list.
     #[cfg(feature = "story")]
     let mut story_since: u16 = 0;
     /// Chapter currently loaded, and the byte offset to resume it from.
