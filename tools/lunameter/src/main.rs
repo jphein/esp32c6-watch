@@ -275,6 +275,87 @@ fn main() {
     frame("aod", &mut sink);
     ui.set_aod(false);
 
+    // 6b. STORY (#story). The character page was invisible to #75 because no
+    //     scenario drove it — this is that scenario, and it found a real cliff.
+    //
+    //     Rust fills BOTH slot models from the fixed label arrays
+    //     UNCONDITIONALLY (slint_shell.rs), so the row count is ALWAYS 11
+    //     equipment + 6 appearance, even on an empty ledger. It never scales
+    //     with how much gear the character has; only the VALUES change. So the
+    //     variable that moves the rung is value LENGTH, not slot count:
+    //
+    //       empty / 4 ch / 6 ch  -> 159 / 211 / 245 glyphs -> cap 256 (7,168 B)
+    //       8 ch and up          -> 279+          glyphs -> cap 512 (14,336 B)
+    //
+    //     6 characters leaves ELEVEN glyphs of margin. `MAX_SLOT_VAL` permits 24,
+    //     and the daemon's own naming style runs 22-28 characters
+    //     ("Shard of Divine Foundation"), so the first non-null equipment write
+    //     doubles the textures rung. Today's ledger has no equip/appear rows at
+    //     all, which is the only reason this page is currently free.
+    const EQ: [&str; 11] = ["Head", "Amulet", "Chest", "Cloak", "Hands", "Legs", "Feet",
+                            "Main hand", "Off hand", "Ring I", "Ring II"];
+    const AP: [&str; 6] = ["Height", "Build", "Hair", "Eyes", "Skin", "Notable"];
+    let fill = |labels: &[&str], val: Option<&str>| -> Vec<StorySlot> {
+        labels.iter().map(|l| StorySlot {
+            label: (*l).into(),
+            value: val.unwrap_or("").into(),
+            known: val.is_some(),
+        }).collect()
+    };
+    let chapters: Vec<StoryChapter> = (1..=16).map(|n| StoryChapter {
+        number: n,
+        title: "Bones of the Sunken Cathedral Wing".into(),
+        duration: "12:34".into(),
+        playable: true,
+        current: n == 3,
+    }).collect();
+    ui.set_story_chapters(slint::ModelRc::from(Rc::new(slint::VecModel::from(chapters))));
+    ui.set_story_more(9);
+    ui.set_story_play_title("Bones of the Sunken Cathedral Wing".into());
+    ui.set_story_speaker("Varkas Emberhand".into());
+    ui.set_story_speaker_kind(1);
+    ui.set_story_progress(0.42);
+    ui.set_story_elapsed("5:12".into());
+    ui.set_story_total("12:34".into());
+    ui.set_story_seg_index(37);
+    ui.set_story_seg_count(128);
+    ui.set_story_playing(true);
+    ui.set_story_subject("Thessaly of the Ninefold Ward".into());
+    ui.set_story_level("14".into());
+    ui.set_story_xp("18,420 / 24,000".into());
+    ui.set_story_gold("2,317".into());
+    ui.set_story_location("Sunken Cathedral".into());
+    ui.set_story_status("bleeding, burdened, blessed by the drowned choir".into());
+    ui.set_story_hp_text("62 / 140".into());
+    ui.set_story_hp_frac(0.44);
+    ui.set_story_hp_known(true);
+    ui.set_story_open(true);
+    for p in 0..4 {
+        ui.set_story_page(p);
+        frame(&format!("story(page{p})"), &mut sink);
+    }
+    // The rung threshold. len06 is the LAST safe average value length; len08 is
+    // the first that crosses. Keep both arms — a single sample cannot show a cliff.
+    for (tag, val) in [
+        ("empty", None),
+        ("len04", Some("iron")),
+        ("len06", Some("bronze")),
+        ("len08", Some("oakstaff")),
+        ("len24", Some("moonsilver greatsword +2")),
+    ] {
+        ui.set_story_equipment(slint::ModelRc::from(Rc::new(slint::VecModel::from(fill(&EQ, val)))));
+        ui.set_story_appearance(slint::ModelRc::from(Rc::new(slint::VecModel::from(fill(&AP, val)))));
+        ui.set_story_equipped_count(if val.is_some() { 11 } else { 0 });
+        ui.set_story_appearance_count(if val.is_some() { 6 } else { 0 });
+        ui.set_story_page(3);
+        frame(&format!("story(page3,{tag})"), &mut sink);
+    }
+    ui.set_story_loading(true);
+    ui.set_story_page(0);
+    frame("story(page0-loading)", &mut sink);
+    ui.set_story_loading(false);
+    ui.set_story_open(false);
+
     // 7. INPUT PROBE — does `visible: false` cull hit-testing as well as draw?
     //    My 400a251 comment asserted it does; verify rather than assert. The
     //    WIFI RadioDot's hit area is (22,8)-(100,72); tap its centre.

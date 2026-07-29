@@ -8,6 +8,12 @@
 # See README.md. Host build only — touches no hardware, opens no serial port.
 set -euo pipefail
 
+# `cargo` missing from a non-login shell's PATH produced ZERO frames and exit 0
+# under `set -e` — a measurement tool that silently measures nothing is worse
+# than one that fails, because its empty output reads as "no change".
+command -v cargo >/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+command -v cargo >/dev/null || { echo "lunameter: cargo not found on PATH" >&2; exit 127; }
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 
