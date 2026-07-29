@@ -191,6 +191,21 @@ printf '        %-24s %10s %10s %12s\n' COMBO 'STACK GAP' MARGIN 'ROM FREE'
 # margin from single-feature deltas; that estimate is exactly what needs replacing
 # with a link.
 COMBOS=("" "debug-console" "tts" "tts,debug-console" "heap-hooks,heap-forensics" "story" "story,debug-console" "story,tts" "story,tts,debug-console")
+
+# NEVER-SHIP features must not appear in the gated matrix. `story-stub-slots` forces
+# the character page's worst frame so the 512 pool rung can be measured at all — it is
+# not inert test code, it makes the watch permanently render the crash regime. A
+# Cargo.toml comment cannot stop it drifting into the matrix; this can. The
+# deploy-time twin lives in `watchctl` (`refuse_if_never_ship`), which is the check
+# that matters, because preflight is run by a person and deploy is what puts bytes on
+# a wrist.
+for _c in "${COMBOS[@]}"; do
+  case ",$_c," in
+    *,story-stub-slots,*|*"story-stub-slots"*)
+      echo "preflight: REFUSING — combo '$_c' contains a never-ship feature" >&2
+      exit 2 ;;
+  esac
+done
 if [[ -n "$ONLY" ]]; then
   # "default" is the human name for the empty feature set.
   [[ "$ONLY" == "default" ]] && ONLY=""

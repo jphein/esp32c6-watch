@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -860,6 +861,61 @@ def sigil_of_image(binp: Path) -> dict:
     return {"build": parts[0], "hash": parts[1], "version": parts[2]}
 
 
+NEVER_SHIP = b"NEVER-SHIP:"
+PIN_DIR = REPO / "scratch" / "flashed"
+
+
+def refuse_if_never_ship(path: Path) -> str | None:
+    """Refuse to flash an image that declares itself unshippable.
+
+    Test-only builds exist and are legitimate — `story-stub-slots` forces the
+    character page's worst frame so the 512 pool rung can be measured at all. What
+    is NOT legitimate is that build reaching a wrist: it does not merely carry inert
+    test code, it makes the watch permanently render the worst frame in the UI, i.e.
+    it ships the crash regime.
+
+    A Cargo.toml comment cannot stop that. This can, and it is checked at the point
+    bytes go onto hardware rather than only at the point someone runs preflight.
+    Matched against the image itself, so it holds no matter which build path or which
+    agent produced the file.
+    """
+    try:
+        blob = path.read_bytes()
+    except OSError:
+        return None
+    i = blob.find(NEVER_SHIP)
+    if i == -1:
+        return None
+    end = blob.find(b"\x00", i)
+    return blob[i:end if end != -1 else i + 96].decode("utf-8", "replace")
+
+
+def pin_image(src: Path) -> Path:
+    """Snapshot the artifact before flashing, and flash the snapshot.
+
+    N agents share one `target/` directory, so the path a deploy reads is being
+    rewritten by whoever finished building last. Observed today: an agent read the
+    shared path expecting its own instrumented build and got another session's
+    production image — which would have flashed prod and measured a "healthy" result
+    that was really the absence of its own change. A silent no-op arriving by a route
+    nobody was watching.
+
+    Copy-then-flash closes the window, and keeping the copy means a later
+    disassembly resolves against the bytes that were actually written. The repo's
+    own handoff records an agent losing three disassembly passes to a rebuilt
+    binary; this makes the fix the default rather than folklore.
+    """
+    try:
+        PIN_DIR.mkdir(parents=True, exist_ok=True)
+        h = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
+        dst = PIN_DIR / f"{src.stem}-{h}{src.suffix}"
+        if not dst.exists():
+            shutil.copy2(src, dst)
+        return dst
+    except OSError:
+        return src  # pinning is a safety net, never a blocker
+
+
 def _tree_hash() -> str:
     """The current working tree's build hash, via the shared implementation."""
     script = REPO / "tools" / "build_hash.sh"
@@ -921,6 +977,18 @@ def cmd_deploy(args) -> int:
         say(f"watchctl: no such file: {image}")
         emit({"error": "not-found", "image": str(image)})
         return EXIT_NOTFOUND
+
+    never = refuse_if_never_ship(image)
+    if never:
+        say(f"watchctl: REFUSING to flash — this image declares '{never}'.")
+        say("  a never-ship build makes the watch render the worst frame in the UI "
+            "permanently; it exists to be measured, not worn")
+        emit({"error": "never-ship", "marker": never})
+        return EXIT_GATE
+    pinned = pin_image(image)
+    if pinned != image:
+        say(f"pinned -> {pinned}  (flashing the snapshot, not the shared path)")
+    image = pinned
 
     with tempfile.TemporaryDirectory(prefix="watchctl-") as tmp:
         binp, kind = _image_from(image, tmp)
