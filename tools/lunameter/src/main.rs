@@ -318,14 +318,22 @@ fn main() {
             known: val.is_some(),
         }).collect()
     };
-    let chapters: Vec<StoryChapter> = (1..=16).map(|n| StoryChapter {
-        number: n,
-        title: "Bones of the Sunken Cathedral Wing".into(),
-        duration: "12:34".into(),
-        playable: true,
-        current: n == 3,
-    }).collect();
-    ui.set_story_chapters(slint::ModelRc::from(Rc::new(slint::VecModel::from(chapters))));
+    // Chapter tiles. `VISIBLE_CHAPTERS = 5` is what the firmware can actually
+    // produce — `slint_shell.rs:1471` does `.take(VISIBLE_CHAPTERS)` before
+    // building the model — so FIVE is the reachable number and sixteen is a bound
+    // the device cannot reach. Both are framed, labelled, because measuring only
+    // the unreachable one produced a "worst screen in the entire UI" claim about a
+    // screen the watch never draws.
+    let mk_chapters = |n: i32| -> Vec<StoryChapter> {
+        (1..=n).map(|i| StoryChapter {
+            number: i,
+            title: "Bones of the Sunken Cathedral Wing".into(),
+            duration: "12:34".into(),
+            playable: true,
+            current: i == 3,
+        }).collect()
+    };
+    ui.set_story_chapters(slint::ModelRc::from(Rc::new(slint::VecModel::from(mk_chapters(5)))));
     ui.set_story_more(9);
     ui.set_story_play_title("Bones of the Sunken Cathedral Wing".into());
     ui.set_story_speaker("Varkas Emberhand".into());
@@ -350,6 +358,20 @@ fn main() {
         ui.set_story_page(p);
         frame(&format!("story(page{p})"), &mut sink);
     }
+    // The unreachable bound, for contrast — and to check the repeater is in fact
+    // bounded by the model rather than by anything in the .slint.
+    ui.set_story_chapters(slint::ModelRc::from(Rc::new(slint::VecModel::from(mk_chapters(16)))));
+    ui.set_story_page(0);
+    frame("story(page0,ch16-UNREACHABLE)", &mut sink);
+    // A toast lands over whatever screen is up and is deliberately NOT culled
+    // (0685985), adding one rectangle plus one item per rendered glyph. The
+    // chapter list is a screen you SIT on while choosing, and OTA/notification
+    // toasts arrive asynchronously — so this is the realistic worst case for
+    // page 0, not the 16-chapter one.
+    ui.set_story_chapters(slint::ModelRc::from(Rc::new(slint::VecModel::from(mk_chapters(5)))));
+    ui.set_toast_text("No WiFi credentials \u{2014} set in Settings".into());
+    frame("story(page0,+toast31)", &mut sink);
+    ui.set_toast_text("".into());
     // The rung threshold. len06 is the LAST safe average value length; len08 is
     // the first that crosses. Keep both arms — a single sample cannot show a cliff.
     for (tag, val) in [
