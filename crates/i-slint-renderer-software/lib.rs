@@ -1477,7 +1477,7 @@ fn prepare_scene(
         size,
         factor,
         window,
-        PrepareScene { scale_factor: factor, ..Default::default() },
+        PrepareScene::with_reserves(factor),
         software_renderer.rotation.get(),
         #[cfg(feature = "systemfonts")]
         &software_renderer.text_layout_cache,
@@ -2042,6 +2042,49 @@ struct PrepareScene {
     vectors: SceneVectors,
     scale_factor: ScaleFactor,
 }
+
+impl PrepareScene {
+    /// WATCH FORK (esp32c6-watch #75): pre-reserve the per-frame scene vectors
+    /// instead of growing them from empty every frame.
+    ///
+    /// The scene is rebuilt each frame from `Vec::new()`, so every frame re-walks
+    /// a doubling ladder. `RawVec::grow_one` holds the OLD and NEW buffers at
+    /// once, so reaching capacity N transiently needs ~1.5N plus churn. On the
+    /// apps menu — deepest-nested and most text-heavy screen — that peak exceeds
+    /// free heap and `handle_alloc_error` panics. esp-alloc has no fallible path
+    /// and the panic handler HALTS, so the panel keeps its last frame and only a
+    /// power cycle recovers: it presents as a "frozen watch".
+    ///
+    /// Captured on hardware; the failed allocation size names the container:
+    ///
+    /// | failed alloc | container | capacity | free heap |
+    /// |---|---|---|---|
+    /// | 3584 B | `SceneBuilder::state_stack` (`RenderState`, 28 B) | 128 | 54,400 B |
+    /// | 4096 B | `items` (`SceneItem`, 16 B) | 256 | 66,008 B |
+    /// | 16384 B | `PartialRendererCache` slab — NOT fixed here | — | 18,308 B |
+    ///
+    /// The first two failed with 54 KB and 66 KB free: pure FRAGMENTATION, no
+    /// contiguous block of the needed size. Reserving makes the per-frame
+    /// allocation a CONSTANT size the allocator can hand straight back, instead
+    /// of a ladder that leaves a trail of differently-sized holes.
+    fn with_reserves(scale_factor: ScaleFactor) -> Self {
+        let mut this = PrepareScene { scale_factor, ..Default::default() };
+        this.items.reserve(ITEMS_RESERVE);
+        this.vectors.textures.reserve(TEXTURES_RESERVE);
+        this
+    }
+}
+
+/// Reserved `SceneItem` capacity (esp32c6-watch fork, #75). 512 * 16 B = 8 KB.
+/// Sized from the captured 4096 B (256-item) failure with headroom, deliberately
+/// NOT the 1024 another panic implied — reserving that much would itself hold
+/// 16 KB per frame on a heap that only has ~51 KB free, trading one OOM for
+/// another. The point is to stop the LADDER, not to pre-buy the worst case.
+const ITEMS_RESERVE: usize = 512;
+
+/// Reserved texture-slot capacity (esp32c6-watch fork, #75) — one per drawn glyph
+/// run / image, tracking ITEMS_RESERVE at a quarter.
+const TEXTURES_RESERVE: usize = 128;
 
 impl ProcessScene for PrepareScene {
     fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
