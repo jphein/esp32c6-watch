@@ -1571,23 +1571,58 @@ impl ShellUi {
         // steady-state and ~830-1,340 B transient, since `set_vec` builds the new
         // generation before dropping the old.
 
+        // FORCED-RUNG MEASUREMENT STUB (#75), `story-stub-slots`, never ship.
+        //
+        // The live ledger sends all 17 equipment/appearance slots null, and
+        // `story.slint:517` renders an unknown slot as `"—"` — ONE glyph. So the
+        // served CHAR page cannot reach the 512 scene-pool rung no matter how long
+        // a real value would be, and the 512 cliff is unmeasurable against this
+        // daemon. This stub substitutes a `MAX_SLOT_VAL`-length value with
+        // `known: true` into every slot, which is the state the daemon WILL produce
+        // once it sends equipment data (its naming style runs 22-28 chars).
+        //
+        // Forcing the value alone is not enough: without `known: true` the `"—"`
+        // branch renders and the scene never grows. Both are required.
+        //
+        // Firmware-side rather than daemon-side deliberately: the daemon is a
+        // separate project, this keeps the change in a tree we control, makes it a
+        // build with its own sigil, and cannot leak into served data.
+        #[cfg(feature = "story-stub-slots")]
+        const STUB_SLOT_VAL: &str = "ABCDEFGHIJKLMNOPQRSTUVWX"; // 24 = MAX_SLOT_VAL
+
+        // Deploy-time gate marker. `watchctl deploy` greps the image for
+        // `NEVER-SHIP:` and refuses to flash it, so this feature cannot reach a
+        // watch by accident. A marker rather than a comment because MEASURED:
+        // this build REBOOTS on first paint of the CHAR page — a 14,336 B
+        // `Vec<SceneTexture>` doubling fails in `draw_text_paragraph`. It does not
+        // merely contain test code, it ships the crash regime.
+        #[cfg(feature = "story-stub-slots")]
+        #[used]
+        static NEVER_SHIP: &str =
+            "NEVER-SHIP: story-stub-slots (reboots on story CHAR page)\0";
+
+        /// `(value, known)` for one slot. The stub ignores the payload entirely.
+        #[cfg(feature = "story-stub-slots")]
+        let slot = |_v: Option<&str>| (SharedString::from(STUB_SLOT_VAL), true);
+        #[cfg(not(feature = "story-stub-slots"))]
+        let slot = |v: Option<&str>| match v {
+            Some(v) => (SharedString::from(v), true),
+            None => (SharedString::default(), false),
+        };
+
         let equip: Vec<StorySlot> = story_proto::model::EQUIP_LABELS
             .iter()
             .enumerate()
-            .map(|(i, label)| StorySlot {
-                label: SharedString::from(*label),
-                // `default()`, NOT `from("")`. `SharedString::from(&str)` calls
-                // `from_iter(bytes.chain(once(0)))`, and for "" that iterator still
-                // yields the NUL byte — so `with_capacity(1)` allocates ~16 B.
-                // `SharedVector::default()` points at the static `SHARED_NULL` and
-                // allocates nothing. Slint renders both as the empty string.
-                // All 11 equipment slots and 6 appearance traits are null on the
-                // live ledger, so these are 17 allocations that look free and are not.
-                value: match c.equip_at(i) {
-                    Some(v) => SharedString::from(v),
-                    None => SharedString::default(),
-                },
-                known: c.equip_at(i).is_some(),
+            .map(|(i, label)| {
+                // Bind ONCE. `slot` allocates, so calling it for `.0` and again for
+                // `.1` builds the SharedString twice and drops one — which would
+                // silently undo 0729873's empty-string fix on every populated row.
+                let (value, known) = slot(c.equip_at(i));
+                StorySlot {
+                    label: SharedString::from(*label),
+                    value,
+                    known,
+                }
             })
             .collect();
         self.story_equipment.set_vec(equip);
@@ -1595,13 +1630,16 @@ impl ShellUi {
         let appear: Vec<StorySlot> = story_proto::model::APPEAR_LABELS
             .iter()
             .enumerate()
-            .map(|(i, label)| StorySlot {
-                label: SharedString::from(*label),
-                value: match c.appear_at(i) {
-                    Some(v) => SharedString::from(v),
-                    None => SharedString::default(),
-                },
-                known: c.appear_at(i).is_some(),
+            .map(|(i, label)| {
+                // Bind ONCE. `slot` allocates, so calling it for `.0` and again for
+                // `.1` builds the SharedString twice and drops one — which would
+                // silently undo 0729873's empty-string fix on every populated row.
+                let (value, known) = slot(c.appear_at(i));
+                StorySlot {
+                    label: SharedString::from(*label),
+                    value,
+                    known,
+                }
             })
             .collect();
         self.story_appearance.set_vec(appear);
