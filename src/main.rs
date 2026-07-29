@@ -585,6 +585,12 @@ fn update_power_stats(
 /// only with a reproduction that survives a soak on a BLE-OFF watch.
 const AOD_LIGHT_SLEEP: bool = false;
 
+/// Main-pool free below which scene-vector growth must spill to the reclaimed pool
+/// (#75). Set to the largest routine allocation: `SceneVectors::textures` doubling to
+/// capacity 256 is 7,168 B. Bracketed on hardware — the watch that panics sits at
+/// 892-6,588 B, the watch that does not holds >= 9,224 B.
+const MAIN_POOL_DANGER_B: usize = 8 * 1024;
+
 /// UI-loop heartbeat interval (#75). 15s is frequent enough to catch a wedge
 /// inside a one-minute trial, sparse enough that it never dominates a log.
 const BEAT_SECS: u64 = 15;
@@ -1689,6 +1695,8 @@ async fn main(_spawner: Spawner) -> ! {
     // Sampling every iteration and reporting the floor is what tells us how
     // close an interaction actually came to the OOM that panicked at 7168 B.
     let mut heap_low: usize = usize::MAX;
+    /// Latch for the main-pool danger warning (#75) — see the beat block below.
+    let mut main_pool_warned = false;
     // Time-sync provenance for the DIAG record (tsrc/tage fields).
     let mut sync_src: &str = "none";
     let mut last_sync = Instant::now();
@@ -2148,6 +2156,30 @@ async fn main(_spawner: Spawner) -> ! {
             // same-size types so an ELF symbol identifies neither either.
             let (ci, ct, cr, cs) = slint::platform::software_renderer::pool_capacities();
             println!("[POOL] items={ci} tex={ct} rr={cr} state={cs}");
+            // MAIN-POOL DANGER LINE (#75). `maxblk` probes the GLOBAL allocator, so it
+            // happily reports a 32 KB hole in the RECLAIMED pool while the main pool
+            // is down to hundreds of bytes — it cannot express the condition that
+            // actually kills the watch.
+            //
+            // Empirical bracket from two watches on identical firmware: the one that
+            // panics runs main at 892-6,588 B; the one that never panics holds main
+            // >= 9,224 B; the fatal request is 7,168 B (`textures` doubling to 256).
+            // So the danger line is "can main still serve the largest routine
+            // allocation", and that is ~8 KB. Below it, every scene-vector growth
+            // falls through into the reclaimed pool and one glyph-dense frame can take
+            // its largest hole.
+            //
+            // Latched: this is a standing condition, not an event, and a per-beat
+            // repeat would bury the log it is meant to make visible.
+            if region_free(0) < MAIN_POOL_DANGER_B && !main_pool_warned {
+                main_pool_warned = true;
+                println!(
+                    "[POOL-WARN] main pool {} B < {} B — below the largest routine \
+                     allocation; scene growth now spills to the reclaimed pool",
+                    region_free(0),
+                    MAIN_POOL_DANGER_B,
+                );
+            }
             next_beat = now + Duration::from_secs(BEAT_SECS);
             heap_low = heap_now; // per-window floor, not lifetime
         }

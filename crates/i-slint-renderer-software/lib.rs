@@ -527,12 +527,28 @@ impl Default for SoftwareRenderer {
 /// Two corrections to what this comment originally claimed, both established after it
 /// was written — kept visible because each was load-bearing and wrong:
 ///
-/// 1. **The 3584 B failure is NOT `state_stack`.** `RenderState` and `SceneTexture`
-///    are BOTH 28 B on this target, so `3584 = 128 x 28` cannot identify the vector by
-///    arithmetic alone. Measured max traversal depth is 12, so `state_stack` never
-///    exceeds capacity 16 (448 B). The consistent attribution is the glyph/texture
-///    vector, corroborated by two exact siblings: `4096 = 256 x 16` (`SceneItem`) and
-///    `3328 = 128 x 26` (`RoundedRectangle`).
+/// 1. **The 3584 B and 7168 B failures are `SceneVectors::textures`, NOT
+///    `state_stack`** — capacity 128 then 256 `SceneTexture` (28 B), one per glyph
+///    emitted by `process_target_texture`. CONFIRMED twice, independently, by
+///    call-site pointer arithmetic rather than by symbol name:
+///
+///    The backtrace symbol says `RawVec<RenderState>::grow_one`, and that is a LIE of
+///    omission. `RenderState` and `SceneTexture` are both 28 B with equal alignment,
+///    so `RawVec::grow_one` — whose body depends only on `Layout{28,4}` — is emitted
+///    ONCE and serves both. There is no `RawVec<SceneTexture>::grow_one` symbol in the
+///    binary at all; the surviving name is arbitrary. Decoding the call at the panic
+///    address gives `addi a0, s2, 0xc` — `self + 12` — and DWARF puts
+///    `vectors.textures` at offset 12 of `PrepareScene`. Three sibling call sites in
+///    the same function confirm the offset->field mapping (offset 0 -> `items`, its own
+///    16 B `grow_one`; offset 36 -> `shared_buffers`, 40 B).
+///
+///    So neither size arithmetic NOR the ELF symbol can identify a 28-byte container
+///    here. Only capacity can — hence `pool_capacities()`.
+///
+///    Corollary worth keeping: the reverted `state_stack` reserve almost certainly
+///    reserved the WRONG vector (measured tree depth is 12, so `state_stack` never
+///    exceeds cap 16 = 448 B) *and* added a permanent 4,480 B contiguous demand per
+///    frame. That is why it measured 20x worse rather than merely useless.
 /// 2. **`esp-alloc` is not "first-fit with no compaction".** `linked_list_allocator`
 ///    is *address-ordered* first-fit with immediate coalescing of adjacent holes —
 ///    among the lowest-fragmentation policies known. Do not swap it; TLSF would cost
