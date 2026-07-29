@@ -795,40 +795,10 @@ export component WatchShell inherits Window {
         }
     }
 
-    // Toast (RAM-busy, notification arrivals): shown while toast-text != ""
-    // (`visible:`-gated — same ROM rationale as the hint strips above).
-    //
-    // DELIBERATELY NOT `covered`-gated (#75). The occlusion cull that gates the
-    // watchface pages must NOT gate this: several toasts can ONLY fire while a
-    // full-screen overlay is up, so gating them made them unreachable —
-    //
-    //   * "No WiFi credentials — set in Settings" (main.rs) is emitted by a WIFI
-    //     tap, which by construction happens while `settings-open` is true. Gated,
-    //     the button went silently dead — verbatim the failure the toast exists to
-    //     prevent, per the comment at its emit site.
-    //   * the notification-arrival toast is an async MQTT/notify event, wholly
-    //     uncorrelated with overlay state, so ANY covered overlay swallowed it.
-    //   * OTA progress toasts land asynchronously and can arrive over Settings.
-    //
-    // And the trade was inverted anyway: this toast is one rectangle plus one text
-    // run, against the ~92-item page cull that is the actual scene-item win. Culling
-    // it saved ~nothing and cost a dead control. Caught in an audit of 400a251
-    // before it shipped to a wrist.
-    Rectangle {
-        visible: root.toast-text != "";
-        x: (parent.width - self.width) / 2;
-        y: 420px;
-        width: min(360px, toast-label.width + 40px);
-        height: 44px;
-        border-radius: 22px;
-        background: #1a2233ee;
-        border-width: 1px; border-color: Theme.line;
-        toast-label := Text {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            text: root.toast-text; color: Theme.ink; font-size: 16px;
-        }
-    }
+    // Toast: MOVED to the very end of this component, after every overlay
+    // conditional. It used to sit here — before the launcher/story/settings blocks
+    // — and was therefore painted over by all of them. See the block at the bottom
+    // of this file for why.
 
     // ==================== launcher overlay ====================
     // Rendered below the AOD overlay so AOD still wins when both are visible.
@@ -1146,6 +1116,63 @@ export component WatchShell inherits Window {
             color: Theme.faint;
             font-size: 18px;
             letter-spacing: 2px;
+        }
+    }
+
+    // ==================== Toast — MUST BE LAST ====================
+    //
+    // Toast (RAM-busy, notification arrivals): shown while toast-text != ""
+    // (`visible:`-gated — same ROM rationale as the hint strips above).
+    //
+    // DELIBERATELY NOT `covered`-gated (#75). The occlusion cull that gates the
+    // watchface pages must NOT gate this: several toasts can ONLY fire while a
+    // full-screen overlay is up, so gating them made them unreachable —
+    //
+    //   * "No WiFi credentials — set in Settings" (main.rs) is emitted by a WIFI
+    //     tap, which by construction happens while `settings-open` is true. Gated,
+    //     the button went silently dead — verbatim the failure the toast exists to
+    //     prevent, per the comment at its emit site.
+    //   * the notification-arrival toast is an async MQTT/notify event, wholly
+    //     uncorrelated with overlay state, so ANY covered overlay swallowed it.
+    //   * OTA progress toasts land asynchronously and can arrive over Settings.
+    //
+    // And the trade was inverted anyway: this toast is one rectangle plus one text
+    // run, against the ~92-item page cull that is the actual scene-item win. Culling
+    // it saved ~nothing and cost a dead control. Caught in an audit of 400a251
+    // before it shipped to a wrist.
+    //
+    // ⚠️ POSITION IS LOAD-BEARING — do not move this block back up.
+    //
+    // Un-culling restored the toast's COST but not its VISIBILITY, and for a full
+    // release nobody noticed, because the item count going UP reads like the fix
+    // working. It sat above the `launcher-open` / `story-open` / `settings-open`
+    // conditionals; later siblings paint on top, every full-screen overlay draws an
+    // opaque `Theme.bg` backdrop as its first element, and the software renderer has
+    // no occlusion culling. So the glyphs were built into the scene and then
+    // completely overpainted.
+    //
+    // Proof it was invisible: `story(page0)` and `story(page0,+toast31)` rendered
+    // BYTE-IDENTICAL PPMs — same md5 — while the scene grew by 32 items and 31
+    // glyphs. Full price, zero pixels.
+    //
+    // Which inverted the un-cull's own rationale exactly: the three toasts listed
+    // above can ONLY fire while an overlay is up, and those are precisely the cases
+    // an overlay overpaints. The WIFI button stayed silently dead either way — culled
+    // it cost nothing and did nothing, un-culled it cost 32 items and did nothing.
+    // Painting last is what makes the un-cull mean something.
+    Rectangle {
+        visible: root.toast-text != "";
+        x: (parent.width - self.width) / 2;
+        y: 420px;
+        width: min(360px, toast-label.width + 40px);
+        height: 44px;
+        border-radius: 22px;
+        background: #1a2233ee;
+        border-width: 1px; border-color: Theme.line;
+        toast-label := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.toast-text; color: Theme.ink; font-size: 16px;
         }
     }
 }

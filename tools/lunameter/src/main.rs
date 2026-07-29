@@ -403,6 +403,28 @@ fn main() {
     ui.set_toast_text("No WiFi credentials \u{2014} set in Settings".into());
     frame("story(page0,+toast31)", &mut sink);
     ui.set_toast_text("".into());
+    ui.set_story_open(false);
+
+    // POSITIVE CONTROLS for the toast. Until these existed, the only evidence the
+    // toast rendered at all was that the scene-item count went up — which it does
+    // whether or not a single pixel changes, and for a full release it did not: the
+    // toast block sat above the overlay conditionals, so every full-screen overlay
+    // overpainted it. `story(page0)` and `story(page0,+toast31)` were BYTE-IDENTICAL.
+    //
+    // The bare-watchface arm proves the toast draws. The over-settings arm proves it
+    // survives the case it exists for — the WIFI-tap toast is emitted while
+    // `settings-open` is true by construction, so an overlay that eats it makes the
+    // control silently dead, which is the exact failure the toast was added to
+    // prevent. Compare each against its no-toast neighbour with a PPM diff, not with
+    // an item count.
+    ui.set_toast_text("No WiFi credentials \u{2014} set in Settings".into());
+    frame("watchface(+toast31)", &mut sink);
+    ui.set_settings_open(true);
+    ui.set_settings_page(2);
+    frame("settings(page2,+toast31)", &mut sink);
+    ui.set_settings_open(false);
+    ui.set_toast_text("".into());
+    ui.set_story_open(true);
     // The rung threshold. len06 is the LAST safe average value length; len08 is
     // the first that crosses. Keep both arms — a single sample cannot show a cliff.
     for (tag, val) in [
