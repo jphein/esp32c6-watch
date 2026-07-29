@@ -66,25 +66,36 @@ pub const PLAY_CHUNK: usize = 512;
 /// whole (beep = 4 chunks) with headroom for a streamed source later (#HA-TTS).
 pub const PLAY_QUEUE_DEPTH: usize = 8;
 
-/// The TX clock ring in STEREO bytes. **16 descriptors = 16,384 B ≈ 256 ms.**
+/// The TX clock ring in STEREO bytes: 3 descriptors × `STEREO_CHUNK` = 3072 B
+/// ≈ 48 ms @ 16 kHz stereo s16le (64,000 B/s). Same 3-descriptor circular
+/// geometry as the mic RX ring (whole-descriptor `available()` growth, no
+/// partial windows). It lives in a `StaticCell` — `TX_RING` in `main.rs` — so
+/// it is `.bss`, NOT the heap.
 ///
-/// Was 3 (48 ms), which could not work: the #58 ping wakes the screen and does a
-/// FULL-FRAME repaint (~200 ms measured), so a 700 ms melody released around it
-/// spanned FOUR ring-lengths of executor starvation. The ring underran and the
-/// chime was audible only when the stall happened to miss it — JP: "I did hear a
-/// ring-like thing once or twice but not reliably". The 12 ms confirm tick always
-/// worked because it finishes before the stall begins.
+/// # Do not grow this ring
 ///
-/// 256 ms buys enough buffered audio to ride out a repaint, so the clip can be
-/// released FIRST (instant, as asked) and survive the UI work that follows.
+/// 48 ms is short enough that a long executor stall starves the feeder: the #58
+/// ping's FULL-FRAME repaint (~200 ms measured) lands inside the 700 ms melody,
+/// so the chime came out intermittently — JP: "I did hear a ring-like thing once
+/// or twice but not reliably". The 12 ms confirm tick never missed, because it
+/// finishes before the stall begins.
 ///
-/// It is HEAP-allocated, not a `StaticCell`: 16 KB of `.bss` would come straight
-/// out of the stack gap, which has only ~2.7 KB of margin over the 70 KB floor
-/// (#65) — the boot assert would fire. Heap has ~75 KB free post-WiFi.
+/// Enlarging the ring to 16 descriptors (16,384 B ≈ 256 ms) is the obvious fix.
+/// It was tried BOTH ways and reverted BOTH times (987be4e) — a measured dead
+/// end, not an untried idea:
 ///
-/// Original note on descriptor geometry: 3 descriptors × `STEREO_CHUNK` — the
-/// same 3-descriptor circular geometry as the mic RX ring (whole-descriptor
-/// `available()` growth, no partial windows). 3072 B ≈ 48 ms @ 16 kHz stereo.
+/// - **In `.bss`** — the stack gap is `_stack_start - _bss_end`, so `.bss`
+///   growth comes straight out of the stack. 16 KB trips the 70 KB
+///   `STACK_FLOOR` boot assert in `main.rs`; overriding that assert is the worse
+///   failure, not the escape hatch (#65: a stack overflow silently smashed the
+///   WiFi blob globals, and the crash looked layout-sensitive rather than
+///   stack-related).
+/// - **On the heap** — starved the launcher into an allocation failure and froze
+///   both watches. The main pool has no room to give (#75).
+///
+/// RAM is exhausted, so the REPAINT moved instead of the buffer: the ping's
+/// visual pulse is deferred until the clip has played out (`ping_visual_due` in
+/// `main.rs`). That is what made the chime reliable — not a bigger ring.
 pub const TX_RING_LEN: usize = 3 * STEREO_CHUNK;
 
 /// Post-clip silence padding in STEREO bytes: one full ring (guarantees every

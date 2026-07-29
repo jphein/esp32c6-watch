@@ -2924,17 +2924,19 @@ async fn main(_spawner: Spawner) -> ! {
                                 // play_all drain the whole clip; the per-tick
                                 // service_amp (below) raises the amp, the feeder
                                 // holds samples until it's up (pop insurance).
-                                // INSTANT PING: clip released FIRST, and it now
-                                // SURVIVES the repaint because the TX ring holds
-                                // 256 ms (was 48 ms — see TX_RING_LEN).
+                                // INSTANT PING: clip released FIRST. It survives the
+                                // repaint because the repaint MOVED — the visual
+                                // pulse is deferred until the melody has played out
+                                // (`ping_visual_due`). The TX ring is still 48 ms;
+                                // it could not be grown (see TX_RING_LEN).
                                 //
                                 // Order matters: queue the clip, raise the amp, then
                                 // yield briefly. The yield lets the clock task open
                                 // its session and push real samples into the ring
-                                // BEFORE the ~200 ms full-frame repaint starves the
-                                // executor. With 256 ms buffered, the DMA keeps
-                                // playing straight through that stall — which is
-                                // what made this unreliable at 48 ms.
+                                // BEFORE any long repaint can starve the executor.
+                                // With only 48 ms buffered, the feeder underruns if
+                                // a full-frame repaint lands mid-clip — which is
+                                // exactly what made this unreliable before.
                                 //
                                 // The wait also covers AMP_SETTLE_MS, so it is not
                                 // added latency: the amp has to settle anyway, and
