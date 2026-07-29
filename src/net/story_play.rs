@@ -131,6 +131,24 @@ pub trait PlaybackUi {
 
     /// True to stop playback (finger down, app change, screen off).
     fn should_stop(&mut self) -> bool;
+
+    /// Poll for a volume change requested during playback, as `(level, muted)`.
+    ///
+    /// WHY THIS EXISTS (#75 follow-up). `play_chapter` is `await`ed for a whole
+    /// chapter and holds `&mut codec` for its duration, so the main loop's
+    /// per-tick volume block cannot run — and both button sources (BOOT GPIO and
+    /// the PMIC PWRON poll) are drained *by that loop*. Result before this hook:
+    /// pressing volume during playback did nothing, and because the PMIC LATCHES
+    /// its key event the press then applied after the chapter ended, which reads
+    /// as "the buttons are dead" rather than "the buttons are deferred".
+    ///
+    /// The codec borrow is why the fix has to be shaped this way: only
+    /// `play_chapter` can touch the codec here, so the implementer reports the
+    /// desired level and playback applies it. Called at chunk boundaries, so it
+    /// must be cheap and must not block.
+    fn poll_volume(&mut self) -> Option<(u8, bool)> {
+        None
+    }
 }
 
 /// Enforces [`PAINT_BUDGET_MS`] and gives up permanently rather than risk audio.
@@ -354,6 +372,11 @@ pub async fn play_chapter<I: I2c>(
     // Leave the amp serviced on the way out so the feeder's tail can complete
     // and release it cleanly instead of waiting for the next main-loop tick.
     audio_out::service_amp(amp, codec);
+    // Volume requested mid-chapter (see `PlaybackUi::poll_volume`). Applied here
+    // because this function holds the only `&mut codec` in scope.
+    if let Some((level, muted)) = ui.poll_volume() {
+        audio_out::set_master_volume(codec, level, muted);
+    }
 
     Ok(Session { outcome, position: pos, gate, retries })
 }

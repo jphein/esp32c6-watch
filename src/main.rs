@@ -4923,10 +4923,63 @@ async fn main(_spawner: Spawner) -> ! {
                             shell.render(&mut display);
 
                             let mut stop_on_tap = || matches!(touch.read(), Ok(Some(_)));
+                            // Volume during playback (#story). `play_chapter` is awaited
+                            // for a whole chapter and owns `&mut audio_codec`, so the
+                            // main loop's per-tick volume block never runs — and it is
+                            // that loop which drains BOTH button sources. Defaults are
+                            // BOOT tap = Volume+, POWER tap = Volume-, so both must be
+                            // polled here or the buttons read as dead mid-chapter.
+                            //
+                            // The PMIC LATCHES its key event, which is why the press
+                            // used to land after the chapter instead of being lost —
+                            // deferred, not dropped, and that is what made it look
+                            // broken rather than merely delayed.
+                            //
+                            // BOOT is edge-detected on a chunk boundary (~62 Hz) rather
+                            // than run through the full short/long state machine: a tap
+                            // is all volume needs, and duplicating that machine here
+                            // would be a second source of truth for it.
+                            let mut boot_was_low = boot_button.is_low();
+                            let mut vol_during_play = || -> Option<(u8, bool)> {
+                                let mut act: Option<ButtonAction> = None;
+                                if let Ok(Some(key)) = power.poll_power_key() {
+                                    act = Some(match key {
+                                        crate::peripherals::power::PowerKey::Long => pwron_long,
+                                        crate::peripherals::power::PowerKey::Short => pwron_short,
+                                    });
+                                }
+                                let low = boot_button.is_low();
+                                if low && !boot_was_low {
+                                    act = act.or(Some(boot_short));
+                                }
+                                boot_was_low = low;
+                                match act? {
+                                    ButtonAction::VolUp => {
+                                        muted = false;
+                                        volume = (volume + 1).min(peripherals::config::VOL_MAX);
+                                        Some((volume, muted))
+                                    }
+                                    ButtonAction::VolDown => {
+                                        muted = false;
+                                        volume = volume.saturating_sub(1);
+                                        Some((volume, muted))
+                                    }
+                                    ButtonAction::Mute => {
+                                        muted = !muted;
+                                        Some((volume, muted))
+                                    }
+                                    // Anything else (Launcher, PowerMenu) is ignored
+                                    // mid-chapter: `stop` already exits on a tap, and
+                                    // acting on a nav action from inside playback would
+                                    // change app_state behind the main loop's back.
+                                    _ => None,
+                                }
+                            };
                             let mut ui = StoryPlayUi {
                                 shell: &mut shell,
                                 display: &mut display,
                                 stop: &mut stop_on_tap,
+                                vol: &mut vol_during_play,
                                 seg: story_seg.as_ref().filter(|i| i.usable()),
                                 title: title.as_str(),
                                 duration_ms,
@@ -6069,6 +6122,11 @@ struct StoryPlayUi<'a> {
     /// struct carries no device generics — same reason `voice_tts::speak_text`
     /// takes `&mut dyn FnMut`.
     stop: &'a mut dyn FnMut() -> bool,
+    /// Volume poll for mid-chapter button presses. A `dyn` closure for the same
+    /// reason as `stop`: it captures the PMIC and the BOOT button, and this struct
+    /// must stay free of device generics. See `PlaybackUi::poll_volume` — playback
+    /// holds the only `&mut codec`, so this reports the level and playback applies it.
+    vol: &'a mut dyn FnMut() -> Option<(u8, bool)>,
     /// `None` when the manifest was missing or refused (over the cap,
     /// non-contiguous, or a rate this hardware cannot play). Playback continues
     /// without a speaker chip.
@@ -6082,6 +6140,10 @@ struct StoryPlayUi<'a> {
 
 #[cfg(feature = "story")]
 impl crate::net::story_play::PlaybackUi for StoryPlayUi<'_> {
+    fn poll_volume(&mut self) -> Option<(u8, bool)> {
+        (self.vol)()
+    }
+
     fn wants_paint(&mut self, position_ms: u32) -> bool {
         let seg_now = self
             .seg
