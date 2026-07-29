@@ -37,7 +37,28 @@ use esp_hal::Blocking;
 // Bytes per DMA transfer == size of the single TX DMA buffer. A Slint strip is
 // WIDTH * 2 lines * 2 B = 1640 B (well under one chunk → single-shot flush);
 // larger fills (fill_screen / write_repeat) are chunked synchronously.
-const DMA_CHUNK: usize = 8000;
+//
+// #75 (lucid): was 8000, which bought NOTHING on the hot path and cost 5,960 B
+// of `.bss` — i.e. 5,960 B of stack, since `stack = _stack_start - _bss_end`
+// (the #65 crash class). The Slint strip flush is 1,640 B and takes the
+// single-shot deferred path either way; the only callers that ever exceed one
+// chunk are `write_pixels_chunked` / `stream_pixels` / `write_repeat`, which
+// already loop. So the buffer only has to be >= 1,640 B to preserve the
+// performance-critical deferred flush; 2048 is the next power of two above it.
+//
+// Measured, identical tree otherwise (`size -A`):
+//   DMA_CHUNK 8000 -> .bss 268,280  .stack 75,120  (floor margin +3,440)
+//   DMA_CHUNK 2048 -> .bss 262,320  .stack 81,080  (floor margin +9,400)
+//
+// Cost: a framebuffer-game full-frame flush (205*251 px = 102,910 B) goes from
+// 13 DMA kicks to 51. The per-pixel byteswap dominates that loop, so the extra
+// ~38 setups are noise; the Slint path is byte-for-byte unchanged.
+//
+// The 5,960 B currently lands in the STACK (margin +3,440 -> +9,400, real #65
+// insurance). To spend it on the heap instead, raise the MAIN `heap_allocator!`
+// in main.rs by the same amount — that pushes `_bss_end` back up and returns the
+// stack to where it was. Do NOT do both.
+const DMA_CHUNK: usize = 2048;
 
 /// Ownership state of the SPI peripheral + its TX DMA buffer.
 enum Bus<'d> {

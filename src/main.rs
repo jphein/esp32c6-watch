@@ -600,10 +600,28 @@ async fn main(_spawner: Spawner) -> ! {
     // RAM-busy toast fallback if squeezed). Real fix on the books: box the
     // session/voice socket buffers out of .bss.
         esp_alloc::heap_allocator!(size: 186 * 1024);
-    // ROM-reclaimed region (dram2_seg, ~64KB, ~100% free at boot). Second pool so
-    // nothing goes to waste; it sits ABOVE the stack ceiling and is independent of
-    // _bss_end, so its size has zero effect on the stack. Kept at 56KB.
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 56 * 1024);
+    // ROM-reclaimed region (dram2_seg). Second pool so nothing goes to waste; it
+    // sits ABOVE the stack ceiling and is independent of _bss_end, so its size has
+    // ZERO effect on the stack.
+    //
+    // #75 (lucid): was 56KB while the region is **exactly 64KB**, so 8,192 B of
+    // usable SRAM was being left on the floor. esp-hal-1.1.1/ld/esp32c6/memory.x:
+    //   dram2_seg: ORIGIN = 0x40800000 + 0x6E610 = 0x4086E610
+    //              len    = 0x4087E610 - 0x4086E610 = 0x10000 = 65,536 B
+    // and `.dram2_uninit` has no other occupant in the whole crate graph (only
+    // esp-hal's ld/sections/dram2.x defines the section). Verified by `size -A`,
+    // identical tree otherwise:
+    //   56KB -> .dram2_uninit 57,344   .bss 268,280   .stack 75,120
+    //   64KB -> .dram2_uninit 65,536   .bss 268,280   .stack 75,120
+    // i.e. +8,192 B of heap with .bss and the stack byte-identical. If a future
+    // dep ever also claims `.dram2_uninit`, this over-subscribes the region and
+    // the LINK FAILS loudly — it cannot silently corrupt anything.
+    //
+    // This pool matters more than "nothing goes to waste": `EspHeapInner::alloc_caps`
+    // walks the regions IN ORDER and falls through on failure, so every ordinary
+    // Rust allocation that the main pool cannot satisfy is retried here. It is the
+    // fallback that decides whether a 4 KB renderer request panics (#75).
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
