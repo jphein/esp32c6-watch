@@ -747,9 +747,9 @@ def cmd_logs(args) -> int:
 
     if not collected:
         if args.reset:
-            say("watchctl: --reset produced NO boot burst — the port is "
-                "likely wedged; run: watchctl recover " + args.watch)
-            emit({"lines": [], "count": 0, "wedged_suspect": True})
+            busy = say_wedged_or_busy(row["dev"], args.watch)
+            emit({"lines": [], "count": 0, "wedged_suspect": not busy,
+                  "port_busy": busy})
             return EXIT_RECOVERY
         say("(no output — release builds light-sleep and gate serial; this "
             "is normal at idle. Use --reset for the boot burst, or a "
@@ -793,9 +793,9 @@ def cmd_slot(args) -> int:
     banner = reset_and_capture(row["dev"], wait=18.0,
                                need=("offset", "sigil"))
     if banner.get("offset") is None:
-        say("no 'Loaded app from partition' line seen — port wedged or boot "
-            "not reaching the bootloader; run: watchctl recover " + args.watch)
-        emit({"error": "no-banner", "lines": banner["lines"][-40:]})
+        busy = say_wedged_or_busy(row["dev"], args.watch)
+        emit({"error": "port-busy" if busy else "no-banner",
+              "port_busy": busy, "lines": banner["lines"][-40:]})
         return EXIT_RECOVERY
     say_fingerprint(banner)
     if banner.get("sigil") is None:
@@ -863,6 +863,45 @@ def sigil_of_image(binp: Path) -> dict:
 
 NEVER_SHIP = b"NEVER-SHIP:"
 PIN_DIR = REPO / "scratch" / "flashed"
+
+
+def port_holders(dev: str) -> str:
+    """Who else has this tty open? Returns a human string, or "" if nobody.
+
+    This exists because "no boot banner" is a NON-DISCRIMINATING diagnosis: it means
+    the watch is wedged OR another process holds the tty, and the two look identical
+    from here. On 2026-07-29 that ambiguity produced a report that a watch was bricked
+    when it was answering console commands the whole time — another agent's capture
+    held the port, so the read saw silence.
+
+    An instrument whose output cannot separate the cases you care about cannot
+    reassure you no matter what it prints. `fuser` separates them in one call, so
+    every "wedged" verdict now carries the answer.
+    """
+    for cmd in (["fuser", "-v", dev], ["lsof", "-t", dev]):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        out = (p.stdout + p.stderr).strip()
+        # fuser prints PIDs to stderr and a header table; either way, non-empty
+        # output naming a pid means somebody has it.
+        if out and any(ch.isdigit() for ch in out):
+            return " ".join(out.split())[:200]
+    return ""
+
+
+def say_wedged_or_busy(dev: str, watch: str) -> bool:
+    """Report a missing banner, distinguishing 'busy' from 'wedged'. True = busy."""
+    held = port_holders(dev)
+    if held:
+        say(f"no boot banner — but {dev} is HELD by another process: {held}")
+        say("  that is almost certainly the cause: a held tty reads exactly like a "
+            "dead device. Release it and retry before concluding anything.")
+        return True
+    say(f"no boot banner, and nothing else holds {dev} — the watch really is not "
+        f"reaching the bootloader; run: watchctl recover {watch}")
+    return False
 
 
 def refuse_if_never_ship(path: Path) -> str | None:
