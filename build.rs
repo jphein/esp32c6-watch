@@ -104,6 +104,29 @@ fn stamp_build_sigil() {
         }
     }
 
+    // fambuild (JP's standard build path since 2026-07-29) rsyncs the worktree to
+    // familiar EXCLUDING `/.git`, so git is unavailable at the far end and every
+    // remote build would stamp `no-git` — silently defeating the whole mechanism
+    // on the path that produces most images. So an externally computed hash wins:
+    // fambuild runs `tools/build_hash.sh` on katana, where git exists, and exports
+    // the result.
+    println!("cargo:rerun-if-env-changed=WATCH_BUILD_HASH");
+    if let Ok(ext) = std::env::var("WATCH_BUILD_HASH") {
+        let ext = ext.trim().to_string();
+        if !ext.is_empty() {
+            let dirty = ext.ends_with('*');
+            let bare = ext.trim_end_matches('*');
+            let sigil = sigil_id::build_name_for_hash(bare)
+                .map(|(adj, noun)| format!("{adj} {noun}"))
+                .unwrap_or_else(|| "no-git".to_string());
+            println!("cargo:rustc-env=BUILD_SIGIL={sigil}");
+            println!("cargo:rustc-env=BUILD_HASH={ext}");
+            println!("cargo:warning=build sigil: {sigil} \u{00b7} {ext} (supplied)");
+            let _ = dirty;
+            return;
+        }
+    }
+
     let (hash, dirty) = match git(&["rev-parse", "HEAD"]) {
         Some(head) => {
             // `--porcelain` covers untracked + staged; `diff HEAD` covers content.

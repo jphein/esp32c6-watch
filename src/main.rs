@@ -3797,16 +3797,20 @@ async fn main(_spawner: Spawner) -> ! {
             if vol_changed {
                 last_interaction = now;
                 audio_out::set_master_volume(&mut audio_codec, volume, muted);
-                shell.set_volume(volume, muted);
                 shell.set_volume_overlay_open(true);
                 shell.request_redraw(); // snappy HUD even at the 1Hz clock idle
                 volume_overlay_until = Some(now + Duration::from_secs(2));
-                if watch_cfg.volume != volume || watch_cfg.muted != muted {
-                    watch_cfg.volume = volume;
-                    watch_cfg.muted = muted;
-                    // DEFERRED, not written here — see the flush block below (#75).
-                    cfg_dirty_at = Some(now);
-                }
+                // NOTE the `shell.set_volume` and the `watch_cfg` divergence test
+                // that used to live here are GONE, not moved by accident: the
+                // reconcile block above runs unconditionally and earlier in the
+                // same tick, so both were already dead by the time control got
+                // here. They are deleted rather than left as no-ops because dead
+                // code that reads as load-bearing is how this exact block got
+                // misdiagnosed twice — and because the failure mode is nasty. If
+                // anyone later moves the reconcile block BELOW this `if`, a
+                // plausible tidy-up, the dead copy would silently become the live
+                // one and the mid-chapter reconcile would stop happening, with
+                // nothing in the diff to show it.
                 if vol_feedback && !audio_out::busy() {
                     audio_out::play_pcm(tick_pcm);
                     audio_out::service_amp(&mut amp_en, &mut audio_codec);

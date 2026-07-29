@@ -255,17 +255,10 @@ for feat in "${COMBOS[@]}"; do
   # `build.rs::stamp_build_sigil`. Only the HASH is compared, not the name — the
   # name is a pure function of the hash, so a hash match is sufficient and avoids
   # duplicating the word tables here.
-  stamp_want_hash=""
-  if head_full=$(git rev-parse HEAD 2>/dev/null); then
-    st=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)
-    df=$(git -c diff.external= diff --no-ext-diff --no-textconv --binary HEAD 2>/dev/null || true)
-    if [[ -z "$st" && -z "$df" ]]; then
-      stamp_want_hash="${head_full:0:7}"
-    else
-      stamp_want_hash="$(printf '%s\n%s\n%s' "$head_full" "$st" "$df" \
-        | git hash-object --stdin 2>/dev/null | cut -c1-7)*"
-    fi
-  fi
+  # ONE implementation, shared with build.rs and fambuild — see tools/build_hash.sh.
+  # A recomputation that drifted from the baked-in one would fail this check
+  # spuriously, which is worse than not checking.
+  stamp_want_hash="$(bash "$REPO/tools/build_hash.sh" 2>/dev/null || true)"
   stamp_got=$(strings -a "$elf" 2>/dev/null | grep -o 'WSIGIL:.*' | head -1)
   stamp_got_hash=$(printf '%s' "$stamp_got" | cut -d'|' -f2)
   if [[ -n "$stamp_want_hash" && -n "$stamp_got_hash" \
