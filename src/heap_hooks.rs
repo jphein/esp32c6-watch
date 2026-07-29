@@ -48,13 +48,16 @@
 //! `.bss` on this target is not free: the stack is the leftover gap under RAM
 //! top (`stack = _stack_start - _bss_end`), so every static byte steals stack
 //! against the 71,680 B floor asserted at boot. This module's entire footprint
-//! is [`Counters`] — 4 words + 12 bucket counters + 2 words = **72 bytes** —
+//! is [`Counters`] — 2 x `usize` + 2 x `u32` + 12 x `u32` = 16 four-byte words
+//! = **64 bytes** of `.bss` —
 //! and with the feature off it compiles to nothing at all. A default build pays
 //! literally zero bytes and zero cycles.
 //!
 //! Unlike `heap-forensics`, this feature does **not** perturb what it measures:
 //! it only counts. It would be safe to ship enabled; it is off by default
-//! because 72 B of stack is not worth spending on a question already answered.
+//! because 64 B is not worth spending on a question already answered. (The
+//! `Snapshot` marks are a separate ~192 B of STACK, which is a different budget
+//! from `.bss` and the one preflight's margin column actually measures.)
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
 
@@ -88,7 +91,7 @@ fn bucket_of(size: usize) -> usize {
     NBUCKETS - 1
 }
 
-/// The whole instrument: 72 bytes of `.bss`.
+/// The whole instrument: 64 bytes of `.bss`.
 struct Counters {
     alloc_bytes: AtomicUsize,
     alloc_count: AtomicU32,

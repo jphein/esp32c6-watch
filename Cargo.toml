@@ -53,7 +53,7 @@ heap-forensics = []
 # deliberately separate flag because the two cost wildly different things.
 # `heap-forensics` perturbs what it measures (it drains the pool to a 16 KB
 # reserve) and must never ship on. This one only counts: it installs esp-alloc's
-# `_esp_alloc_alloc`/`_esp_alloc_dealloc` hooks and adds 72 B of `.bss` plus a
+# `_esp_alloc_alloc`/`_esp_alloc_dealloc` hooks and adds 64 B of `.bss` plus a
 # few relaxed atomic adds per allocation. Folding it into `heap-forensics` would
 # saddle a cheap, safe instrument with a never-enable constraint it has not
 # earned.
