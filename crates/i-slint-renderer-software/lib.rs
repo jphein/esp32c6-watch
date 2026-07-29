@@ -594,7 +594,59 @@ impl ScenePool {
         self.items = items;
         self.vectors = vectors;
         self.line_ranges = line_ranges;
+        self.publish_capacity();
     }
+
+    /// WATCH FORK (esp32c6-watch #75): publish pooled CAPACITY for the firmware.
+    ///
+    /// This exists because neither obvious way to identify a failing allocation
+    /// works here:
+    ///
+    /// * **By size** — `RenderState` and `SceneTexture` are BOTH 28 B on this
+    ///   target, so `3584 = 128 x 28` and `7168 = 256 x 28` are each consistent with
+    ///   two different vectors. One misattribution on that basis already produced a
+    ///   "fix" that made freezes 20x worse.
+    /// * **By symbol** — `RawVec<T>::grow_one`'s code depends only on
+    ///   `size_of::<T>()` and alignment, so the two 28-byte monomorphisations are
+    ///   byte-identical and the linker may FOLD them. The surviving symbol name is
+    ///   then arbitrary, which is why an ELF backtrace naming `RawVec<RenderState>`
+    ///   cannot outweigh a measured tree depth of 12.
+    ///
+    /// Capacity is unambiguous: the vector that grows names itself.
+    ///
+    /// Published through atomics rather than logged here, so this fork gains no
+    /// logging dependency and no formatting cost on the render path — the firmware
+    /// reads them on its existing heartbeat via [`pool_capacities`].
+    fn publish_capacity(&self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        POOL_CAP_ITEMS.store(self.items.capacity() as u32, Relaxed);
+        POOL_CAP_TEXTURES.store(self.vectors.textures.capacity() as u32, Relaxed);
+        POOL_CAP_ROUNDED.store(self.vectors.rounded_rectangles.capacity() as u32, Relaxed);
+        POOL_CAP_STATE.store(self.state_stack.capacity() as u32, Relaxed);
+    }
+}
+
+use core::sync::atomic::AtomicU32;
+
+static POOL_CAP_ITEMS: AtomicU32 = AtomicU32::new(0);
+static POOL_CAP_TEXTURES: AtomicU32 = AtomicU32::new(0);
+static POOL_CAP_ROUNDED: AtomicU32 = AtomicU32::new(0);
+static POOL_CAP_STATE: AtomicU32 = AtomicU32::new(0);
+
+/// Pooled scene-vector capacities as `(items, textures, rounded_rects, state_stack)`
+/// (esp32c6-watch fork, #75). Element sizes on this target: 16 / 28 / 26 / 28 B.
+///
+/// The vector that grows is the one whose doubling can fail, and capacity is the
+/// only unambiguous way to name it — see [`ScenePool::publish_capacity`] for why
+/// size arithmetic and ELF symbols both fail to.
+pub fn pool_capacities() -> (u32, u32, u32, u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (
+        POOL_CAP_ITEMS.load(Relaxed),
+        POOL_CAP_TEXTURES.load(Relaxed),
+        POOL_CAP_ROUNDED.load(Relaxed),
+        POOL_CAP_STATE.load(Relaxed),
+    )
 }
 
 #[cfg(feature = "testing")]

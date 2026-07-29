@@ -2141,6 +2141,13 @@ async fn main(_spawner: Spawner) -> ! {
                 region_free(1),
                 largest_free_block(),
             );
+            // Pooled scene-vector capacities (#75). The vector that GROWS is the one
+            // whose doubling can fail, and capacity is the only unambiguous way to
+            // name it: `RenderState` and `SceneTexture` are both 28 B, so a byte
+            // count identifies neither, and `RawVec::grow_one` is foldable across
+            // same-size types so an ELF symbol identifies neither either.
+            let (ci, ct, cr, cs) = slint::platform::software_renderer::pool_capacities();
+            println!("[POOL] items={ci} tex={ct} rr={cr} state={cs}");
             next_beat = now + Duration::from_secs(BEAT_SECS);
             heap_low = heap_now; // per-window floor, not lifetime
         }
