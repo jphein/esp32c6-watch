@@ -22,6 +22,10 @@ mod notify;
 mod peripherals;
 mod ui;
 mod apps;
+// Heap attribution hooks (feature `heap-hooks`, OFF by default): counts every
+// allocation by size class, including the WiFi/BLE blob's. See src/heap_hooks.rs.
+#[cfg(feature = "heap-hooks")]
+mod heap_hooks;
 // UI test automator (feature `debug-console`, on by default): drive + measure
 // the UI over the USB-Serial-JTAG RX. See src/debug_console.rs.
 #[cfg(feature = "debug-console")]
@@ -454,6 +458,17 @@ struct ClimatePending {
 /// allocation, and NOT something the normal UI ever asks for: the Slint shell
 /// has no framebuffer at all (it line-streams through a 2-line 1,640 B strip,
 /// `ui/slint_platform.rs`). Only the games `Framebuffer` allocates this.
+///
+/// Region ORDER is load-bearing, not incidental: esp-alloc walks its regions in
+/// registration order and takes the first that satisfies the layout
+/// (`esp-alloc-0.10.0/src/lib.rs:428` add_region, `:538-552` alloc_caps), and
+/// both pools register as `Internal`. So main is not "the heap" and reclaimed is
+/// not "a second heap" — **everything lands in main until main cannot hold it,
+/// and reclaimed is pure spillover.** A near-zero `main_free` alongside a full
+/// `recl_free` is therefore the designed steady state, not a fault. Measured on
+/// glass at ca4794d: a game launch moved main by exactly 820 B (the fb's
+/// full-width `row`) while reclaimed fell 51,456 B (the fb's `buf`) — first-fit
+/// by region order, doing precisely what it says.
 fn log_heap(tag: &str) {
     let stats = esp_alloc::HEAP.stats();
     let region_free = |i: usize| {
@@ -470,7 +485,70 @@ fn log_heap(tag: &str) {
         esp_alloc::HEAP.free(),
         (410usize / 2) * (502usize / 2),
     );
+    // High-water mark (#75), opt-in via `heap-hooks` -> esp-alloc's
+    // `internal-heap-stats`. This is the one number the static census could not
+    // derive: `free()` samples the instant you ask, so a transient spike between
+    // two probes is invisible to it — and the spike is the thing that OOMs. The
+    // scene-vector work was diagnosed off exactly such a spike ("heap sat at
+    // ~51-52 KB for 5,530 s, then dropped to 18 KB inside a SINGLE frame",
+    // d10aa0b). `max_usage` records that peak whether or not anyone was looking.
+    #[cfg(feature = "heap-hooks")]
+    println!("[HEAP-HW] {}: max_usage={}", tag, stats.max_usage);
+    // Attribution sweep (#75), opt-in via `heap-forensics`. Hung off `log_heap`
+    // rather than the heartbeat because these six call sites are already the
+    // interesting moments — boot, pre/post-WiFi, and the pair that BRACKETS
+    // `suspend_scene()`, which is the teardown that produced the
+    // `Bad free?` corruption panic. See [`harvest_free`] for how to read it.
+    #[cfg(feature = "heap-forensics")]
+    {
+        // Headroom left for the esp-rtos threads that allocate concurrently with
+        // the sweep (net_task, and the WiFi blob via esp-alloc's `compat` malloc).
+        const RESERVE: usize = 16 * 1024;
+        let h = harvest_free(RESERVE);
+        println!(
+            "[HARVEST] {}: reachable={} blocks={} left={} reserve={} stop={}",
+            tag,
+            h.bytes,
+            h.blocks,
+            h.left,
+            RESERVE,
+            if h.budget_bound { "budget" } else { "nomem" },
+        );
+    }
 }
+
+// === heap-hooks span helpers =============================================
+//
+// These exist so the probe call sites below read as plain Rust with no `#[cfg]`
+// scattered through the boot sequence. With `heap-hooks` off, `HeapMark` is `()`
+// and both functions have empty bodies, so the whole mechanism costs nothing —
+// no branch, no byte, no `.bss`. Bracket any suspect with:
+//
+//     let m = heap_mark();
+//     let thing = expensive_init();
+//     heap_span("thing", &m);
+
+/// Opaque counter snapshot; `()` when the feature is off.
+#[cfg(feature = "heap-hooks")]
+type HeapMark = heap_hooks::Snapshot;
+#[cfg(not(feature = "heap-hooks"))]
+type HeapMark = ();
+
+/// Take a counter snapshot to bracket against.
+#[cfg(feature = "heap-hooks")]
+fn heap_mark() -> HeapMark {
+    heap_hooks::snapshot()
+}
+#[cfg(not(feature = "heap-hooks"))]
+fn heap_mark() -> HeapMark {}
+
+/// Report everything allocated and freed since `since`, with a size histogram.
+#[cfg(feature = "heap-hooks")]
+fn heap_span(tag: &str, since: &HeapMark) {
+    heap_hooks::report(tag, since);
+}
+#[cfg(not(feature = "heap-hooks"))]
+fn heap_span(_tag: &str, _since: &HeapMark) {}
 
 /// Largest currently-allocatable block, in bytes (0 if even 1 KB fails).
 ///
@@ -502,6 +580,131 @@ fn largest_free_block() -> usize {
         }
     }
     0
+}
+
+/// Result of a [`harvest_free`] sweep.
+#[cfg(feature = "heap-forensics")]
+struct Harvest {
+    /// Bytes we were actually able to take and hand back.
+    bytes: usize,
+    /// How many separate blocks that took (i.e. how shredded the free space is).
+    blocks: usize,
+    /// `HEAP.free()` at peak drain — what the bookkeeping still claims is free
+    /// when we can no longer obtain any of it.
+    left: usize,
+    /// True = we stopped because the reserve ran out (healthy). False = we
+    /// stopped because nothing would allocate at any size (see the type docs).
+    budget_bound: bool,
+}
+
+/// Total *reachable* free bytes, measured by actually taking them (#75).
+///
+/// **Why this exists.** `HEAP.free()` is `size - used` bookkeeping inside
+/// `linked_list_allocator` (`src/lib.rs:239-240`). I traced the split/merge
+/// paths and it *is* a faithful sum of hole sizes — but only while the hole list
+/// is intact. Every free block carries an 8-byte `Hole { size, next }` header in
+/// its first bytes; a stray write into a freed block smashes it, and if `next` is
+/// zeroed then **every hole beyond it is orphaned instantly while `used` — and
+/// therefore `free()` — does not move at all.** That failure mode is invisible to
+/// every counter we have and it presents *exactly* like fragmentation:
+/// "a 3,584 B request failed with 54,400 B free".
+///
+/// We are not speculating about this. `src/ui/slint_shell.rs` records
+/// `Freed node aliases existing hole! Bad free?` — a live `assert!` in
+/// `linked_list_allocator/src/hole.rs:501,537,554`, which fires when a freed
+/// block physically overlaps an existing hole — crashing shipped v0.12.1 100 % of
+/// the time on game launch. That is heap corruption, and it was routed around
+/// (`ui = None` became `suspended: bool`), not fixed.
+///
+/// **How to read the result.** `[HARVEST] <tag>: reachable=N blocks=N left=N
+/// reserve=N stop=(budget|nomem)`
+///
+/// - `stop=budget` and `left` ≈ `reserve` → **hole list INTACT.** `free()` is
+///   telling the truth; any allocation failure elsewhere is genuine capacity or
+///   ordinary fragmentation, and the capacity work is the right work.
+/// - `stop=nomem` while `left` is still large → **`free()` is reporting bytes
+///   that cannot be obtained at any size down to 16 B. Holes have been lost.**
+///   That is corruption, and it outranks every capacity fix on this issue.
+/// - `blocks` is a free bonus: reachable ÷ blocks is the mean hole size, i.e. a
+///   direct read on how shredded the pool is.
+///
+/// The decisive placement is the pair of `log_heap` calls that bracket
+/// `suspend_scene()` — run with the scene *drop* restored, a shortfall that
+/// appears only in the post-drop sweep localises the bad free to the Slint
+/// component teardown without needing the crash to reproduce.
+///
+/// **Why it is opt-in and must stay opt-in.** At peak the heap really is drained
+/// to `reserve`, and the esp-rtos threads allocate concurrently with this loop —
+/// `net_task`, and the WiFi blob through esp-alloc's `compat` `malloc`. `reserve`
+/// is their headroom. Do not shrink it, and do not enable this feature on a
+/// shipped build.
+#[cfg(feature = "heap-forensics")]
+fn harvest_free(reserve: usize) -> Harvest {
+    // Ladder bottom is 16 B so every harvested block can hold the 8-byte link.
+    const SIZES: [usize; 12] = [
+        32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16,
+    ];
+    let budget = esp_alloc::HEAP.free().saturating_sub(reserve);
+    let mut head: *mut u8 = core::ptr::null_mut();
+    let mut bytes = 0usize;
+    let mut blocks = 0usize;
+
+    loop {
+        let mut got = false;
+        for &sz in SIZES.iter() {
+            if bytes + sz > budget {
+                continue; // this rung is out of reach because of the reserve
+            }
+            // SAFETY: `sz` is non-zero and align 4 is valid for it. Every block
+            // taken here is released in the give-back loop below with the
+            // identical layout, exactly once (the list is consumed as it walks).
+            unsafe {
+                let layout = core::alloc::Layout::from_size_align_unchecked(sz, 4);
+                let p = alloc::alloc::alloc(layout);
+                if p.is_null() {
+                    continue; // try a smaller rung
+                }
+                // Thread the list through the harvested block itself, so N blocks
+                // cost O(1) extra memory: [0..4) = next, [4..8) = size.
+                p.cast::<*mut u8>().write(head);
+                p.cast::<usize>().add(1).write(sz);
+                head = p;
+                bytes += sz;
+                blocks += 1;
+                got = true;
+            }
+            break;
+        }
+        if !got {
+            break;
+        }
+    }
+    let left = esp_alloc::HEAP.free();
+    // If even the smallest rung was over budget we stopped on the reserve, not
+    // on the allocator. That distinction is the whole measurement.
+    let budget_bound = bytes + SIZES[SIZES.len() - 1] > budget;
+
+    // Give every byte back. Address-ordered coalescing restores the list exactly.
+    // SAFETY: each node was allocated above with `(size, 4)`; `size` is read back
+    // from the node's own header and each node is freed exactly once.
+    unsafe {
+        while !head.is_null() {
+            let next = head.cast::<*mut u8>().read();
+            let sz = head.cast::<usize>().add(1).read();
+            alloc::alloc::dealloc(
+                head,
+                core::alloc::Layout::from_size_align_unchecked(sz, 4),
+            );
+            head = next;
+        }
+    }
+
+    Harvest {
+        bytes,
+        blocks,
+        left,
+        budget_bound,
+    }
 }
 
 /// CFG key `R` boot debounce (reference main.rs REBOOT_DEBOUNCE_MS): within
@@ -793,7 +996,15 @@ async fn main(_spawner: Spawner) -> ! {
     // Slint shell owns the whole watchface + launcher UI now. Construct it once
     // (registers the Slint platform + shows the window). brightness is synced to
     // the real boot value once watch_cfg is loaded (below).
+    // Bracketed for #75: this is the single largest permanent heap consumer in
+    // the firmware, and the `<=16` bucket in the report IS Slint's
+    // dependency-node count — one 16 B alloc per property a live binding reads
+    // (i-slint-core properties.rs:461). The static census could bound that only
+    // as ">=238, plausibly 500-1000", leaving ~15.7 KB of boot heap
+    // unattributed. This closes it by counting instead of estimating.
+    let mark_scene = heap_mark();
     let mut shell = ShellUi::new();
+    heap_span("ShellUi::new", &mark_scene);
     println!("[SLINT] shell up");
 
     // The ~201KB RGB332 framebuffer must NOT be resident while the Slint scene
@@ -1159,11 +1370,29 @@ async fn main(_spawner: Spawner) -> ! {
     let wifi_config = esp_radio::wifi::ControllerConfig::default()
         .with_ampdu_rx_enable(false)
         .with_rx_ba_win(0);
+    // Bracketed for #75: source accounts for only ~16 KB of what WiFi actually
+    // takes (`static_rx_buf_num` = 10 x ~1.6 KB, esp-radio wifi/mod.rs:2060-2068
+    // "not freed until esp_wifi_deinit"). The remainder — supplicant,
+    // net80211/pp control blocks, PHY — lives inside the closed blob. It is
+    // visible here because the blob's `malloc` funnels through the same hooked
+    // `HEAP.alloc_caps` (esp-alloc malloc.rs:11,18).
+    let mark_wifi = heap_mark();
     let (wifi_controller, wifi_interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, wifi_config).expect("WiFi init failed");
     log_heap("post-wifi"); // confirms the RX-pool carve isn't starving a region
+    heap_span("wifi::new", &mark_wifi);
+    // BLE was a measurement BLIND SPOT until now: `log_heap("post-wifi")` fires
+    // ABOVE this line and the next probe was hundreds of lines away, so BLE's
+    // permanent cost — NimBLE msys 12x256 + 24x320 = 10,752 B (ble/npl.rs:1208),
+    // a 4,096 B controller task stack, ACL 24x255, HCI 38x70, call it ~24 KB —
+    // was never bracketed by anything and had to be inferred from config
+    // constants. It is also unconditional: the watch pays it even though the
+    // radios are logged as OFF at boot.
+    let mark_ble = heap_mark();
     let ble_connector =
         BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
+    log_heap("post-ble");
+    heap_span("BleConnector::new", &mark_ble);
     // trouble-host GATT server: wrap the HCI transport and hand it to the
     // host task. The task parks until the watchface BLE button fires.
     let ble_controller: peripherals::ble::WatchController =
