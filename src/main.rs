@@ -1675,6 +1675,9 @@ async fn main(_spawner: Spawner) -> ! {
         pwron_long.label(),
     );
     let mut mesh_channel_pinned = false;
+    // The channel ESP-NOW is currently tuned to, so an elected change retunes
+    // even while the pin is already held (0 = never tuned).
+    let mut mesh_tuned_ch: u8 = 0;
     let mut last_mesh_peers: u8 = 0;
     let mut next_diag = Instant::now() + Duration::from_secs(30);
     // UI-loop heartbeat state (#75) — see the beat block in the loop below.
@@ -2743,15 +2746,21 @@ async fn main(_spawner: Spawner) -> ! {
         // above (a cfg_save flash program in the toggle arm) can park this loop
         // while net_task processes the very Raise that just went out — pinning
         // ch6 off a stale true here is exactly the a5a4c27 auth-frame hazard.
+        // The channel is now the ELECTED one, not a compile-time constant. It
+        // starts at the rendezvous default (ch6) and only moves once the fleet
+        // agrees — a lone node is not a quorum (`mesh_elect::Elector::step`), so
+        // a watch that has heard no ELECT peers never walks off ch6 on its own.
+        // That is what makes this safe to flash before smol speaks ELECT.
         let mesh_pin_ok = crate::net::net_task::snapshot().mesh_pin_ok;
-        if mesh_pin_ok && !mesh_channel_pinned {
-            match esp_now.set_channel(crate::net::smol_mesh::MESH_CHANNEL) {
+        let want_ch = mesh.elected_channel();
+        if mesh_pin_ok && (!mesh_channel_pinned || mesh_tuned_ch != want_ch) {
+            match esp_now.set_channel(want_ch) {
                 Ok(()) => {
                     mesh_channel_pinned = true;
-                    println!(
-                        "[MESH] pinned to ch{}",
-                        crate::net::smol_mesh::MESH_CHANNEL
-                    );
+                    if mesh_tuned_ch != want_ch {
+                        println!("[MESH] tuned to ch{want_ch}");
+                    }
+                    mesh_tuned_ch = want_ch;
                 }
                 Err(e) => println!("[MESH] set_channel failed: {e:?}"),
             }
@@ -2784,7 +2793,52 @@ async fn main(_spawner: Spawner) -> ! {
             if esp_now_peer_added && mesh_enabled {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
-                mesh.tick(&mut esp_now, now_ms, uptime_secs).await;
+                // HOLD MESH *TRANSMITS* DURING AN IN-FLIGHT ASSOCIATION.
+                //
+                // This is a second, independent cause of the association failures
+                // that de-pinning alone does not address. The mesh tick broadcast
+                // HELLO+TIME every 2 s regardless of what the STA was doing, so a
+                // 15 s auth handshake ate ~7 ESP-NOW transmits. On a single radio
+                // each of those preempts the PHY, and the WPA2 4-way handshake has
+                // retry deadlines in the hundreds of ms — which is exactly the
+                // shape of "AuthenticationExpired at -44 dBm", a timeout that
+                // looks like a signal problem and is not one.
+                //
+                // Only TX is held. Receiving costs nothing and keeps the roster
+                // warm, so a held tick loses nothing but airtime contention.
+                let assoc_in_flight = matches!(
+                    crate::net::net_task::snapshot().phase,
+                    crate::net::net_task::WifiPhase::Connecting { .. }
+                );
+                if !assoc_in_flight {
+                    mesh.tick(&mut esp_now, now_ms, uptime_secs).await;
+                    mesh.elect_tick(&mut esp_now, now_ms).await;
+                }
+                // Fold our own scan into the election. The observations come
+                // from net_task (it owns the radio, so it owns the scans) and
+                // `landed_channel` is the channel we ACTUALLY associated on —
+                // the election runs over reality, not over what we asked for.
+                if let Some(d) = mesh.election_step(
+                    now_ms,
+                    &crate::net::net_task::scan_observations(),
+                    crate::net::net_task::landed_channel(),
+                ) {
+                    println!(
+                        "[ELECT] won ch{} epoch{} gw{} (enforce={})",
+                        d.channel,
+                        d.epoch,
+                        d.gateway,
+                        crate::net::smol_mesh::ELECT_ENFORCE
+                    );
+                    // Hand the channel down as the association PREFERENCE. One
+                    // radio: the AP we associate to and the mesh channel are the
+                    // same decision, so this is what keeps them in step. The
+                    // ESP-NOW retune happens in the pin block above off
+                    // `mesh.elected_channel()`.
+                    if crate::net::smol_mesh::ELECT_ENFORCE {
+                        crate::net::net_task::set_preferred_channel(d.channel);
+                    }
+                }
                 let peers = mesh.peer_count(now_ms) as u8;
                 if peers != last_mesh_peers {
                     last_mesh_peers = peers;
@@ -3050,6 +3104,14 @@ async fn main(_spawner: Spawner) -> ! {
                             let _ = audio_out::play_chime();
                             audio_out::service_amp(&mut amp_en, &mut audio_codec);
                             println!("[SAY] from {}: {}", from.as_str(), text.as_str());
+                        }
+                        Some(MeshEvent::Elected { decision }) => {
+                            // Adopted a peer's higher epoch. Same handling as
+                            // winning locally: prefer that channel for the next
+                            // association, and let the pin block retune ESP-NOW.
+                            if crate::net::smol_mesh::ELECT_ENFORCE {
+                                crate::net::net_task::set_preferred_channel(decision.channel);
+                            }
                         }
                         None => {}
                     }
