@@ -229,8 +229,21 @@ export component LauncherOverlay {
     property <length> tile-h: 108px;
     property <length> gutter: 12px;
 
-    // Scrim (watchface faintly behind) — the per-scheme token, so Paper gets
-    // its warm light scrim instead of a hardcoded Midnight-dark one.
+    // Scrim — the per-scheme token, so Paper gets its warm light scrim instead
+    // of a hardcoded Midnight-dark one.
+    //
+    // #75 / `covered` in shell.slint: this token is 95 % opaque (Midnight
+    // `#05080af2`, Paper `#d8d4c8ee`), so the watchface used to read through it
+    // at ~5 % — teal clock digits landed at RGB(17,20,23) over an RGB(5,8,10)
+    // scrim, i.e. 2 of 31 RGB565 levels, and only in the 12px tile gutters and
+    // the top strip, where it fought the APPS eyebrow and the section title.
+    // Buying that ghost cost the whole watchface page + chrome in the scene:
+    // 92 items / 62 glyph textures / 27 rounded rects on top of the launcher's
+    // own 102 / 50 / 51, which is what pushed `PrepareScene`'s doubling Vecs
+    // onto the 4 096 / 3 584 / 3 328 B rungs that fail at 54-66 kB free. The
+    // shell now hides the covered content while the launcher is up. To restore
+    // the ghost, drop `root.launcher-open` from `covered` in shell.slint — and
+    // expect the launcher to re-cross those rungs.
     Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
     OverlaySwallow {} // #54: chrome beneath must never be hit-testable
 
