@@ -183,7 +183,14 @@ printf '        %-24s %10s %10s %12s\n' COMBO 'STACK GAP' MARGIN 'ROM FREE'
 # this list would let it rot exactly as `tts` once did. `story,tts` is included
 # because the two features' `.bss` is additive and the stack gap is the binding
 # budget — testing them only in isolation would miss the case that overruns it.
-COMBOS=("" "debug-console" "tts" "tts,debug-console" "heap-hooks,heap-forensics" "story" "story,debug-console" "story,tts")
+# `story,tts,debug-console` is the thinnest combination in the tree and was
+# ungated. The file's own justification for testing `tts,debug-console` — that the
+# features' .bss is additive and the stack gap is the binding budget, so testing
+# them only in isolation misses the case that overruns it — applies with more force
+# once story is measured at 5,584 B of stack on its own. Estimated at ~+2,240 B of
+# margin from single-feature deltas; that estimate is exactly what needs replacing
+# with a link.
+COMBOS=("" "debug-console" "tts" "tts,debug-console" "heap-hooks,heap-forensics" "story" "story,debug-console" "story,tts" "story,tts,debug-console")
 if [[ -n "$ONLY" ]]; then
   # "default" is the human name for the empty feature set.
   [[ "$ONLY" == "default" ]] && ONLY=""

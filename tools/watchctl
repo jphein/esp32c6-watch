@@ -860,13 +860,47 @@ def sigil_of_image(binp: Path) -> dict:
     return {"build": parts[0], "hash": parts[1], "version": parts[2]}
 
 
+def _tree_hash() -> str:
+    """The current working tree's build hash, via the shared implementation."""
+    script = REPO / "tools" / "build_hash.sh"
+    if not script.is_file():
+        return ""
+    try:
+        p = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
 def say_image_sigil(binp: Path) -> dict:
-    """Print the image's build stamp for comparison against the watch's glass."""
+    """Print the image's build stamp, and shout if it does not match this tree.
+
+    The staleness check matters more since builds moved to familiar: `fambuild`
+    runs cargo on the remote host, and if the artifact is not fetched back the
+    LOCAL target/ path still holds an older binary. Deploying that path then
+    flashes the stale image while the build log says success — measured on
+    2026-07-29 as a 664 B .bss / 784 B stack difference between the two, with no
+    error anywhere. Comparing the baked-in hash against the tree catches it
+    regardless of which build path produced the file.
+
+    A warning rather than a refusal: re-flashing a deliberately older image is a
+    legitimate thing to do (bisecting, reverting), and the operator can see this
+    line. What is NOT legitimate is doing it without knowing.
+    """
     sig = sigil_of_image(binp)
     if not sig:
         say("  no WSIGIL marker in this image — it predates the build stamp, so "
             "the watch's BUILD row cannot be compared for this flash")
         return {}
+    want = _tree_hash()
+    if want and sig.get("hash") and want != sig["hash"]:
+        say("  " + "!" * 60)
+        say(f"  STALE IMAGE? it was built from '{sig['hash']}' but this tree is "
+            f"'{want}'")
+        say("  if you just ran `fambuild`, check the ELF came back — a remote "
+            "build that is not fetched leaves an OLDER binary at the local path")
+        say("  " + "!" * 60)
     say("  ---------------------------------------------")
     say(f"   BUILD  {sig['build']}")
     say(f"   HASH   {sig['hash']}")
