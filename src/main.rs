@@ -443,9 +443,17 @@ struct ClimatePending {
 
 /// Log per-region free heap at boot / app-enter. The framebuffer must come from
 /// ONE region, so total-free (HEAP.free()) can read fine while the main region
-/// alone is short. region_stats[0] = main (240KB pool), [1] = reclaimed (56KB).
-/// `need` is the half-res fb footprint (205*251) so a launch log shows the
-/// margin at a glance.
+/// alone is short. `region_stats[0]` = the MAIN pool, `[1]` = the ROM-reclaimed
+/// pool (dram2_seg), in declaration order of the two `heap_allocator!` calls in
+/// `main()` — read the sizes THERE, not from a number copied into this comment.
+///
+/// `need` is a CONSTANT, not a measurement. It is the half-res GAMES framebuffer
+/// footprint — `(410/2) * (502/2)` = 51,455 B, one byte per pixel (RGB332, see
+/// `drivers/framebuffer.rs`) — so it prints the same value on every line. It is
+/// a reference mark to compare `main_free` against at a game launch, NOT a live
+/// allocation, and NOT something the normal UI ever asks for: the Slint shell
+/// has no framebuffer at all (it line-streams through a 2-line 1,640 B strip,
+/// `ui/slint_platform.rs`). Only the games `Framebuffer` allocates this.
 fn log_heap(tag: &str) {
     let stats = esp_alloc::HEAP.stats();
     let region_free = |i: usize| {
@@ -620,17 +628,29 @@ async fn main(_spawner: Spawner) -> ! {
     // buffers so those futures leave .bss and the main pool can be restored.
     //
     // Voice-wire (#42/#28): the shared mic_capture adds ~14KB .bss (MIC_RING 8KB
-    // StaticCell + MIC_CH channel + the capture-task future), which dropped the
+    // StaticCell — its size AT THE TIME; it is 3072 B today — plus the MIC_CH
+    // channel and the capture-task future), which dropped the
     // gap-stack 51.6KB→37.9KB — under the 46KB guardrail (would fire at boot; the
     // #59 stack-floor tripwire caught it at measure-time). Trim the MAIN pool
     // 228KB→214KB to lower _bss_end ~14KB → stack back to ~51.6KB (v0.5.1 glass-
     // proven). #53's net_task .bss (+5.6KB) thinned the gap to 46.9KB and the
     // CONSOLIDATED shell (power menu + switcher + shade + spectrum) overflowed
     // the guard during WatchShell::new — caught by the wrong-creds acceptance
-    // boot. Trimmed further 214→198KB (gap ≈ 63KB): scene-build peak clears
-    // with margin; heap keeps ~38KB spare above the 51KB fb need (#35 gets the
-    // RAM-busy toast fallback if squeezed). Real fix on the books: box the
-    // session/voice socket buffers out of .bss.
+    // boot. Trimmed further 214→198KB (gap ≈ 63KB): scene-build peak cleared
+    // with margin and left ~38KB spare above the ~51KB fb need (#35 gets the
+    // RAM-busy toast fallback if squeezed).
+    //
+    // FINALLY 198→186KB — #65 ROOT CAUSE (79bfd49). Even gap ≈ 63KB was not
+    // enough: the WiFi blob's globals sit at the TOP of .bss, and at that gap
+    // `ppRxFragmentProc`'s pointer was a mere 2,608 B below the stack floor.
+    // Overflow overwrote it with a spilled register, its null-check PASSED on
+    // the garbage, and the blob stored through it → fault at 2.7 s. A/B on an
+    // otherwise identical build: gap 61KB → 5/5 panic, gap 73KB → 0/5 clean.
+    // 12KB of pool bought 12KB of stack. That is the value on the line below.
+    //
+    // If you change it, `STACK_FLOOR`'s boot assert is the authority on whether
+    // the result is safe — not this comment. Real fix still on the books: box
+    // the session/voice socket buffers out of .bss so the pool can be restored.
         esp_alloc::heap_allocator!(size: 186 * 1024);
     // ROM-reclaimed region (dram2_seg). Second pool so nothing goes to waste; it
     // sits ABOVE the stack ceiling and is independent of _bss_end, so its size has
@@ -909,7 +929,9 @@ async fn main(_spawner: Spawner) -> ! {
         .with_din(peripherals.GPIO21) // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
         .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
     // Mic PCM channel (capture task → consumers) + the DMA capture ring.
-    // Channel::new() is const → a plain static; the 8 KB ring needs a StaticCell.
+    // Channel::new() is const → a plain static; the ring needs a StaticCell.
+    // MIC_RING_LEN is 3 × STEREO_CHUNK = 3072 B (it was 8 KB until the
+    // three-descriptor rework — see mic_capture.rs for the live value).
     static MIC_CH: mic_capture::MicChannel = mic_capture::MicChannel::new();
     static MIC_RING: StaticCell<[u8; mic_capture::MIC_RING_LEN]> = StaticCell::new();
     let mic_ring = MIC_RING.init([0u8; mic_capture::MIC_RING_LEN]);
@@ -4977,9 +4999,12 @@ async fn main(_spawner: Spawner) -> ! {
                         app_state = AppState::Settings;
                     } else {
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
-                        // see framebuffer.rs). It fits alongside the resident Slint
-                        // scene at the 240KB heap with ~80KB to spare, so a launch no
-                        // longer *needs* the scene gone. We still close the launcher
+                        // see framebuffer.rs). It was sized to fit alongside the
+                        // resident Slint scene without needing the scene gone; the
+                        // margin is much thinner than when that was written (the main
+                        // pool is 186KB now, not 240KB — see the heap_allocator! call
+                        // and #75), so treat the fallible alloc below as load-bearing
+                        // rather than a formality. We still close the launcher
                         // and drop the scene here (kept as heap headroom; post-ship
                         // task #37 may remove it), then allocate the fb fallibly. The
                         // failure path (now practically impossible) recreates the
