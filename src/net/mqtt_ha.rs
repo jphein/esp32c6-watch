@@ -64,14 +64,37 @@ const ANNOUNCE_WAIT: Duration = Duration::from_millis(1500);
 /// — the boot burst is the once-per-boot MQTT window that makes a pushed
 /// update reach a watch with no screen-held session up. Never fails the
 /// caller: logs `[MQTT] published` or `[MQTT] failed: <reason>` and returns.
-/// Bounded at 8s wall time (was 5s; +subscribe/announce phase).
+///
+/// The outer bound must EXCEED the sum of the inner ones or it steals their
+/// diagnosis: at 8 s, a 2 s connect plus a 5 s handshake already fills 7 s, so a
+/// healthy-but-slow broker would be cut off here and reported as
+/// `timeout (12s)` — hiding the specific reason the inner bounds would have named.
+/// A generic timeout that pre-empts a specific error is strictly worse than the
+/// specific error. 12 s = 2 (connect) + 5 (handshake) + 5 (publishes + DISCONNECT).
+///
+/// Raising it does NOT slow the common failure path: the inner bounds still fail
+/// fast, so an unreachable broker still gives up in ~2 s. This only widens the
+/// backstop for the pathological case.
 pub async fn publish_burst(stack: Stack<'static>, batt_pct: u8) {
-    match with_timeout(Duration::from_secs(8), burst(stack, batt_pct)).await {
+    match with_timeout(BURST_BUDGET, burst(stack, batt_pct)).await {
         Ok(Ok(())) => println!("[MQTT] published"),
         Ok(Err(reason)) => println!("[MQTT] failed: {reason}"),
-        Err(_) => println!("[MQTT] failed: timeout (8s)"),
+        Err(_) => println!("[MQTT] failed: timeout (12s, outer backstop)"),
     }
 }
+
+/// Whole-burst backstop. Must stay > CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT so it
+/// never pre-empts the specific error those produce.
+const BURST_BUDGET: Duration = Duration::from_secs(12);
+/// TCP-connect bound, kept tight: if the broker is down the SYN goes unanswered, and
+/// `connect` would otherwise block the single-threaded executor for the whole
+/// handshake window during the boot NTP burst.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Post-connect idle bound for CONNACK and the publishes. Deliberately longer than
+/// the connect bound: a broker that authenticates (MQTT_USER/MQTT_PASS) may take
+/// well over 2 s to return CONNACK and still be entirely healthy — which is what
+/// `[MQTT] failed: tcp read` was reporting. Matches `mqtt_climate`'s value.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> {
     let (ip, port) = parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?;
@@ -79,18 +102,29 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
     let mut rx_buf = [0u8; 256];
     let mut tx_buf = [0u8; 1024];
     let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-    // 2s (was 4s): the telemetry broker (MQTT_BROKER) may be on a subnet the watch
-    // can't reach from its roam VLAN (the SYN is silently dropped, not RST'd), so
-    // this timeout governs how long `connect` below blocks the single-threaded
-    // executor on a doomed connect. Fail fast so an unreachable broker doesn't
-    // freeze the UI/PTT loop for 4s during the boot NTP burst. A reachable broker
-    // completes the handshake well inside 2s.
-    socket.set_timeout(Some(Duration::from_secs(2)));
+    // SPLIT timeouts, because one value cannot serve both phases — and using one
+    // was the bug behind `[MQTT] failed: tcp read`.
+    //
+    // `set_timeout` is the socket's INACTIVITY timeout: it governs the connect AND
+    // every subsequent read. At 2 s it fast-failed a doomed connect (good) and also
+    // gave the broker only 2 s to return CONNACK (bad). `tcp read` is reachable only
+    // AFTER a successful connect, so the error string was already saying the
+    // handshake timed out rather than that the broker was unreachable — the comment
+    // that used to live here blamed a roam-VLAN routing problem, which JP has since
+    // confirmed cannot apply: the `admin` SSID reaches every subnet.
+    //
+    // `mqtt_climate` already solved this and this is its shape: bound `connect`
+    // tightly with an explicit `with_timeout` so an unreachable broker cannot block
+    // the single-threaded executor, and give the post-connect handshake its own
+    // longer window. An authenticating broker doing a credential lookup can easily
+    // exceed 2 s for CONNACK while being perfectly healthy.
+    socket.set_timeout(Some(HANDSHAKE_TIMEOUT));
 
-    socket
-        .connect((ip, port))
-        .await
-        .map_err(|_| "tcp connect")?;
+    match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, port))).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return Err("tcp connect"),
+        Err(_) => return Err("tcp connect: timeout"),
+    }
 
     // CONNECT -> CONNACK
     let mut client_id: heapless::String<CLIENT_ID_CAP> = heapless::String::new();
