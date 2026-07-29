@@ -297,9 +297,14 @@ export component SettingsHub {
                     clicked => { root.vol-up(); }
                 }
             }
+            // #75: "the number" dropped — the caption sits directly under the
+            // number it refers to. 9 fewer glyphs, and every glyph is a scene
+            // item on this renderer: page 0's worst case (MUTED + "+18 dB")
+            // goes 134 -> 125 glyphs, i.e. under the 128 doubling rung that
+            // costs `Vec<SceneTexture>` 7168 B instead of 3584 B.
             Text {
                 x: 18px; y: 170px;
-                text: "tap the number to mute \u{00b7} 0\u{2013}15 steps";
+                text: "tap to mute \u{00b7} 0\u{2013}15 steps";
                 color: Theme.faint; font-size: Theme.t-caption;
             }
 
@@ -569,9 +574,17 @@ export component SettingsHub {
         }
 
         // Strongest-first rows (Rust caps the model at 6 — dedup'd, sorted).
+        //
+        // #75: the `visible: i < 6` guard makes that cap LOCAL. Rust enforces it
+        // in main.rs (`heapless::Vec<_, 6>` + `.take(6)`) and `manual` below
+        // already hard-clamps its y to `min(length, 6)`, so a 7th row would both
+        // collide with "Other network…" AND add ~19 unbounded scene items per
+        // extra AP — in a busy RF environment that is an unbounded scene, which
+        // on this allocator is an OOM. No-op today; a guard if the cap ever moves.
         if !root.scanning: Rectangle {
             x: 22px; y: 96px; width: 366px; height: 350px;
             for net[i] in root.nets: NetworkRow {
+                visible: i < 6;
                 x: 0; y: i * 50px; width: 366px;
                 ssid: net.ssid;
                 bars: net.bars;
