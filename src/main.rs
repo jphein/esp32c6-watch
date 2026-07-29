@@ -3777,6 +3777,23 @@ async fn main(_spawner: Spawner) -> ! {
                     }
                 }
             }
+            // RECONCILE first, unconditionally. `volume`/`muted` can now be changed
+            // from a THIRD path — the mid-chapter poller inside `play_chapter`, which
+            // bypasses this block entirely because the main loop is parked inside
+            // playback. Without this, a volume raised during a chapter leaves the UI
+            // showing the stale level, and the Settings slider's absolute-set path
+            // then snaps the codec back down to it the moment it is touched: the UI
+            // is authoritative and wrong.
+            //
+            // Marking dirty here (rather than inside `if vol_changed`) is also what
+            // persists a mid-chapter change — the deferred flush picks it up at a
+            // quiet moment, so no flash is ever written from the audio path (#75).
+            if watch_cfg.volume != volume || watch_cfg.muted != muted {
+                watch_cfg.volume = volume;
+                watch_cfg.muted = muted;
+                shell.set_volume(volume, muted);
+                cfg_dirty_at = Some(now);
+            }
             if vol_changed {
                 last_interaction = now;
                 audio_out::set_master_volume(&mut audio_codec, volume, muted);
@@ -4970,6 +4987,11 @@ async fn main(_spawner: Spawner) -> ! {
                             // is all volume needs, and duplicating that machine here
                             // would be a second source of truth for it.
                             let mut boot_was_low = boot_button.is_low();
+                            // Non-volume actions seen mid-chapter land here and are
+                            // handed back to `pending_button` after playback, so the
+                            // main loop drains them exactly as it would have before.
+                            let mut requeued: Option<ButtonAction> = None;
+                            let requeue = &mut requeued;
                             let mut vol_during_play = || -> Option<(u8, bool)> {
                                 let mut act: Option<ButtonAction> = None;
                                 if let Ok(Some(key)) = power.poll_power_key() {
@@ -4998,11 +5020,35 @@ async fn main(_spawner: Spawner) -> ! {
                                         muted = !muted;
                                         Some((volume, muted))
                                     }
-                                    // Anything else (Launcher, PowerMenu) is ignored
-                                    // mid-chapter: `stop` already exits on a tap, and
-                                    // acting on a nav action from inside playback would
-                                    // change app_state behind the main loop's back.
-                                    _ => None,
+                                    // Anything else (Launcher, PowerMenu) must be
+                                    // RE-QUEUED, not dropped. `poll_power_key` CLEARS
+                                    // the PMIC latch as it reads, so discarding the
+                                    // action here destroys it outright — and with
+                                    // `pwron_long = PowerMenu` by default that made the
+                                    // power menu unreachable for a whole chapter, every
+                                    // 64 ms, leaving only the AXP2101's 4 s hardware
+                                    // OFFLEVEL cut as an escape. The PMIC's 1.5 s
+                                    // IRQLEVEL latch exists precisely so firmware can
+                                    // react before that cutoff; swallowing it threw that
+                                    // window away.
+                                    //
+                                    // Before this hook the latch persisted and the menu
+                                    // opened when the chapter ended — DEFERRED, which was
+                                    // never the complaint. Re-queueing restores that and
+                                    // keeps the fix to what it was meant to fix.
+                                    //
+                                    // Note this also means a long BOOT press mid-chapter
+                                    // reads as one Volume+ (only `boot_short` is emitted
+                                    // here), so the documented BOOT-hold = Launcher does
+                                    // not apply during playback. Accepted: duplicating
+                                    // the short/long state machine here would create a
+                                    // second source of truth for it.
+                                    other => {
+                                        if requeue.is_none() {
+                                            *requeue = Some(other);
+                                        }
+                                        None
+                                    }
                                 }
                             };
                             let mut ui = StoryPlayUi {
@@ -5034,6 +5080,14 @@ async fn main(_spawner: Spawner) -> ! {
                             )
                             .await;
 
+                            // Hand back whatever the mid-chapter poller could not act
+                            // on, so the main loop dispatches it on the next tick.
+                            if let Some(act) = requeued.take() {
+                                if pending_button.is_none() {
+                                    println!("[STORY] re-queued {act:?} from mid-chapter");
+                                    pending_button = Some(act);
+                                }
+                            }
                             match res {
                                 Ok(sess) => {
                                     story_pos = sess.position;
@@ -5712,6 +5766,19 @@ async fn main(_spawner: Spawner) -> ! {
                     if target == AppState::Story {
                         shell.set_story_page(0);
                         shell.set_story_loading(true, "");
+                        // Seed the character/stats pages with an EMPTY character so
+                        // their rows exist before any fetch.
+                        //
+                        // Without this the eleven equip slots and six appear traits
+                        // are simply ABSENT until `/api/character` returns, because
+                        // the row labels are pushed from Rust alongside the values —
+                        // so a fetch failure (or just the moment before it lands)
+                        // shows a page with two headers and nothing under them,
+                        // which reads as broken rather than as "no data yet".
+                        // `Character::new()` is all-`None`, so this renders exactly
+                        // the eleven em-dashes and `0/11` + `0/6` counts that are
+                        // the honest empty state.
+                        shell.set_story_character(&story_proto::model::Character::new());
                         shell.set_story_open(true);
                         story_need_list = true;
                         // Stats/character are one 501-byte request that feeds both

@@ -63,12 +63,39 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(6);
 /// Head scratch, also the PCM staging window: one [`audio_out::PLAY_CHUNK`].
 const BUF: usize = 512;
 
-/// Consecutive window failures tolerated before giving up on the chapter.
+/// Window failures WITHOUT FORWARD PROGRESS tolerated before giving up.
 ///
 /// Retrying is nearly free (the offset is exact), so a transient stall or an AP
 /// roam should not end playback. Three strikes distinguishes "the network
 /// hiccupped" from "the daemon is gone".
+///
+/// **"Without forward progress" is load-bearing — see [`MIN_PROGRESS_BYTES`].**
 const MAX_WINDOW_RETRIES: u8 = 3;
+
+/// Audio delivered in a failed attempt that still counts as forward progress:
+/// one second (32,000 B).
+///
+/// # Why progress must clear the strike count
+///
+/// Observed in the daemon's access log on 2026-07-29: a window requested at
+/// 5,827,584 failed, and the retry resumed at 5,974,016 — **146,432 B, 4.576 s of
+/// audio actually played** — in 17 s of wall clock, against a healthy baseline of
+/// 1,920,000 B per 61 s. So the link was not dead; it was delivering ~4.6 s per
+/// attempt.
+///
+/// Counting that as a strike is wrong. Three such attempts deliver ~14 s of real
+/// audio and then **abandon the chapter while it is still making progress** —
+/// which on a marginal link is the difference between a stutter and playback
+/// simply stopping. Only a *zero-progress* failure is evidence the far end is
+/// gone, so only that increments the count.
+const MIN_PROGRESS_BYTES: u32 = crate::peripherals::audio_out::PLAY_SAMPLE_RATE * 2;
+
+/// Absolute cap on retries per chapter, so progress-resets cannot spin forever.
+///
+/// Without it a link delivering a trickle per attempt would retry indefinitely.
+/// 64 attempts against 60-second windows is far more than any healthy chapter
+/// needs and still terminates.
+const MAX_TOTAL_RETRIES: u16 = 64;
 
 /// Chunks between `should_stop` polls. The poll reads the touch controller over
 /// the I2C bus the codec shares, so polling all 62 chunks/second would triple
@@ -336,6 +363,7 @@ pub async fn play_chapter<I: I2c>(
         let Some((first, last)) = story_proto::window_at(pos, total_bytes) else {
             break; // reached the end of the chapter
         };
+        let before = pos;
         match stream_window(
             stack, addr, chapter, first, last, &mut pos, &mut carry, &mut poll, amp, codec,
             ui, &mut gate,
@@ -354,9 +382,16 @@ pub async fn play_chapter<I: I2c>(
             // 13-minute chapter is just a flaky link.
             Ok(None) => attempt = 0,
             Err(_e) => {
-                attempt = attempt.saturating_add(1);
                 retries = retries.saturating_add(1);
-                if attempt >= MAX_WINDOW_RETRIES {
+                // A failure that still delivered a second of audio means the link
+                // is slow, not gone — clear the strike count rather than spending
+                // one. See MIN_PROGRESS_BYTES for the measurement behind this.
+                if pos.saturating_sub(before) >= MIN_PROGRESS_BYTES {
+                    attempt = 0;
+                } else {
+                    attempt = attempt.saturating_add(1);
+                }
+                if attempt >= MAX_WINDOW_RETRIES || retries >= MAX_TOTAL_RETRIES {
                     // Give up on the chapter but keep the position, so the caller
                     // can report progress and resume exactly here.
                     outcome = Played::Interrupted;
@@ -372,8 +407,9 @@ pub async fn play_chapter<I: I2c>(
     // Leave the amp serviced on the way out so the feeder's tail can complete
     // and release it cleanly instead of waiting for the next main-loop tick.
     audio_out::service_amp(amp, codec);
-    // Volume requested mid-chapter (see `PlaybackUi::poll_volume`). Applied here
-    // because this function holds the only `&mut codec` in scope.
+    // Final catch for a press that landed in the last chunk, after the loop's
+    // last poll. The mid-chapter case is handled per chunk in `feed_pcm` — this
+    // alone is NOT sufficient and was the original bug.
     if let Some((level, muted)) = ui.poll_volume() {
         audio_out::set_master_volume(codec, level, muted);
     }
@@ -578,8 +614,20 @@ async fn feed_pcm<I: I2c>(
         audio_out::service_amp(amp, codec);
 
         *poll = poll.wrapping_add(1);
-        if *poll % CANCEL_POLL_CHUNKS == 0 && ui.should_stop() {
-            return Some(Played::Cancelled);
+        if *poll % CANCEL_POLL_CHUNKS == 0 {
+            if ui.should_stop() {
+                return Some(Played::Cancelled);
+            }
+            // Volume requested mid-chapter. THIS is the call site the
+            // `poll_volume` doc comment describes ("called at chunk
+            // boundaries") — a single call after the streaming loop, which is
+            // where this started out, applies the press only once the chapter
+            // ENDS and so reproduces the very symptom it was added to fix.
+            // `feed_pcm` already holds `&mut codec` for `service_amp`, so the
+            // codec borrow that forced the hook's shape is satisfied here.
+            if let Some((level, muted)) = ui.poll_volume() {
+                audio_out::set_master_volume(codec, level, muted);
+            }
         }
         if PLAY_CANCEL.load(Ordering::Relaxed) {
             return Some(Played::Cancelled);
