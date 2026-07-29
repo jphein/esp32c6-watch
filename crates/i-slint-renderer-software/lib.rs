@@ -510,7 +510,7 @@ impl Default for SoftwareRenderer {
             repaint_buffer_type: Default::default(),
             #[cfg(feature = "systemfonts")]
             text_layout_cache: Default::default(),
-            scene_pool: Default::default(),
+            scene_pool: RefCell::new(ScenePool::with_reserves()),
         }
     }
 }
@@ -570,6 +570,13 @@ impl Default for SoftwareRenderer {
 /// flight. Buffers are emptied at reclaim time, not at lend time, so refcounted
 /// payloads are released on the same frame as upstream.
 #[derive(Default)]
+/// Measured peak scene-vector counts (esp32c6-watch fork, #75). See
+/// [`ScenePool::with_reserves`] for the measurements and the reasoning.
+const ITEMS_PEAK: usize = 256;
+const TEXTURES_PEAK: usize = 256;
+const ROUNDED_PEAK: usize = 64;
+const STATE_PEAK: usize = 16;
+
 struct ScenePool {
     items: Vec<SceneItem>,
     vectors: SceneVectors,
@@ -578,6 +585,64 @@ struct ScenePool {
 }
 
 impl ScenePool {
+    /// WATCH FORK (esp32c6-watch #75): reserve peak capacity ONCE, at renderer
+    /// construction, so the pool never grows at render time.
+    ///
+    /// ## Why this is not the change that was reverted
+    ///
+    /// `d10aa0b` reserved capacity on a FRESH `PrepareScene` **every frame**, which
+    /// demanded a large contiguous block 6-11 times a second on a heap that was
+    /// already fragmented. It made freezes 20x worse (53 min -> 155 s) and the
+    /// failing allocation became the reserve itself. This is the opposite shape: the
+    /// pool is created ONCE and lives on `SoftwareRenderer`, so reserving in its
+    /// constructor is a single allocation made early, while the heap is least
+    /// fragmented. Pooling (`f334785`) is what made this possible; before it there
+    /// was no once-per-process place to put the reservation.
+    ///
+    /// ## What it fixes: a boot-to-boot LOTTERY, measured
+    ///
+    /// Capacity is a high-water that never shrinks and only resets on reboot, so the
+    /// resting cost is decided by whichever busy frame happens FIRST. Two cold boots
+    /// of the same watch, identical firmware, identical config, byte-identical boot
+    /// heap (`main_free=134612 recl_free=65536` both):
+    ///
+    /// | boot | pool | total free | main free |
+    /// |---|---|---|---|
+    /// | 1 | items=128 tex=64 rr=32 | 60,264 | 3,656 |
+    /// | 2 | items=256 tex=256 rr=64 | **34,548** | **504** |
+    ///
+    /// ~25.7 KB of permanent difference, from luck alone. Boot 2 then sits one heavy
+    /// frame from needing a 14,336 B contiguous block with 504 B left in main — and
+    /// that doubling TRANSIENT (old + new buffers both live during realloc) is what
+    /// actually fails, not the resting size.
+    ///
+    /// Reserving to the measured peak makes every boot look like boot 2's resting
+    /// cost, but with NO doubling ever — trading a worse average for a deterministic
+    /// ceiling. On a watch that reboots when it loses that lottery, determinism is
+    /// worth more than the KB.
+    ///
+    /// ## Sizing — measured, not guessed
+    ///
+    /// Peak per-surface counts from the host harness (`tools/lunameter`) after the
+    /// occlusion culls: shade 173 items / 145 glyphs, theme picker 178 / 151,
+    /// Settings page 5 198 / 184. So `items` and `textures` both peak inside the
+    /// 256 rung and `rounded_rectangles` inside 64. Total resident: 4,096 + 7,168 +
+    /// 1,664 + 448 = 13,376 B.
+    ///
+    /// If a future screen exceeds 256 items or glyphs the pool doubles once at
+    /// runtime and we are back to a 14 KB request — so `[POOL] next=` exists to make
+    /// that visible before it bites, and any new screen should be measured with the
+    /// harness rather than eyeballed.
+    fn with_reserves() -> Self {
+        let mut pool = Self::default();
+        pool.items.reserve_exact(ITEMS_PEAK);
+        pool.vectors.textures.reserve_exact(TEXTURES_PEAK);
+        pool.vectors.rounded_rectangles.reserve_exact(ROUNDED_PEAK);
+        pool.state_stack.reserve_exact(STATE_PEAK);
+        pool
+    }
+
+
     /// Lend every buffer out for the duration of one frame, leaving the pool empty.
     ///
     /// `clear()` is belt-and-braces here (reclaim already emptied them); it is what
