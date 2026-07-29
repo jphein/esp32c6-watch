@@ -946,8 +946,26 @@ def pin_image(src: Path) -> Path:
     """
     try:
         PIN_DIR.mkdir(parents=True, exist_ok=True)
-        h = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
-        dst = PIN_DIR / f"{src.stem}-{h}{src.suffix}"
+        # Name it with the image's OWN build sigil, not just a content hash.
+        #
+        # The first version used `<stem>-<sha12>` and that is how a pin got
+        # mislabelled within the hour: a deploy pinned whatever sat at the shared
+        # `target/` path, which at that moment was another agent's forced-crash
+        # build, and the filename said nothing about which build it was. It was then
+        # offered as "the production image to restore from" — and flashing it would
+        # have installed a reboots-on-the-character-page firmware while everyone
+        # believed production had been restored. That surfaces later as a mystery
+        # regression, which is worse than the interrupted deploy it was meant to undo.
+        #
+        # Pinning the PATH is inherently racy with N agents in one target dir and
+        # cannot be fixed here — you can only pin what you were handed. Putting the
+        # sigil in the name makes a wrong hand-off visible at `ls` time instead of
+        # requiring someone to run `strings`. Content hash stays as the tiebreaker.
+        sig = sigil_of_image(src)
+        words = "".join(c for c in sig.get("build", "") if c.isalnum()) or "nosigil"
+        stamp = (sig.get("hash") or "").replace("*", "dirty") or "nohash"
+        h = hashlib.sha256(src.read_bytes()).hexdigest()[:8]
+        dst = PIN_DIR / f"{src.stem}-{words}-{stamp}-{h}{src.suffix or '.elf'}"
         if not dst.exists():
             shutil.copy2(src, dst)
         return dst
