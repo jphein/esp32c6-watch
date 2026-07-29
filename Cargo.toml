@@ -37,6 +37,37 @@ debug-console = ["dep:embedded-io-async"]
 # than reverted, so it flips on in one line the moment the ROM budget exists.
 # See docs/superpowers/specs/2026-07-27-tts-notify-readaloud-design.md.
 tts = ["dep:tts-proto"]
+# `heap-forensics` is OPT-IN and MUST NOT ship on. It adds a harvest sweep to
+# every `log_heap` call: take every free block the allocator will give, count the
+# bytes, hand them all back. That is the one measurement that separates "out of
+# contiguous memory" (ordinary fragmentation — `free()` is honest) from "`free()`
+# is reporting holes that have been LOST" (heap corruption — the `Bad free?`
+# class documented in src/ui/slint_shell.rs). See `harvest_free` in src/main.rs.
+#
+# Off by default because at peak the sweep really does drain the heap down to its
+# 16 KB reserve, and the esp-rtos threads allocate concurrently with it — a
+# shipped build would be trading a diagnostic for a chance of starving the WiFi
+# blob's `malloc`. Diagnostic runs only: `--features heap-forensics`.
+heap-forensics = []
+# `heap-hooks` is the ATTRIBUTION counterpart to `heap-forensics`, and is a
+# deliberately separate flag because the two cost wildly different things.
+# `heap-forensics` perturbs what it measures (it drains the pool to a 16 KB
+# reserve) and must never ship on. This one only counts: it installs esp-alloc's
+# `_esp_alloc_alloc`/`_esp_alloc_dealloc` hooks and adds 72 B of `.bss` plus a
+# few relaxed atomic adds per allocation. Folding it into `heap-forensics` would
+# saddle a cheap, safe instrument with a never-enable constraint it has not
+# earned.
+#
+# It answers the two questions source-reading could not close on #75: the WiFi/
+# BLE blob split (every blob `malloc` funnels through the hooked
+# `HEAP.alloc_caps`, so the closed stack is finally visible), and Slint's
+# dependency-node count (a node is exactly 16 B, so the `<=16` bucket delta
+# across scene construction IS the count). `internal-heap-stats` rides along for
+# `max_usage` — a measured high-water mark, which is the one number the static
+# census could only estimate.
+#
+# Diagnostic runs: `--features heap-hooks`. See src/heap_hooks.rs.
+heap-hooks = ["esp-alloc/alloc-hooks", "esp-alloc/internal-heap-stats"]
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [

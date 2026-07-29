@@ -429,6 +429,9 @@ impl ShellUi {
     /// framebuffer fits (the two can't coexist in the C6's SRAM). The window +
     /// platform are set-once globals and survive; the current page is saved for
     /// the recreate. Idempotent — safe to call when already suspended.
+    ///
+    /// #75: the teardown itself is gated behind
+    /// [`Self::SCENE_DROP_ON_SUSPEND`] — read that const before changing it.
     pub fn suspend_scene(&mut self) {
         // Retire any running hint window: a stale armed-instant would other-
         // wise resume ticking while the game owns the panel.
@@ -444,8 +447,52 @@ impl ShellUi {
         // render() and handle_touch() bail, so the game owns the panel and the
         // input stream exactly as before — we simply stop touching Slint's
         // allocation graph.
-        self.suspended = true;
+        //
+        // #75 forensics: flip `SCENE_DROP_ON_SUSPEND` to `true` to run the
+        // teardown deliberately, under instrumentation.
+        if Self::SCENE_DROP_ON_SUSPEND {
+            self.ui = None;
+        } else {
+            self.suspended = true;
+        }
     }
+
+    /// #75 forensics gate: drop the Slint component tree on game launch instead
+    /// of parking it. **OFF.** This deliberately re-arms the teardown that
+    /// panicked with `Freed node aliases existing hole! Bad free?` inside
+    /// `PropertyHandle::drop`, 100 % of the time on game launch, including on
+    /// shipped v0.12.1 (#66).
+    ///
+    /// It exists because that panic was routed around, never diagnosed, and
+    /// "free heap is high but the allocation failed" cannot be fully attributed
+    /// to fragmentation while a live free-list corruption sits in the binary.
+    ///
+    /// # Running the experiment
+    ///
+    /// 1. Flip this to `true`.
+    /// 2. Build `--features heap-forensics` (see `harvest_free` in src/main.rs).
+    /// 3. Launch a framebuffer game. `log_heap` brackets this teardown, so the
+    ///    run prints a `[HARVEST]` sweep immediately before and after it.
+    ///
+    /// # Reading the result
+    ///
+    /// - **Both sweeps `stop=budget`** → the teardown is NOT losing holes. The
+    ///   corruption is a stale hazard, `free()` is honest, and the capacity work
+    ///   is the right work. (The `assert!` may still fire — that is cause
+    ///   (a)/(b), a double or wrong-size free caught *before* the list is
+    ///   damaged, which is a different and more tractable bug.)
+    /// - **`pre-drop` is `stop=budget` but `post-drop` is `stop=nomem` with a
+    ///   large `left`** → the teardown lost holes. Confirmed live corruption,
+    ///   localised to the Slint component drop, and it outranks every capacity
+    ///   fix on #75.
+    ///
+    /// Safe to try: `esp-backtrace` is configured `custom-halt`, so a panic
+    /// reboots (~2 s) instead of bricking the watch (#75, d43fa3c).
+    /// `resume_scene` still has its full `build_scene` rebuild path, so a game
+    /// exit recovers normally.
+    ///
+    /// Never ship `true`.
+    const SCENE_DROP_ON_SUSPEND: bool = false;
 
     /// Recreate the scene after a game exits: fresh component, callbacks
     /// re-registered, mesh model re-bound, page restored. The caller re-pushes

@@ -171,7 +171,14 @@ fi
 note "link combos + budgets (floor $STACK_FLOOR B)"
 printf '        %-24s %10s %10s %12s\n' COMBO 'STACK GAP' MARGIN 'ROM FREE'
 
-COMBOS=("" "debug-console" "tts" "tts,debug-console")
+# The two #75 diagnostic features ride together in ONE combo rather than two.
+# They must be here at all — a gated feature nothing builds is exactly the rot
+# this script was written to catch (see the `--features tts` story in the header)
+# — but each entry is a full fat-LTO link, so pairing them buys both for the
+# price of one and additionally proves they compose: `heap-forensics` allocates
+# inside `log_heap` while `heap-hooks` counts every allocation, so building them
+# together is the case most likely to break.
+COMBOS=("" "debug-console" "tts" "tts,debug-console" "heap-hooks,heap-forensics")
 if [[ -n "$ONLY" ]]; then
   # "default" is the human name for the empty feature set.
   [[ "$ONLY" == "default" ]] && ONLY=""
