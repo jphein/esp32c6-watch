@@ -598,6 +598,26 @@ fn largest_free_block() -> (usize, usize) {
                 // change; a `used` delta cannot.
                 let from_main = region_used(0) > before;
                 alloc::alloc::dealloc(p, layout);
+                // SELF-VALIDATION (#75). A successful probe at `sz` must come out of
+                // ONE region's span, so `sz` can never exceed total free. If it does,
+                // either this probe is lying or the allocator's accounting is
+                // inconsistent — and either way every conclusion drawn from `maxblk`
+                // is void.
+                //
+                // This check exists because the FIRST version of this probe reported
+                // `maxblk=32768` in 236 consecutive beats while total free sat at
+                // 25,592-40,372 B — arithmetically impossible, and it silently
+                // underwrote a fragmentation story ("recl had a 32 KB hole an `items`
+                // doubling took") for hours. An instrument that cannot detect its own
+                // impossibility is worse than no instrument: it launders a guess into
+                // a measurement.
+                let total_free = esp_alloc::HEAP.free();
+                if sz > total_free {
+                    println!(
+                        "[PROBE-BUG] probe served {sz} B but HEAP.free()={total_free} \
+                         — maxblk is NOT trustworthy this beat"
+                    );
+                }
                 if global == 0 {
                     global = sz;
                 }
