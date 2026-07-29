@@ -38,4 +38,18 @@ pub mod voice_stt;
 #[cfg(feature = "tts")]
 #[allow(dead_code)]
 pub mod voice_tts;
+// Endless LitRPG story client (#story): the JSON half — chapter index, manifest
+// segment index, character/stats and the playback cursor, all stream-parsed so
+// an ~18 KB chapter payload is never resident. Gated on `story` so the shipped
+// default build is byte-identical until the app has been on glass once; the
+// audio half lives in `story_play`.
+#[cfg(feature = "story")]
+#[allow(dead_code)]
+pub mod story_api;
+// The audio half: Range-window `GET /media/{n}.pcm` streamed into audio_out.
+// Must pump `service_amp` per chunk (read-aloud spec §6.2) and enforces a
+// measured paint budget so live highlighting can never cost chopped audio.
+#[cfg(feature = "story")]
+#[allow(dead_code)]
+pub mod story_play;
 pub mod weather;

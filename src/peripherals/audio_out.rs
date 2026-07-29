@@ -64,6 +64,29 @@ pub const PLAY_SAMPLE_RATE: u32 = 16_000;
 pub const PLAY_CHUNK: usize = 512;
 /// Queue depth: 8 × 16 ms = 128 ms of buffered audio. Covers every SFX clip
 /// whole (beep = 4 chunks) with headroom for a streamed source later (#HA-TTS).
+///
+/// # Growing this does NOT buy runway across a blocking paint — read before trying
+///
+/// The obvious fix, when a full-frame render starves the speaker, is to deepen
+/// this queue. **It cannot help, and the reason is worth stating once here rather
+/// than being rediscovered.** This channel is drained by `silent_clock_task` —
+/// an Embassy task on the *same single-threaded executor* that a paint blocks. A
+/// paint therefore stops the drain as well as the producer, so the only buffer
+/// the DMA can still consume from is [`TX_RING_LEN`] (**48 ms**), no matter how
+/// many chunks are sitting here.
+///
+/// So: 128 ms is the *backpressure* window for a streamed source, and 48 ms is
+/// the *underrun* window for anything that blocks the executor. They are
+/// different numbers answering different questions, and conflating them sends you
+/// after the wrong constant. Growing the ring is the lever that would work, and
+/// `TX_RING_LEN`'s own docs record that being tried twice and reverted (16 KB in
+/// `.bss` trips the stack floor; 16 KB on the heap froze both watches).
+///
+/// The working approach is to keep the blocking work *shorter than 48 ms* —
+/// partial rendering, small fixed dirty regions — or to move the repaint out of
+/// the audio window entirely (`ping_visual_due` in `main.rs`). See
+/// `net::story_play::PAINT_BUDGET_MS`, which enforces the former with a measured,
+/// self-disabling gate.
 pub const PLAY_QUEUE_DEPTH: usize = 8;
 
 /// The TX clock ring in STEREO bytes: 3 descriptors × `STEREO_CHUNK` = 3072 B

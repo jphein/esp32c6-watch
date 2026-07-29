@@ -1,0 +1,7 @@
+HTTP/1.1 206 Partial Content
+content-type: audio/L16; rate=16000; channels=1
+accept-ranges: bytes
+content-length: 512
+content-range: bytes 1000000-1000511/14487328
+date: Wed, 29 Jul 2026 15:26:33 GMT
+

@@ -173,6 +173,23 @@ export component AppIcon {
         Rectangle { x: 33px; y: 37px; width: 6px;  height: 6px;  border-radius: 3px;  background: root.tint.with-alpha(0.55); }
         Rectangle { x: 41px; y: 30px; width: 4px;  height: 4px;  border-radius: 2px;  background: root.tint.with-alpha(0.4); }
     }
+    // 16 — Story (#story): an open book, with a sound arc off the right page to
+    // say "this one is read aloud" rather than just "text".
+    if root.id == 16: Rectangle {
+        // spine
+        Rectangle { x: 23px; y: 8px;  width: 3px;  height: 32px; background: root.tint.with-alpha(0.75); }
+        // left page
+        Rectangle { x: 6px;  y: 10px; width: 16px; height: 28px; border-radius: 2px; border-width: 2px; border-color: root.tint; }
+        // right page
+        Rectangle { x: 27px; y: 10px; width: 16px; height: 28px; border-radius: 2px; border-width: 2px; border-color: root.tint.with-alpha(0.85); }
+        // three text lines on the left page
+        Rectangle { x: 10px; y: 16px; width: 9px;  height: 2px; background: root.tint.with-alpha(0.55); }
+        Rectangle { x: 10px; y: 22px; width: 9px;  height: 2px; background: root.tint.with-alpha(0.55); }
+        Rectangle { x: 10px; y: 28px; width: 6px;  height: 2px; background: root.tint.with-alpha(0.4); }
+        // sound arc: two pips stepping out from the right page
+        Rectangle { x: 33px; y: 20px; width: 4px;  height: 4px; border-radius: 2px;  background: root.tint; }
+        Rectangle { x: 38px; y: 18px; width: 3px;  height: 8px; border-radius: 1.5px; background: root.tint.with-alpha(0.6); }
+    }
 }
 
 // One app tile: icon over label, sized for the 3x3 page grid (114x108).

@@ -129,6 +129,15 @@ pub static REGISTRY: &[AppDescriptor] = &[
     AppDescriptor { state: AppState::Theme,      name: "Theme",       icon_id: 13, accent: 0xa78bfa, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 13
     AppDescriptor { state: AppState::Lights,     name: "Lights",      icon_id: 14, accent: 0xffb454, section: System, kind: Overlay,     flags: AppFlags::WIFI },    // idx 14
     AppDescriptor { state: AppState::Ping,       name: "Ping",        icon_id: 15, accent: 0xffd166, section: System, kind: Overlay,     flags: AppFlags::NONE },    // idx 15
+    // APPENDED, not inserted: order == launch index, so adding anywhere else
+    // would silently re-point every launcher tile after it.
+    //
+    // Gated with the feature so the shipped default build does not show a tile
+    // that opens a screen with no client behind it. A dead launcher entry is
+    // worse than an absent one — the whole point of shipping `story` off is that
+    // JP's watch behaves exactly as it does today.
+    #[cfg(feature = "story")]
+    AppDescriptor { state: AppState::Story,      name: "Story",       icon_id: 16, accent: 0xa78bfa, section: Audio,  kind: Overlay,     flags: AppFlags::WIFI },    // idx 16
 ];
 
 /// Look up a launchable app's descriptor by state (linear scan, ≤15 entries).

@@ -171,7 +171,12 @@ fi
 note "link combos + budgets (floor $STACK_FLOOR B)"
 printf '        %-24s %10s %10s %12s\n' COMBO 'STACK GAP' MARGIN 'ROM FREE'
 
-COMBOS=("" "debug-console" "tts" "tts,debug-console")
+# `story` combos are here for the reason in this file's header: a default-off
+# feature's code is invisible until something links it, so leaving `story` out of
+# this list would let it rot exactly as `tts` once did. `story,tts` is included
+# because the two features' `.bss` is additive and the stack gap is the binding
+# budget — testing them only in isolation would miss the case that overruns it.
+COMBOS=("" "debug-console" "tts" "tts,debug-console" "story" "story,debug-console" "story,tts")
 if [[ -n "$ONLY" ]]; then
   # "default" is the human name for the empty feature set.
   [[ "$ONLY" == "default" ]] && ONLY=""

@@ -1465,6 +1465,46 @@ async fn main(_spawner: Spawner) -> ! {
     // send (queue full during an OTA) retries next tick.
     let mut session_hold_up = false;
     let mut voice_hold_up = false;
+    // #story holds WiFi for the life of the screen (a chapter streams for up to
+    // 18 minutes). Declared unconditionally — it is one bool and the hold edge
+    // is feature-independent, so a non-`story` build behaves identically.
+    let mut story_hold_up = false;
+    // === Story (#story) state ===
+    // Everything the four pages render, held as bounded `story_proto` models: a
+    // chapter payload is ~18 KB and streams through a 512 B window, so none of
+    // the prose ever lands here. ~5 KB total — see the crate's own budget test.
+    #[cfg(feature = "story")]
+    let mut story_list = story_proto::model::ChapterList::new();
+    #[cfg(feature = "story")]
+    let mut story_seg: Option<story_proto::model::SegmentIndex> = None;
+    #[cfg(feature = "story")]
+    let mut story_char: Option<story_proto::model::Character> = None;
+    #[cfg(feature = "story")]
+    let mut story_need_list = false;
+    #[cfg(feature = "story")]
+    let mut story_need_char = false;
+    /// Chapter the user tapped, waiting for the playback call site (which owns
+    /// the amp/codec borrows) to pick it up.
+    #[cfg(feature = "story")]
+    let mut story_play_req: Option<u16> = None;
+    /// `?since=` paging cursor for the chapter list.
+    #[cfg(feature = "story")]
+    let mut story_since: u16 = 0;
+    /// Chapter currently loaded, and the byte offset to resume it from.
+    ///
+    /// Device-local by design: `PUT /api/progress` is chapter-granular
+    /// (`consumed_through`), so there is nowhere server-side to record a position
+    /// *within* a chapter. Resume works within a session; a reboot restarts the
+    /// chapter. Persisting it would need a `WatchConfig` field (an SWCFG bump plus
+    /// migration) and this app has not earned one yet.
+    #[cfg(feature = "story")]
+    let mut story_cur: u16 = 0;
+    #[cfg(feature = "story")]
+    let mut story_pos: u32 = 0;
+    /// A director note was requested: the next successful PTT transcript is
+    /// POSTed to `/api/notes` instead of only being shown.
+    #[cfg(feature = "story")]
+    let mut story_note_pending = false;
     let mut climate_running = false;
     // Optimistic setpoint for the Climate detail (oracle-t9 C4/C5/E2).
     let mut climate_pending: Option<ClimatePending> = None;
@@ -1797,6 +1837,7 @@ async fn main(_spawner: Spawner) -> ! {
                 | AppState::Lights
                 | AppState::Ping
                 | AppState::Voice
+                | AppState::Story
                 | AppState::Theme
                 | AppState::Settings => {
                     // Slint animations (launcher slide, flings) need frame pacing;
@@ -3444,6 +3485,7 @@ async fn main(_spawner: Spawner) -> ! {
             | AppState::Lights
             | AppState::Ping
             | AppState::Voice
+            | AppState::Story
             | AppState::Sound
             | AppState::Theme
             | AppState::Settings => {
@@ -3461,6 +3503,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Lights
                         | AppState::Ping
                         | AppState::Voice
+                        | AppState::Story
                         | AppState::Sound
                         | AppState::Theme
                         | AppState::Settings
@@ -3690,6 +3733,19 @@ async fn main(_spawner: Spawner) -> ! {
                     };
                     if crate::net::net_task::send(cmd) {
                         session_hold_up = climate_session_want;
+                    }
+                }
+                // #story holds WiFi for the life of the screen: a chapter fetch
+                // is small but playback streams for up to 18 minutes.
+                let story_want = app_state == AppState::Story;
+                if story_want != story_hold_up {
+                    let cmd = if story_want {
+                        crate::net::net_task::NetCmd::Raise(crate::net::net_task::Hold::Story)
+                    } else {
+                        crate::net::net_task::NetCmd::Drop(crate::net::net_task::Hold::Story)
+                    };
+                    if crate::net::net_task::send(cmd) {
+                        story_hold_up = story_want;
                     }
                 }
                 let voice_want = app_state == AppState::Voice;
@@ -4197,6 +4253,23 @@ async fn main(_spawner: Spawner) -> ! {
                         Ok(t) if !t.is_empty() => {
                             shell.set_voice_transcript(t.as_str());
                             shell.set_voice_state(3); // result
+                            // #story: the Story screen asked for a director note,
+                            // so this transcript is steering the story rather than
+                            // just being read back. POSTed here because this is
+                            // where the text exists; `is_notable` upstream stops a
+                            // misfired hold becoming a note.
+                            #[cfg(feature = "story")]
+                            if story_note_pending {
+                                story_note_pending = false;
+                                match crate::net::story_api::post_note(stack, t.as_str()).await {
+                                    Ok(()) => {
+                                        shell.set_toast("Note sent");
+                                        toast_active = true;
+                                        toast_until = now + Duration::from_secs(2);
+                                    }
+                                    Err(e) => println!("[STORY] note failed: {e}"),
+                                }
+                            }
                             // Share it with the fleet: the other watch shows it
                             // as a shade card. Broadcast, fire-and-forget — a
                             // dropped frame just means no card, which beats a
@@ -4284,6 +4357,265 @@ async fn main(_spawner: Spawner) -> ! {
                             }
                         } else {
                             println!("[TTS] nothing to read");
+                        }
+                    }
+                }
+
+                // === Story (#story) ==========================================
+                // Everything the Story screen does that needs to await: chapter
+                // and character fetches, and playback. Placed HERE, at the one
+                // site that owns `amp_en`/`audio_codec`/`touch`/`display`, for
+                // the same reason the speak site above is: `PlaybackFeeder`
+                // withholds every sample until `AMP_READY`, which ONLY
+                // `audio_out::service_amp` sets, and that needs the amp GPIO and
+                // the codec's I2C. Drive playback anywhere that cannot pump it
+                // and every chunk waits out the 1 s AMP_WAIT_MS failsafe and
+                // drains into a MUTED DAC — silent in the room, fully successful
+                // in the log (read-aloud spec §6.2).
+                #[cfg(feature = "story")]
+                if app_state == AppState::Story {
+                    use crate::net::{story_api, story_play};
+                    use story_proto::model as smodel;
+
+                    // ---- UI requests (cheap; no awaits) --------------------
+                    if let Some(p) = shell.req.story_nav.take() {
+                        shell.set_story_page(p);
+                        if (p == 2 || p == 3) && story_char.is_none() {
+                            story_need_char = true;
+                        }
+                        if p == 0 && story_list.rows.is_empty() {
+                            story_need_list = true;
+                        }
+                        shell.request_redraw();
+                    }
+                    if let Some(d) = shell.req.story_page_delta.take() {
+                        // Step by what the screen shows, not by the parse cap —
+                        // paging by 16 while displaying 5 would skip 11 chapters.
+                        let step = smodel::VISIBLE_CHAPTERS as u16;
+                        story_since = if d < 0 {
+                            story_since.saturating_sub(step)
+                        } else {
+                            story_since.saturating_add(step)
+                        };
+                        story_need_list = true;
+                    }
+                    if let Some(n) = shell.req.story_pick.take() {
+                        if n > 0 {
+                            story_play_req = Some(n.min(u16::MAX as i32) as u16);
+                        }
+                    }
+                    if shell.req.story_stop.take() {
+                        story_play::cancel();
+                    }
+                    if shell.req.story_note.take() {
+                        // Hand off to the existing push-to-talk screen; the
+                        // transcript site POSTs it to /api/notes.
+                        story_note_pending = true;
+                        shell.req.launch.set(Some(AppState::Voice));
+                    }
+
+                    // ---- fetches (park the loop briefly) ------------------
+                    if net.phase.ready() {
+                        #[cfg(feature = "debug-console")]
+                        debug_console::arm_exempt();
+                        if story_need_list {
+                            story_need_list = false;
+                            shell.set_story_loading(true, "");
+                            shell.render(&mut display);
+                            // Parse into a FRESH list, and only adopt it on
+                            // success: a failed page must not leave the screen
+                            // showing half of two different pages.
+                            let mut fresh = smodel::ChapterList::new();
+                            match story_api::get_json(
+                                stack,
+                                story_proto::Route::Chapters { since: story_since },
+                                &mut fresh,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    story_list = fresh;
+                                    shell.set_story_chapters(
+                                        &story_list.rows,
+                                        story_cur,
+                                        story_list.dropped,
+                                    );
+                                    shell.set_story_loading(false, "");
+                                }
+                                Err(e) => {
+                                    println!("[STORY] chapters failed: {e}");
+                                    shell.set_story_loading(false, e);
+                                }
+                            }
+                            shell.request_redraw();
+                        }
+                        if story_need_char {
+                            story_need_char = false;
+                            let mut c = smodel::Character::new();
+                            match story_api::get_json(
+                                stack,
+                                story_proto::Route::Character,
+                                &mut c,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    shell.set_story_character(&c);
+                                    story_char = Some(c);
+                                }
+                                Err(e) => println!("[STORY] character failed: {e}"),
+                            }
+                            shell.request_redraw();
+                        }
+                    } else if story_need_list {
+                        shell.set_story_loading(false, "WiFi not ready");
+                    }
+
+                    // ---- playback -----------------------------------------
+                    if let Some(chapter) = story_play_req.take() {
+                        let row = story_list.find(chapter).cloned();
+                        let total = row.as_ref().and_then(|r| r.total_bytes).unwrap_or(0);
+                        if total == 0 {
+                            shell.set_story_loading(false, "chapter has no audio");
+                        } else if net.phase.ready() {
+                            #[cfg(feature = "debug-console")]
+                            debug_console::arm_exempt();
+
+                            // Resume only if this is the SAME chapter we were in.
+                            if chapter != story_cur {
+                                story_cur = chapter;
+                                story_pos = 0;
+                                story_seg = None;
+                            }
+
+                            // The segment index drives the speaker chip. Its
+                            // failure is not fatal: playback needs only
+                            // `total_bytes`, so a missing or untrustworthy
+                            // manifest costs the chip, not the chapter.
+                            if story_seg.is_none() {
+                                let mut idx = smodel::SegmentIndex::new();
+                                match story_api::get_json(
+                                    stack,
+                                    story_proto::Route::Chapter { n: chapter },
+                                    &mut idx,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        if !idx.usable() {
+                                            println!(
+                                                "[STORY] manifest unusable (segs={} dropped={} rate={})",
+                                                idx.segments.len(),
+                                                idx.dropped,
+                                                idx.bytes_per_ms
+                                            );
+                                        }
+                                        story_seg = Some(idx);
+                                    }
+                                    Err(e) => println!("[STORY] manifest failed: {e}"),
+                                }
+                            }
+
+                            let usable =
+                                story_seg.as_ref().is_some_and(|i| i.usable());
+                            let title = row
+                                .as_ref()
+                                .map(|r| r.title.clone())
+                                .unwrap_or_default();
+                            let duration_ms = story_proto::bytes_to_ms(total);
+
+                            // Paint the whole screen ONCE, before any audio is
+                            // queued. Never a full paint during playback: 90-170
+                            // ms against a 48 ms DMA ring (see PAINT_BUDGET_MS).
+                            shell.set_story_page(1);
+                            shell.set_story_highlight_state(!usable, false);
+                            shell.set_story_playback(
+                                title.as_str(),
+                                "",
+                                0,
+                                story_pos,
+                                duration_ms,
+                                0,
+                                story_seg.as_ref().map_or(0, |i| i.segments.len() as i32),
+                                true,
+                            );
+                            shell.render(&mut display);
+
+                            let mut stop_on_tap = || matches!(touch.read(), Ok(Some(_)));
+                            let mut ui = StoryPlayUi {
+                                shell: &mut shell,
+                                display: &mut display,
+                                stop: &mut stop_on_tap,
+                                seg: story_seg.as_ref().filter(|i| i.usable()),
+                                title: title.as_str(),
+                                duration_ms,
+                                last_seg: usize::MAX,
+                                last_tick: u32::MAX,
+                                pos_ms: story_pos,
+                            };
+
+                            // Resolve once per chapter, not per window: 18
+                            // windows would mean 18 needless DNS round trips
+                            // inside the audio path.
+                            let addr = story_api::resolve(stack).await;
+                            let res = story_play::play_chapter(
+                                stack,
+                                addr,
+                                chapter,
+                                total,
+                                story_pos,
+                                &mut amp_en,
+                                &mut audio_codec,
+                                &mut ui,
+                            )
+                            .await;
+
+                            match res {
+                                Ok(sess) => {
+                                    story_pos = sess.position;
+                                    println!(
+                                        "[STORY] ch{} {} at {} B ({} ms) retries={} paints={} worst={}us gate={}",
+                                        chapter,
+                                        sess.outcome.label(),
+                                        sess.position,
+                                        sess.position_ms(),
+                                        sess.retries,
+                                        sess.gate.paints(),
+                                        sess.gate.worst_us(),
+                                        if sess.gate.tripped() { "TRIPPED" } else { "ok" },
+                                    );
+                                    // Report the cursor only on a real finish, so
+                                    // stopping halfway never tells the daemon JP
+                                    // consumed a chapter he did not.
+                                    if sess.outcome == story_play::Played::Complete {
+                                        story_pos = 0;
+                                        if let Err(e) =
+                                            story_api::put_progress(stack, chapter).await
+                                        {
+                                            println!("[STORY] progress failed: {e}");
+                                        }
+                                    }
+                                    shell.set_story_highlight_state(
+                                        !usable,
+                                        sess.gate.tripped(),
+                                    );
+                                    shell.set_story_playback(
+                                        title.as_str(),
+                                        "",
+                                        0,
+                                        story_pos,
+                                        duration_ms,
+                                        0,
+                                        0,
+                                        false,
+                                    );
+                                }
+                                Err(e) => {
+                                    println!("[STORY] play failed: {e}");
+                                    shell.set_story_loading(false, e);
+                                }
+                            }
+                            shell.request_redraw();
                         }
                     }
                 }
@@ -4908,6 +5240,21 @@ async fn main(_spawner: Spawner) -> ! {
                     // side already hard-cut the switcher on the tap).
                     shell.set_switcher_open(false);
                     shell.set_shade_open(false);
+                    // #story: a Slint overlay like Voice/WLED — raise it in
+                    // place, no scene suspend and no framebuffer. Opens on the
+                    // chapter list and asks for a fetch; the Story arm above does
+                    // the awaiting, where it owns the borrows it needs.
+                    #[cfg(feature = "story")]
+                    if target == AppState::Story {
+                        shell.set_story_page(0);
+                        shell.set_story_loading(true, "");
+                        shell.set_story_open(true);
+                        story_need_list = true;
+                        // Stats/character are one 501-byte request that feeds both
+                        // pages, so fetch it up front rather than on first tab.
+                        story_need_char = true;
+                        app_state = AppState::Story;
+                    }
                     if target == AppState::Wled {
                         // WLED is a Slint overlay, not a framebuffer app: it renders
                         // through the resident scene, so raise the overlay in place
@@ -5157,6 +5504,7 @@ async fn main(_spawner: Spawner) -> ! {
                         | AppState::Lights
                         | AppState::Ping
                         | AppState::Voice
+                        | AppState::Story
                         | AppState::Sound
                         | AppState::Theme
                         | AppState::Settings
@@ -5314,6 +5662,105 @@ async fn main(_spawner: Spawner) -> ! {
 /// `AppResult::Exit` (the boot-button exit stays in the caller's arm — it needs
 /// `.await`); `sfx` is any one-shot effect for the caller to play on the shared
 /// I2S path. This one body replaces the per-game render/flush arms.
+/// Drives the Story playback screen from inside `story_play::play_chapter`.
+///
+/// The player owns the *timing* (only it knows where the audio pipeline is) and
+/// this owns *what appears* — which is also what keeps `story_play` independent
+/// of how highlighting is rendered.
+///
+/// # Why the repaint policy is what it is
+///
+/// A full-frame Slint paint is 90-170 ms on this panel and the audio DMA ring
+/// holds 48 ms, with nothing refilling it while a paint blocks the single-
+/// threaded executor. Partial rendering (`RepaintBufferType::ReusedBuffer`) means
+/// the cost scales with the dirty region, and `story.slint` keeps the changing
+/// elements in one small band with fixed geometry so that region stays small.
+///
+/// This therefore repaints only on a **segment change** or a **5-second progress
+/// tick** — never per frame — and `story_play::PaintGate` times the result and
+/// switches highlighting off for the rest of the chapter if it ever exceeds
+/// `PAINT_BUDGET_MS`. Degrade the cosmetic thing; protect the audio.
+#[cfg(feature = "story")]
+struct StoryPlayUi<'a> {
+    shell: &'a mut ShellUi,
+    display: &'a mut crate::drivers::co5300::Co5300Display<'static>,
+    /// Finger-down poll. A `dyn` closure rather than the touch driver so this
+    /// struct carries no device generics — same reason `voice_tts::speak_text`
+    /// takes `&mut dyn FnMut`.
+    stop: &'a mut dyn FnMut() -> bool,
+    /// `None` when the manifest was missing or refused (over the cap,
+    /// non-contiguous, or a rate this hardware cannot play). Playback continues
+    /// without a speaker chip.
+    seg: Option<&'a story_proto::model::SegmentIndex>,
+    title: &'a str,
+    duration_ms: u32,
+    last_seg: usize,
+    last_tick: u32,
+    pos_ms: u32,
+}
+
+#[cfg(feature = "story")]
+impl crate::net::story_play::PlaybackUi for StoryPlayUi<'_> {
+    fn wants_paint(&mut self, position_ms: u32) -> bool {
+        let seg_now = self
+            .seg
+            .and_then(|i| i.segment_idx_at(position_ms))
+            .unwrap_or(usize::MAX);
+        // 5 s, not 1 s: a 366 px bar over an 18-minute chapter moves 0.3 px/s, so
+        // a finer tick would buy nothing visible and spend paints against the
+        // budget for it.
+        let tick = position_ms / 5_000;
+        if seg_now == self.last_seg && tick == self.last_tick {
+            return false;
+        }
+        self.last_seg = seg_now;
+        self.last_tick = tick;
+        self.pos_ms = position_ms;
+        true
+    }
+
+    fn paint(&mut self) {
+        let (speaker, kind) = match (self.seg, self.last_seg) {
+            (Some(idx), n) if n != usize::MAX => {
+                let k = idx.segments.get(n).map_or(0, |g| match g.kind {
+                    story_proto::model::SegKind::Narrator => 0,
+                    story_proto::model::SegKind::System => 1,
+                    story_proto::model::SegKind::Dialogue => 2,
+                    story_proto::model::SegKind::Other => 3,
+                });
+                let name = idx
+                    .segments
+                    .get(n)
+                    .map_or("", |g| idx.speaker_of(g));
+                // `narrator` is the daemon's speaker id; title-case it for glass.
+                (if name == "narrator" { "Narrator" } else { name }, k)
+            }
+            _ => ("", 0),
+        };
+        let count = self.seg.map_or(0, |i| i.segments.len() as i32);
+        let index = if self.last_seg == usize::MAX {
+            0
+        } else {
+            self.last_seg as i32 + 1
+        };
+        self.shell.set_story_playback(
+            self.title,
+            speaker,
+            kind,
+            self.pos_ms,
+            self.duration_ms,
+            index,
+            count,
+            true,
+        );
+        self.shell.render(self.display);
+    }
+
+    fn should_stop(&mut self) -> bool {
+        (self.stop)()
+    }
+}
+
 fn run_fb_app(
     app: &mut dyn App,
     input: &AppInput,

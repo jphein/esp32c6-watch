@@ -37,6 +37,22 @@ debug-console = ["dep:embedded-io-async"]
 # than reverted, so it flips on in one line the moment the ROM budget exists.
 # See docs/superpowers/specs/2026-07-27-tts-notify-readaloud-design.md.
 tts = ["dep:tts-proto"]
+# `story` (the Endless LitRPG reader/player) is OPT-IN and OFF BY DEFAULT — but
+# for a different reason than `tts`: ROM is no longer the constraint. Measured
+# 2026-07-29 against the widened region (#67): **2,098,526 B free**, so size is
+# a non-issue. It ships off because this is JP's working watch and the shipped
+# default build stays byte-identical until the app has been on glass once. One
+# line to flip.
+#
+# What it costs, and why that is the number to watch instead: ~5 KB of `.bss` for
+# the retained models (asserted by a host test in `story-proto`) plus ~2 KB of
+# socket and PCM staging buffers, against a MEASURED stack-gap headroom of
+# 9,408 B (gap 81,088 vs the 71,680 B floor). `.bss` growth steals stack
+# silently, so `tools/preflight.sh` asserting the gap is the real gate — not a
+# successful link.
+#
+# See ~/Projects/endlesslitrpg/docs/superpowers/specs/2026-07-29-endless-litrpg-design.md §9.4.
+story = ["dep:story-proto"]
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [
@@ -147,6 +163,7 @@ sigil-id = { path = "crates/sigil-id" }
 # encoding (escapes attacker-influenced MQTT text), bridge HTTP response
 # framing, 16 kHz chunk math. Host-unit-tested; feeds src/net/voice_tts.rs.
 tts-proto = { path = "crates/tts-proto", optional = true }
+story-proto = { path = "crates/story-proto", optional = true }
 
 # Slint UI toolkit (no_std MCU backend, software renderer) — used by the
 # `slint-demo` binary only.

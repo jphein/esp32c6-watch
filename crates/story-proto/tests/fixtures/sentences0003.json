@@ -1,0 +1,755 @@
+{
+  "chapter": 3,
+  "sample_rate": 16000,
+  "bytes_per_ms": 32,
+  "duration_ms": 804975,
+  "segments": [
+    {
+      "idx": 0,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The road to Oakhaven was not so much a path as a suggestion of travel carved through the grey dunes. The ash here was fine, sifting through the cracks of Kaelen’s boots with a sound like dry breath.",
+      "start_ms": 0,
+      "end_ms": 9851
+    },
+    {
+      "idx": 1,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It coated everything: the skeletal remains of the olive trees, the rusted hinges of abandoned farmhouses, the lining of Kaelen’s throat. He did not cough.",
+      "start_ms": 9851,
+      "end_ms": 17798
+    },
+    {
+      "idx": 2,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Coughing wasted energy, and energy was currency he could no longer afford to waste. Sera walked half a paces behind him, her silhouette sharp against the diffuse light.",
+      "start_ms": 17798,
+      "end_ms": 26722
+    },
+    {
+      "idx": 3,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "She carried her crossbow unslung, the string oiled, the bolts counted. She did not look at him.",
+      "start_ms": 26722,
+      "end_ms": 32291
+    },
+    {
+      "idx": 4,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "She looked at the horizon, scanning for the heat shimmer of ambushes or the unnatural stillness of places where the air had been sucked out by a debt that had gone bad.",
+      "start_ms": 32291,
+      "end_ms": 40630
+    },
+    {
+      "idx": 5,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"The wind is shifting,\" Sera said. Her voice was flat, devoid of the tremor that fear usually induced in lesser collectors. Kaelen adjusted the strap of the ledger on his back.",
+      "start_ms": 40630,
+      "end_ms": 50046
+    },
+    {
+      "idx": 6,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The leather was warm, pulsing with a faint, rhythmic heat that matched the beat of his own heart. Or what was left of it. \"It’s always shifting in the Vale. It doesn’t mean anything.\"",
+      "start_ms": 50046,
+      "end_ms": 59925
+    },
+    {
+      "idx": 7,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"It means the ash is settling,\" Sera corrected. She stopped, raising a hand. \"Look at the ground.\" Kaelen looked. The ash was not settling. It was arranging itself.",
+      "start_ms": 59925,
+      "end_ms": 69131
+    },
+    {
+      "idx": 8,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Tiny grains were sliding downhill, drawn by an invisible slope, forming concentric rings around a cluster of blackened roots. The pattern was geometric, precise, and wrong. Nature did not do geometry.",
+      "start_ms": 69131,
+      "end_ms": 80160
+    },
+    {
+      "idx": 9,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Nature did rot. This was drying. This was calculation. \"A collection point,\" Kaelen said. He felt the weight of the ledger shift against his spine. It was a warning, a pull.",
+      "start_ms": 80160,
+      "end_ms": 90643
+    },
+    {
+      "idx": 10,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Someone is owed something here.\" \"And if we’re the ones being owed?\" Sera asked. She didn’t lower her crossbow. \"Then we’re already dead. We’d just be the ones collecting our own remains.\"",
+      "start_ms": 90643,
+      "end_ms": 101287
+    },
+    {
+      "idx": 11,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen stepped forward, his boots crunching on the organized ash. He pulled a small iron chisel from his belt. It was not for combat. It was for opening sealed envelopes. They approached the roots.",
+      "start_ms": 101287,
+      "end_ms": 111621
+    },
+    {
+      "idx": 12,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "As Kaelen got closer, the air grew cold, not with the chill of winter, but with the absence of warmth. The heat was being siphoned out, stored in a container he couldn’t see.",
+      "start_ms": 111621,
+      "end_ms": 120742
+    },
+    {
+      "idx": 13,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He crouched, inspecting the root system. Embedded in the wood was a small, crystalline structure, no larger than a thumb. It pulsed with a dull, amber light. \"A memory shard,\" Sera said.",
+      "start_ms": 120742,
+      "end_ms": 130510
+    },
+    {
+      "idx": 14,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Or a piece of the god’s nerve.\" \"Something like that,\" Kaelen murmured. He reached out, his gloved fingers hovering over the crystal.",
+      "start_ms": 130510,
+      "end_ms": 137402
+    },
+    {
+      "idx": 15,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The authority of the ledger hummed in his blood, a low vibration that made his teeth ache. It told him the price. It told him the debtor. It told him the terms.",
+      "start_ms": 137402,
+      "end_ms": 146185
+    },
+    {
+      "idx": 16,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Quest Update: The Ashen Ledger — 1 of 3 seals broken. Current Objective: Recover the Amber Resonance. Reward: 200 XP, +10 HP, Coin of the Forgotten (Chance: 5%). Failure Condition: Debt escalates.",
+      "start_ms": 146185,
+      "end_ms": 159829
+    },
+    {
+      "idx": 17,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Local Reality Stability -15%.",
+      "start_ms": 159829,
+      "end_ms": 162971
+    },
+    {
+      "idx": 18,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Ready,\" Sera said. Her voice was tight. \"Stay back,\" Kaelen said. He didn’t know why he said it. It wasn’t a command of authority, but a reflex of caution.",
+      "start_ms": 162971,
+      "end_ms": 172344
+    },
+    {
+      "idx": 19,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The ledger didn’t like to be touched by uninvited hands. He placed his palm on the crystal. The world dissolved into white noise. He was no longer in the ash fields. He was in a room.",
+      "start_ms": 172344,
+      "end_ms": 182273
+    },
+    {
+      "idx": 20,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "A small, stone room with a single window looking out onto a sky that was neither blue nor black, but a bruised purple. A man sat at a table.",
+      "start_ms": 182273,
+      "end_ms": 189469
+    },
+    {
+      "idx": 21,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He was old, his skin like parchment stretched over bird bones. He wore robes of grey wool, stained with ink and ash. \"You’re late,\" the man said. He did not look up from the scroll he was reading.",
+      "start_ms": 189469,
+      "end_ms": 199970
+    },
+    {
+      "idx": 22,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"I didn’t know I had an appointment,\" Kaelen said. His voice echoed strangely, stripped of its warmth. \"The appointment was made before you were born,\" the man said. He finally looked up.",
+      "start_ms": 199970,
+      "end_ms": 210186
+    },
+    {
+      "idx": 23,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "His eyes were entirely black, no iris, no pupil. Just void. \"I am Oren. I borrowed time from the God of Ends. I spent it on a daughter who should have died in the cradle.\"",
+      "start_ms": 210186,
+      "end_ms": 220724
+    },
+    {
+      "idx": 24,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen felt a surge of nausea. The ledger was heavy in his mind, a physical weight pressing down on his consciousness. He saw the numbers floating in the air, transparent and cold.",
+      "start_ms": 220724,
+      "end_ms": 230366
+    },
+    {
+      "idx": 25,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"She lived to be eighty,\" Oren said, his voice cracking. \"She died in her bed. I cheated the collection. I hid her name in the cracks of the ledger. But the God is dead now. The cracks are closing.\"",
+      "start_ms": 230366,
+      "end_ms": 241235
+    },
+    {
+      "idx": 26,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"And you want me to reopen them,\" Kaelen said. \"I want you to collect,\" Oren said. He slid a small pouch across the table. It clinked with the sound of metal on metal. \"Take my life instead.",
+      "start_ms": 241235,
+      "end_ms": 250613
+    },
+    {
+      "idx": 27,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "I have twenty years left on the book. Take it. Let the girl keep hers.\" Kaelen looked at the pouch. He looked at Oren. He felt the cold logic of the system. This was not a moral dilemma.",
+      "start_ms": 250613,
+      "end_ms": 261338
+    },
+    {
+      "idx": 28,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It was a transaction. The ledger did not care about love. It cared about balance. \"If I take your life,\" Kaelen said, \"the debt is settled. The girl lives. But who pays me?\"",
+      "start_ms": 261338,
+      "end_ms": 271566
+    },
+    {
+      "idx": 29,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"You are the Collector,\" Oren said. \"You are the law. The law does not starve.\" Kaelen reached for the pouch. His hand trembled. Not from fear, but from the strain of the authority.",
+      "start_ms": 271566,
+      "end_ms": 281495
+    },
+    {
+      "idx": 30,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The ledger was rewriting him, turning his empathy into arithmetic. He felt his own memories slipping, replaced by cold facts. He forgot the taste of his mother’s bread.",
+      "start_ms": 281495,
+      "end_ms": 290376
+    },
+    {
+      "idx": 31,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He remembered only the caloric value. He took the pouch. The room shattered. Kaelen gasped, falling back onto the ash.",
+      "start_ms": 290376,
+      "end_ms": 297204
+    },
+    {
+      "idx": 32,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The crystal in his hand flared with amber light, then dimmed, turning into a dull, grey stone. The weight in his mind lifted, leaving a hollow ache.",
+      "start_ms": 297204,
+      "end_ms": 305255
+    },
+    {
+      "idx": 33,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Sera was kneeling beside him, her hand on his shoulder. \"Kaelen?\" He blinked, focusing on her face. She looked worried. It was a familiar, comforting sensation.",
+      "start_ms": 305255,
+      "end_ms": 314237
+    },
+    {
+      "idx": 34,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It reminded him that he was still human, or at least, that he still pretended to be. \"I’m fine,\" he said. His voice sounded raspy, unused. \"It’s done.\" Sera helped him up.",
+      "start_ms": 314237,
+      "end_ms": 323943
+    },
+    {
+      "idx": 35,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "She didn’t ask what had happened. She knew better. The collectors never talked about the collections. They only talked about the results. Kaelen opened his inventory.",
+      "start_ms": 323943,
+      "end_ms": 332877
+    },
+    {
+      "idx": 36,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The coin he had received was now in his pocket. It was heavy, cold, and etched with symbols he didn’t recognize. But it was real. It was payment.",
+      "start_ms": 332877,
+      "end_ms": 340653
+    },
+    {
+      "idx": 37,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Quest Completed: The Amber Resonance. Experience Gained: 200 XP. Hit Points Restored: 10 HP. Current HP: 110/110. Current Level: 3 (XP: 150/200). Loot Acquired: Coin of the Forgotten (x1).",
+      "start_ms": 340653,
+      "end_ms": 357095
+    },
+    {
+      "idx": 38,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "New Inventory: Tattered Contract Page (x1) — *A fragment of the original will, detailing the location of the Second Seal.*",
+      "start_ms": 357095,
+      "end_ms": 365044
+    },
+    {
+      "idx": 39,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen froze. He pulled the Tattered Contract Page from his satchel. It was made of the same grey paper as the ledger, but older, more brittle. He unfolded it carefully.",
+      "start_ms": 365044,
+      "end_ms": 374024
+    },
+    {
+      "idx": 40,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The handwriting was jagged, hurried. *Second Seal: The Iron Archive.* *Location: Beneath the Sunken City of Vael.* *Cost: One Truth, Unspoken.* \"The Second Seal,\" Sera said, reading over his shoulder.",
+      "start_ms": 374024,
+      "end_ms": 388407
+    },
+    {
+      "idx": 41,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "She didn’t touch the page. \"Vael. The drowned city.\" Kaelen nodded. \"We need to go there.\" \"And the cost?\" Sera asked. She was already calculating. \"One truth, unspoken. What does that mean? A secret?",
+      "start_ms": 388407,
+      "end_ms": 400531
+    },
+    {
+      "idx": 42,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "A confession?\" \"It means I have to give up something I know,\" Kaelen said. He looked at the page again. The words seemed to shift, rearranging themselves.",
+      "start_ms": 400531,
+      "end_ms": 408865
+    },
+    {
+      "idx": 43,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He felt a pang of loss, a vague sense of something slipping away, even though he hadn’t said anything yet. \"Vael is dangerous,\" Sera said. \"The water there is thick with ash. It clogs lungs.",
+      "start_ms": 408865,
+      "end_ms": 419283
+    },
+    {
+      "idx": 44,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "And the debt collectors in the sunken city don’t use ledgers. They use blades.\" \"Good thing I have blades,\" Kaelen said. He sheathed the iron chisel. \"And I have the ledger.\"",
+      "start_ms": 419283,
+      "end_ms": 429427
+    },
+    {
+      "idx": 45,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Sera looked at him, her eyes searching his face. \"You look tired, Kaelen.\" \"I’m always tired,\" he said. \"That’s not what I mean,\" Sera said. She stepped closer, invading his personal space.",
+      "start_ms": 429427,
+      "end_ms": 440066
+    },
+    {
+      "idx": 46,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It was an aggressive move, but one she made only when she thought he was drifting. \"You’re changing. The ledger is eating you.\" Kaelen didn’t flinch. \"It’s part of the job.\" \"Is it?\" Sera asked.",
+      "start_ms": 440066,
+      "end_ms": 450484
+    },
+    {
+      "idx": 47,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Or is it the job of a ghost?\" Kaelen looked away. He couldn’t answer. He didn’t know the answer himself. He only knew that the ledger was growing heavier, and his memories were growing thinner.",
+      "start_ms": 450484,
+      "end_ms": 460568
+    },
+    {
+      "idx": 48,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"We leave at dawn,\" Kaelen said. \"We need supplies. Clean water filters. Iron spikes. And... I need to check the ledger.\" \"Check it for what?\" Sera asked. \"For new debts,\" Kaelen said.",
+      "start_ms": 460568,
+      "end_ms": 471942
+    },
+    {
+      "idx": 49,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"The god didn’t just die. He was murdered. And there are people who benefited.\" Sera’s eyes narrowed. \"You think there’s a trail?\" \"I know there is,\" Kaelen said. \"The ledger doesn’t lie.",
+      "start_ms": 471942,
+      "end_ms": 482567
+    },
+    {
+      "idx": 50,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It just hides the details until the price is right.\" He turned and began walking back toward the road. The ash swirled around his boots, trying to pull him down, but he kept his head high.",
+      "start_ms": 482567,
+      "end_ms": 492458
+    },
+    {
+      "idx": 51,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He was a collector. He collected debts. And the greatest debt of all was the one owed to the dead god. As they walked, Kaelen felt the ledger pulse again. It was a different rhythm this time. Faster.",
+      "start_ms": 492458,
+      "end_ms": 503366
+    },
+    {
+      "idx": 52,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Urgent. He pulled the book from his back. The cover was warm, almost hot to the touch. He opened it to a blank page. Ink began to form, dark and wet. Kaelen closed the book. He didn’t tell Sera.",
+      "start_ms": 503366,
+      "end_ms": 515065
+    },
+    {
+      "idx": 53,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Not yet. Some debts were too heavy to share. \"The sun is setting,\" Sera said. \"We should make camp.\" Kaelen looked at the horizon. The grey ash was turning pink with the dying light.",
+      "start_ms": 515065,
+      "end_ms": 524402
+    },
+    {
+      "idx": 54,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It looked like blood. It looked like rust. It looked like the end of everything. \"Agreed,\" he said. They found a sheltered hollow beneath the roots of a dead oak.",
+      "start_ms": 524402,
+      "end_ms": 532770
+    },
+    {
+      "idx": 55,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Sera set up the fire, using dry twigs and a small amount of alcohol fuel. The flame was blue, burning clean and hot. They sat on either side of it, the heat pushing back the chill of the ash.",
+      "start_ms": 532770,
+      "end_ms": 543001
+    },
+    {
+      "idx": 56,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Sera ate her rations in silence. Kaelen watched the flames. He thought about the man in the stone room. Oren. He had traded his life for his daughter’s. It was a noble sacrifice.",
+      "start_ms": 543001,
+      "end_ms": 552986
+    },
+    {
+      "idx": 57,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It was also a transaction. The ledger had accepted it. But what about the other debts? The ones that couldn’t be paid? The ones that had no collateral?",
+      "start_ms": 552986,
+      "end_ms": 561377
+    },
+    {
+      "idx": 58,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He felt a itch in his mind, a persistent nagging. He tried to ignore it, but the ledger was loud tonight. It whispered in the spaces between thoughts. *Check the coin,* it said.",
+      "start_ms": 561377,
+      "end_ms": 571787
+    },
+    {
+      "idx": 59,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "*Check the coin.* Kaelen reached into his pocket and pulled out the Coin of the Forgotten. It was small, heavy, and cold. He held it up to the firelight. The symbols on it were not etched.",
+      "start_ms": 571787,
+      "end_ms": 582527
+    },
+    {
+      "idx": 60,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "They were carved, deep and precise. They looked like letters, but he couldn’t read them. He rolled the coin between his fingers. It felt solid. Real. \"Kaelen,\" Sera said. She was watching him.",
+      "start_ms": 582527,
+      "end_ms": 593149
+    },
+    {
+      "idx": 61,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"You’re doing it again.\" \"Doing what?\" \"Fidgeting. You’re thinking about the coin.\" \"It’s just a coin,\" Kaelen said. \"Is it?\" Sera asked. \"Or is it a key?\" Kaelen stopped rolling the coin.",
+      "start_ms": 593149,
+      "end_ms": 604140
+    },
+    {
+      "idx": 62,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He looked at Sera. \"Why do you say that?\" \"Because,\" Sera said, \"I’ve seen collectors before. They never carry coins they can’t spend. They carry tokens. And tokens are keys.\"",
+      "start_ms": 604140,
+      "end_ms": 615181
+    },
+    {
+      "idx": 63,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen put the coin back in his pocket. He didn’t answer. He couldn’t. The truth was that he didn’t know what the coin was. And that uncertainty was a debt in itself. \"I’m tired, Sera,\" he said.",
+      "start_ms": 615181,
+      "end_ms": 625553
+    },
+    {
+      "idx": 64,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Let’s sleep.\" Sera nodded. She extinguished the fire, wrapping herself in her cloak. \"Wake me if you see anything. Anything at all.\" Kaelen lay down on the hard ground.",
+      "start_ms": 625553,
+      "end_ms": 635203
+    },
+    {
+      "idx": 65,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The ash seeped through his clothes, grinding against his skin. He closed his eyes, but he couldn’t sleep. The ledger was humming, a low, steady vibration that traveled up his spine.",
+      "start_ms": 635203,
+      "end_ms": 645035
+    },
+    {
+      "idx": 66,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He opened his eyes and looked at the starless sky. The ash blocked the stars. It blocked the moon. It blocked the sun. It blocked everything. Except for the debts. The debts were always visible.",
+      "start_ms": 645035,
+      "end_ms": 655639
+    },
+    {
+      "idx": 67,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "They glowed in the dark, bright and terrible. And Kaelen was the only one who could see them. He pulled the ledger out again. He didn’t open it. He just held it.",
+      "start_ms": 655639,
+      "end_ms": 664437
+    },
+    {
+      "idx": 68,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The warmth of it was a comfort, in a strange, twisted way. It was the only thing that was real. The only thing that mattered. *One Truth, Unspoken,* the page had said. Kaelen looked at his hands.",
+      "start_ms": 664437,
+      "end_ms": 676130
+    },
+    {
+      "idx": 69,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "They were steady. They were calloused. They were the hands of a man who had killed for a living. But were they the hands of a man who had loved? He didn’t remember.",
+      "start_ms": 676130,
+      "end_ms": 683508
+    },
+    {
+      "idx": 70,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He didn’t remember much of anything, except for the debts. And the cold. He closed the ledger and tucked it under his head. He would sleep when the sun came up. He would walk when the sun set.",
+      "start_ms": 683508,
+      "end_ms": 693619
+    },
+    {
+      "idx": 71,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He would collect when the debt called. And in the meantime, he would listen to the silence. Because in the silence, the ledger whispered its secrets.",
+      "start_ms": 693619,
+      "end_ms": 701143
+    },
+    {
+      "idx": 72,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "And Kaelen was starting to understand that the secrets were not just about the god. They were about him.",
+      "start_ms": 701143,
+      "end_ms": 706480
+    },
+    {
+      "idx": 73,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He drifted off, not into sleep, but into a state of half-awareness, where the boundary between the real and the recorded was thin. He saw a city beneath the water. He saw a door made of iron.",
+      "start_ms": 706480,
+      "end_ms": 716376
+    },
+    {
+      "idx": 74,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He saw a woman with no face, holding a key. And he heard a voice, his own, but not his own, saying: *The price is paid.* Kaelen woke with a start.",
+      "start_ms": 716376,
+      "end_ms": 725588
+    },
+    {
+      "idx": 75,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The sun was rising, painting the ash in shades of grey and gold. Sera was already awake, packing the camp. \"Morning,\" she said. \"Morning,\" Kaelen said. His head was clear. The whispering was gone.",
+      "start_ms": 725588,
+      "end_ms": 736928
+    },
+    {
+      "idx": 76,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "For now. He stood up, brushing the ash from his clothes. He picked up the ledger. It was light today. Lighter than usual. \"What’s the plan?\" Sera asked. Kaelen looked at the horizon.",
+      "start_ms": 736928,
+      "end_ms": 747707
+    },
+    {
+      "idx": 77,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The road to Oakhaven led north. The road to Vael led south. \"We go north,\" he said. \"First, we settle the debt in Oakhaven. Then, we go south.\" Sera nodded. \"Oakhaven. The merchant district.\"",
+      "start_ms": 747707,
+      "end_ms": 759014
+    },
+    {
+      "idx": 78,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Yes,\" Kaelen said. \"There’s a collection there. A simple one. A loan shark who forgot to pay interest.\" \"Simple,\" Sera repeated. \"You say that about everything until it isn’t.\" Kaelen smiled.",
+      "start_ms": 759014,
+      "end_ms": 770605
+    },
+    {
+      "idx": 79,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It was a dry, humorless smile. \"That’s the job, Sera.\" He adjusted the strap of the ledger and began to walk. The ash swirled around his boots, but he didn’t look back. He had a debt to collect.",
+      "start_ms": 770605,
+      "end_ms": 781255
+    },
+    {
+      "idx": 80,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "And for the first time in a long time, he felt like he knew the price.",
+      "start_ms": 781255,
+      "end_ms": 785096
+    },
+    {
+      "idx": 81,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Level Up Threshold Reached. Current XP: 150/200. Level: 3. Next Level: 4 (XP: 200). Note: Authority Passive Ability: Debt Perception active.",
+      "start_ms": 785096,
+      "end_ms": 796639
+    },
+    {
+      "idx": 82,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen didn’t check the notification. He didn’t need to. He could feel the difference. The world was sharper. The debts were louder. And he was ready.",
+      "start_ms": 796639,
+      "end_ms": 804975
+    }
+  ]
+}

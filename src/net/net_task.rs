@@ -136,6 +136,15 @@ pub enum Hold {
     /// Never dropped in practice — esp-radio 0.18 has no controller stop,
     /// and mesh-off is a tick-level pause, not a teardown.
     Phy,
+    /// The Story screen (#story): chapter fetches and PCM streaming need the
+    /// stack for as long as the screen is up — a chapter runs to 18 minutes.
+    ///
+    /// Its own bit rather than sharing `Voice`, because the Story screen's
+    /// director-note affordance *uses* the Voice PTT path: sharing one bit would
+    /// let that flow's hold drop tear the link out from under a playing chapter.
+    /// Appended last so no existing discriminant — and therefore no existing
+    /// bit — moves.
+    Story,
 }
 
 impl Hold {
@@ -150,6 +159,7 @@ impl Hold {
             Hold::Voice => "voice",
             Hold::Ota => "ota",
             Hold::Phy => "phy",
+            Hold::Story => "story",
         }
     }
 }
@@ -160,6 +170,7 @@ const ASSOC_HOLDS: u8 = Hold::User.bit()
     | Hold::Burst.bit()
     | Hold::Session.bit()
     | Hold::Voice.bit()
+    | Hold::Story.bit()
     | Hold::Ota.bit();
 
 /// A command for the network owner. See the module docs for semantics.

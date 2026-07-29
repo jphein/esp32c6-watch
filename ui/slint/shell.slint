@@ -13,6 +13,7 @@ import { ClimateOverlay, ClimateCard } from "climate.slint";
 import { LightsOverlay } from "lights.slint";
 import { PingOverlay, PingPulse } from "ping.slint";
 import { VoicePage } from "voice.slint";
+import { StoryPage, StoryChapter, StorySlot } from "story.slint";
 import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { SettingsHub } from "settings.slint";
@@ -164,6 +165,41 @@ export component WatchShell inherits Window {
     in property <float> voice-level: 0.0;
     in property <string> voice-transcript;
     in property <string> voice-error;
+
+    // Endless LitRPG reader (#story). Four pages behind one overlay; every value
+    // is pushed from Rust, which stream-parses the daemon's JSON so nothing large
+    // is ever resident. `story-page`: 0 list · 1 play · 2 stats · 3 character.
+    in-out property <bool> story-open: false;
+    in-out property <int> story-page: 0;
+    in property <[StoryChapter]> story-chapters;
+    in property <bool> story-loading: false;
+    in property <string> story-error;
+    in property <int> story-more: 0;
+    in property <string> story-play-title;
+    in property <string> story-speaker;
+    in property <int> story-speaker-kind: 0;
+    in property <float> story-progress: 0.0;
+    in property <string> story-elapsed: "0:00";
+    in property <string> story-total: "0:00";
+    in property <int> story-seg-index: 0;
+    in property <int> story-seg-count: 0;
+    in property <bool> story-playing: false;
+    in property <bool> story-no-manifest: false;
+    in property <bool> story-highlight-off: false;
+    in property <string> story-subject;
+    in property <string> story-level: "—";
+    in property <string> story-xp: "—";
+    in property <string> story-gold: "—";
+    in property <string> story-location: "—";
+    in property <string> story-status;
+    in property <string> story-hp-text: "—";
+    in property <float> story-hp-frac: 0.0;
+    in property <bool> story-hp-known: false;
+    in property <[StorySlot]> story-inventory;
+    in property <[StorySlot]> story-equipment;
+    in property <[StorySlot]> story-appearance;
+    in property <int> story-equipped-count: 0;
+    in property <int> story-appearance-count: 0;
     // SoundLevel meter overlay (#28): live dBFS + peak-hold, both in [-60, 0],
     // pushed from the Rust loop draining the shared mic capture through rms_dbfs.
     in-out property <bool> mic-open: false;
@@ -269,6 +305,15 @@ export component WatchShell inherits Window {
     callback ping-pulse-tap();             // tap on the receiver pulse → dismiss
     callback voice-ptt-pressed();  // finger down on the PTT button → start capture
     callback voice-ptt-released(); // finger up → stop (advisory; loop keys off INT pin)
+
+    // #story. `story-pick` carries the CHAPTER NUMBER, not a row index, so paging
+    // the list cannot desynchronise the selection from what was tapped.
+    callback story-nav(int);
+    callback story-pick(int);
+    callback story-stop();
+    callback story-note();
+    callback story-page-prev();
+    callback story-page-next();
     callback mic-gain-down();      // Sound app − : lower digital mic gain
     callback mic-gain-up();        // Sound app + : raise digital mic gain
     callback theme-changed(int);   // Theme picker → new scheme index (Rust persists)
@@ -344,6 +389,7 @@ export component WatchShell inherits Window {
         || root.wled-open || root.hunt-open || root.energy-open
         || root.climate-open || root.lights-open || root.ping-open
         || root.voice-open || root.mic-open || root.theme-open
+        || root.story-open
         || root.power-menu-open;
 
     // Page backdrop. On the dark schemes (Midnight/Amber/Violet) `Theme.bg` is
@@ -832,6 +878,52 @@ export component WatchShell inherits Window {
         // the right-swipe Flag path in OVERLAYS). reconcile_overlay picks it up
         // and the Rust loop tears down Voice on the app_state transition.
         close => { root.voice-open = false; }
+    }
+
+    // ==================== Story overlay (#story) ====================
+    if root.story-open: StoryPage {
+        width: 100%;
+        height: 100%;
+        page: root.story-page;
+        chapters: root.story-chapters;
+        loading: root.story-loading;
+        error-text: root.story-error;
+        more-count: root.story-more;
+        play-title: root.story-play-title;
+        speaker: root.story-speaker;
+        speaker-kind: root.story-speaker-kind;
+        progress: root.story-progress;
+        elapsed: root.story-elapsed;
+        total: root.story-total;
+        seg-index: root.story-seg-index;
+        seg-count: root.story-seg-count;
+        playing: root.story-playing;
+        no-manifest: root.story-no-manifest;
+        highlight-off: root.story-highlight-off;
+        subject: root.story-subject;
+        level: root.story-level;
+        xp: root.story-xp;
+        gold: root.story-gold;
+        location: root.story-location;
+        status: root.story-status;
+        hp-text: root.story-hp-text;
+        hp-frac: root.story-hp-frac;
+        hp-known: root.story-hp-known;
+        inventory: root.story-inventory;
+        equipment: root.story-equipment;
+        appearance: root.story-appearance;
+        equipped-count: root.story-equipped-count;
+        appearance-count: root.story-appearance-count;
+        nav(p) => { root.story-nav(p); }
+        pick(n) => { root.story-pick(n); }
+        stop => { root.story-stop(); }
+        note => { root.story-note(); }
+        page-prev => { root.story-page-prev(); }
+        page-next => { root.story-page-next(); }
+        // Chevron close: clear the flag directly (Flag idiom, like Theme/Voice);
+        // reconcile_overlay picks it up and the Rust loop tears Story down on the
+        // app_state transition — which is also what stops playback.
+        close => { root.story-open = false; }
     }
 
     // ==================== SoundLevel meter overlay ====================

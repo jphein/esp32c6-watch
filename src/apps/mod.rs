@@ -119,6 +119,13 @@ pub enum AppState {
     /// Rides the shared HA MQTT session like Climate/Energy (WiFi held while
     /// open, released on close).
     Lights,
+    /// Endless LitRPG reader (#story) — a Slint overlay with four pages (chapter
+    /// list, playback, stats, character). Streams raw 16 kHz PCM from
+    /// `litrpg-daemon` via HTTP `Range` windows straight into `audio_out`, with no
+    /// decoder and nothing buffered whole (a chapter is ~25 MB against 512 KB of
+    /// SRAM). Holds WiFi while open; playback parks the main loop by design and
+    /// pumps `service_amp` per chunk (read-aloud spec §6.2).
+    Story,
     /// Watch-to-watch ping (#35) — a Slint overlay: a hero button broadcasts a
     /// SMOLv1 PING over ESP-NOW; the peer answers with a PINGACK ("delivered
     /// to <sigil>") and blooms a full-screen greeting pulse + two-tone chime.
