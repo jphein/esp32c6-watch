@@ -945,6 +945,13 @@ def pin_image(src: Path) -> Path:
     binary; this makes the fix the default rather than folklore.
     """
     try:
+        # Already pinned? Don't pin it again. Re-stamping produced
+        # `PROD-story-WroughtQuench-bcc91eb-WroughtQuench-bcc91eb-1cb1a3de.bin` when a
+        # hand-named pin was deployed — cosmetic, but an unreadable name defeats the
+        # whole point of putting the sigil there, which was to make provenance legible
+        # at `ls` time.
+        if PIN_DIR.resolve() == src.resolve().parent:
+            return src
         PIN_DIR.mkdir(parents=True, exist_ok=True)
         # Name it with the image's OWN build sigil, not just a content hash.
         #

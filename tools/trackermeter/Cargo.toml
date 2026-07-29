@@ -1,0 +1,35 @@
+# Host-only measurement harness — see README.md. Deliberately NOT a member of the
+# firmware workspace (own `[workspace]` table below), so `cargo build` at the repo
+# root never sees it and the riscv target config never applies to it.
+#
+# `src/main.rs` is GENERATED from tools/lunameter/src/main.rs by instrument.py on
+# every run, which is why this package has no committed src/ directory. Run
+# measure.sh — plain `cargo run` here has nothing to compile.
+[package]
+name = "trackermeter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Same feature set the firmware uses (Cargo.toml). `unsafe-single-threaded` matters
+# here beyond parity: it is why a plain counting allocator is sound as an
+# instrument — there is no second thread allocating Slint properties underneath it.
+slint = { version = "1.17.1", default-features = false, features = [
+    "compat-1-2",
+    "unsafe-single-threaded",
+    "libm",
+    "renderer-software",
+] }
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+# The renderer fork is staged by tools/lunameter/instrument.py, reused rather than
+# re-derived: there is exactly ONE renderer in the repo and exactly one patch set
+# for it. Reusing it also means a single run reports BOTH costs per frame — scene
+# items from the renderer, dependency nodes from the allocator.
+[patch.crates-io]
+i-slint-renderer-software = { path = "renderer-fork" }
+
+[workspace]
