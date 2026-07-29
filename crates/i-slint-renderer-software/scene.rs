@@ -24,6 +24,34 @@ pub struct SceneVectors {
     pub conic_gradients: Vec<ConicGradientCommand>,
 }
 
+impl SceneVectors {
+    /// WATCH FORK (#75): empty every vector while keeping its allocation, so the
+    /// buffers can be handed back to [`super::ScenePool`] and reused next frame.
+    ///
+    /// Deliberately written as an exhaustive destructuring rather than six field
+    /// accesses: if a future upstream merge adds a seventh vector this stops
+    /// compiling instead of silently leaking that vector's contents into the next
+    /// frame. Every reused buffer MUST be reset — a missed `clear()` here renders
+    /// garbage (stale items are drawn again) and pins the `Rc`s in
+    /// `shared_buffers` / gradient stops forever.
+    pub fn clear(&mut self) {
+        let Self {
+            textures,
+            rounded_rectangles,
+            shared_buffers,
+            linear_gradients,
+            radial_gradients,
+            conic_gradients,
+        } = self;
+        textures.clear();
+        rounded_rectangles.clear();
+        shared_buffers.clear();
+        linear_gradients.clear();
+        radial_gradients.clear();
+        conic_gradients.clear();
+    }
+}
+
 pub struct Scene {
     /// the next line to be processed
     pub(super) current_line: PhysicalLength,
@@ -47,11 +75,16 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// WATCH FORK (#75): `current_line_ranges` is now passed in (from
+    /// [`super::ScenePool`]) instead of being `Default::default()`, so the last
+    /// per-frame heap allocation in this struct is gone too.
     pub fn new(
         mut items: Vec<SceneItem>,
         vectors: SceneVectors,
         dirty_region: PhysicalRegion,
+        mut current_line_ranges: Vec<core::ops::Range<i16>>,
     ) -> Self {
+        current_line_ranges.clear();
         let current_line =
             dirty_region.iter_box().map(|x| x.min.y_length()).min().unwrap_or_default();
         items.retain(|i| i.pos.y_length() + i.size.height_length() > current_line);
@@ -65,12 +98,35 @@ impl Scene {
             future_items_index: current_items_index,
             vectors,
             dirty_region,
-            current_line_ranges: Default::default(),
+            current_line_ranges,
             range_valid_until_line: Default::default(),
         };
         r.recompute_ranges();
         debug_assert_eq!(r.current_line, r.dirty_region.bounding_rect().origin.y_length());
         r
+    }
+
+    /// WATCH FORK (#75): surrender the heap buffers at end-of-frame so the renderer
+    /// can keep them for the next frame.
+    ///
+    /// Everything is `clear()`ed here rather than at the next lend, so the drop
+    /// timing of the refcounted payloads (`SharedBufferCommand::buffer`, the
+    /// gradients' `SharedVector` stops) is unchanged from upstream: they are
+    /// released when the `Scene` would have been dropped, not one frame later.
+    /// The `Scene` is unusable afterwards and must be dropped immediately.
+    pub fn take_buffers(
+        &mut self,
+    ) -> (Vec<SceneItem>, SceneVectors, Vec<core::ops::Range<i16>>) {
+        let mut items = core::mem::take(&mut self.items);
+        let mut vectors = core::mem::take(&mut self.vectors);
+        let mut line_ranges = core::mem::take(&mut self.current_line_ranges);
+        items.clear();
+        vectors.clear();
+        line_ranges.clear();
+        // Keep the (now meaningless) cursors consistent with the emptied vectors.
+        self.current_items_index = 0;
+        self.future_items_index = 0;
+        (items, vectors, line_ranges)
     }
 
     /// Updates `current_items_index` and `future_items_index` to match the invariant

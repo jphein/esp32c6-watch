@@ -495,6 +495,8 @@ pub struct SoftwareRenderer {
     rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: sharedparley::TextLayoutCache,
+    /// WATCH FORK (#75): scene buffers that outlive a frame. See [`ScenePool`].
+    scene_pool: RefCell<ScenePool>,
 }
 
 impl Default for SoftwareRenderer {
@@ -508,7 +510,75 @@ impl Default for SoftwareRenderer {
             repaint_buffer_type: Default::default(),
             #[cfg(feature = "systemfonts")]
             text_layout_cache: Default::default(),
+            scene_pool: Default::default(),
         }
+    }
+}
+
+/// WATCH FORK (#75): the scene's growable buffers, owned by the `SoftwareRenderer`
+/// so that they outlive a single frame.
+///
+/// Upstream allocates all of these from empty on every frame and drops them again at
+/// frame end: `PrepareScene::items`, the six vectors inside `SceneVectors`,
+/// `SceneBuilder::state_stack` and `Scene::current_line_ranges`. `esp-alloc` is a
+/// first-fit linked-list allocator with no compaction, so that alloc/free churn at
+/// 6-11 fps shreds the free list into sub-4 KB fragments. Measured consequence: a
+/// 3584 B `state_stack` and a 4096 B `items` allocation *failing* with 54-66 KB still
+/// free (issue #75) — fragmentation, not exhaustion.
+///
+/// Pooling attacks the churn instead of the symptom. The `Vec` doubling ladder is
+/// climbed only while a screen is growing the high-water mark — once the busiest
+/// screen has been drawn, `clear()` keeps the capacity and the steady state performs
+/// ZERO scene allocations. Note this is the OPPOSITE of the reverted
+/// `Vec::with_capacity` attempt (d10aa0b): that asked for one big contiguous block
+/// *every frame*, which the fragmented heap could not satisfy, and made time-to-panic
+/// far worse (53 min -> 155 s). Here we stop asking altogether, so the renderer also
+/// stops being the thing that fragments the heap.
+///
+/// Invariant: the pool is empty (len 0, capacity retained) whenever no frame is in
+/// flight. Buffers are emptied at reclaim time, not at lend time, so refcounted
+/// payloads are released on the same frame as upstream.
+#[derive(Default)]
+struct ScenePool {
+    items: Vec<SceneItem>,
+    vectors: SceneVectors,
+    state_stack: Vec<RenderState>,
+    line_ranges: Vec<core::ops::Range<i16>>,
+}
+
+impl ScenePool {
+    /// Lend every buffer out for the duration of one frame, leaving the pool empty.
+    ///
+    /// `clear()` is belt-and-braces here (reclaim already emptied them); it is what
+    /// guarantees no item can leak between frames even if a previous frame aborted
+    /// before reclaiming.
+    fn lend(
+        &mut self,
+    ) -> (Vec<SceneItem>, SceneVectors, Vec<RenderState>, Vec<core::ops::Range<i16>>) {
+        let mut items = core::mem::take(&mut self.items);
+        let mut vectors = core::mem::take(&mut self.vectors);
+        let mut state_stack = core::mem::take(&mut self.state_stack);
+        let mut line_ranges = core::mem::take(&mut self.line_ranges);
+        items.clear();
+        vectors.clear();
+        state_stack.clear();
+        line_ranges.clear();
+        (items, vectors, state_stack, line_ranges)
+    }
+
+    /// Take the `SceneBuilder`'s state stack back. Balanced save/restore should leave
+    /// it empty already, but an unbalanced `save_state` must not poison the next frame.
+    fn reclaim_state_stack(&mut self, mut state_stack: Vec<RenderState>) {
+        state_stack.clear();
+        self.state_stack = state_stack;
+    }
+
+    /// Take the finished scene's buffers back. `scene` is dead afterwards.
+    fn reclaim_scene(&mut self, scene: &mut Scene) {
+        let (items, vectors, line_ranges) = scene.take_buffers();
+        self.items = items;
+        self.vectors = vectors;
+        self.line_ranges = line_ranges;
     }
 }
 
@@ -1464,6 +1534,14 @@ fn render_window_frame_by_line(
             scene.next_line();
         }
     }
+
+    // WATCH FORK (#75): the frame is flushed — hand the buffers back to the pool
+    // (emptied, capacity kept) instead of letting the `Scene` drop free them. This is
+    // the only exit from this function: there is no early `return` or `?` above, and
+    // the bare-metal target aborts on panic (no unwinder), so no path skips it. Even
+    // if one did, the pool would simply be empty and the next frame would re-allocate.
+    renderer.scene_pool.borrow_mut().reclaim_scene(&mut scene);
+
     scene.dirty_region
 }
 
@@ -1473,15 +1551,25 @@ fn prepare_scene(
     software_renderer: &SoftwareRenderer,
 ) -> Scene {
     let factor = ScaleFactor::new(window.scale_factor());
-    let prepare_scene = SceneBuilder::new(
+    // WATCH FORK (#75): borrow the frame's buffers from the renderer-owned pool
+    // instead of allocating them from empty. The borrow of the RefCell ends here —
+    // the buffers are moved out, so nothing is held across the draw callbacks and
+    // there is no re-entrancy hazard.
+    let (pooled_items, pooled_vectors, pooled_state_stack, pooled_line_ranges) =
+        software_renderer.scene_pool.borrow_mut().lend();
+    let mut prepare_scene = SceneBuilder::new(
         size,
         factor,
         window,
-        PrepareScene { scale_factor: factor, ..Default::default() },
+        PrepareScene { items: pooled_items, vectors: pooled_vectors, scale_factor: factor },
         software_renderer.rotation.get(),
         #[cfg(feature = "systemfonts")]
         &software_renderer.text_layout_cache,
     );
+    // `SceneBuilder::new` seeds this with `Vec::new()`, which does not allocate, so
+    // overwriting it costs nothing and leaves the other caller (`render_buffer_impl`)
+    // on the unpooled path.
+    prepare_scene.state_stack = pooled_state_stack;
     let mut renderer =
         software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene);
     let window_adapter = renderer.window_adapter.clone();
@@ -1563,7 +1651,15 @@ fn prepare_scene(
 
     software_renderer.measure_frame_rendered(&mut renderer);
 
-    let prepare_scene = renderer.into_inner();
+    let mut prepare_scene = renderer.into_inner();
+
+    // WATCH FORK (#75): the SceneBuilder is finished with; its state stack goes home
+    // now. `items`/`vectors` travel on inside the `Scene` and are reclaimed by
+    // `render_window_frame_by_line` once the last line has been flushed.
+    software_renderer
+        .scene_pool
+        .borrow_mut()
+        .reclaim_state_stack(core::mem::take(&mut prepare_scene.state_stack));
 
     /* // visualize dirty regions
     let mut prepare_scene = prepare_scene;
@@ -1583,7 +1679,12 @@ fn prepare_scene(
         )
     } // */
 
-    Scene::new(prepare_scene.processor.items, prepare_scene.processor.vectors, dirty_region)
+    Scene::new(
+        prepare_scene.processor.items,
+        prepare_scene.processor.vectors,
+        dirty_region,
+        pooled_line_ranges,
+    )
 }
 
 trait ProcessScene {
