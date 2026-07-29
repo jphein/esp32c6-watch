@@ -816,31 +816,55 @@ impl SmolMesh {
     /// Snapshot the roster into `out`, ordered by id (known ids first,
     /// ascending; anonymous MACs last, freshest first). Returns row count.
     pub fn peers(&self, now_ms: u64, out: &mut [PeerView]) -> usize {
+        // SORT-then-truncate. This used to truncate-then-sort: the roster was
+        // copied in INSERTION order, cut at `out.len()`, and only that prefix was
+        // sorted — so an IDENTIFIED peer sitting past the cut was invisible behind
+        // staler rows that merely arrived first. The roster holds up to
+        // `2 * MESH_MAX_ROWS` entries against the DoS cap (a7e4b69) while the UI
+        // shows 7, so the cut is reachable in normal use, not just in theory.
+        //
+        // Bounded top-k insertion: every roster entry is considered, the best
+        // `out.len()` are kept, and they come out already sorted. No alloc, and at
+        // 16 x 7 the comparison count is trivial.
+        let key = |r: &PeerView| match r.id {
+            Some(id) => (0u8, id as u64, 0u64),
+            None => (1u8, 0, r.age_ms),
+        };
+        if out.is_empty() {
+            return 0;
+        }
         let mut n = 0;
         for p in &self.peers {
-            if n >= out.len() {
-                break;
-            }
-            out[n] = PeerView {
+            let view = PeerView {
                 mac: p.mac,
                 id: p.id,
                 age_ms: now_ms.saturating_sub(p.last_rx_ms),
                 rssi_dbm: p.rssi_ewma_x8.map(|e| (e >> 3).clamp(-128, 127) as i8),
             };
-            n += 1;
-        }
-        // Tiny roster: insertion sort, no alloc.
-        let rows = &mut out[..n];
-        let key = |r: &PeerView| match r.id {
-            Some(id) => (0u8, id as u64, 0u64),
-            None => (1u8, 0, r.age_ms),
-        };
-        for i in 1..rows.len() {
-            let mut j = i;
-            while j > 0 && key(&rows[j - 1]) > key(&rows[j]) {
-                rows.swap(j - 1, j);
-                j -= 1;
+            // Where does this row belong among the ones kept so far?
+            let mut pos = n;
+            while pos > 0 && key(&out[pos - 1]) > key(&view) {
+                pos -= 1;
             }
+            if n < out.len() {
+                // Room left: shift the tail right and insert.
+                let mut j = n;
+                while j > pos {
+                    out[j] = out[j - 1];
+                    j -= 1;
+                }
+                out[pos] = view;
+                n += 1;
+            } else if pos < n {
+                // Full, but this beats the current worst row — drop that one.
+                let mut j = n - 1;
+                while j > pos {
+                    out[j] = out[j - 1];
+                    j -= 1;
+                }
+                out[pos] = view;
+            }
+            // else: full and this sorts after everything kept — discard it.
         }
         n
     }
