@@ -308,6 +308,44 @@ export component WatchShell inherits Window {
 
     in-out property <float> brightness: 0.8;
 
+    // ==================== takeover gate (#75) ====================
+    // TRUE while a full-screen surface completely hides the watchface pages and
+    // the shell chrome declared above it. Every overlay listed here paints an
+    // OPAQUE `Theme.bg` backdrop as its first element (grep
+    // `background: Theme.bg` across ui/slint), so the content beneath
+    // contributes ZERO visible pixels — except the launcher, whose
+    // `Theme.scrim` is 95 % opaque (see the note on `covered` in
+    // launcher.slint). All but PingOverlay also place an `OverlaySwallow`, so
+    // for those the gate is input-neutral too; for Ping it closes a latent
+    // #54-class hole (chrome was reachable through the overlay's dead zones).
+    //
+    // The software renderer has NO occlusion culling: it builds a scene item for
+    // every glyph and every rectangle behind an opaque cover, so hidden content
+    // costs exactly as much per-frame heap as visible content. Measured on the
+    // real renderer at 410x502 (Midnight, populated watchface):
+    //
+    //   watchface page + chrome       92 items · 62 glyph textures · 27 rounded
+    //   launcher SYSTEM page adds   +102 items · +50 glyphs        · +51 rounded
+    //   -------------------------------------------------------------------
+    //   together                     194 items · 112 glyphs        · 78 rounded
+    //
+    // `PrepareScene` keeps one `Vec` per kind and they grow by DOUBLING, so those
+    // totals are what push the per-frame requests onto the 256/128/128 rungs —
+    // 4 096 B, 3 584 B and 3 328 B, i.e. the exact allocations that fail at
+    // 54-66 kB free in #75. Gating the covered content off keeps every one of
+    // them on the rung the watchface alone already sustains (2 048 / 1 792 /
+    // 1 664 B), which the watch has run for hours without a failure.
+    //
+    // Deliberately NOT listed: `switcher-open`, `shade-open`, `ping-pulse-open`
+    // (translucent `Theme.scrim` by design — the watchface must read through),
+    // `volume-overlay-open` (a HUD card, not full-screen) and `aod` (touch
+    // routing while dimmed is owned by the Rust loop; left untouched).
+    property <bool> covered: root.launcher-open || root.settings-open
+        || root.wled-open || root.hunt-open || root.energy-open
+        || root.climate-open || root.lights-open || root.ping-open
+        || root.voice-open || root.mic-open || root.theme-open
+        || root.power-menu-open;
+
     // Page backdrop. On the dark schemes (Midnight/Amber/Violet) `Theme.bg` is
     // solid #000000 — crisp, self-emissive-black, battery-optimal on this
     // RGB565 software renderer (a near-black gradient bands badly, so no
@@ -321,6 +359,11 @@ export component WatchShell inherits Window {
     pages := Rectangle {
         width: 100%; height: 100%;
         clip: true;
+        // #75: one `visible` on the container culls all five pages' draw AND
+        // input in a single check — the four off-screen pages already cost no
+        // scene items (they fall outside this clip), so what this reclaims is
+        // the ~92 items of the ON-screen page under a full-screen cover.
+        visible: !root.covered;
 
         ClockPage {
             x: (0 - root.current-page) * pages.width;
@@ -412,7 +455,7 @@ export component WatchShell inherits Window {
 
     // Left edge: page carousel, more content behind the left bezel.
     Rectangle {
-        visible: root.hint-sides && !root.aod && !root.launcher-open;
+        visible: root.hint-sides && !root.aod && !root.covered;
         x: 0; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -434,7 +477,7 @@ export component WatchShell inherits Window {
 
     // Right edge: mirror of the left strip.
     Rectangle {
-        visible: root.hint-sides && !root.aod && !root.launcher-open;
+        visible: root.hint-sides && !root.aod && !root.covered;
         x: parent.width - self.width; y: 170px; width: 36px; height: 100px;
         opacity: root.hints-lit ? 1.0 : 0.0;
         animate opacity { duration: 480ms; easing: ease-in-out; }
@@ -461,7 +504,7 @@ export component WatchShell inherits Window {
     // beam hugging the edge zone (start_y ≥ 427), tucked under the page dots
     // (visible dots end y473; this starts y479).
     Rectangle {
-        visible: root.hint-up && !root.aod && !root.launcher-open;
+        visible: root.hint-up && !root.aod && !root.covered;
         x: (parent.width - self.width) / 2; y: 474px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -482,7 +525,7 @@ export component WatchShell inherits Window {
     // bottom handle, hugging the top bezel above the radio dots' visible
     // row (~y38); the echo "descends" toward the content.
     Rectangle {
-        visible: root.hint-down && !root.aod && !root.launcher-open;
+        visible: root.hint-down && !root.aod && !root.covered;
         x: (parent.width - self.width) / 2; y: 2px;
         width: 104px; height: 26px;
         opacity: root.hints-lit ? 1.0 : 0.0;
@@ -505,11 +548,18 @@ export component WatchShell inherits Window {
     // pill); x 22/102/182 fills the strip left of the pill with 2px gaps. The
     // hit areas clear the corner arcs (top-left on-panel at x22,y8) and the pill
     // (MESH ends x260, pill starts ~268).
-    RadioDot { x: 22px;  y: 8px; label: "WIFI"; active: root.wifi-on;
+    // All three are `covered`-gated (#75): under a full-screen overlay their
+    // dot+label were still being built into the scene (3 rounded rects + 13
+    // glyph textures) behind an opaque backdrop, and the OverlaySwallow was
+    // already eating their taps — so the gate is pixel- and input-neutral.
+    RadioDot { visible: !root.covered;
+               x: 22px;  y: 8px; label: "WIFI"; active: root.wifi-on;
                tapped => { root.wifi-tap(); } }
-    RadioDot { x: 102px; y: 8px; label: "BLE";  active: root.ble-on;
+    RadioDot { visible: !root.covered;
+               x: 102px; y: 8px; label: "BLE";  active: root.ble-on;
                tapped => { root.ble-tap(); } }
     RadioDot {
+        visible: !root.covered;
         x: 182px; y: 8px;
         label: root.mesh-peers > 0 ? "MESH \{root.mesh-peers}" : "MESH";
         active: root.mesh-peers > 0;
@@ -519,6 +569,7 @@ export component WatchShell inherits Window {
     // Battery pill (top-right) — dropped to safe-top and pulled in by
     // safe-corner so its top-right corner sits inside the arc.
     batt-pill := Rectangle {
+        visible: !root.covered; // #75 — 3 rounded rects + 1 rect + 3 glyphs
         x: parent.width - self.width - Theme.safe-corner;
         y: Theme.safe-top;
         width: batt-text.width + 62px;
@@ -566,6 +617,10 @@ export component WatchShell inherits Window {
     // y446) with a 2px gap. 160x44 hit area (≥44px floor); IconButton gives the
     // pressed accent-bg halo (Recipe B) and the idle dots ignite while held.
     dots := IconButton {
+        // #75: the launcher and the Settings hub already draw their OWN
+        // indicator dots directly over these — five rounded rects that were
+        // being built only to be painted over.
+        visible: !root.covered;
         x: (parent.width - self.width) / 2;
         y: 448px;
         width: 160px;
@@ -591,7 +646,7 @@ export component WatchShell inherits Window {
     // than `if`-gated: chrome is resident anyway, and each `if` would cost
     // a ~3-6KB generated inner component (see shade.slint's ROM note).
     susp-chip := IconButton {
-        visible: root.suspended-count > 0 && !root.aod;
+        visible: root.suspended-count > 0 && !root.aod && !root.covered;
         x: parent.width - self.width - Theme.safe-corner;
         y: 64px;
         width: 58px;
@@ -622,7 +677,7 @@ export component WatchShell inherits Window {
     // Unread notifications chip (#32): warm dot + count, left of the
     // suspended chip when both show — one cluster row. Tap opens the shade.
     unread-chip := IconButton {
-        visible: root.notif-unread > 0 && !root.aod;
+        visible: root.notif-unread > 0 && !root.aod && !root.covered;
         x: parent.width - self.width - Theme.safe-corner
             - (root.suspended-count > 0 ? 62px : 0px);
         y: 64px;
@@ -646,7 +701,7 @@ export component WatchShell inherits Window {
     // Toast (RAM-busy, notification arrivals): shown while toast-text != ""
     // (`visible:`-gated — same ROM rationale as the hint strips above).
     Rectangle {
-        visible: root.toast-text != "";
+        visible: root.toast-text != "" && !root.covered;
         x: (parent.width - self.width) / 2;
         y: 420px;
         width: min(360px, toast-label.width + 40px);
