@@ -27,14 +27,31 @@ path = "./src/bin/slint_demo.rs"
 # tools/ui_test.py.
 default = []
 debug-console = ["dep:embedded-io-async"]
-# `tts` (read notifications aloud) is OPT-IN and OFF BY DEFAULT — not because it
-# is unfinished, but because the firmware is OUT OF ROM. Measured 2026-07-27:
-# the 4 MiB ROM region esp-hal hardcodes for the C6 had only 6 952 B free at
-# 9363d52, and this feature needs ~9.9 KB, overflowing by ~3.0 KB. It links and
-# runs clean once the region is raised to the 6 MiB `partitions.csv` already
-# reserves for each OTA slot (verified: relinks with 2 094 128 B to spare).
-# Same discipline as audio_out::CHIME_ENABLED — gated behind one flag rather
-# than reverted, so it flips on in one line the moment the ROM budget exists.
+# `tts` (read notifications aloud) is OPT-IN and OFF BY DEFAULT.
+#
+# THE ROM REASON IS OBSOLETE — it was the whole justification and it is gone.
+# This used to read "the firmware is OUT OF ROM": the 4 MiB region esp-hal
+# hardcodes for the C6 had 6,952 B free at 9363d52 and this feature needs ~9.9 KB,
+# so it could not link. `build.rs::widen_rom_region` (#67) raised the region to the
+# 6 MiB `partitions.csv` already reserves per OTA slot, and ROM is now at
+# **51.2 % used, ~3.07 MB free** (measured 2026-07-29). The stated blocker no
+# longer exists.
+#
+# What it costs now, measured on familiar rather than estimated:
+#
+#   default      stack gap 80,592   margin +8,912
+#   tts          stack gap 80,264   margin +8,584   <- tts = 328 B of stack
+#   story        stack gap 75,000   margin +3,320
+#   story,tts    stack gap 74,904   margin +3,224
+#
+# So it is now a 328 B question against ~8.6 KB of margin on the shipping default,
+# not a link failure. **This flag is one line from ON and the only remaining reason
+# to hold it is a product decision, not a budget one** — enabling it makes the watch
+# speak notifications aloud unprompted, which is JP's call to make deliberately
+# rather than mine to flip while tidying a comment.
+#
+# Same discipline as audio_out::CHIME_ENABLED — gated behind one flag rather than
+# reverted, so it flips on in one line.
 # See docs/superpowers/specs/2026-07-27-tts-notify-readaloud-design.md.
 tts = ["dep:tts-proto"]
 # `heap-forensics` is OPT-IN and MUST NOT ship on. It adds a harvest sweep to
@@ -84,6 +101,18 @@ heap-hooks = ["esp-alloc/alloc-hooks", "esp-alloc/internal-heap-stats"]
 #
 # See ~/Projects/endlesslitrpg/docs/superpowers/specs/2026-07-29-endless-litrpg-design.md §9.4.
 story = ["dep:story-proto"]
+
+# MEASUREMENT-ONLY, NEVER SHIP (#75). Substitutes a MAX_SLOT_VAL-length value with
+# `known: true` into all 17 equipment/appearance slots, to measure the CHAR page in
+# the state the daemon WILL produce once it sends equipment data.
+#
+# Why it must exist: the live ledger sends every slot null, and `story.slint:517`
+# renders an unknown slot as `"—"` — one glyph. So the 512 scene-pool rung is
+# UNREACHABLE against today's daemon, and the projected reclaimed floor after that
+# rung arms (~7,352 B, vs a measured 18,616 B today) cannot otherwise be tested.
+# Forcing the value alone does nothing; `known: true` is required or the `"—"`
+# branch renders.
+story-stub-slots = ["story"]
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = [

@@ -264,7 +264,9 @@ pub async fn speak_text<I: I2c>(
 ```
 
 `should_stop` is `dyn` rather than generic on purpose: one instantiation instead of one per closure
-type, and this binary is out of ROM (§6.7).
+type. (The original reason was "this binary is out of ROM (§6.7)", which is no longer true — ROM is
+51.2 % used since #67. The `dyn` choice stands on its own: one instantiation is the right shape for a
+callback that has exactly one caller, and it is why `get_json` is non-generic too, worth 5,560 B.)
 
 Loop shape:
 
@@ -353,6 +355,9 @@ strictly better and avoids touching the 186 KB pool at all).
 | vs `STACK_FLOOR` (71,680 B) | +3,496 B | **+3,080 B — PASSES** | |
 | ROM free (4 MiB region) | 6,952 B | **−3,024 B — OVERFLOWS** | −9,976 B |
 
+> **Superseded 2026-07-29** — the region is 6 MiB now (#67); ROM is 51.2 % used
+> with ~3.07 MB free, so this row no longer describes the build.
+
 **RAM is a non-issue: +416 B, not the ~2.4 KB budgeted.** rustc *did* overlap `speak_text`'s frame
 with `stream_utterance`'s — they sit in disjoint branches of the same main-loop generator and never
 run concurrently. §6.1 explicitly refused to rely on that; it turned out to hold, and the pessimistic
@@ -365,7 +370,22 @@ the always-compiled `SpeakMode`, `ButtonAction::Speak`, and the v7 config field.
 format is deliberately feature-INDEPENDENT so a `tts` and a non-`tts` build read and write byte-
 identical flash records.
 
-### 6.7 The firmware is out of ROM (project-level, pre-existing)
+### 6.7 The firmware WAS out of ROM — resolved 2026-07-29, this section is history
+
+> **SUPERSEDED.** `build.rs::widen_rom_region` (#67) raised the region from the 4 MiB
+> esp-hal hardcodes to the 6 MiB `partitions.csv` already reserves per OTA slot. ROM is
+> now **51.2 % used with ~3.07 MB free**, so nothing below is a live constraint.
+>
+> The remaining cost of `tts` is **328 B of stack**, measured: default 80,592 B gap
+> (+8,912 over the 71,680 floor) vs `tts` 80,264 B (+8,584). `story,tts` is 74,904 B
+> (+3,224). The feature is one line from ON and the only reason left is a product
+> decision — it makes the watch speak notifications aloud unprompted.
+>
+> Kept rather than deleted because §6.7's *reasoning* is still the reference for how the
+> ROM ceiling was diagnosed, and because "the firmware is out of ROM" was cited as
+> settled fact in four places for two days after it stopped being true.
+
+### 6.7 (historical) The firmware is out of ROM (project-level, pre-existing)
 
 `esp-hal` hardcodes a **4 MiB** ROM region for the C6 in `ld/esp32c6/memory.x`
 (`LENGTH = 0x400000 - 0x20`). At `9363d52` the binary had **6,952 bytes free — 0.17 %**. This
