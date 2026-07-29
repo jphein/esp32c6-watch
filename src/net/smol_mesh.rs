@@ -348,6 +348,12 @@ pub struct SmolMesh {
     last_relay_emit_ms: u64,
     /// #75: latch so the "roster at cap" warning is printed once, not per frame.
     roster_cap_logged: bool,
+    /// Latches for the three ELECT log sites (#75) — each is reachable from an
+    /// unauthenticated broadcast on the unbounded RX drain, so an unlatched
+    /// print there is a remote heartbeat-stall DoS. See `handle_rx`.
+    elect_last_logged_ch: Option<u8>,
+    elect_refused_logged: bool,
+    elect_full_logged: bool,
     /// Fleet-wide channel/gateway election (2026-07-29). One radio means the
     /// ESP-NOW channel IS the associated AP's channel, so agreeing on a channel
     /// is the whole of not-partitioning.
@@ -576,6 +582,9 @@ impl SmolMesh {
             relay_tx: RelayTx::new(),
             last_relay_emit_ms: 0,
             roster_cap_logged: false,
+            elect_last_logged_ch: None,
+            elect_refused_logged: false,
+            elect_full_logged: false,
             elect: mesh_elect::Elector::new(id),
             last_elect_ms: 0,
             last_peer_ms: 0,
@@ -640,12 +649,34 @@ impl SmolMesh {
             }
         }
         self.elect.observe_self(now_ms, &obs);
-        if let Some(d) = self.elect.step(now_ms) {
-            return Some(d);
+        // `step()` COMMITS a decision and BUMPS THE EPOCH, so it must not run while
+        // we are observe-only (#64). Gating only `elected_channel()` is not enough:
+        // with `step()` live and `ELECT_ENFORCE = false` this node advertises a
+        // RISING EPOCH for a channel it is NOT moving to, and "higher epoch wins"
+        // means any node that DOES honour the election follows us somewhere we
+        // aren't. That is the emit-without-honour partition, one level up — at the
+        // epoch rather than the frame.
+        //
+        // Caught by the smol-side port, which independently refused to call `step()`
+        // for this reason and noted the asymmetry: its epoch stays 0 while ours
+        // climbed. Two halves of one protocol disagreeing about whether observe-only
+        // includes committing is exactly how a fleet partitions.
+        //
+        // Observability is unaffected: the tally/intent logging reads `winner()` and
+        // `election_intent()`, which are pure and commit nothing.
+        if ELECT_ENFORCE {
+            if let Some(d) = self.elect.step(now_ms) {
+                return Some(d);
+            }
         }
         // No peers for a while on an adopted decision → it may be a stale epoch
         // pinning us to a dead channel. Bounded escape, not a re-election storm.
-        if self.elect.on_probation() && now_ms.saturating_sub(self.last_peer_ms) > PEER_STALE_MS {
+        // Same reasoning: `note_barren` exists to ESCAPE an adopted decision, which
+        // is only meaningful once decisions are acted on.
+        if ELECT_ENFORCE
+            && self.elect.on_probation()
+            && now_ms.saturating_sub(self.last_peer_ms) > PEER_STALE_MS
+        {
             return self.elect.note_barren(now_ms);
         }
         None
@@ -1202,24 +1233,56 @@ impl SmolMesh {
                 f.gateway,
                 &f.w,
             );
+            // EVERY log below is LATCHED (#75). These three arms are reachable from
+            // an unauthenticated broadcast, and `handle_rx` runs on the UNBOUNDED
+            // `while let Some(rx) = esp_now.receive()` drain inside the Embassy MAIN
+            // LOOP — the same loop that emits `[LOOP]`. `esp_println` writes block.
+            //
+            // So an unlatched print here is a REMOTE DoS: flood ELECT frames with
+            // forged node_ids, the election table fills, and every subsequent frame
+            // prints. The UI loop then stalls in proportion to inbound frame rate and
+            // THE HEARTBEAT STOPS — which is precisely the frozen-watch signature
+            // used to diagnose this issue. An off-wrist attacker could manufacture
+            // the exact symptom we are debugging.
+            //
+            // `ELECT_ENFORCE = false` does NOT cover this: the gate prevents steering
+            // the radio, but `observe_peer` and these logs run unconditionally.
+            //
+            // Precedent, same file: the roster-cap warning is latched for exactly this
+            // reason — "a flood would otherwise turn the only available signal into a
+            // log storm." Three unlatched sites was an inconsistency, not a judgement.
             match got {
                 mesh_elect::Ingest::Adopted(d) => {
-                    println!(
-                        "[ELECT] adopted ch{} epoch{} gw{} from id{}",
-                        d.channel, d.epoch, d.gateway, f.node_id
-                    );
+                    // Adoption is a real state change and rare by construction
+                    // (epoch must exceed ours), but a higher forged epoch makes it
+                    // craftable, so it is latched per adopted channel: a genuine
+                    // channel move still logs, a flood re-asserting the same channel
+                    // does not.
+                    if self.elect_last_logged_ch != Some(d.channel) {
+                        self.elect_last_logged_ch = Some(d.channel);
+                        println!(
+                            "[ELECT] adopted ch{} epoch{} gw{} from id{}",
+                            d.channel, d.epoch, d.gateway, f.node_id
+                        );
+                    }
                     return Some(MeshEvent::Elected { decision: d });
                 }
                 mesh_elect::Ingest::RefusedUnusable(ch) => {
                     // Someone with a higher epoch wants us on a channel we have
                     // no usable AP on and have heard nobody on. Refusing is the
                     // cheap defence against an unauthenticated frame dragging
-                    // the fleet somewhere dead — worth a log line, since it is
+                    // the fleet somewhere dead — worth ONE log line, since it is
                     // also what a misconfigured node looks like.
-                    println!("[ELECT] refused ch{ch} from id{} (no usable AP)", f.node_id);
+                    if !self.elect_refused_logged {
+                        self.elect_refused_logged = true;
+                        println!("[ELECT] refused ch{ch} from id{} (no usable AP)", f.node_id);
+                    }
                 }
                 mesh_elect::Ingest::Full => {
-                    println!("[ELECT] table full - dropped id{}", f.node_id);
+                    if !self.elect_full_logged {
+                        self.elect_full_logged = true;
+                        println!("[ELECT] table full - dropped id{}", f.node_id);
+                    }
                 }
                 _ => {}
             }
