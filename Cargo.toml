@@ -25,11 +25,15 @@ path = "./src/bin/slint_demo.rs"
 # but battery-draining for a shipped build. Release cut = default (no console, AOD
 # on). Test builds add `--features debug-console`. See src/debug_console.rs +
 # tools/ui_test.py.
-default = []
+# `tts` is ON by default as of 2026-07-29 (JP's call). Enabling the FEATURE does not
+# make the watch talk: the runtime default is `SpeakMode::OnDemand`
+# (config.rs:233), so it speaks only when asked from the notification card. `Auto`
+# is a separate, deliberate setting.
+default = ["tts"]
 debug-console = ["dep:embedded-io-async"]
-# `tts` (read notifications aloud) is OPT-IN and OFF BY DEFAULT.
+# `tts` (read notifications aloud) is now ON BY DEFAULT — see `default` above.
 #
-# THE ROM REASON IS OBSOLETE — it was the whole justification and it is gone.
+# THE ROM REASON IT WAS OFF IS OBSOLETE — it was the whole justification and it is gone.
 # This used to read "the firmware is OUT OF ROM": the 4 MiB region esp-hal
 # hardcodes for the C6 had 6,952 B free at 9363d52 and this feature needs ~9.9 KB,
 # so it could not link. `build.rs::widen_rom_region` (#67) raised the region to the
@@ -44,11 +48,11 @@ debug-console = ["dep:embedded-io-async"]
 #   story        stack gap 75,000   margin +3,320
 #   story,tts    stack gap 74,904   margin +3,224
 #
-# So it is now a 328 B question against ~8.6 KB of margin on the shipping default,
-# not a link failure. **This flag is one line from ON and the only remaining reason
-# to hold it is a product decision, not a budget one** — enabling it makes the watch
-# speak notifications aloud unprompted, which is JP's call to make deliberately
-# rather than mine to flip while tidying a comment.
+# So it was a 328 B question against ~8.6 KB of margin, not a link failure — and the
+# product concern turned out to be unfounded too: `SpeakMode::OnDemand` is the runtime
+# default, so a watch with this compiled in stays silent until someone taps the speaker
+# control or chooses `Auto`. The feature being present and the watch talking are two
+# different switches.
 #
 # Same discipline as audio_out::CHIME_ENABLED — gated behind one flag rather than
 # reverted, so it flips on in one line.

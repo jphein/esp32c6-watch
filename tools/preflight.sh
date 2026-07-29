@@ -190,6 +190,12 @@ printf '        %-24s %10s %10s %12s\n' COMBO 'STACK GAP' MARGIN 'ROM FREE'
 # once story is measured at 5,584 B of stack on its own. Estimated at ~+2,240 B of
 # margin from single-feature deltas; that estimate is exactly what needs replacing
 # with a link.
+# NOTE feature lists here are ADDITIVE to `default`, and `tts` is now IN default
+# (2026-07-29). So "" already includes tts, and the explicit "tts" / "story,tts" /
+# "story,tts,debug-console" entries are duplicates of "" / "story" /
+# "story,debug-console". Kept rather than pruned: they cost one link each and they
+# are the combos someone will type by hand when checking whether tts is the thing
+# that broke their budget. `--no-default-features` is how you measure WITHOUT it.
 COMBOS=("" "debug-console" "tts" "tts,debug-console" "heap-hooks,heap-forensics" "story" "story,debug-console" "story,tts" "story,tts,debug-console")
 
 # NEVER-SHIP features must not appear in the gated matrix. `story-stub-slots` forces
