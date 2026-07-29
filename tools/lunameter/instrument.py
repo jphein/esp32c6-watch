@@ -97,9 +97,16 @@ PATCHES = [
             }
             c
         };
+        // The `HOSTsizeof_NOT_DEVICE` group is the HOST's `size_of`, printed only so
+        // the rung arithmetic below can be checked. It is NOT the device's: a
+        // `SceneTexture` is 40 B here and **28 B on riscv32**, so anyone multiplying
+        // a texture count by the host figure over-predicts by 43 %. The
+        // `riscv32_rung_bytes` group is the one to read — it already uses 28. The
+        // name is deliberately ugly; a plausible-looking `host_sizeof` invited
+        // exactly that mistake.
         hoststd::eprintln!(
             "LUNAMETER items={} textures={} rounded={} lingrad={} shared={} max_state_depth={} \
-             | host_sizeof item={} texture={} rounded={} state={} \
+             | HOSTsizeof_NOT_DEVICE item={} texture={} rounded={} state={} \
              | riscv32_rung_bytes items={} tex={} rounded={} sum={}",
             p.items.len(),
             p.vectors.textures.len(),

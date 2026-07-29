@@ -2031,6 +2031,10 @@ async fn main(_spawner: Spawner) -> ! {
     // window is the argument that settled "leak vs capacity high-water" for total
     // heap; per-pool it is strictly more informative, because main is the pool that
     // actually has to serve the fatal allocations.
+    // PER-BEAT-WINDOW floor, reset every beat — NOT a lifetime minimum. So a single
+    // alarming value means one ~15 s window dipped there, and a healthy value on the
+    // current beat says nothing about earlier ones. Misreading it as a lifetime low
+    // makes a transient look permanent, and a recovery look like it never happened.
     let mut main_low: usize = usize::MAX;
     /// Latch for the main-pool danger warning (#75) — see the beat block below.
     let mut main_pool_warned = false;

@@ -1,5 +1,23 @@
 //! Heap allocation *attribution* (#75), opt-in via the `heap-hooks` feature.
 //!
+//! # ⚠️ It counts allocation EVENTS, not LIVE BLOCKS
+//!
+//! Read `net` for a persistent-cost question and the bucket counts for a churn
+//! question. Confusing the two invalidated a pre-committed experiment on
+//! 2026-07-29: the prediction was "~166 blocks in bucket 0 if the cost is one 16 B
+//! tracker per rendered item", and bucket 0 came back at **1,493-1,715** against an
+//! idle baseline of 13 per 2 s — not because 1,700 trackers were live, but because
+//! Slint's `properties.rs:461` allocates one 16 B block per property a live binding
+//! READS and throws the whole list away on every re-evaluation. The signal was
+//! there and drowned. `net` bytes survived that churn (10,800 B, matching an
+//! independent region-delta measurement to 0.6 %); the counts did not.
+//!
+//! Corollary: a bucket count is only interpretable against a measured baseline for
+//! the same screen and the same duration, and the render loop's baseline is not
+//! small — watchface idle churns 603 allocations / 42,564 B in ~2 s at `net=0`.
+//! Allocation-heavy and perfectly leak-free, which is itself worth knowing: a
+//! persistent cost shows up as a large positive `net` against a zero-net background.
+//!
 //! # What this answers that nothing else can
 //!
 //! `HEAP.free()` tells you how much is left. `harvest_free` (the sibling
