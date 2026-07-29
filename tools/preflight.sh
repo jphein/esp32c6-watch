@@ -258,14 +258,47 @@ for feat in "${COMBOS[@]}"; do
   # ONE implementation, shared with build.rs and fambuild — see tools/build_hash.sh.
   # A recomputation that drifted from the baked-in one would fail this check
   # spuriously, which is worse than not checking.
-  stamp_want_hash="$(bash "$REPO/tools/build_hash.sh" 2>/dev/null || true)"
+  # FAIL CLOSED. The first version of this read
+  #   stamp_want_hash="$(bash tools/build_hash.sh 2>/dev/null || true)"
+  # which swallowed EVERY failure — script missing, script broken, git absent,
+  # permission denied — into an empty string, and an empty string made the
+  # comparison false. The gate was therefore skipped silently, with no output at
+  # all. The worry had been that it would cry wolf and get disabled; the actual
+  # behaviour was the opposite and worse: it would never bark and nobody would
+  # notice it had stopped. The rest of this script fails closed on exactly this
+  # class ("could not fetch the remote ELF"), and so does smol's equivalent, which
+  # refuses to package an image whose stack was never measured.
+  #
+  # Three states, distinguished:
+  #   script unusable        -> FAIL (we cannot know, so we do not pass)
+  #   script says "no git"   -> a real answer; the image must agree ("unknown")
+  #   script returns a hash  -> must match the image, or the stamp is stale
   stamp_got=$(strings -a "$elf" 2>/dev/null | grep -o 'WSIGIL:.*' | head -1)
   stamp_got_hash=$(printf '%s' "$stamp_got" | cut -d'|' -f2)
-  if [[ -n "$stamp_want_hash" && -n "$stamp_got_hash" \
-        && "$stamp_want_hash" != "$stamp_got_hash" ]]; then
+  if [[ ! -f "$REPO/tools/build_hash.sh" ]]; then
+    fail "$label: tools/build_hash.sh is missing, so the build-stamp gate cannot \
+run. It is the single implementation shared by build.rs, this script and fambuild \
+— if it is absent here it is absent from the build too, and every image is \
+stamped 'no-git'."
+  elif ! stamp_want_hash=$(bash "$REPO/tools/build_hash.sh" 2>&1); then
+    fail "$label: tools/build_hash.sh failed (${stamp_want_hash:-no output}), so \
+the build stamp cannot be verified."
+  elif [[ -z "$stamp_got_hash" ]]; then
+    : # absence is caught by the WSIGIL presence check below, with its own message
+  elif [[ -z "$stamp_want_hash" ]]; then
+    # No git in this tree. That is a legitimate state (source tarball), but then
+    # the image must SAY so rather than carry a hash from somewhere else.
+    if [[ "$stamp_got_hash" != "unknown" ]]; then
+      fail "$label: no git in this tree, yet the image claims hash \
+'$stamp_got_hash' — it was built from a different tree than the one being measured."
+    fi
+  elif [[ "$stamp_want_hash" != "$stamp_got_hash" ]]; then
     fail "$label: build sigil is STALE — the image says '$stamp_got_hash' but the \
-tree is '$stamp_want_hash'. build.rs did not re-run for an input it does not \
-declare; find it and add it to the rerun-if-changed list in stamp_build_sigil()."
+tree is '$stamp_want_hash'. If the image says 'unknown' and came from a REMOTE \
+build, the cause is a missing WATCH_BUILD_HASH (fambuild excludes /.git, so \
+build.rs cannot see git on the build host) — NOT a missing rerun-if-changed. \
+Otherwise build.rs did not re-run for an input it does not declare; find it and \
+add it to the list in stamp_build_sigil()."
   fi
 
   # The build STAMP must be present in every image. `#[used]` stops LLVM's DCE
