@@ -572,7 +572,16 @@ fn heap_span(_tag: &str, _since: &HeapMark) {}
 /// so keep it at beat cadence, never per-iteration.
 fn largest_free_block() -> (usize, usize) {
     // Sized around the observed failures: 3584, 4096, 4480, 7168, 16384.
-    const SIZES: [usize; 8] = [32768, 16384, 8192, 6144, 4096, 3584, 2048, 1024];
+    // Rungs run down to 16 B DELIBERATELY. `maxblk_main=0` with a 1,024 B bottom
+    // rung cannot distinguish "main can serve 512 B" from "main can serve nothing",
+    // and the allocation that actually killed a watch was **16 B** — the Slint
+    // dep-node push at `i-slint-core/properties.rs:63`. With a 16 B floor, a beat
+    // reporting `maxblk_main=16` (or worse, a global 16) is a PRE-MORTEM: the heap
+    // is one small allocation from the panic, visible on beat cadence, with no
+    // crash required to learn it.
+    const SIZES: [usize; 14] = [
+        32768, 16384, 8192, 6144, 4096, 3584, 2048, 1024, 512, 256, 128, 64, 32, 16,
+    ];
     let region_used = |i: usize| -> usize {
         esp_alloc::HEAP
             .stats()
@@ -2533,13 +2542,21 @@ async fn main(_spawner: Spawner) -> ! {
             //
             // Latched: a standing condition, not an event; a per-beat repeat would
             // bury the log it exists to make visible.
-            if region_free(0) < MAIN_POOL_DANGER_B && !main_pool_warned {
+            // Gate on what main can actually SERVE, not on its free TOTAL. Measured
+            // reason: a watch showed `main=13104` — comfortably above this line, so a
+            // free-total alarm stayed silent — while `maxblk_main=0` proved main could
+            // not serve even 1 KB. `free` is a sum of hole sizes and cannot see that;
+            // the probe can. This is the necessary-not-sufficient gap in the original
+            // alarm, now closed with a measurement rather than an argument.
+            if mb_main < MAIN_POOL_DANGER_B && !main_pool_warned {
                 main_pool_warned = true;
                 println!(
-                    "[POOL-WARN] main pool {} B < {} B — below the largest routine \
-                     allocation; scene growth now spills to the reclaimed pool",
-                    region_free(0),
+                    "[POOL-WARN] main pool can serve only {} B (< {} B) with {} B free \
+                     — fragmented residue; every sizeable allocation now spills to the \
+                     reclaimed pool",
+                    mb_main,
                     MAIN_POOL_DANGER_B,
+                    region_free(0),
                 );
             }
             next_beat = now + Duration::from_secs(BEAT_SECS);
@@ -4650,6 +4667,11 @@ async fn main(_spawner: Spawner) -> ! {
                                     }
                                     Err(e) => println!("[STORY] note failed: {e}"),
                                 }
+                                // Return to Story rather than dropping the user on
+                                // the Voice screen: they came from Story, said one
+                                // sentence, and the note is a Story action.
+                                shell.set_voice_open(false);
+                                shell.req.launch.set(Some(AppState::Story));
                             }
                             // Share it with the fleet: the other watch shows it
                             // as a shade card. Broadcast, fire-and-forget — a
@@ -4791,6 +4813,14 @@ async fn main(_spawner: Spawner) -> ! {
                     if shell.req.story_note.take() {
                         // Hand off to the existing push-to-talk screen; the
                         // transcript site POSTs it to /api/notes.
+                        //
+                        // CLOSING STORY FIRST IS LOAD-BEARING, not tidiness.
+                        // `reconcile_overlay` only *reports* the first open
+                        // overlay, it never closes one — and in `shell.slint` the
+                        // StoryPage block paints AFTER VoicePage, so leaving
+                        // `story-open` true draws Story on top and buries the
+                        // push-to-talk screen the user was just sent to.
+                        shell.set_story_open(false);
                         story_note_pending = true;
                         shell.req.launch.set(Some(AppState::Voice));
                     }
@@ -5817,7 +5847,19 @@ async fn main(_spawner: Spawner) -> ! {
                         );
                         shell.set_settings_open(true);
                         app_state = AppState::Settings;
-                    } else {
+                    } else if !matches!(target, AppState::Story) {
+                        // Story is an OVERLAY and is handled by its own `if` above
+                        // this chain, so it must be excluded here explicitly.
+                        //
+                        // Without this guard it fell through to the games branch:
+                        // launching Story would raise the overlay AND allocate a
+                        // ~51 KB framebuffer and suspend the Slint scene — which
+                        // suspends the very scene the overlay renders through. The
+                        // visible result is a Story tile that paints nothing while
+                        // eating a quarter of the heap. `AppState::Story` is not
+                        // feature-gated (only the registry row is), so this
+                        // compiles identically with and without `story`.
+                        //
                         // Games paint through the framebuffer, now HALF-RES (~51KB,
                         // see framebuffer.rs). It was sized to fit alongside the
                         // resident Slint scene without needing the scene gone; the
