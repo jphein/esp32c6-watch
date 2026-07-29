@@ -92,7 +92,36 @@ const RELAY_RETX_MS: u64 = 2_000;
 const RELAY_MAX_TRIES: u8 = 3;
 
 /// The smol default TIME-SHARE mesh channel (mode.rs ESP_NOW_FIXED_CHANNEL).
+///
+/// Now only the RENDEZVOUS default — where a node sits when there is nothing to
+/// elect — not a pin. [`SmolMesh::elected_channel`] is the live answer. Kept
+/// equal to `mesh_elect::RENDEZVOUS_CHANNEL` so an un-migrated smol fleet and a
+/// migrated watch still meet on ch6 (asserted below).
 pub const MESH_CHANNEL: u8 = 6;
+
+const _RENDEZVOUS_AGREES: () = assert!(MESH_CHANNEL == mesh_elect::RENDEZVOUS_CHANNEL);
+
+/// ELECT gossip cadence. Slower than the 2 s HELLO tick on purpose: the election
+/// settles over tens of seconds ([`mesh_elect::SETTLE_MS`]) and its inputs move
+/// slowly, so a faster rate buys no convergence and costs airtime during the
+/// association handshakes we are trying to stop disturbing.
+pub const ELECT_INTERVAL_MS: u64 = 5_000;
+
+/// **Does the election ACT, or only observe?** `false` = compute, gossip and log
+/// the decision, but keep the radio on [`MESH_CHANNEL`].
+///
+/// Off for now, deliberately, because of a partition hazard that only appears
+/// with more than one migrated node: the smol C3 fleet does not speak ELECT yet,
+/// so it cannot leave ch6. Two watches DO speak it to each other, which is quorum
+/// (`mesh_elect::Elector::step` needs 2 members) — so if enforcement were on, the
+/// pair could agree to move to a better channel and abandon every smol node,
+/// manufacturing the exact partition this work exists to remove.
+///
+/// So the election ships observe-only: `[ELECT]` log lines show what it WOULD
+/// decide, on real hardware, with real scans, before it is allowed to act. Flip
+/// this to `true` in the same release that teaches smol to honour the election —
+/// see the spec addendum, R5.
+pub const ELECT_ENFORCE: bool = false;
 /// Peer link decays after this much silence (protocol.md PEER_STALE_MS).
 /// Pub since #35: the ping hero resolves its target from live roster rows.
 pub const PEER_STALE_MS: u64 = 3000;
@@ -267,6 +296,11 @@ pub enum MeshEvent {
     /// A voice transcription from another watch. The main loop turns it into a
     /// shade card ("<sigil> said"). Text is already clipped + sanitized.
     Say { from_id: u8, text: heapless::String<SAY_TEXT_CAP>, mac: [u8; 6] },
+    /// The mesh channel/gateway decision CHANGED (adopted from a peer, or won
+    /// locally). The caller must retune the ESP-NOW channel, hand the channel
+    /// down to `net_task` as the association preference, and persist it as the
+    /// new last-known-good.
+    Elected { decision: mesh_elect::Decision },
 }
 
 /// A leaf's single outstanding RELAY message (mode.rs RelayTx): retained so
@@ -314,6 +348,26 @@ pub struct SmolMesh {
     last_relay_emit_ms: u64,
     /// #75: latch so the "roster at cap" warning is printed once, not per frame.
     roster_cap_logged: bool,
+    /// Fleet-wide channel/gateway election (2026-07-29). One radio means the
+    /// ESP-NOW channel IS the associated AP's channel, so agreeing on a channel
+    /// is the whole of not-partitioning.
+    ///
+    /// **Costs 232 B of `.bss`, and measurably so** (#65): the default combo's
+    /// stack margin moved +9408 -> +9152 B. It is NOT stack, despite `mesh` being
+    /// a local in `main` — `#[esp_rtos::main]` expands to an embassy task whose
+    /// future is stored in a static `___embassy_main::POOL` (0x2138 B) in `.bss`,
+    /// so every local in `main` is `.bss`. Worth knowing before adding state
+    /// anywhere in that function and assuming it is free.
+    ///
+    /// All fixed-size arrays, so it cannot grow at runtime. If the budget ever
+    /// needs it back: `MAX_NODES` 8 -> 6 saves 48 B, and narrowing the four
+    /// `u64` millisecond stamps to `u32` saves ~44 B more.
+    elect: mesh_elect::Elector,
+    /// Last ELECT broadcast, so it paces independently of the 2 s HELLO tick.
+    last_elect_ms: u64,
+    /// When we last had a live peer. Drives the "adopted a dead channel" escape
+    /// hatch — see [`mesh_elect::Elector::note_barren`].
+    last_peer_ms: u64,
 }
 
 fn parse_id(rest: &[u8]) -> Option<u8> {
@@ -522,7 +576,79 @@ impl SmolMesh {
             relay_tx: RelayTx::new(),
             last_relay_emit_ms: 0,
             roster_cap_logged: false,
+            elect: mesh_elect::Elector::new(id),
+            last_elect_ms: 0,
+            last_peer_ms: 0,
         }
+    }
+
+    /// The channel the mesh should actually tune to.
+    ///
+    /// While [`ELECT_ENFORCE`] is false this is always [`MESH_CHANNEL`] — the
+    /// election runs and logs but does not steer the radio. Once enforcing, it is
+    /// the elected channel, which still starts at the rendezvous default and only
+    /// moves when the fleet agrees (a lone node is not a quorum).
+    pub fn elected_channel(&self) -> u8 {
+        if ELECT_ENFORCE {
+            self.elect.decision().channel
+        } else {
+            MESH_CHANNEL
+        }
+    }
+
+    /// What the election WOULD choose, regardless of enforcement — for logging
+    /// and for validating convergence on glass before letting it act.
+    pub fn election_intent(&self) -> u8 {
+        self.elect.decision().channel
+    }
+
+    /// The elected decision, for logging / persistence.
+    pub fn election(&self) -> mesh_elect::Decision {
+        self.elect.decision()
+    }
+
+    /// Restore the persisted last-known-good decision at boot. This is what
+    /// makes a converged fleet converged *instantly* on the next boot instead of
+    /// re-deriving agreement from scratch.
+    pub fn restore_election(&mut self, d: mesh_elect::Decision) {
+        self.elect.restore(d);
+    }
+
+    /// Fold this node's own scan into the election and run one step.
+    ///
+    /// Returns `Some(decision)` only on a CHANGE, so the caller retunes and
+    /// persists exactly on transitions. `associated_ch` is the channel we are
+    /// actually associated on, if any — the election runs over reality, not over
+    /// what we hinted at the driver.
+    pub fn election_step(
+        &mut self,
+        now_ms: u64,
+        obs: &[Option<i8>; mesh_elect::N_CHANNELS],
+        associated_ch: Option<u8>,
+    ) -> Option<mesh_elect::Decision> {
+        let mut obs = *obs;
+        // Being associated is the strongest possible evidence a channel is
+        // usable — stronger than a scan row, since we completed a handshake on
+        // it. Floor our own vote for it so a marginal scan cannot vote us off
+        // the channel we are demonstrably working on.
+        if let Some(ch) = associated_ch {
+            if let Some(i) = mesh_elect::ch_index(ch) {
+                let floor = -60i8;
+                if obs[i].map(|r| r < floor).unwrap_or(true) {
+                    obs[i] = Some(floor);
+                }
+            }
+        }
+        self.elect.observe_self(now_ms, &obs);
+        if let Some(d) = self.elect.step(now_ms) {
+            return Some(d);
+        }
+        // No peers for a while on an adopted decision → it may be a stale epoch
+        // pinning us to a dead channel. Bounded escape, not a re-election storm.
+        if self.elect.on_probation() && now_ms.saturating_sub(self.last_peer_ms) > PEER_STALE_MS {
+            return self.elect.note_barren(now_ms);
+        }
+        None
     }
 
     /// Called after our own NTP sync: we become a time authority.
@@ -715,6 +841,50 @@ impl SmolMesh {
             write_u10(self.synced_at, &mut time[n..]);
             send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &time).await;
         }
+    }
+
+    /// Broadcast our election view: `SMOLv1 ELECT <id> <epoch> <ch> <gw> <w×13>`.
+    ///
+    /// Paced at [`ELECT_INTERVAL_MS`] rather than the 2 s HELLO tick — the
+    /// election converges in tens of seconds and its inputs change slowly, so
+    /// gossiping it every 2 s would be pure airtime. One fixed 61 B frame.
+    pub async fn elect_tick(&mut self, esp_now: &mut EspNow<'_>, now_ms: u64) {
+        if now_ms.saturating_sub(self.last_elect_ms) < ELECT_INTERVAL_MS {
+            return;
+        }
+        self.last_elect_ms = now_ms;
+        let d = self.elect.decision();
+        let f = mesh_elect::wire::ElectFrame {
+            node_id: self.id,
+            epoch: d.epoch,
+            channel: d.channel,
+            gateway: d.gateway,
+            w: self.elect.self_weights(),
+        };
+        let mut buf = [0u8; mesh_elect::wire::ELECT_LEN];
+        if let Some(n) = mesh_elect::wire::encode(&f, &mut buf) {
+            send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &buf[..n]).await;
+        }
+        // The tally, printed, is how convergence gets validated on glass while
+        // ELECT_ENFORCE is false: JP can read two watches' logs side by side and
+        // see whether they agree BEFORE the election is allowed to steer.
+        // `voters/sum` per channel is the whole decision input, so a disagreement
+        // is diagnosable from one line rather than inferred from behaviour.
+        let t = self.elect.tally(now_ms);
+        // Sized for the worst case, not the typical one: a 34-char header plus
+        // all 13 channels at ~11 chars each is ~180, so a 120 B buffer would
+        // silently truncate exactly when the log is most interesting (every
+        // channel populated). `write!` into a full heapless::String just returns
+        // Err, so the loss would be invisible.
+        let mut line: heapless::String<208> = heapless::String::new();
+        use core::fmt::Write as _;
+        let _ = write!(line, "[ELECT] want ch{} ep{} m{}", d.channel, d.epoch, self.elect.members(now_ms));
+        for (i, c) in t.iter().enumerate() {
+            if c.voters > 0 {
+                let _ = write!(line, " ch{}={}/{}", i + 1, c.voters, c.sum);
+            }
+        }
+        println!("{}", line.as_str());
     }
 
     /// Broadcast a DIAG record ("SMOLv1 DIAG NNN" + verbatim key=val record).
@@ -1013,6 +1183,46 @@ impl SmolMesh {
             }
             // Malformed FAM: still proof of life.
             self.upsert_peer(src, None, now_ms, rssi);
+            return None;
+        }
+        // Election gossip. Parsed strictly (fixed 61 B, every field digit- and
+        // range-checked in `mesh_elect::wire::parse`) BEFORE anything reaches
+        // election state, because this arrives from unauthenticated broadcasts.
+        if data.starts_with(mesh_elect::wire::ELECT_PREFIX) {
+            self.upsert_peer(src, None, now_ms, rssi);
+            self.last_peer_ms = now_ms;
+            let Some(f) = mesh_elect::wire::parse(data) else {
+                return None; // malformed: proof of life, nothing more
+            };
+            let got = self.elect.observe_peer(
+                now_ms,
+                f.node_id,
+                f.epoch,
+                f.channel,
+                f.gateway,
+                &f.w,
+            );
+            match got {
+                mesh_elect::Ingest::Adopted(d) => {
+                    println!(
+                        "[ELECT] adopted ch{} epoch{} gw{} from id{}",
+                        d.channel, d.epoch, d.gateway, f.node_id
+                    );
+                    return Some(MeshEvent::Elected { decision: d });
+                }
+                mesh_elect::Ingest::RefusedUnusable(ch) => {
+                    // Someone with a higher epoch wants us on a channel we have
+                    // no usable AP on and have heard nobody on. Refusing is the
+                    // cheap defence against an unauthenticated frame dragging
+                    // the fleet somewhere dead — worth a log line, since it is
+                    // also what a misconfigured node looks like.
+                    println!("[ELECT] refused ch{ch} from id{} (no usable AP)", f.node_id);
+                }
+                mesh_elect::Ingest::Full => {
+                    println!("[ELECT] table full - dropped id{}", f.node_id);
+                }
+                _ => {}
+            }
             return None;
         }
         if data.starts_with(SMOL_PREFIX) {
