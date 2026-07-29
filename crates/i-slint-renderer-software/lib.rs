@@ -520,11 +520,26 @@ impl Default for SoftwareRenderer {
 ///
 /// Upstream allocates all of these from empty on every frame and drops them again at
 /// frame end: `PrepareScene::items`, the six vectors inside `SceneVectors`,
-/// `SceneBuilder::state_stack` and `Scene::current_line_ranges`. `esp-alloc` is a
-/// first-fit linked-list allocator with no compaction, so that alloc/free churn at
-/// 6-11 fps shreds the free list into sub-4 KB fragments. Measured consequence: a
-/// 3584 B `state_stack` and a 4096 B `items` allocation *failing* with 54-66 KB still
-/// free (issue #75) — fragmentation, not exhaustion.
+/// `SceneBuilder::state_stack` and `Scene::current_line_ranges`. That alloc/free churn
+/// at 6-11 fps degrades the free list. Measured consequence: 3584 B and 4096 B
+/// allocations *failing* with 54-66 KB still free (issue #75).
+///
+/// Two corrections to what this comment originally claimed, both established after it
+/// was written — kept visible because each was load-bearing and wrong:
+///
+/// 1. **The 3584 B failure is NOT `state_stack`.** `RenderState` and `SceneTexture`
+///    are BOTH 28 B on this target, so `3584 = 128 x 28` cannot identify the vector by
+///    arithmetic alone. Measured max traversal depth is 12, so `state_stack` never
+///    exceeds capacity 16 (448 B). The consistent attribution is the glyph/texture
+///    vector, corroborated by two exact siblings: `4096 = 256 x 16` (`SceneItem`) and
+///    `3328 = 128 x 26` (`RoundedRectangle`).
+/// 2. **`esp-alloc` is not "first-fit with no compaction".** `linked_list_allocator`
+///    is *address-ordered* first-fit with immediate coalescing of adjacent holes —
+///    among the lowest-fragmentation policies known. Do not swap it; TLSF would cost
+///    ~12.7 KB of `.bss` for no fit benefit. And the failures sit at ~79% pool
+///    utilisation, so this is exhaustion EXPRESSED AS fragmentation, not a bad
+///    allocator. That distinction is why asking for a *bigger* contiguous block (the
+///    reverted reserve, below) made it 20x worse.
 ///
 /// Pooling attacks the churn instead of the symptom. The `Vec` doubling ladder is
 /// climbed only while a screen is growing the high-water mark — once the busiest

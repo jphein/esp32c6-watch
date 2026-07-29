@@ -700,8 +700,25 @@ export component WatchShell inherits Window {
 
     // Toast (RAM-busy, notification arrivals): shown while toast-text != ""
     // (`visible:`-gated — same ROM rationale as the hint strips above).
+    //
+    // DELIBERATELY NOT `covered`-gated (#75). The occlusion cull that gates the
+    // watchface pages must NOT gate this: several toasts can ONLY fire while a
+    // full-screen overlay is up, so gating them made them unreachable —
+    //
+    //   * "No WiFi credentials — set in Settings" (main.rs) is emitted by a WIFI
+    //     tap, which by construction happens while `settings-open` is true. Gated,
+    //     the button went silently dead — verbatim the failure the toast exists to
+    //     prevent, per the comment at its emit site.
+    //   * the notification-arrival toast is an async MQTT/notify event, wholly
+    //     uncorrelated with overlay state, so ANY covered overlay swallowed it.
+    //   * OTA progress toasts land asynchronously and can arrive over Settings.
+    //
+    // And the trade was inverted anyway: this toast is one rectangle plus one text
+    // run, against the ~92-item page cull that is the actual scene-item win. Culling
+    // it saved ~nothing and cost a dead control. Caught in an audit of 400a251
+    // before it shipped to a wrist.
     Rectangle {
-        visible: root.toast-text != "" && !root.covered;
+        visible: root.toast-text != "";
         x: (parent.width - self.width) / 2;
         y: 420px;
         width: min(360px, toast-label.width + 40px);
