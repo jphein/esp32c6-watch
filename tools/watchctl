@@ -896,13 +896,15 @@ def say_image_sigil(binp: Path) -> dict:
     want = _tree_hash()
     if want and sig.get("hash") and want != sig["hash"]:
         say("  " + "!" * 60)
-        say(f"  STALE IMAGE? it was built from '{sig['hash']}' but this tree is "
-            f"'{want}'")
-        say("  if you just ran `fambuild`, check the ELF came back — a remote "
-            "build that is not fetched leaves an OLDER binary at the local path")
-        say("  OR the tree simply moved since the build (several agents committing "
-            "faster than a 2-minute link). The IMAGE's hash above is the "
-            "self-consistent provenance — quote that, not a tree hash sampled later.")
+        say(f"  HASH MISMATCH: image '{sig['hash']}' vs tree '{want}'")
+        say("  TWO causes, and this test tells them apart:")
+        say("    did `fambuild: fetched ...` appear in the build output?")
+        say("      YES -> the tree moved DURING the build (agents commit faster "
+            "than a 2-minute link). Benign: the ELF is exactly what was built.")
+        say("             Trust the image's WSIGIL above; re-running fambuild just "
+            "chases a moving target.")
+        say("      NO  -> the remote build never came back and this path holds "
+            "OLDER bytes. That is the dangerous one — rebuild before flashing.")
         say("  " + "!" * 60)
     say("  ---------------------------------------------")
     say(f"   BUILD  {sig['build']}")
