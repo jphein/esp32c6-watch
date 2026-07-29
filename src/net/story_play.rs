@@ -63,39 +63,12 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(6);
 /// Head scratch, also the PCM staging window: one [`audio_out::PLAY_CHUNK`].
 const BUF: usize = 512;
 
-/// Window failures WITHOUT FORWARD PROGRESS tolerated before giving up.
-///
-/// Retrying is nearly free (the offset is exact), so a transient stall or an AP
-/// roam should not end playback. Three strikes distinguishes "the network
-/// hiccupped" from "the daemon is gone".
-///
-/// **"Without forward progress" is load-bearing — see [`MIN_PROGRESS_BYTES`].**
-const MAX_WINDOW_RETRIES: u8 = 3;
-
-/// Audio delivered in a failed attempt that still counts as forward progress:
-/// one second (32,000 B).
-///
-/// # Why progress must clear the strike count
-///
-/// Observed in the daemon's access log on 2026-07-29: a window requested at
-/// 5,827,584 failed, and the retry resumed at 5,974,016 — **146,432 B, 4.576 s of
-/// audio actually played** — in 17 s of wall clock, against a healthy baseline of
-/// 1,920,000 B per 61 s. So the link was not dead; it was delivering ~4.6 s per
-/// attempt.
-///
-/// Counting that as a strike is wrong. Three such attempts deliver ~14 s of real
-/// audio and then **abandon the chapter while it is still making progress** —
-/// which on a marginal link is the difference between a stutter and playback
-/// simply stopping. Only a *zero-progress* failure is evidence the far end is
-/// gone, so only that increments the count.
-const MIN_PROGRESS_BYTES: u32 = crate::peripherals::audio_out::PLAY_SAMPLE_RATE * 2;
-
-/// Absolute cap on retries per chapter, so progress-resets cannot spin forever.
-///
-/// Without it a link delivering a trickle per attempt would retry indefinitely.
-/// 64 attempts against 60-second windows is far more than any healthy chapter
-/// needs and still terminates.
-const MAX_TOTAL_RETRIES: u16 = 64;
+/// The retry decision now lives in `story_proto::RetryBudget`, which is
+/// host-tested. It was here, where `esp-hal` makes host tests impossible — and it
+/// was wrong: only a fully-delivered window cleared the strike count, so a link
+/// delivering ~4.6 s per attempt abandoned a chapter that was still progressing.
+/// That was found by reading a production access log. Untestable logic is how.
+pub use story_proto::{MAX_TOTAL_RETRIES, MAX_WINDOW_RETRIES, MIN_PROGRESS_BYTES};
 
 /// Chunks between `should_stop` polls. The poll reads the touch controller over
 /// the I2C bus the codec shares, so polling all 62 chunks/second would triple
@@ -176,6 +149,29 @@ pub trait PlaybackUi {
     fn poll_volume(&mut self) -> Option<(u8, bool)> {
         None
     }
+
+    /// Sample any *sampled* (non-latching) button EVERY chunk and latch its edge.
+    ///
+    /// WHY THIS IS SEPARATE FROM [`poll_volume`]. The two button sources are not
+    /// equivalent: the PMIC LATCHES its key event, so a press is still there
+    /// whenever firmware next looks, while the BOOT GPIO is a level that must be
+    /// caught while it is held. `poll_volume` runs on the
+    /// [`CANCEL_POLL_CHUNKS`]-chunk boundary (64 ms) because it shares that tick
+    /// with `should_stop`, whose touch read costs I2C traffic — and a press that
+    /// begins and ends inside one 64 ms window produces no observable edge at all.
+    ///
+    /// The result was an asymmetry that reads as a hardware fault: Volume− (PMIC,
+    /// latched) 100 % reliable, Volume+ (BOOT, sampled) intermittently dead. Which
+    /// is the same "the buttons don't work" complaint the volume hook was added to
+    /// cure, just rarer and therefore harder to believe. The canonical button state
+    /// machine in the main loop samples every tick and is built around presses
+    /// ≥40 ms; 64 ms sampling is coarser than the thing being measured.
+    ///
+    /// Called on EVERY chunk (~16 ms), so it must touch nothing but GPIO — no I2C,
+    /// no allocation, no logging. Tripling the I2C cadence by lowering
+    /// `CANCEL_POLL_CHUNKS` instead would have paid for this in bus traffic during
+    /// audio playback, which is the one place that bus is busiest.
+    fn poll_button_edge(&mut self) {}
 }
 
 /// Enforces [`PAINT_BUDGET_MS`] and gives up permanently rather than risk audio.
@@ -337,7 +333,6 @@ pub async fn play_chapter<I: I2c>(
 
     let mut pos = story_proto::align_sample(start_byte.min(total_bytes));
     let mut gate = PaintGate::new();
-    let mut retries = 0u16;
     let mut poll = 0u8;
     // Odd trailing byte carried between socket reads — see `feed_pcm`.
     let mut carry: Option<u8> = None;
@@ -358,7 +353,7 @@ pub async fn play_chapter<I: I2c>(
     // progress bar still moving forward. Deriving from `pos` makes a retry resume
     // exactly where the audio stopped, which costs nothing because `ms x 32` is
     // exact.
-    let mut attempt = 0u8;
+    let mut budget = story_proto::RetryBudget::new();
     loop {
         let Some((first, last)) = story_proto::window_at(pos, total_bytes) else {
             break; // reached the end of the chapter
@@ -377,21 +372,13 @@ pub async fn play_chapter<I: I2c>(
                 audio_out::drain_queue();
                 break;
             }
-            // Window delivered. Reset the strike count: three *consecutive*
-            // failures mean the daemon is gone, whereas three spread across a
-            // 13-minute chapter is just a flaky link.
-            Ok(None) => attempt = 0,
+            // Window delivered: the link is healthy, clear the strikes.
+            Ok(None) => budget.delivered(),
             Err(_e) => {
-                retries = retries.saturating_add(1);
-                // A failure that still delivered a second of audio means the link
-                // is slow, not gone — clear the strike count rather than spending
-                // one. See MIN_PROGRESS_BYTES for the measurement behind this.
-                if pos.saturating_sub(before) >= MIN_PROGRESS_BYTES {
-                    attempt = 0;
-                } else {
-                    attempt = attempt.saturating_add(1);
-                }
-                if attempt >= MAX_WINDOW_RETRIES || retries >= MAX_TOTAL_RETRIES {
+                // `failed` owns the whole decision — progress clears the strike
+                // count, and the total cap guarantees termination. Host-tested in
+                // `story-proto`'s tests/retry.rs.
+                if budget.failed(pos.saturating_sub(before)) {
                     // Give up on the chapter but keep the position, so the caller
                     // can report progress and resume exactly here.
                     outcome = Played::Interrupted;
@@ -414,7 +401,7 @@ pub async fn play_chapter<I: I2c>(
         audio_out::set_master_volume(codec, level, muted);
     }
 
-    Ok(Session { outcome, position: pos, gate, retries })
+    Ok(Session { outcome, position: pos, gate, retries: budget.total() })
 }
 
 /// Stream one `Range` window. `Ok(None)` = delivered; `Ok(Some(_))` = stop.
@@ -612,6 +599,11 @@ async fn feed_pcm<I: I2c>(
 
     for chunk in body.chunks(audio_out::PLAY_CHUNK) {
         audio_out::service_amp(amp, codec);
+
+        // EVERY chunk (~16 ms): GPIO only, no bus traffic. The 4-chunk boundary
+        // below is gated on an I2C touch read, which is why the cheap sampled
+        // button cannot simply share it — see `poll_button_edge`.
+        ui.poll_button_edge();
 
         *poll = poll.wrapping_add(1);
         if *poll % CANCEL_POLL_CHUNKS == 0 {

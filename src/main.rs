@@ -4986,11 +4986,32 @@ async fn main(_spawner: Spawner) -> ! {
                             // deferred, not dropped, and that is what made it look
                             // broken rather than merely delayed.
                             //
-                            // BOOT is edge-detected on a chunk boundary (~62 Hz) rather
-                            // than run through the full short/long state machine: a tap
-                            // is all volume needs, and duplicating that machine here
-                            // would be a second source of truth for it.
+                            // BOOT is edge-detected rather than run through the full
+                            // short/long state machine: a tap is all volume needs, and
+                            // duplicating that machine here would be a second source of
+                            // truth for it.
+                            //
+                            // The SAMPLING RATE is the subtle part. This used to be read
+                            // only on the 64 ms `CANCEL_POLL_CHUNKS` boundary, which it
+                            // shares with an I2C touch read — so a BOOT press that began
+                            // and ended inside one window produced no edge at all. That
+                            // made Volume+ intermittently dead while Volume− (PMIC, which
+                            // LATCHES) was perfectly reliable: an asymmetry that reads as
+                            // a hardware fault, and the same "buttons don't work"
+                            // complaint the volume hook exists to cure. The canonical
+                            // state machine samples every tick and is built around
+                            // presses ≥40 ms, so 64 ms was coarser than the signal.
+                            //
+                            // Now `poll_button_edge` samples the GPIO every chunk
+                            // (~16 ms) and LATCHES the falling edge here; the 64 ms poll
+                            // consumes the latch. GPIO costs no bus traffic, so this does
+                            // not touch the I2C cadence during playback.
                             let mut boot_was_low = boot_button.is_low();
+                            // A `Cell`, not a plain bool: the sampler closure SETS this
+                            // and the volume closure CONSUMES it, so two closures need it
+                            // at once and `&mut` capture would make them mutually
+                            // exclusive. Single-threaded, no atomics needed.
+                            let boot_tap_latched = core::cell::Cell::new(false);
                             // Non-volume actions seen mid-chapter land here and are
                             // handed back to `pending_button` after playback, so the
                             // main loop drains them exactly as it would have before.
@@ -5004,11 +5025,10 @@ async fn main(_spawner: Spawner) -> ! {
                                         crate::peripherals::power::PowerKey::Short => pwron_short,
                                     });
                                 }
-                                let low = boot_button.is_low();
-                                if low && !boot_was_low {
+                                // Consume the latch set by `poll_button_edge`.
+                                if boot_tap_latched.take() {
                                     act = act.or(Some(boot_short));
                                 }
-                                boot_was_low = low;
                                 match act? {
                                     ButtonAction::VolUp => {
                                         muted = false;
@@ -5055,11 +5075,23 @@ async fn main(_spawner: Spawner) -> ! {
                                     }
                                 }
                             };
+                            // Cheap per-chunk GPIO sample. Defined AFTER the volume
+                            // closure so the borrow checker sees the two disjointly:
+                            // this one owns `boot_button` and `boot_was_low`, the volume
+                            // closure owns the PMIC and only reads the latch.
+                            let mut boot_edge = || {
+                                let low = boot_button.is_low();
+                                if low && !boot_was_low {
+                                    boot_tap_latched.set(true);
+                                }
+                                boot_was_low = low;
+                            };
                             let mut ui = StoryPlayUi {
                                 shell: &mut shell,
                                 display: &mut display,
                                 stop: &mut stop_on_tap,
                                 vol: &mut vol_during_play,
+                                edge: &mut boot_edge,
                                 seg: story_seg.as_ref().filter(|i| i.usable()),
                                 title: title.as_str(),
                                 duration_ms,
@@ -6240,6 +6272,12 @@ struct StoryPlayUi<'a> {
     /// must stay free of device generics. See `PlaybackUi::poll_volume` — playback
     /// holds the only `&mut codec`, so this reports the level and playback applies it.
     vol: &'a mut dyn FnMut() -> Option<(u8, bool)>,
+    /// Per-chunk (~16 ms) sample of the SAMPLED buttons, so a short BOOT tap is
+    /// latched instead of missed. Separate from `vol` because `vol` runs on the
+    /// 64 ms boundary it shares with an I2C touch read, and a tap can start and
+    /// end inside one of those windows. GPIO only — see
+    /// `PlaybackUi::poll_button_edge` for why the cadences differ.
+    edge: &'a mut dyn FnMut(),
     /// `None` when the manifest was missing or refused (over the cap,
     /// non-contiguous, or a rate this hardware cannot play). Playback continues
     /// without a speaker chip.
@@ -6255,6 +6293,10 @@ struct StoryPlayUi<'a> {
 impl crate::net::story_play::PlaybackUi for StoryPlayUi<'_> {
     fn poll_volume(&mut self) -> Option<(u8, bool)> {
         (self.vol)()
+    }
+
+    fn poll_button_edge(&mut self) {
+        (self.edge)()
     }
 
     fn wants_paint(&mut self, position_ms: u32) -> bool {
