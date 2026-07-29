@@ -57,21 +57,75 @@ fn main() {
 /// `ui` and `.git/HEAD` costs a `slint` recompile on each source edit; a version
 /// label that silently lags the binary is not worth saving those seconds.
 fn stamp_build_sigil() {
-    // Re-run whenever the committed hash, the working tree or the UI changes.
-    println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=ui");
-    println!("cargo:rerun-if-changed=Cargo.toml");
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // Declared inputs. `crates` is NOT optional here and was the hole in the
+    // first version of this: every path dependency (including the vendored Slint
+    // renderer, where most of this project's hot work happens) lives there, so
+    // omitting it produced a build whose bytes were new and whose label was the
+    // previous one. Worse — if the ONLY dirt is under `crates/`, the stamp is
+    // computed on a tree git calls clean, so the watch reports a clean HEAD hash
+    // with no `*`: a dirty build wearing a clean label, which is the exact bug
+    // this whole mechanism exists to prevent, one level down.
+    //
+    // A path that does NOT exist makes cargo treat the crate as permanently
+    // dirty ("the file `X` is missing", every build), which here would mean a
+    // full slint recompile forever, visible only under `cargo build -v`. So
+    // optional paths are declared only when present.
+    for path in [
+        "src",
+        "ui",
+        "crates",              // ALL path deps, incl. the vendored renderer
+        "Cargo.toml",
+        "Cargo.lock",          // a dependency bump changes the bytes
+        "build.rs",
+        "partitions.csv",      // fed to espflash; changes the image layout
+        ".cargo/config.toml",  // holds ESP_LOG, which esp-println bakes in
+    ] {
+        if std::path::Path::new(path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    // git plumbing. `.git/index` matters because `git add` flips a file from
+    // `??` to `A ` in `--porcelain`, which changes the dirty hash with no source
+    // edit. `.git/packed-refs` matters because `git gc` (auto-gc is on by
+    // default) DELETES `.git/refs/heads/<branch>` and folds it in there — after
+    // which a declaration of the loose path would be a missing file, i.e. the
+    // permanent-rebuild trap above.
+    let mut git_inputs = vec![
+        ".git/HEAD".to_string(),
+        ".git/index".to_string(),
+        ".git/packed-refs".to_string(),
+    ];
     if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
-        println!("cargo:rerun-if-changed=.git/{head_ref}");
+        git_inputs.push(format!(".git/{head_ref}"));
+    }
+    for path in git_inputs {
+        if std::path::Path::new(&path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
     }
 
     let (hash, dirty) = match git(&["rev-parse", "HEAD"]) {
         Some(head) => {
             // `--porcelain` covers untracked + staged; `diff HEAD` covers content.
-            let status = git(&["status", "--porcelain"]).unwrap_or_default();
-            let diff = git(&["diff", "HEAD"]).unwrap_or_default();
+            //
+            // The flags are not decoration. `git diff` renders a tracked binary
+            // as "Binary files … differ" with NO content, so two different
+            // binaries would hash identically — `--binary` emits the real delta.
+            // There are no tracked binaries today, but Slint embeds resources
+            // from `ui/`, so the day a font or PNG is committed there, edits to
+            // it would otherwise be invisible to this hash. And the diff TEXT is
+            // sensitive to the invoking user's git config (`diff.external`,
+            // textconv, algorithm), which would make "same sources -> same name"
+            // a per-host property — this builds on both katana and familiar.
+            // `--untracked-files=all` lists files inside untracked directories
+            // rather than just the directory name.
+            let status = git(&["status", "--porcelain=v1", "--untracked-files=all"])
+                .unwrap_or_default();
+            let diff = git(&[
+                "-c", "diff.external=",
+                "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD",
+            ])
+            .unwrap_or_default();
             if status.is_empty() && diff.is_empty() {
                 (head[..7].to_string(), false)
             } else {

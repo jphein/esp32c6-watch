@@ -31,8 +31,18 @@
 /// to end.
 ///
 /// `#[used]` is load-bearing: without it fat LTO drops an otherwise-unreferenced
-/// static and the marker silently vanishes from the image. Costs ~40 B of
-/// `.rodata` in flash and zero RAM.
+/// static and the marker silently vanishes from the image. Costs 45 B of
+/// `.rodata` in flash (worst case, measured) and zero RAM.
+///
+/// ⚠️ **`#[used]` lowers to `llvm.used`, which stops LLVM's DCE but NOT the ELF
+/// linker's `--gc-sections`.** The marker therefore survives because nothing in
+/// this project passes that flag — the only link args are `-Tlinkall.x` and the
+/// error-handling script. #67 (ROM ceiling, ~6.9 KB free before
+/// `widen_rom_region`) makes adding `--gc-sections` an attractive future diet,
+/// and the failure would be SILENT: flash/OTA would simply stop printing a sigil
+/// and every image would look like a pre-stamp build. `tools/preflight.sh`
+/// therefore greps the built ELF for `WSIGIL:` and fails — a check on the
+/// shipped bytes, which cannot rot the way this comment can.
 #[used]
 static BUILD_STAMP: &str = concat!(
     "WSIGIL:",

@@ -229,6 +229,17 @@ for feat in "${COMBOS[@]}"; do
     fail "$label: could not read _bss_end/_stack_start from the ELF (measured gap ${gap:-?})"
     continue
   fi
+  # The build STAMP must be present in every image. `#[used]` stops LLVM's DCE
+  # but NOT the ELF linker's --gc-sections, and nothing passes that flag today —
+  # so the marker survives only because no one garbage-collects sections. #67
+  # (ROM ceiling) makes adding --gc-sections an attractive future diet, and the
+  # failure would be silent: the flash tooling would just stop printing a sigil
+  # and every image would look like a pre-stamp build. This is the one check that
+  # cannot rot, because it reads the shipped bytes.
+  if ! strings -a "$elf" | grep -q 'WSIGIL:'; then
+    fail "$label: no WSIGIL build stamp in the ELF — \`#[used]\` on src/net/sigil.rs::BUILD_STAMP was defeated (a new --gc-sections link arg is the likely cause). Without it, flash/OTA cannot report which image it wrote."
+  fi
+
   margin=$(( gap - STACK_FLOOR ))
   if [[ "$rom_end" -gt 0 ]]; then
     rom_free=$(( rom_end - 0x42000000 - rom_used ))

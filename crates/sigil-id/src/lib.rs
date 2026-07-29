@@ -74,10 +74,26 @@ pub static FORGE: Realm = Realm {
 /// Name a BUILD from its git short hash, e.g. `"d8f228e"` -> `("Bellowed", "Kiln")`.
 ///
 /// The seed is the hash parsed as hex, matching realm-sigil's `parse_hex(hash)`
-/// in all four languages — so `sigil generate --realm forge <hash>` on any host
-/// agrees with what the watch shows. Returns `None` for a non-hex or empty
-/// string rather than guessing, so a build with no git info reports that fact
-/// instead of a confident wrong name.
+/// in all four languages, so the name is independently checkable. There is **no
+/// `sigil` CLI** — verify against the corpus itself:
+///
+/// ```text
+/// python3 -c "
+/// import json; d=json.load(open('$HOME/Projects/realm-sigil/words/realms.json'))['forge']
+/// s=int('d7cdcee',16)
+/// print(d['adjectives'][s%14], d['nouns'][(s>>8)%14])"   # -> Molten Forge
+/// ```
+///
+/// Two boundaries for whoever checks: strip a trailing `*` first (a dirty build's
+/// hash is a CONTENT hash that no generator can re-derive from git), and never
+/// paste a full 40-char SHA — this returns `None` above 8 hex chars while the Go,
+/// Python and JS implementations will happily name it, giving a different answer.
+/// 8 chars is also the widest safe value: an old JS consumer using `>>` instead
+/// of BigInt coerces to int32 and breaks for seeds >= 2^31, which is about half
+/// of all 8-char hashes. A 7-char git short hash is < 2^28 and safe everywhere.
+///
+/// Returns `None` for a non-hex or empty string rather than guessing, so a build
+/// with no git info reports that fact instead of a confident wrong name.
 ///
 /// Accepts up to 8 hex chars (a u32); longer input is refused rather than
 /// truncated, because silently using a *different* seed than the caller's hash
