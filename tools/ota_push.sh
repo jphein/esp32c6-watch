@@ -144,6 +144,26 @@ else
     fi
     echo "ota_push: image ${BIN_SIZE}B fits the slot ($((6291456 - BIN_SIZE))B headroom)"
 
+    # Read the build sigil OUT OF THE IMAGE (marker: src/net/sigil.rs BUILD_STAMP)
+    # rather than recomputing it from the working tree. The tree may have moved on
+    # since the remote build, and a label that disagrees with the bytes is worse
+    # than none. This line is what to compare against the watch's SYSTEM page.
+    # `strings` splits on the NUL terminator, which a portable grep pattern
+    # cannot express; the marker is NUL-terminated for exactly this reason.
+    SIGIL_STAMP=$(strings -a "$TMP/watch.bin" | grep -o 'WSIGIL:.*' | head -1 | cut -c8-)
+    if [ -n "$SIGIL_STAMP" ]; then
+        echo "ota_push: ============================================"
+        echo "ota_push:  BUILD  $(echo "$SIGIL_STAMP" | cut -d'|' -f1)"
+        echo "ota_push:  HASH   $(echo "$SIGIL_STAMP" | cut -d'|' -f2)"
+        echo "ota_push:  VER    $(echo "$SIGIL_STAMP" | cut -d'|' -f3)"
+        echo "ota_push: ---- compare on SYSTEM page / Settings p4 ----"
+    else
+        # An image with no marker predates this change (or LTO dropped it) — say
+        # so, because silence would read as "sigil matches".
+        echo "ota_push: WARNING no WSIGIL marker in the image — it predates the build stamp;"
+        echo "ota_push:         the watch's BUILD row cannot be compared for this push."
+    fi
+
     # 4. Publish the image to the OTA HTTP server.
     scp -q "$TMP/watch.bin" "$OTA_DEST"
     echo "ota_push: image uploaded -> $OTA_DEST ($(stat -c%s "$TMP/watch.bin") bytes)"

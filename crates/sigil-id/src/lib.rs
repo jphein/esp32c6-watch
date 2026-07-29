@@ -42,6 +42,63 @@ pub static FANTASY: Realm = Realm {
     ],
 };
 
+/// The `forge` realm — verbatim from realm-sigil `words/realms.json` (14 adj /
+/// 14 noun), for naming **BUILDS**, never devices.
+///
+/// Two namespaces, deliberately kept apart (realm-sigil's own rule): [`FANTASY`]
+/// names a *device* — an identity that outlives every flash — while `forge`
+/// names a *build* — provenance. "eldritch-lantern is running Bellowed Kiln"
+/// only reads unambiguously because the two words can never be confused for
+/// each other's kind. They overlap on exactly one word (`forge`, an adjective
+/// in one and a noun in the other), which cannot produce a colliding full name.
+///
+/// Unlike [`FANTASY`] this table is NOT pinned-forever: build names are
+/// ephemeral, so a future re-sync from sigil costs nothing but a different word
+/// on the next build. Renaming a *device* would change its MQTT topic.
+///
+/// 14 x 14 = 196 pairs, so two builds ~196 apart may share a name — which is
+/// why the short hash is displayed beside it and is the actual identifier. The
+/// words exist so a human can tell two builds apart at a glance on a 410 px
+/// panel, where seven hex characters all look alike.
+pub static FORGE: Realm = Realm {
+    adjectives: &[
+        "Molten", "Hammered", "Tempered", "Forged", "Glowing", "Smoldering", "Sparking",
+        "Kilned", "Ironclad", "Wrought", "Bellowed", "Anvilled", "White-Hot", "Smelted",
+    ],
+    nouns: &[
+        "Forge", "Anvil", "Kiln", "Quench", "Hammer", "Smithy", "Smelter", "Ironheart",
+        "Wright", "Crucible", "Bellows", "Mold", "Ingot", "Foundry",
+    ],
+};
+
+/// Name a BUILD from its git short hash, e.g. `"d8f228e"` -> `("Bellowed", "Kiln")`.
+///
+/// The seed is the hash parsed as hex, matching realm-sigil's `parse_hex(hash)`
+/// in all four languages — so `sigil generate --realm forge <hash>` on any host
+/// agrees with what the watch shows. Returns `None` for a non-hex or empty
+/// string rather than guessing, so a build with no git info reports that fact
+/// instead of a confident wrong name.
+///
+/// Accepts up to 8 hex chars (a u32); longer input is refused rather than
+/// truncated, because silently using a *different* seed than the caller's hash
+/// would break exactly the cross-tool agreement this exists to provide.
+pub fn build_name_for_hash(hash: &str) -> Option<(&'static str, &'static str)> {
+    if hash.is_empty() || hash.len() > 8 {
+        return None;
+    }
+    let mut seed: u32 = 0;
+    for b in hash.as_bytes() {
+        let digit = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return None,
+        };
+        seed = (seed << 4) | digit as u32;
+    }
+    Some(name_for_seed(seed, &FORGE))
+}
+
 /// The realm every unit agrees on (sigil's `realm` string). LOCKED to fantasy,
 /// matching the smol fleet — repoint it (and paste another realm's table from
 /// sigil's generated source) to re-theme every device's name at once.
@@ -200,8 +257,57 @@ mod tests {
     const WATCH_A: [u8; 6] = [0x98, 0xA3, 0x16, 0xA7, 0x2F, 0xE4];
     const WATCH_B: [u8; 6] = [0x98, 0xA3, 0x16, 0xA5, 0xA7, 0xF8];
 
-    /// Parity with smol's names.rs / realm-sigil: known seeds → known names.
-    /// (sigil formula: `adj = A[seed % 20]`, `noun = N[(seed >> 8) % 20]`.)
+    /// Cross-language parity for the BUILD namespace: these pairs come from
+    /// realm-sigil's own generator over `words/realms.json` forge, so a drift in
+    /// this vendored table fails here instead of silently renaming builds.
+    #[test]
+    fn forge_build_names_match_sigil() {
+        assert_eq!(build_name_for_hash("d8f228e"), Some(("Bellowed", "Kiln")));
+        assert_eq!(build_name_for_hash("0000000"), Some(("Molten", "Forge")));
+        // Case-insensitive: git prints lowercase, humans paste either.
+        assert_eq!(build_name_for_hash("D8F228E"), build_name_for_hash("d8f228e"));
+    }
+
+    /// A missing or malformed hash must be REPORTED, not guessed. A build with
+    /// no git info that confidently displays "Molten Forge" is worse than one
+    /// that says it does not know — the whole point is trusting the label.
+    #[test]
+    fn forge_refuses_what_it_cannot_name() {
+        assert_eq!(build_name_for_hash(""), None);
+        assert_eq!(build_name_for_hash("nothex!"), None);
+        // 9 chars would overflow the u32 seed; refuse rather than truncate to a
+        // seed the caller never asked for.
+        assert_eq!(build_name_for_hash("d8f228e00"), None);
+        assert_eq!(build_name_for_hash("d8f228e0"), Some(name_for_seed(0xd8f228e0, &FORGE)));
+    }
+
+    /// The device and build namespaces must not produce the same full name, or
+    /// "X is running Y" stops being readable. Overlap on single words is fine
+    /// (and expected: `forge`); a colliding PAIR is not.
+    #[test]
+    fn build_names_never_collide_with_device_names() {
+        // A nested scan, not a HashSet: this crate is `no_std` (deliberately —
+        // it links into firmware), so the test prelude has no `std` collections
+        // and no `Iterator`. 196 x 256 comparisons is nothing at test time.
+        let mut id = 0u16;
+        while id <= u8::MAX as u16 {
+            let (da, dn) = name_for_id(id as u8);
+            let mut ai = 0;
+            while ai < FORGE.adjectives.len() {
+                let mut ni = 0;
+                while ni < FORGE.nouns.len() {
+                    assert!(
+                        !(FORGE.adjectives[ai] == da && FORGE.nouns[ni] == dn),
+                        "build name is also a device name"
+                    );
+                    ni += 1;
+                }
+                ai += 1;
+            }
+            id += 1;
+        }
+    }
+
     #[test]
     fn smol_parity_known_seeds() {
         assert_eq!(name_for_seed(0, REALM), ("Arcane", "Aegis"));

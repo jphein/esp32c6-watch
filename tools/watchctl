@@ -833,6 +833,48 @@ def _image_from(path: Path, tmpdir: str) -> tuple[Path | None, str]:
     return out, "elf"
 
 
+def sigil_of_image(binp: Path) -> dict:
+    """Read the BUILD STAMP out of an image — the bytes about to be written.
+
+    Marker written by `src/net/sigil.rs::BUILD_STAMP`:
+    `WSIGIL:<forge name>|<git hash[*]>|v<crate version>`. A trailing `*` on the
+    hash means the tree was DIRTY, so the hash is a content hash over
+    HEAD+status+diff rather than a commit you can `git show`.
+
+    Deliberately read from the file rather than recomputed from the working
+    tree: the tree can move on between a build and a flash (it did, repeatedly,
+    on 2026-07-29), and a version label that disagrees with the bytes is worse
+    than no label because it gets trusted. Returns {} for an image with no
+    marker — a build predating the stamp — which the caller must SAY rather than
+    pass over in silence.
+    """
+    try:
+        blob = binp.read_bytes()
+    except OSError:
+        return {}
+    m = re.search(rb"WSIGIL:([^\x00]{1,96})", blob)
+    if not m:
+        return {}
+    parts = m.group(1).decode("utf-8", "replace").split("|")
+    parts += [""] * (3 - len(parts))
+    return {"build": parts[0], "hash": parts[1], "version": parts[2]}
+
+
+def say_image_sigil(binp: Path) -> dict:
+    """Print the image's build stamp for comparison against the watch's glass."""
+    sig = sigil_of_image(binp)
+    if not sig:
+        say("  no WSIGIL marker in this image — it predates the build stamp, so "
+            "the watch's BUILD row cannot be compared for this flash")
+        return {}
+    say("  ---------------------------------------------")
+    say(f"   BUILD  {sig['build']}")
+    say(f"   HASH   {sig['hash']}")
+    say(f"   VER    {sig['version']}")
+    say("  ---- compare: SYSTEM page / Settings p4 -----")
+    return sig
+
+
 def cmd_deploy(args) -> int:
     row = require_usb(args.watch)
     image = Path(args.image)
@@ -875,6 +917,7 @@ def cmd_deploy(args) -> int:
                 emit({"error": "bad-slot", "slot": args.slot})
                 return EXIT_NOTFOUND
 
+        img_sigil = say_image_sigil(binp)
         say(f"writing {binp.name} -> {slot_of(target)} @ {hex(target)} "
             f"on {row['dev']} …")
         try:
@@ -912,7 +955,7 @@ def cmd_deploy(args) -> int:
         say("  (no [SIGIL] line — if this build should print one, the app "
             "may be crashing; check: watchctl logs --reset " + args.watch + ")")
     emit({"ok": True, "wrote": hex(target), "size": size,
-          **fingerprint(banner)})
+          "image": img_sigil, **fingerprint(banner)})
     return EXIT_OK
 
 
@@ -946,6 +989,9 @@ def cmd_flash_full(args) -> int:
                 f"{IMAGE_GATE} B slot cap")
             emit({"error": "gate-failed", "size": size, "gate": IMAGE_GATE})
             return EXIT_GATE
+        # Read the stamp while the derived .bin still exists (the tempdir goes
+        # away below, and espflash re-derives its own copy from the ELF).
+        img_sigil = say_image_sigil(binp)
     say(f"image {size} B fits the slot ({IMAGE_GATE - size} B headroom)")
 
     cmd = ["flash", "--chip", "esp32c6", "--port", row["dev"],
@@ -980,7 +1026,7 @@ def cmd_flash_full(args) -> int:
                                                            SLOT_OFFSETS["ota_0"]):
         say(f"  NOTE: expected ota_0 after an otadata erase but booted "
             f"{hex(banner['offset'])}")
-    emit({"ok": True, "size": size, "erased_otadata": bool(args.erase_otadata),
+    emit({"ok": True, "image": img_sigil, "size": size, "erased_otadata": bool(args.erase_otadata),
           **fingerprint(banner)})
     return EXIT_OK
 

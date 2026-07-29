@@ -1,6 +1,7 @@
 fn main() {
     linker_be_nice();
     widen_rom_region();
+    stamp_build_sigil();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 
@@ -10,6 +11,130 @@ fn main() {
         .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer);
     slint_build::compile_with_config("ui/slint/shell.slint", slint_config)
         .expect("failed to compile ui/slint/shell.slint");
+}
+
+/// Stamp this build with a **realm-sigil forge name + short hash**, so the
+/// About page identifies the *image that is running* rather than a constant.
+///
+/// ## The bug this fixes
+///
+/// The About page showed `v{CARGO_PKG_VERSION}` — `v0.12.1`, a string that is
+/// identical in every build ever made from this crate version. It therefore
+/// could not answer the only question anyone ever asks it ("did my OTA land?"),
+/// and on 2026-07-29 it was read as evidence that an OTA had NOT landed. It was
+/// evidence of nothing at all. A version label that cannot change is worse than
+/// no label, because it is trusted.
+///
+/// ## Why a name and not just the hash
+///
+/// Seven hex characters are unreadable at a glance on a 410 px panel, and two
+/// builds an hour apart look alike. `Bellowed Kiln` does not. The hash stays
+/// beside it as the actual identifier; the words are the human index. Same
+/// `(hash, realm)` gives the same name in Go, Python, JS and Rust, so
+/// `sigil generate --realm forge <hash>` on any host verifies what the watch
+/// shows — the label is checkable, not merely printed.
+///
+/// ## Dirty builds get their OWN hash, deliberately
+///
+/// Most of this project's flashes are of uncommitted trees. If a dirty build
+/// reported HEAD's hash, every debug flash in a session would carry the SAME
+/// label — reintroducing the exact failure above, one level down. So a dirty
+/// build is named from a content hash over `HEAD + status + diff`, marked with a
+/// trailing `*`. Two dirty builds differ iff their sources differ, which is the
+/// property that makes "still says the old sigil" a real diagnosis.
+///
+/// Untracked files reach the hash through `--porcelain` (their *names*, not
+/// their contents) — enough to notice a new module appearing, not enough to
+/// notice an edit inside one that was never `git add`ed. Adding it makes it
+/// fully tracked.
+///
+/// ## Freshness
+///
+/// `slint_build` already emits `rerun-if-changed` for the `.slint` files, which
+/// NARROWS cargo's default "rerun on any package change" to just those — so
+/// without the paths declared below, the stamp would go stale exactly when it
+/// matters (edit a `.rs`, reflash, read last build's name). Declaring `src`,
+/// `ui` and `.git/HEAD` costs a `slint` recompile on each source edit; a version
+/// label that silently lags the binary is not worth saving those seconds.
+fn stamp_build_sigil() {
+    // Re-run whenever the committed hash, the working tree or the UI changes.
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=ui");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        println!("cargo:rerun-if-changed=.git/{head_ref}");
+    }
+
+    let (hash, dirty) = match git(&["rev-parse", "HEAD"]) {
+        Some(head) => {
+            // `--porcelain` covers untracked + staged; `diff HEAD` covers content.
+            let status = git(&["status", "--porcelain"]).unwrap_or_default();
+            let diff = git(&["diff", "HEAD"]).unwrap_or_default();
+            if status.is_empty() && diff.is_empty() {
+                (head[..7].to_string(), false)
+            } else {
+                // `hash-object` WITHOUT `-w`: computes the id, writes nothing to
+                // the object database. A build must not litter the user's repo.
+                let blob = format!("{head}
+{status}
+{diff}");
+                match git_stdin(&["hash-object", "--stdin"], &blob) {
+                    Some(h) if h.len() >= 7 => (h[..7].to_string(), true),
+                    // Hash failed but we know it is dirty — say so rather than
+                    // presenting HEAD as if it were what got built.
+                    _ => (format!("{}", &head[..7]), true),
+                }
+            }
+        }
+        None => (String::new(), false),
+    };
+
+    let (sigil, hash_label) = if hash.is_empty() {
+        // No git (source tarball / detached build host). Refuse to invent a name.
+        ("no-git".to_string(), "unknown".to_string())
+    } else {
+        let name = sigil_id::build_name_for_hash(&hash)
+            .map(|(adj, noun)| format!("{adj} {noun}"))
+            .unwrap_or_else(|| "no-git".to_string());
+        (name, if dirty { format!("{hash}*") } else { hash })
+    };
+
+    println!("cargo:rustc-env=BUILD_SIGIL={sigil}");
+    println!("cargo:rustc-env=BUILD_HASH={hash_label}");
+    // Echoed so a flash/OTA log records exactly what went on the glass — the
+    // tooling greps this line instead of recomputing and possibly disagreeing.
+    println!("cargo:warning=build sigil: {sigil} \u{00b7} {hash_label}");
+}
+
+/// `git <args>` -> trimmed stdout, or `None` if git is missing or the command
+/// fails. Never panics: a missing git must degrade the label, not break the build.
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    Some(s.trim_end().to_string())
+}
+
+/// `git <args>` with `input` on stdin -> trimmed stdout.
+fn git_stdin(args: &[&str], input: &str) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.as_mut()?.write_all(input.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok().map(|s| s.trim_end().to_string())
 }
 
 /// #67: widen the ROM (flash-mapped code+rodata) region from esp-hal's hardcoded

@@ -1,9 +1,13 @@
 import { Theme, StatRow, PageTitle } from "theme.slint";
 
 export component SystemPage {
-    in property <string> chip-text: "ESP32-C6 \u{00b7} RISC-V";
-    in property <string> display-text: "410x502 AMOLED";
-    in property <string> fw-text;      // "v0.1.0" (set once from Cargo)
+    // Chip AND panel on one row: this page is EXACTLY full at seven 48 px rows
+    // (120 + 7*48 + 6*6 = 492 of 502 px), so `build-text` could only be added by
+    // merging two static rows. Both halves are device constants that never
+    // change, which makes them the cheapest thing on the page to combine.
+    in property <string> chip-text: "ESP32-C6 \u{00b7} 410x502";
+    in property <string> fw-text;      // "v0.12.1 · d8f228e" (version + git hash)
+    in property <string> build-text;   // "Glowing Wright" (realm-sigil forge name)
     in property <string> sigil-text;   // "eldritch-lantern" (per-device sigil, #34)
     in property <string> heap-text;    // "123k free"
     in property <string> uptime-text;
@@ -17,7 +21,7 @@ export component SystemPage {
         width: 330px;
         spacing: 6px;
         StatRow { label: "CHIP"; value: root.chip-text; }
-        StatRow { label: "DISPLAY"; value: root.display-text; }
+        StatRow { label: "BUILD"; value: root.build-text; value-color: Theme.accent; }
         StatRow { label: "FIRMWARE"; value: root.fw-text; }
         StatRow { label: "SIGIL"; value: root.sigil-text; }
         StatRow { label: "HEAP"; value: root.heap-text; value-color: Theme.accent; }

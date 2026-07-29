@@ -2324,9 +2324,23 @@ fn build_scene(
     ui.set_launcher_page_count(launcher_titles.len().max(1) as i32);
     ui.set_launcher_titles(ModelRc::from(Rc::new(VecModel::from(launcher_titles))));
     ui.set_launcher_tiles(ModelRc::from(Rc::new(VecModel::from(launcher_tiles))));
-    // Firmware version is a compile-time constant; set it once so the system
-    // page shows the real Cargo version instead of a string that drifts.
-    ui.set_fw_text(slint::format!("v{}", env!("CARGO_PKG_VERSION")));
+    // Firmware version + the git hash of the image that is actually running.
+    // The Cargo version ALONE was the bug: `v0.12.1` is identical in every build
+    // from this crate version, so the About page could not answer "did my OTA
+    // land?" and on 2026-07-29 its unchanged value was read as proof that one had
+    // NOT landed. `BUILD_HASH` comes from build.rs (see `stamp_build_sigil`) and
+    // carries a trailing `*` when the tree was dirty.
+    ui.set_fw_text(slint::format!(
+        "v{} \u{b7} {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_HASH")
+    ));
+    // The same hash as a realm-sigil `forge` name — two words a human can match
+    // against what the flash/OTA tooling reported, which seven hex characters at
+    // 22 px are not. Deliberately a DIFFERENT realm from the device sigil below:
+    // one names a build, the other names a board, and they appear in the same
+    // sentence ("eldritch-lantern is running Glowing Wright").
+    ui.set_build_text(SharedString::from(env!("BUILD_SIGIL")));
     // Per-device sigil (#34): a device constant (efuse MAC), stamped here like
     // fw-text so it survives suspend/resume scene rebuilds with no stored state.
     ui.set_sigil_text(SharedString::from(crate::net::sigil::get().sigil.as_str()));

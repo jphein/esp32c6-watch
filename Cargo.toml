@@ -214,6 +214,13 @@ slint = { version = "1.17.1", default-features = false, features = [
 
 [build-dependencies]
 slint-build = "1.17.1"
+# The same word tables the firmware uses for DEVICE names also name each BUILD
+# (`FORGE`), computed host-side in build.rs and passed in as a `rustc-env`
+# string. Depending on it here rather than re-copying the corpus is the whole
+# point of the crate: realm-sigil's Rust binding exists because smol hand-copied
+# its corpus twice and both copies drifted. Zero-dependency and `no_std`, so it
+# builds for the host as a build-dep and for riscv as a normal dep.
+sigil-id = { path = "crates/sigil-id" }
 
 # Vendored fork of Slint's software renderer with ONE local patch: even-grid
 # dirty-region alignment for the CO5300's CASET/RASET window restrictions

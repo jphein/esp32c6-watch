@@ -20,6 +20,33 @@
 //! `watch/<sigil>/ota` + per-device client ids), the System page, and the BLE
 //! advertised name.
 
+/// The BUILD stamp, tagged so tooling can read the sigil out of the **image it
+/// is about to flash** rather than recomputing it and possibly disagreeing.
+///
+/// `grep -a -o 'WSIGIL:[^\x00]*' watch.bin` on any image — a build directory, an
+/// OTA payload, a downloaded artifact — answers "what is in this file?" with no
+/// git, no toolchain and no trust in a log line. The alternative (tooling that
+/// re-derives the name from the working tree) is a second implementation that
+/// can disagree with the binary, which is the failure this whole change exists
+/// to end.
+///
+/// `#[used]` is load-bearing: without it fat LTO drops an otherwise-unreferenced
+/// static and the marker silently vanishes from the image. Costs ~40 B of
+/// `.rodata` in flash and zero RAM.
+#[used]
+static BUILD_STAMP: &str = concat!(
+    "WSIGIL:",
+    env!("BUILD_SIGIL"),
+    "|",
+    env!("BUILD_HASH"),
+    "|v",
+    env!("CARGO_PKG_VERSION"),
+    // Explicit terminator: a Rust `&str` literal is NOT NUL-terminated, so a
+    // reader scanning for "not NUL" would run past the end into whatever
+    // .rodata the linker placed next and report garbage as part of the version.
+    "\0",
+);
+
 use embassy_sync::lazy_lock::LazyLock;
 
 /// `watch/` + sigil (≤ [`sigil_id::SIGIL_MAX`]) + `/ota`.

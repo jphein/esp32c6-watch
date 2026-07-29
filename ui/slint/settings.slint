@@ -222,6 +222,10 @@ export component SettingsHub {
     // --- SYSTEM ---
     in property <string> sigil: "--";
     in property <string> fw: "--";
+    // realm-sigil `forge` name for this build ("Glowing Wright"). Shown here as
+    // well as on the SYSTEM page because this is the page with the UPDATE
+    // FIRMWARE button — the one place you compare a name before and after.
+    in property <string> build: "--";
     in property <int> node-id: 0;
     in property <string> ota-status: "";
     callback ota-tap();
@@ -456,12 +460,16 @@ export component SettingsHub {
                 x: 18px; y: 0; width: 330px;
                 spacing: 4px;
                 StatRow { label: "SIGIL"; value: root.sigil; }
+                StatRow { label: "BUILD"; value: root.build; value-color: Theme.accent; }
                 StatRow { label: "FIRMWARE"; value: root.fw; }
                 StatRow { label: "NODE"; value: "#\{root.node-id}"; }
             }
 
+            // y shifted +28 for the fourth StatRow above: 4*48 + 3*4 = 204px of
+            // rows, so 182 would have overlapped the last one. The 336 px parent
+            // still leaves room below the status line (270 + 18 = 288).
             PillButton {
-                x: (parent.width - 280px) / 2; y: 182px;
+                x: (parent.width - 280px) / 2; y: 210px;
                 width: 280px; height: 44px;
                 text: "UPDATE FIRMWARE";
                 text-size: 15px;
@@ -471,7 +479,7 @@ export component SettingsHub {
             // line the old fb Settings showed, now scene-resident.
             if root.ota-status != "": Text {
                 x: (parent.width - self.width) / 2;
-                y: 242px;
+                y: 270px;
                 text: root.ota-status;
                 color: Theme.warm;
                 font-size: 15px;

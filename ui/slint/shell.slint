@@ -66,6 +66,10 @@ export component WatchShell inherits Window {
     in property <string> fw-text: "--";
     // Per-device sigil name (#34), stamped with fw-text from the efuse MAC.
     in property <string> sigil-text: "--";
+    // realm-sigil `forge` name for THIS BUILD, e.g. "Glowing Wright" — set from
+    // build.rs's git stamp. Distinct namespace from sigil-text: that names the
+    // board and never changes, this changes with every source change.
+    in property <string> build-text: "--";
     in property <string> heap-text: "--";
     in property <string> uptime-text: "--";
     in property <string> battery-text: "--";
@@ -498,6 +502,7 @@ export component WatchShell inherits Window {
             animate x { duration: 260ms; easing: ease-out; }
             fw-text: root.fw-text;
             sigil-text: root.sigil-text;
+            build-text: root.build-text;
             heap-text: root.heap-text;
             uptime-text: root.uptime-text;
             battery-text: root.battery-text;
@@ -1016,6 +1021,7 @@ export component WatchShell inherits Window {
         kb-plain: root.kb-plain;
         sigil: root.sigil-text;
         fw: root.fw-text;
+        build: root.build-text;
         node-id: root.node-id;
         ota-status: root.ota-status;
         volume-level: root.volume-level;
