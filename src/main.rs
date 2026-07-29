@@ -2508,6 +2508,29 @@ async fn main(_spawner: Spawner) -> ! {
             // name it: `RenderState` and `SceneTexture` are both 28 B, so a byte
             // count identifies neither, and `RawVec::grow_one` is foldable across
             // same-size types so an ELF symbol identifies neither either.
+            //
+            // ⚠️ `[POOL]` IS A BOUNDED INSTRUMENT, NOT AN INCOMPLETE ONE. It measures
+            // SCENE GEOMETRY and is blind to the renderer's own bookkeeping by
+            // construction. Do NOT read `items`/`tex` as "the heap cost of a screen".
+            //
+            // Measured 2026-07-29: opening story's CHAR page cost 10.7 KB of heap
+            // (~4.6 KB main + ~6.1 KB reclaimed, 4/4 trials against a no-tap control
+            // that moved 0 B) while `items` and `tex` stayed pinned at 256/256. So on
+            // that page these numbers understate the heap cost by ~8x.
+            //
+            // The missing consumer is `PartialRendererCache` in i-slint-core
+            // (`partial_renderer.rs:173`): a `slab::Slab<PartialRenderingCachedData>`
+            // holding one ~32 B entry plus one heap `Box<PropertyTracker>` (16 B) PER
+            // RENDERED ITEM, live here because `MinimalSoftwareWindow` is built with
+            // `RepaintBufferType::ReusedBuffer`, which enables partial rendering. A
+            // slab doubling to 256 entries is an 8,192 B contiguous ask.
+            //
+            // It CANNOT be added to this line: `PartialRendererCache` is a private
+            // struct with no `len()`/`capacity()` accessor, so it is unreachable from
+            // the vendored software renderer and from firmware alike. Covering it
+            // means vendoring i-slint-core, which is a far bigger step than vendoring
+            // the renderer was. Until then, the routes that work are the 16 B rung in
+            // the `SIZES` ladder above and `heap_hooks`'s size histogram.
             let (ci, ct, cr, cs) = slint::platform::software_renderer::pool_capacities();
             // `next` is the size of the NEXT doubling this UI would ask for — the
             // honest danger threshold, which is not a constant: it tracks the live
@@ -2517,6 +2540,15 @@ async fn main(_spawner: Spawner) -> ! {
                 core::cmp::max((ct as usize) * 28, (ci as usize) * 16),
                 (cr as usize) * 26,
             ) * 2;
+            // `maxblk_main=0` does NOT mean "main can serve nothing" — the ladder's
+            // smallest rung is 16 B, so it means **main cannot serve >= 16 B**. Main
+            // goes on absorbing 4-, 8- and 12-byte requests indefinitely, which is
+            // exactly what a shredded pool does. That distinction resolves what looks
+            // like a broken gauge: `main` fell 4,284 B across the CHAR tap while this
+            // read 0 the whole time, and both are true at once. It also constrains
+            // attribution usefully — a large contiguous block CANNOT have come from
+            // main in that state, so it came from reclaimed while main took the
+            // sub-16 B churn.
             println!(
                 "[POOL] items={ci} tex={ct} rr={cr} state={cs} next={next} \
                  main_low={main_low} maxblk_main={mb_main}"
