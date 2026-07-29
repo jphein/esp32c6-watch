@@ -600,3 +600,68 @@ pub fn request(
     s.push_str("\r\nConnection: close\r\n\r\n").ok()?;
     Some(s)
 }
+
+// ---------------------------------------------------------------------------
+// Retry budget
+// ---------------------------------------------------------------------------
+
+/// Audio in a failed attempt that still counts as forward progress: 1 s.
+pub const MIN_PROGRESS_BYTES: u32 = BYTES_PER_SEC as u32;
+
+/// Zero-progress failures tolerated before abandoning a chapter.
+pub const MAX_WINDOW_RETRIES: u8 = 3;
+
+/// Absolute retry cap per chapter, so progress-resets cannot spin forever.
+pub const MAX_TOTAL_RETRIES: u16 = 64;
+
+/// The "keep going or give up" decision for a failed `Range` window.
+///
+/// # Why this lives here and not in the firmware
+///
+/// It was in `src/net/story_play.rs`, where **it could not be tested at all** —
+/// that crate depends on `esp-hal`, which does not build for the host. And it was
+/// wrong: `attempt` was cleared only by a *fully delivered* window, so a link
+/// delivering 4.6 s of audio per attempt burned three strikes in ~14 s and
+/// abandoned a chapter that was still making progress. That flaw was caught by
+/// reading a production access log, which is a bad way to find out.
+///
+/// So the decision moved to the one place with tests. The rule: **only a
+/// zero-progress failure is evidence the far end is gone.**
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RetryBudget {
+    /// Consecutive failures that delivered nothing.
+    stalled: u8,
+    /// Every failure this chapter, progress or not.
+    total: u16,
+}
+
+impl RetryBudget {
+    pub const fn new() -> Self {
+        Self { stalled: 0, total: 0 }
+    }
+
+    /// A window was delivered in full: the link is healthy, clear the strikes.
+    pub fn delivered(&mut self) {
+        self.stalled = 0;
+    }
+
+    /// A window failed after advancing `progress` bytes.
+    ///
+    /// Returns `true` when playback should give up. Progress at or above
+    /// [`MIN_PROGRESS_BYTES`] clears the strike count — the link is slow, not
+    /// dead — while [`MAX_TOTAL_RETRIES`] still guarantees termination.
+    pub fn failed(&mut self, progress: u32) -> bool {
+        self.total = self.total.saturating_add(1);
+        if progress >= MIN_PROGRESS_BYTES {
+            self.stalled = 0;
+        } else {
+            self.stalled = self.stalled.saturating_add(1);
+        }
+        self.stalled >= MAX_WINDOW_RETRIES || self.total >= MAX_TOTAL_RETRIES
+    }
+
+    /// Total failures this chapter — what `Session::retries` reports.
+    pub fn total(&self) -> u16 {
+        self.total
+    }
+}
