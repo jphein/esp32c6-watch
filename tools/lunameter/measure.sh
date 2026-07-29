@@ -20,7 +20,11 @@ root="$(cd "$here/../.." && pwd)"
 # Stage OUTSIDE the repo: the repo's .cargo/config.toml pins
 # target = riscv32imac-unknown-none-elf for everything beneath it, and this is a
 # host binary. Building in-tree fails with "can't find crate for `std`".
-stage="${LUNAMETER_STAGE:-${TMPDIR:-/tmp}/lunameter-$(id -u)}"
+# A FIXED path here races itself: two concurrent runs `rm -rf` each other's
+# staging tree and one dies with "cannot remove …: Directory not empty" — observed
+# live 2026-07-29 in a session running several agents in parallel. Default to a
+# unique dir; `LUNAMETER_STAGE` still pins it for anyone who wants build reuse.
+stage="${LUNAMETER_STAGE:-$(mktemp -d "${TMPDIR:-/tmp}/lunameter-$(id -u)-XXXXXX")}"
 rm -rf "$stage"
 mkdir -p "$stage"
 cp "$here/Cargo.toml" "$here/build.rs" "$stage/"

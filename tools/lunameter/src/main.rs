@@ -187,9 +187,25 @@ fn main() {
     //    byte-for-byte (the `visible` gate is the only thing that moved).
     frame("watchface(reshow)", &mut sink);
 
+    // 3b. The PAGER's own five pages. Only page 0 (clock) was ever framed, which
+    //     left the SYSTEM page (2) unmeasured — the page documented as "EXACTLY
+    //     full at seven 48 px rows (120 + 7*48 + 6*6 = 492 of 502 px)" and whose
+    //     rows were restructured in 15c3bad to fit a BUILD row by merging the chip
+    //     and panel rows. Tightest layout in the tree + rows just moved + never
+    //     measured is the same combination that hid the story character page.
+    for p in 0..5 {
+        ui.set_current_page(p);
+        frame(&format!("pager(page{p})"), &mut sink);
+    }
+    ui.set_current_page(0);
+
     // 4. Full Settings sweep — every page, every sub-view, worst-case content.
     ui.set_sigil_text("EMBER-7".into());
-    ui.set_fw_text("v0.12.1".into());
+    // Populated, not the "--" default: the About rows are the screen 15c3bad
+    // changed, and measuring them empty understates the new BUILD row by ~9
+    // glyphs. Longest realm-sigil forge name is "Smoldering Ironheart" (20 ch).
+    ui.set_fw_text("v0.12.1 \u{b7} d7cdcee".into());
+    ui.set_build_text("Smoldering Ironheart".into());
     ui.set_node_id(7);
     ui.set_net_current("realm-roam-5g".into());
     ui.set_net_status(2);

@@ -229,6 +229,52 @@ for feat in "${COMBOS[@]}"; do
     fail "$label: could not read _bss_end/_stack_start from the ELF (measured gap ${gap:-?})"
     continue
   fi
+  # The build STAMP must MATCH THE TREE, not merely be present.
+  #
+  # Presence alone was the weaker check. `crates/**` was missing from build.rs's
+  # `rerun-if-changed` set, so an edit there produced new bytes wearing the
+  # PREVIOUS label — and if `crates/` was the only dirt, git called the tree clean
+  # and the watch reported a clean HEAD hash with no `*`. A dirty build wearing a
+  # clean label.
+  #
+  # The fix declared the missing paths. This check exists because that fix cannot
+  # be PROVEN complete: cargo's own dep-info (`<bin>.d`) reproduces the hole
+  # mechanically, but it is blind to the vendored Slint renderer entirely — that
+  # crate is `exclude`d from the workspace and reaches the build through
+  # `[patch.crates-io]`, so it appears in no dep list at all. Also absent from
+  # `.d`: linkall.x/memory.x, partitions.csv, Cargo.lock, rust-toolchain.toml, and
+  # every dependency build script's own inputs (`.cargo/config.toml`'s ESP_LOG
+  # feeds esp-println's build script and changes the binary leaving no trace).
+  #
+  # So ANY answer of the form "here is the list of inputs" has the same failure
+  # mode as the original bug: right until someone adds an input. Comparing the
+  # shipped bytes against the tree is immune to every input nobody enumerated,
+  # and retires the class instead of the instance.
+  #
+  # DRIFT WARNING: the two commands below MUST stay identical to
+  # `build.rs::stamp_build_sigil`. Only the HASH is compared, not the name — the
+  # name is a pure function of the hash, so a hash match is sufficient and avoids
+  # duplicating the word tables here.
+  stamp_want_hash=""
+  if head_full=$(git rev-parse HEAD 2>/dev/null); then
+    st=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)
+    df=$(git -c diff.external= diff --no-ext-diff --no-textconv --binary HEAD 2>/dev/null || true)
+    if [[ -z "$st" && -z "$df" ]]; then
+      stamp_want_hash="${head_full:0:7}"
+    else
+      stamp_want_hash="$(printf '%s\n%s\n%s' "$head_full" "$st" "$df" \
+        | git hash-object --stdin 2>/dev/null | cut -c1-7)*"
+    fi
+  fi
+  stamp_got=$(strings -a "$elf" 2>/dev/null | grep -o 'WSIGIL:.*' | head -1)
+  stamp_got_hash=$(printf '%s' "$stamp_got" | cut -d'|' -f2)
+  if [[ -n "$stamp_want_hash" && -n "$stamp_got_hash" \
+        && "$stamp_want_hash" != "$stamp_got_hash" ]]; then
+    fail "$label: build sigil is STALE — the image says '$stamp_got_hash' but the \
+tree is '$stamp_want_hash'. build.rs did not re-run for an input it does not \
+declare; find it and add it to the rerun-if-changed list in stamp_build_sigil()."
+  fi
+
   # The build STAMP must be present in every image. `#[used]` stops LLVM's DCE
   # but NOT the ELF linker's --gc-sections, and nothing passes that flag today —
   # so the marker survives only because no one garbage-collects sections. #67
