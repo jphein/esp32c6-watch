@@ -94,6 +94,11 @@ esp-backtrace = { version = "0.19.0", features = [
     "esp32c6",
     "panic-handler",
     "println",
+    # custom-halt: reboot instead of hanging forever on panic (#75). Without it
+    # esp-backtrace ends in `loop {}` inside `interrupt_free`, which is exactly
+    # the "watch is bricked until you power-cycle it" experience. See
+    # `custom_halt` in src/main.rs.
+    "custom-halt",
 ] }
 esp-alloc = "0.10.0"
 embassy-executor = { version = "0.10.0", features = [

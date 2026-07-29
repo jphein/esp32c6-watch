@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+include!("../panic_reboot.rs");
+
 // Slint UI demo for the Waveshare ESP32-C6-Touch-AMOLED-2.06.
 //
 // A Slint-rendered watchface (time from the PCF85063 RTC) drawn with the

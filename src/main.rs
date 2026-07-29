@@ -38,6 +38,8 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::RgbColor;
 use embedded_hal_bus::i2c::RefCellDevice;
 use esp_backtrace as _;
+
+include!("panic_reboot.rs");
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
