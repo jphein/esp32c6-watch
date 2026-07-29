@@ -1,0 +1,593 @@
+{
+  "chapter": 4,
+  "sample_rate": 16000,
+  "bytes_per_ms": 32,
+  "duration_ms": 637151,
+  "segments": [
+    {
+      "idx": 0,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The road to Oakhaven was not a road so much as a suggestion of direction, etched into the grey crust of the Vale by the weight of carriage wheels that hadn’t turned in decades.",
+      "start_ms": 0,
+      "end_ms": 9010
+    },
+    {
+      "idx": 1,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen Vord walked it because Sera insisted that the settlement in Oakhaven would be clean, and because the ledger in his satchel had grown heavy, pulling at his shoulder with a gravitational",
+      "start_ms": 9010,
+      "end_ms": 17465
+    },
+    {
+      "idx": 2,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "insistence that felt less like physics and more like guilt. The ash here was fine, the colour of dried bone. It coated the tongue with a taste of nothing, which was the worst kind of taste.",
+      "start_ms": 17465,
+      "end_ms": 27312
+    },
+    {
+      "idx": 3,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It didn’t rot; it dried. It took moisture from the air, from the lungs, from the memory of rain.",
+      "start_ms": 27312,
+      "end_ms": 32863
+    },
+    {
+      "idx": 4,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Sera walked a pace behind him, her boots kicking up small clouds of grey dust that settled before they could settle. She carried a long, thin case on her back, wrapped in oiled leather.",
+      "start_ms": 32863,
+      "end_ms": 42102
+    },
+    {
+      "idx": 5,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "She didn’t speak. She never spoke unless there was work to be done, and even then, she tended to speak in the language of numbers: distances, debts, probabilities.",
+      "start_ms": 42102,
+      "end_ms": 50781
+    },
+    {
+      "idx": 6,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen adjusted the strap of his satchel. The Coin of the Forgotten sat against his hip, cold and smooth, a counterweight to the Tattered Contract Page that fluttered against his ribs. He was tired.",
+      "start_ms": 50781,
+      "end_ms": 60762
+    },
+    {
+      "idx": 7,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The Authority hummed in his blood, a low-frequency vibration that made his teeth ache if he stood still for too long. It wanted to be used. It wanted to balance the books.",
+      "start_ms": 60762,
+      "end_ms": 69666
+    },
+    {
+      "idx": 8,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Current Objective: The Oakhaven Tithe. Location: Oakhaven Outskirts. Debt Identified: Unpaid grain levy, 412 years overdue. Principal: 400 bushels of winter wheat.",
+      "start_ms": 69666,
+      "end_ms": 81645
+    },
+    {
+      "idx": 9,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Compound Interest: 14,200 bushels of winter wheat (adjusted for scarcity and divine inflation). Currency Conversion: Equivalent to 85 gold pieces or 2 years of labour. Status: Collectible.",
+      "start_ms": 81645,
+      "end_ms": 94477
+    },
+    {
+      "idx": 10,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Oakhaven is supposed to be a sanctuary,\" Sera said. Her voice was flat, dry as the ash. \"The God of Ends granted it amnesty on all pre-Collapse debts.",
+      "start_ms": 94477,
+      "end_ms": 103889
+    },
+    {
+      "idx": 11,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The charter is still pinned to the town hall door.\" Kaelen looked at her. She was looking at the horizon, where the grey sky met the grey earth.",
+      "start_ms": 103889,
+      "end_ms": 110927
+    },
+    {
+      "idx": 12,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Charter or no, the ledger doesn’t care about paper promises. It cares about the signature. The grain was taken. The wheat was eaten. The debt was incurred.",
+      "start_ms": 110927,
+      "end_ms": 119490
+    },
+    {
+      "idx": 13,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The amnesty expired when the town council failed to renew the oath every ten years. They forgot. The ledger remembers.\" Sera stopped walking.",
+      "start_ms": 119490,
+      "end_ms": 127221
+    },
+    {
+      "idx": 14,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"If we go in there, and the town remembers the oath, we walk away empty-handed.\" \"If they remember,\" Kaelen said, \"we’ll know for sure. And if they don’t, we take the gold.\"",
+      "start_ms": 127221,
+      "end_ms": 136109
+    },
+    {
+      "idx": 15,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"And if they do remember, but the council is dead?\" \"Then we find the heir to the obligation.\" Sera nodded slowly. \"And if the heir is a child?\" Kaelen looked down at his hands.",
+      "start_ms": 136109,
+      "end_ms": 145438
+    },
+    {
+      "idx": 16,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The skin was pale, the veins dark. He thought of Oren. He thought of the twenty years he had taken, the way the old man had looked at him with eyes that had seen the end of time and accepted it.",
+      "start_ms": 145438,
+      "end_ms": 154921
+    },
+    {
+      "idx": 17,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He didn’t answer. He just kept walking. The outskirts of Oakhaven were not much to look at. A row of stone houses, their roofs caved in, their windows boarded with ash-hardened wood.",
+      "start_ms": 154921,
+      "end_ms": 165162
+    },
+    {
+      "idx": 18,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "There were no trees. There were no birds. Just the silence of a place that had been forgotten by the world, and the weight of a debt that had been forgotten by the debtors.",
+      "start_ms": 165162,
+      "end_ms": 173247
+    },
+    {
+      "idx": 19,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "They passed the town square. In the centre stood a well, its stone rim cracked, the bucket missing. Kaelen paused by the well.",
+      "start_ms": 173247,
+      "end_ms": 179765
+    },
+    {
+      "idx": 20,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The ledger in his satchel pulsed, a sharp, rhythmic throb against his spine. It wasn’t just a debt. It was a knot. A tangle of obligations so dense that it felt like a physical mass.",
+      "start_ms": 179765,
+      "end_ms": 190148
+    },
+    {
+      "idx": 21,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Alert: High-density debt cluster detected. Warning: Direct enforcement may trigger collective resistance. Recommendation: Locate primary signatory.",
+      "start_ms": 190148,
+      "end_ms": 199319
+    },
+    {
+      "idx": 22,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Kaelen,\" Sera said. She was standing by the town hall, a large building with a slate roof that had survived the collapse. The door was heavy oak, bound in iron. \"This is it.\"",
+      "start_ms": 199319,
+      "end_ms": 208971
+    },
+    {
+      "idx": 23,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen walked to the door. He placed his hand on the wood. It was cold. He could feel the signatures inside. Hundreds of them. Not just the council. The merchants. The farmers. The families.",
+      "start_ms": 208971,
+      "end_ms": 219743
+    },
+    {
+      "idx": 24,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "They had all signed. They had all agreed to the tithe. And they had all died without paying. He knocked. Three times. The sound echoed in the empty square. No answer. He knocked again. Harder.",
+      "start_ms": 219743,
+      "end_ms": 230909
+    },
+    {
+      "idx": 25,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "A voice came from inside. It was thin, reedy, and old. \"We have no gold. We have no wheat. The land is barren.\" Kaelen pushed the door. It opened without a sound. Inside, the hall was dark.",
+      "start_ms": 230909,
+      "end_ms": 242967
+    },
+    {
+      "idx": 26,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The air was thick with the smell of dust and decay. At the far end, behind a long wooden table, sat a man. He was old, his skin like parchment, his eyes clouded with cataracts.",
+      "start_ms": 242967,
+      "end_ms": 253271
+    },
+    {
+      "idx": 27,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He wore the robes of a magistrate, though they were threadbare and stained. \"I am Kaelen Vord,\" he said. His voice was calm, steady. \"I am here to collect the Oakhaven Tithe.\" The man looked up.",
+      "start_ms": 253271,
+      "end_ms": 263592
+    },
+    {
+      "idx": 28,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He didn’t seem surprised. He seemed resigned. \"You are late.\" \"Time is relative,\" Kaelen said. \"The debt is absolute.\" The man sighed. \"I am Elder Thorne. I am the last of the council.",
+      "start_ms": 263592,
+      "end_ms": 273919
+    },
+    {
+      "idx": 29,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The others are in the ground. The children are gone. We have nothing left to give.\" Kaelen stepped into the room. Sera stayed at the door, her hand on the hilt of her knife.",
+      "start_ms": 273919,
+      "end_ms": 282944
+    },
+    {
+      "idx": 30,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"The ledger requires payment,\" Kaelen said. \"Principal and interest. Eighty-five gold pieces. Or two years of labour.\" Thorne laughed. It was a dry, rattling sound. \"Labour? There is no work here.",
+      "start_ms": 282944,
+      "end_ms": 294966
+    },
+    {
+      "idx": 31,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "No crops. No trade. We are a ghost town. You expect us to work for a debt we cannot pay?\" \"Then pay in life,\" Kaelen said. Thorne froze. He looked at Kaelen with his milky eyes. \"Life?",
+      "start_ms": 294966,
+      "end_ms": 306547
+    },
+    {
+      "idx": 32,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "You would take my life? For wheat?\" \"Not wheat,\" Kaelen said. \"Value. The wheat was consumed. The value was transferred. The debt remains.\" Thorne stood up. He was small, frail.",
+      "start_ms": 306547,
+      "end_ms": 316699
+    },
+    {
+      "idx": 33,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He leaned on a cane of twisted ash wood. \"You are a collector. I know your kind. You take what you can. But you are bound by the rules. The Charter of Amnesty. It is still valid.\" Kaelen frowned.",
+      "start_ms": 316699,
+      "end_ms": 327020
+    },
+    {
+      "idx": 34,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He reached into his satchel and pulled out the ledger. He opened it. The pages were blank, save for the entry for Oakhaven. He traced the line with his finger.",
+      "start_ms": 327020,
+      "end_ms": 335165
+    },
+    {
+      "idx": 35,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"The Charter expired in Year 310,\" Kaelen said. \"The council failed to renew the oath. The debt is overdue.\" Thorne shook his head. \"We renewed it. We renewed it every year.",
+      "start_ms": 335165,
+      "end_ms": 345130
+    },
+    {
+      "idx": 36,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The records are in the archives. Ask the scribe.\" Kaelen looked at the ledger again. There was no record of renewal. No stamp. No signature.",
+      "start_ms": 345130,
+      "end_ms": 353446
+    },
+    {
+      "idx": 37,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Just the original debt, compounded, growing heavier with every passing year. \"The ledger does not show a renewal,\" Kaelen said. \"Then the ledger is broken,\" Thorne said. \"Or you are lying.\"",
+      "start_ms": 353446,
+      "end_ms": 363651
+    },
+    {
+      "idx": 38,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen felt the Authority stir in his blood. It was angry. It wanted to enforce. It wanted to take. It didn’t care about archives or scribes or the frailty of old men. It only cared about the balance.",
+      "start_ms": 363651,
+      "end_ms": 376159
+    },
+    {
+      "idx": 39,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Authority Check: Initiated. Target: Elder Thorne. Status: Signatory. Dispute: Validity of Renewal Clause. Resolution: Default to Primary Record. Effect: Thorne’s lifespan is forfeit.",
+      "start_ms": 376159,
+      "end_ms": 388884
+    },
+    {
+      "idx": 40,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen closed his eyes. He could feel the thread of Thorne’s life. It was thin, frayed, but still intact. He could pull it. He could sever it. The debt would be settled. The ledger would be balanced.",
+      "start_ms": 388884,
+      "end_ms": 399724
+    },
+    {
+      "idx": 41,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "But he remembered Oren. He remembered the cost. \"Show me the archives,\" Kaelen said. Thorne blinked. \"The archives are in the basement. They are flooded. The water is ash. Nothing remains.\"",
+      "start_ms": 399724,
+      "end_ms": 410226
+    },
+    {
+      "idx": 42,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"Then take me to the well,\" Kaelen said. Thorne hesitated. Then he nodded. He turned and walked toward the door. Kaelen followed. Sera came up behind him, her hand still on her knife.",
+      "start_ms": 410226,
+      "end_ms": 420904
+    },
+    {
+      "idx": 43,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The well was dark. Kaelen looked down into it. The water at the bottom was black, oily. It reflected nothing. It absorbed everything. \"Look,\" Thorne said. He pointed to the surface of the water.",
+      "start_ms": 420904,
+      "end_ms": 431846
+    },
+    {
+      "idx": 44,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"There.\" Kaelen squinted. In the black water, he saw shapes. Not reflections. Memories. Images floating on the surface like leaves on a pond. He saw the council meeting.",
+      "start_ms": 431846,
+      "end_ms": 442208
+    },
+    {
+      "idx": 45,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He saw the scribe stamping the parchment. He saw the oath being read. And then he saw the fire. The archives had burned. Not in the flood. Before it.",
+      "start_ms": 442208,
+      "end_ms": 450260
+    },
+    {
+      "idx": 46,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The renewal had been attempted, but the archives had burned, and the proof had turned to ash. \"The debt is not renewed,\" Kaelen said. His voice was flat. \"The proof is gone. The debt stands.\"",
+      "start_ms": 450260,
+      "end_ms": 461103
+    },
+    {
+      "idx": 47,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Thorne slumped. He looked at the water. \"Then it is over. Take my life. It is the only thing I have left.\" Kaelen looked at the ledger. He looked at Thorne. He thought of the eighty-five gold pieces.",
+      "start_ms": 461103,
+      "end_ms": 472221
+    },
+    {
+      "idx": 48,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He thought of the two years of labour. He thought of Oren. He could take Thorne’s life. It would be easy. The Authority would do it for him.",
+      "start_ms": 472221,
+      "end_ms": 479342
+    },
+    {
+      "idx": 49,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He would feel the pulse stop, the breath cease, the debt settled. But he was tired. He was so tired of taking. \"Is there anyone else?\" Kaelen asked. Thorne looked at him. \"No. I am the last.\"",
+      "start_ms": 479342,
+      "end_ms": 490362
+    },
+    {
+      "idx": 50,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Kaelen sighed. He reached into his satchel and pulled out the Coin of the Forgotten. It was cold in his hand. It was a piece of the dead god’s foundation. It had value. Not just gold. Value.",
+      "start_ms": 490362,
+      "end_ms": 501269
+    },
+    {
+      "idx": 51,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "\"I will pay the debt,\" Kaelen said. Thorne stared at him. \"You? You are a collector. You take. You do not give.\" \"I am tired of taking,\" Kaelen said. He placed the Coin on the edge of the well.",
+      "start_ms": 501269,
+      "end_ms": 512161
+    },
+    {
+      "idx": 52,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "It sank into the ash water. It did not sink. It floated. It glowed with a faint, grey light.",
+      "start_ms": 512161,
+      "end_ms": 517853
+    },
+    {
+      "idx": 53,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Transaction: Debt Settlement. Debt: Oakhaven Tithe. Amount: 14,200 bushels of winter wheat. Payment Method: Coin of the Forgotten (Artifact). Value: Sufficient. Result: Debt extinguished.",
+      "start_ms": 517853,
+      "end_ms": 531000
+    },
+    {
+      "idx": 54,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Loot: Elder Thorne’s Gratitude (Uncommon). XP Gained: 250. Gold Lost: 1 (Coin of the Forgotten).",
+      "start_ms": 531000,
+      "end_ms": 538299
+    },
+    {
+      "idx": 55,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Thorne stared at the coin. He reached out and touched it. His hand trembled. \"What is this?\" \"A payment,\" Kaelen said. \"The debt is settled. You are free.\" Thorne looked at Kaelen.",
+      "start_ms": 538299,
+      "end_ms": 549322
+    },
+    {
+      "idx": 56,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "His eyes were clear for a moment. \"Why?\" \"Because I can,\" Kaelen said. He turned and walked away. Sera was waiting by the door. She didn’t say anything. She just watched him.",
+      "start_ms": 549322,
+      "end_ms": 559046
+    },
+    {
+      "idx": 57,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "They walked out of the town hall. The sun was setting. The ash was turning pink. The sky was bruised. Kaelen felt lighter. The Authority was quiet. The ledger was closed.",
+      "start_ms": 559046,
+      "end_ms": 568485
+    },
+    {
+      "idx": 58,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Quest Updated: The Ashen Ledger. Progress: 1 of 3 seals broken. Current Seal: The Oakhaven Tithe (Settled). Next Objective: The Iron Bridge. Location: North of Oakhaven.",
+      "start_ms": 568485,
+      "end_ms": 579860
+    },
+    {
+      "idx": 59,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Reward: Shard of Divine Foundation. Penalty: Failure to collect within 30 days results in debt accrual.",
+      "start_ms": 579860,
+      "end_ms": 586318
+    },
+    {
+      "idx": 60,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "Sera fell into step beside him. \"You gave up a coin,\" she said. \"That was worth more than the debt.\" Kaelen looked at her. \"Yes.\" \"Why?\" \"Because I want to,\" he said. Sera frowned. \"You don’t want.",
+      "start_ms": 586318,
+      "end_ms": 597698
+    },
+    {
+      "idx": 61,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "You are a collector. You are bound by the ledger.\" \"I am bound,\" Kaelen said. \"But I am not a machine.\" Sera shook her head. \"You are getting softer, Kaelen. It is dangerous.\" Kaelen didn’t answer.",
+      "start_ms": 597698,
+      "end_ms": 609181
+    },
+    {
+      "idx": 62,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "He just walked. The road stretched out before them, grey and endless. He had one seal broken. Two more to go. And he was running out of room to keep choosing who he was.",
+      "start_ms": 609181,
+      "end_ms": 618681
+    },
+    {
+      "idx": 63,
+      "speaker": "SYSTEM",
+      "kind": "system",
+      "voice_ref": "sherpa:kokoro-multi-lang-v1_0:24",
+      "text": "Status Update: Kaelen Vord hp: 110 max_hp: 110 level: 3 xp: 400 inventory: Tattered Contract Page x1, Shard of Divine Foundation x1",
+      "start_ms": 618681,
+      "end_ms": 629481
+    },
+    {
+      "idx": 64,
+      "speaker": "narrator",
+      "kind": "narrator",
+      "voice_ref": "sherpa:piper-en_GB-cori-high:0",
+      "text": "The XP threshold for Level 4 is 500. He had 100 left to go. They walked into the dark. The ash rose to meet them.",
+      "start_ms": 629481,
+      "end_ms": 637151
+    }
+  ]
+}

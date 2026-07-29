@@ -1,0 +1,30 @@
+# story-proto — Endless LitRPG watch-client protocol core
+# (design spec ~/Projects/endlesslitrpg/docs/superpowers/specs/2026-07-29-endless-litrpg-design.md
+#  §8 artifacts/manifest, §9.1 routes, §9.4 the watch app).
+#
+# Deliberately a STANDALONE crate (not a module in the firmware crate), for the
+# same reason as `tts-proto`: the firmware package's deps
+# (esp-hal/esp-radio/slint/…) don't build for the host, so a `src/net/…` module
+# could never be `cargo test`-ed. `tools/preflight.sh` auto-discovers everything
+# under `crates/`, so this is host-tested from day one with no wiring.
+#
+# The one job that matters here: parse the daemon's JSON **as it streams through
+# a 512 B window**, keeping only bounded fields and letting prose fall on the
+# floor. A chapter payload is ~18 KB (an 8.3 KB `text_md` plus segment texts up
+# to 3.6 KB EACH) and this device has 512 KB of SRAM with no PSRAM, so the
+# document is never held — not even briefly. Every parse path is bounded and
+# panic-free (same discipline as crates/scan-model's adversarial parser).
+[package]
+name = "story-proto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Pure no_std Endless LitRPG watch-client core: bounded streaming JSON scanner, chapter/segment/character models, HTTP Range framing, and 16kHz PCM offset math. Untrusted-input hardened; host-testable."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "story_proto"
+path = "src/lib.rs"
+
+[dependencies]
+heapless = "0.9"

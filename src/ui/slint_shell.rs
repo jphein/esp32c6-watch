@@ -165,6 +165,13 @@ const OVERLAYS: &[Overlay] = &[
     Overlay { state: AppState::Ping, is_open: WatchShell::get_ping_open, set_open: WatchShell::set_ping_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Voice, is_open: WatchShell::get_voice_open, set_open: WatchShell::set_voice_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Sound, is_open: WatchShell::get_mic_open, set_open: WatchShell::set_mic_open, close: OverlayClose::Flag },
+    // #story. `Flag` rather than `Cell`: the WiFi hold is edge-tracked off
+    // `app_state == Story` in the loop, so clearing the flag drops it on the very
+    // next tick with nothing to strand. Note a right-swipe cannot land *during*
+    // playback — the loop is parked in the stream by design — which is exactly why
+    // a tap stops playback (`PlaybackUi::should_stop`); that is the escape hatch,
+    // not the swipe.
+    Overlay { state: AppState::Story, is_open: WatchShell::get_story_open, set_open: WatchShell::set_story_open, close: OverlayClose::Flag },
     Overlay { state: AppState::Theme, is_open: WatchShell::get_theme_open, set_open: WatchShell::set_theme_open, close: OverlayClose::Flag },
     // Settings hub (v0.9.0): listed for the mirror/reconcile plumbing; its
     // Right-swipe never reaches this table's close arm — handle_touch routes
@@ -254,6 +261,17 @@ pub struct ShellRequests {
     /// Volume HUD / SOUND-page slider drag → 0..1 (the loop maps to 0..15,
     /// clears mute, and resets the HUD's 2s auto-dismiss).
     pub volume_changed: Cell<Option<f32>>,
+    /// Story (#story): tab tapped → page 0 list · 1 play · 2 stats · 3 character.
+    pub story_nav: Cell<Option<i32>>,
+    /// Story: a chapter tapped. Carries the CHAPTER NUMBER, not a row index, so
+    /// paging the list cannot desynchronise it from what was tapped.
+    pub story_pick: Cell<Option<i32>>,
+    /// Story: STOP tapped — ends playback at the next chunk boundary.
+    pub story_stop: Cell<bool>,
+    /// Story: DIRECTOR NOTE tapped — hand off to the push-to-talk STT path.
+    pub story_note: Cell<bool>,
+    /// Story: list paging, -1 newer / +1 older.
+    pub story_page_delta: Cell<Option<i32>>,
     /// Power menu (#48): SHUTDOWN row → the loop writes the AXP2101 poweroff
     /// bit (power.shutdown()). REBOOT reuses the `reboot` cell above.
     pub power_shutdown: Cell<bool>,
@@ -316,6 +334,14 @@ pub struct ShellUi {
     /// Notification-shade cards (#32), swapped in place by set_shade_cards
     /// (same long-lived pattern as mesh_model).
     shade_model: Rc<VecModel<NotifCard>>,
+    /// Story chapter-list rows (#story). Deliberately holds only the page the
+    /// list draws, not the whole index: #75's OOM was a DRAWN-ITEM-COUNT problem,
+    /// so paging costs a request rather than a scene full of hidden rows.
+    story_chapters: Rc<VecModel<StoryChapter>>,
+    /// Story inventory / equipment / appearance rows, all label+value pairs.
+    story_inventory: Rc<VecModel<StorySlot>>,
+    story_equipment: Rc<VecModel<StorySlot>>,
+    story_appearance: Rc<VecModel<StorySlot>>,
     /// Registry idx per visible switcher slot — maps a kill-swipe's start_y
     /// (→ slot via [`switcher_slot`]) back to the app it lands on.
     switcher_rows: heapless::Vec<i32, SWITCHER_CARDS>,
@@ -378,6 +404,10 @@ impl ShellUi {
         let wifi_model: Rc<VecModel<WifiNet>> = Rc::new(VecModel::default());
         let switcher_model: Rc<VecModel<LauncherTile>> = Rc::new(VecModel::default());
         let shade_model: Rc<VecModel<NotifCard>> = Rc::new(VecModel::default());
+        let story_chapters: Rc<VecModel<StoryChapter>> = Rc::new(VecModel::default());
+        let story_inventory: Rc<VecModel<StorySlot>> = Rc::new(VecModel::default());
+        let story_equipment: Rc<VecModel<StorySlot>> = Rc::new(VecModel::default());
+        let story_appearance: Rc<VecModel<StorySlot>> = Rc::new(VecModel::default());
         let ui = build_scene(
             &req,
             &mesh_model,
@@ -386,6 +416,10 @@ impl ShellUi {
             &wifi_model,
             &switcher_model,
             &shade_model,
+            &story_chapters,
+            &story_inventory,
+            &story_equipment,
+            &story_appearance,
         );
         // First frame under ReusedBuffer must be a full paint (the panel just
         // showed fill_screen(BLACK); the renderer has no prior frame to diff
@@ -403,6 +437,10 @@ impl ShellUi {
             wifi_model,
             switcher_model,
             shade_model,
+            story_chapters,
+            story_inventory,
+            story_equipment,
+            story_appearance,
             switcher_rows: heapless::Vec::new(),
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
@@ -524,6 +562,10 @@ impl ShellUi {
             &self.wifi_model,
             &self.switcher_model,
             &self.shade_model,
+            &self.story_chapters,
+            &self.story_inventory,
+            &self.story_equipment,
+            &self.story_appearance,
         );
         ui.set_current_page(self.saved_page);
         // A fresh scene resets the Theme global to scheme 0; restore the active
@@ -1379,6 +1421,192 @@ impl ShellUi {
         ui.set_mic_open(open);
     }
 
+    // ================= Story (#story) =================
+    // Every setter is a plain push from a `story_proto` model the loop already
+    // holds; none of them allocates beyond the SharedStrings Slint needs, and
+    // none of them holds prose (the parser never kept any).
+
+    pub fn set_story_open(&self, open: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_story_open(open);
+    }
+
+    /// 0 list · 1 play · 2 stats · 3 character.
+    pub fn set_story_page(&self, page: i32) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_story_page(page.clamp(0, 3));
+    }
+
+    pub fn story_page(&self) -> i32 {
+        self.ui.as_ref().map_or(0, |ui| ui.get_story_page())
+    }
+
+    pub fn set_story_loading(&self, loading: bool, error: &str) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_story_loading(loading);
+        ui.set_story_error(SharedString::from(error));
+    }
+
+    /// Push the visible chapter rows.
+    ///
+    /// Gated on `story` only because it names a `story_proto` type; the scene and
+    /// every other Story setter are feature-INDEPENDENT, so a default build
+    /// compiles byte-identical UI code (the same discipline the `tts` config
+    /// record follows).
+    #[cfg(feature = "story")]
+    ///
+    /// `more` is the count the retained window could not hold, so the list can
+    /// say "+N more" instead of implying it showed everything — the same
+    /// no-silent-caps rule the parser follows.
+    pub fn set_story_chapters(
+        &self,
+        rows: &[story_proto::model::ChapterRow],
+        current: u16,
+        more: u16,
+    ) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        // Only what the screen can draw — see VISIBLE_CHAPTERS.
+        let items: Vec<StoryChapter> = rows
+            .iter()
+            .take(story_proto::model::VISIBLE_CHAPTERS)
+            .map(|r| StoryChapter {
+                number: r.number as i32,
+                title: SharedString::from(r.title.as_str()),
+                duration: SharedString::from(mmss(r.duration_ms).as_str()),
+                playable: r.playable(),
+                current: r.number == current,
+            })
+            .collect();
+        let shown = items.len();
+        self.story_chapters.set_vec(items);
+        // "+N more" counts BOTH what the parse cap dropped and what this page did
+        // not show, so the number is honest about the whole remainder.
+        let unshown = rows.len().saturating_sub(shown) as u16;
+        ui.set_story_more(more.saturating_add(unshown) as i32);
+    }
+
+    /// Playback state. Called on segment change and on a coarse progress tick —
+    /// NEVER per frame: the paint has to fit inside the 48 ms DMA ring
+    /// (`net::story_play::PAINT_BUDGET_MS`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_story_playback(
+        &self,
+        title: &str,
+        speaker: &str,
+        kind: i32,
+        position_ms: u32,
+        duration_ms: u32,
+        seg_index: i32,
+        seg_count: i32,
+        playing: bool,
+    ) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_story_play_title(SharedString::from(title));
+        ui.set_story_speaker(SharedString::from(speaker));
+        ui.set_story_speaker_kind(kind);
+        ui.set_story_progress(if duration_ms == 0 {
+            0.0
+        } else {
+            (position_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
+        });
+        ui.set_story_elapsed(SharedString::from(mmss(position_ms).as_str()));
+        ui.set_story_total(SharedString::from(mmss(duration_ms).as_str()));
+        ui.set_story_seg_index(seg_index);
+        ui.set_story_seg_count(seg_count);
+        ui.set_story_playing(playing);
+    }
+
+    /// `no_manifest`: the segment index refused to drive highlighting (over the
+    /// cap, non-contiguous, or a rate this hardware cannot play).
+    /// `highlight_off`: the paint gate tripped mid-chapter to protect the audio.
+    pub fn set_story_highlight_state(&self, no_manifest: bool, highlight_off: bool) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_story_no_manifest(no_manifest);
+        ui.set_story_highlight_off(highlight_off);
+    }
+
+    /// Push the stats and character pages from one `/api/character` response.
+    #[cfg(feature = "story")]
+    ///
+    /// Absent values become an em-dash and, for HP, **suppress the bar entirely**
+    /// rather than drawing it empty: on the live ledger `hp` is null against
+    /// `max_hp` 110, and a zero-width fill would assert the protagonist is dead.
+    pub fn set_story_character(&self, c: &story_proto::model::Character) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        ui.set_story_subject(SharedString::from(c.subject.as_str()));
+        ui.set_story_level(SharedString::from(opt_num(c.level.map(u32::from)).as_str()));
+        ui.set_story_xp(SharedString::from(opt_num(c.xp).as_str()));
+        ui.set_story_gold(SharedString::from(opt_num(c.gold).as_str()));
+        ui.set_story_location(SharedString::from(
+            c.location.as_ref().map_or("—", |s| s.as_str()),
+        ));
+        ui.set_story_status(SharedString::from(
+            c.status.as_ref().map_or("", |s| s.as_str()),
+        ));
+
+        let hp_known = c.hp.is_some() && c.max_hp.is_some();
+        ui.set_story_hp_known(hp_known);
+        ui.set_story_hp_frac(c.hp_fraction().unwrap_or(0.0));
+        let mut hp: heapless::String<24> = heapless::String::new();
+        match (c.hp, c.max_hp) {
+            (Some(h), Some(m)) => {
+                let _ = story_proto::push_u32(&mut hp, h);
+                let _ = hp.push_str(" / ");
+                let _ = story_proto::push_u32(&mut hp, m);
+            }
+            // max_hp alone is still worth showing — it says the ledger knows the
+            // ceiling but not the current value, which is different from "no HP".
+            (None, Some(m)) => {
+                let _ = hp.push_str("— / ");
+                let _ = story_proto::push_u32(&mut hp, m);
+            }
+            _ => {
+                let _ = hp.push_str("—");
+            }
+        }
+        ui.set_story_hp_text(SharedString::from(hp.as_str()));
+
+        let inv: Vec<StorySlot> = c
+            .inventory
+            .iter()
+            .map(|it| {
+                let mut n: heapless::String<8> = heapless::String::new();
+                let _ = story_proto::push_u32(&mut n, it.count as u32);
+                StorySlot {
+                    label: SharedString::from(it.name.as_str()),
+                    value: SharedString::from(n.as_str()),
+                    known: true,
+                }
+            })
+            .collect();
+        self.story_inventory.set_vec(inv);
+
+        let equip: Vec<StorySlot> = story_proto::model::EQUIP_LABELS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| StorySlot {
+                label: SharedString::from(*label),
+                value: SharedString::from(c.equip_at(i).unwrap_or("")),
+                known: c.equip_at(i).is_some(),
+            })
+            .collect();
+        self.story_equipment.set_vec(equip);
+
+        let appear: Vec<StorySlot> = story_proto::model::APPEAR_LABELS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| StorySlot {
+                label: SharedString::from(*label),
+                value: SharedString::from(c.appear_at(i).unwrap_or("")),
+                known: c.appear_at(i).is_some(),
+            })
+            .collect();
+        self.story_appearance.set_vec(appear);
+
+        ui.set_story_equipped_count(c.equipped_count() as i32);
+        ui.set_story_appearance_count(c.appearance_count() as i32);
+    }
+
     /// Apply a theme scheme (0 Midnight · 1 Paper · 2 Amber · 3 Violet) to the
     /// Slint Theme global — every screen repaints. Clamped to the valid range and
     /// stored so a scene rebuild (suspend/resume) re-applies it. Called at boot
@@ -1800,6 +2028,68 @@ impl ShellUi {
     }
 }
 
+
+/// `m:ss` / `h:mm:ss` from milliseconds, without `core::fmt`.
+///
+/// Chapters run to 18 minutes today and the buffer keeps growing, so the hour
+/// case is real rather than defensive.
+fn mmss(ms: u32) -> heapless::String<12> {
+    let mut out: heapless::String<12> = heapless::String::new();
+    let total = ms / 1000;
+    let (h, m, sec) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        push_dec(&mut out, h);
+        let _ = out.push(':');
+        push_pad2(&mut out, m);
+    } else {
+        push_dec(&mut out, m);
+    }
+    let _ = out.push(':');
+    push_pad2(&mut out, sec);
+    out
+}
+
+/// A number, or an em-dash when the ledger has not proposed it yet. `None` and
+/// `Some(0)` must never render the same — see `set_story_character`.
+fn opt_num(v: Option<u32>) -> heapless::String<12> {
+    let mut out: heapless::String<12> = heapless::String::new();
+    match v {
+        Some(n) => push_dec(&mut out, n),
+        None => {
+            let _ = out.push('\u{2014}');
+        }
+    }
+    out
+}
+
+fn push_dec<const N: usize>(s: &mut heapless::String<N>, v: u32) {
+    let mut buf = [0u8; 10];
+    let mut n = 0usize;
+    let mut v = v;
+    loop {
+        if let Some(slot) = buf.get_mut(n) {
+            *slot = b'0' + (v % 10) as u8;
+        }
+        n += 1;
+        v /= 10;
+        if v == 0 || n >= buf.len() {
+            break;
+        }
+    }
+    for i in (0..n).rev() {
+        if let Some(&c) = buf.get(i) {
+            let _ = s.push(c as char);
+        }
+    }
+}
+
+fn push_pad2<const N: usize>(s: &mut heapless::String<N>, v: u32) {
+    if v < 10 {
+        let _ = s.push('0');
+    }
+    push_dec(s, v);
+}
+
 /// Build a fresh WatchShell: wire the callback→request cells, bind the mesh
 /// model, stamp the firmware version, and show it on the (shared) window.
 /// Used by `ShellUi::new` and by `resume_scene` after a suspend, so callback
@@ -1812,6 +2102,10 @@ fn build_scene(
     wifi_model: &Rc<VecModel<WifiNet>>,
     switcher_model: &Rc<VecModel<LauncherTile>>,
     shade_model: &Rc<VecModel<NotifCard>>,
+    story_chapters: &Rc<VecModel<StoryChapter>>,
+    story_inventory: &Rc<VecModel<StorySlot>>,
+    story_equipment: &Rc<VecModel<StorySlot>>,
+    story_appearance: &Rc<VecModel<StorySlot>>,
 ) -> WatchShell {
     let ui = WatchShell::new().expect("failed to create WatchShell");
     {
@@ -1821,6 +2115,33 @@ fn build_scene(
     {
         let r = req.clone();
         ui.on_wifi_tap(move || r.wifi_toggle.set(true));
+    }
+    // #story callbacks. Same Cell-request idiom as every other overlay: the
+    // callback only records intent, and the main loop acts on it where it owns
+    // the amp/codec/socket borrows.
+    {
+        let r = req.clone();
+        ui.on_story_nav(move |p| r.story_nav.set(Some(p)));
+    }
+    {
+        let r = req.clone();
+        ui.on_story_pick(move |n| r.story_pick.set(Some(n)));
+    }
+    {
+        let r = req.clone();
+        ui.on_story_stop(move || r.story_stop.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_story_note(move || r.story_note.set(true));
+    }
+    {
+        let r = req.clone();
+        ui.on_story_page_prev(move || r.story_page_delta.set(Some(-1)));
+    }
+    {
+        let r = req.clone();
+        ui.on_story_page_next(move || r.story_page_delta.set(Some(1)));
     }
     {
         let r = req.clone();
@@ -1988,6 +2309,11 @@ fn build_scene(
     ui.set_climate_cards(ModelRc::from(climate_cards.clone()));
     ui.set_mic_spectrum(ModelRc::from(spectrum_model.clone()));
     ui.set_wifi_nets(ModelRc::from(wifi_model.clone()));
+    // #story: four long-lived models, swapped in place like the rest.
+    ui.set_story_chapters(ModelRc::from(story_chapters.clone()));
+    ui.set_story_inventory(ModelRc::from(story_inventory.clone()));
+    ui.set_story_equipment(ModelRc::from(story_equipment.clone()));
+    ui.set_story_appearance(ModelRc::from(story_appearance.clone()));
     ui.set_switcher_tiles(ModelRc::from(switcher_model.clone()));
     ui.set_notif_cards(ModelRc::from(shade_model.clone()));
     // Launcher pages are built once from the app registry (single source of

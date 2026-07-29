@@ -2077,6 +2077,7 @@ dependencies = [
  "slint",
  "slint-build",
  "static_cell",
+ "story-proto",
  "trouble-host",
  "tts-proto",
  "u8g2-fonts",
@@ -5671,6 +5672,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0530892bb4fa575ee0da4b86f86c667132a94b74bb72160f58ee5a4afec74c23"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "story-proto"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
 ]
 
 [[package]]
