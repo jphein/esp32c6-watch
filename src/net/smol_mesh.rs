@@ -194,6 +194,38 @@ struct Peer {
 /// that the embedded-graphics pages module (its former home) is gone.
 pub const MESH_MAX_ROWS: usize = 7;
 
+/// Hard ceiling on tracked peers. This is a SECURITY bound, not a memory tune (#75).
+///
+/// The roster was append-only: `upsert_peer` pushed a 24 B `Peer` for every distinct
+/// source MAC and nothing in this file ever removed one. `PEER_STALE_MS` only filters
+/// the roster *reads*; it never evicted.
+///
+/// The reachability is what makes this matter. The entry price is a 7-byte ASCII
+/// prefix: the fallthrough at the end of `handle_frame` upserts on ANY frame starting
+/// with `SMOL_PREFIX`, and a malformed FAM frame upserts too. No id parse, no
+/// authentication — `ensure_unicast_peer` registers with `lmk: None, encrypt: false` —
+/// and the source MAC is attacker-chosen. So any on-channel ESP-NOW broadcaster
+/// (`MESH_CHANNEL` 6) could add 24 B per spoofed MAC without limit: ~340 entries
+/// (~8 KB) is enough for the `Vec` doubling to become one of the mid-size contiguous
+/// requests already failing on this pool, ~1,700 (~40 KB) exhausts it, and the OOM
+/// path is `Vec::push` -> panic -> reboot. A single MAC-cycling neighbour does it by
+/// accident; a hostile one does it on purpose.
+///
+/// Note the one bound that already existed and does NOT save us: `ensure_unicast_peer`
+/// only fills the *blob's* peer table, which IDF caps and whose errors we swallow. The
+/// blob side is bounded; this `Vec` was not.
+///
+/// 16 is chosen against two real ceilings, not for roundness:
+/// - ESP-IDF's `ESP_NOW_MAX_TOTAL_PEER_NUM` is 20 (`esp-wifi-sys-*/src/include.rs`).
+///   `ensure_unicast_peer` cannot register more than that with the driver, so tracking
+///   past ~20 buys nothing — we could not unicast-ACK them anyway.
+/// - It is 2x `MESH_MAX_ROWS`, so for any realistic fleet the roster never reaches the
+///   cap at all and behaviour is bit-identical to before this change.
+///
+/// Worst case the backing Vec is 16 * 24 B = 384 B, reached via three growing pushes
+/// (4 -> 8 -> 16) and then never reallocated.
+pub const MESH_MAX_PEERS: usize = 16;
+
 /// A read-only roster row for the UI: who, how long since we heard them, and
 /// how near they sound (smoothed dBm).
 #[derive(Clone, Copy, Default)]
@@ -280,6 +312,8 @@ pub struct SmolMesh {
     next_msgid: u16,
     relay_tx: RelayTx,
     last_relay_emit_ms: u64,
+    /// #75: latch so the "roster at cap" warning is printed once, not per frame.
+    roster_cap_logged: bool,
 }
 
 fn parse_id(rest: &[u8]) -> Option<u8> {
@@ -487,6 +521,7 @@ impl SmolMesh {
             next_msgid: 0,
             relay_tx: RelayTx::new(),
             last_relay_emit_ms: 0,
+            roster_cap_logged: false,
         }
     }
 
@@ -572,13 +607,52 @@ impl SmolMesh {
             }
             false
         } else {
-            self.peers.push(Peer {
+            let fresh = Peer {
                 mac,
                 id,
                 last_rx_ms: now_ms,
                 rssi_ewma_x8: rssi.map(|dbm| (dbm as i32) << 3),
-            });
-            true
+            };
+            // #75 hardening: bounded insert. Below the cap this is the old `push`.
+            if self.peers.len() < MESH_MAX_PEERS {
+                self.peers.push(fresh);
+                return true;
+            }
+
+            // At the cap. The newcomer is UNAUTHENTICATED (see `MESH_MAX_PEERS`), so it
+            // may only take a slot we already believe is DEAD — stale beyond
+            // `PEER_STALE_MS`, the same liveness notion the roster reads already use.
+            // If every slot is live we refuse the newcomer rather than displace a real
+            // peer: an attacker must not be able to evict the fleet by flooding MACs.
+            // Among dead slots prefer anonymous ones (no id ever parsed from them),
+            // then the stalest. `id` is a weak signal — a forged HELLO can claim one —
+            // but it costs nothing and it correctly prioritises evicting the junk from
+            // the `SMOL_PREFIX` fallthrough over a fleet member that went quiet.
+            let victim = self
+                .peers
+                .iter_mut()
+                .filter(|p| now_ms.saturating_sub(p.last_rx_ms) >= PEER_STALE_MS)
+                .min_by_key(|p| (p.id.is_some(), p.last_rx_ms));
+
+            // The only signal anyone will ever get that the cap is live. Latched, so a
+            // flood cannot turn it into a log storm.
+            if !self.roster_cap_logged {
+                self.roster_cap_logged = true;
+                println!(
+                    "[MESH] roster at cap {MESH_MAX_PEERS} - evicting stale / refusing live-full (possible ESP-NOW MAC flood)"
+                );
+            }
+
+            match victim {
+                Some(v) => {
+                    *v = fresh;
+                    true
+                }
+                // Cap reached and every entry still live: drop the newcomer on the
+                // floor. It is still ACKed/handled by the caller for this frame; it
+                // just does not earn a roster slot.
+                None => false,
+            }
         }
     }
 
