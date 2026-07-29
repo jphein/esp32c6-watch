@@ -1,8 +1,9 @@
 # HANDOFF — 2026-07-29 (late), esp32c6-watch
 
 **Active goal (Stop hook):** get Endless LitRPG story stably running on a watch.
-**Status: story loads, plays, and volume works mid-chapter. One MEASURED crash is
-armed and waiting on a server-side change — read §1 before touching the daemon.**
+**Status: DONE for this pass.** Story loads, plays, volume works mid-chapter, and the
+CHARACTER-page reboot found today is fixed and verified 6/6 on hardware. Equipment data
+is safe to ship from the daemon. Nothing is blocking.
 
 ---
 
@@ -68,13 +69,17 @@ condition is the `story(page3,len24)` frame staying on cap 256.
 
 | watch | firmware | notes |
 |---|---|---|
-| eldritch-lantern | lucid's `story,debug-console,story-stub-slots` arm | **re-enumerates across ttyACM\* live** — always resolve by sigil, never hardcode |
-| mythic-throne | `Molten Forge · d7cdcee` (`--features story`) | crash reference; panicked live today, see §3 |
+| eldritch-lantern | production, `PROD-story-KilnedAnvil-9c7dfe3` | banner reads gap 75,000 B; **re-enumerates across ttyACM\* live** — always resolve by sigil, never hardcode |
+| mythic-throne | `Molten Forge · d7cdcee` | the OLDER image, kept as the crash reference; panicked live today, see §3 |
 
-`main` is pushed and clean apart from lucid-story-heap's in-flight stub edits
-(`Cargo.toml`, `src/ui/slint_shell.rs`). **`watchctl deploy` now pins the ELF** to
-`scratch/flashed/<stem>-<sha12>` and flashes the snapshot — the folklore rule about
-pinning per flash is now the default behaviour.
+**`tts` is ON by default** as of `7cfa270`. Enabling the feature does not make the watch
+talk — `SpeakMode::OnDemand` is the runtime default, so it speaks only when asked.
+
+`main` is pushed and clean. **`watchctl deploy` pins the ELF** to
+`scratch/flashed/<stem>-<SigilWords>-<hash>` and flashes the snapshot — the sigil is in
+the FILENAME because a bare content hash let a crash build be mistaken for production
+within an hour of pinning being added. It also refuses images carrying a `NEVER-SHIP:`
+marker unless `--allow-never-ship` is passed.
 
 ## 3. Mythic's "always rebooting" — captured, with a mechanism
 
