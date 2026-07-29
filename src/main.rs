@@ -550,7 +550,13 @@ fn heap_span(tag: &str, since: &HeapMark) {
 #[cfg(not(feature = "heap-hooks"))]
 fn heap_span(_tag: &str, _since: &HeapMark) {}
 
-/// Largest currently-allocatable block, in bytes (0 if even 1 KB fails).
+/// Largest currently-allocatable block as `(global, main_pool_only)`, in bytes
+/// (0 for either if even 1 KB fails there).
+///
+/// `main_pool_only` is the number that matters: allocations drain the main pool
+/// first and spill to the reclaimed pool, so a healthy GLOBAL figure routinely
+/// coexists with a main pool that can no longer serve a scene-vector doubling.
+/// A watch has been observed reporting `maxblk=32768` while main held 892 B.
 ///
 /// The missing number of issue #75. Every OOM so far failed on a 3.3-16 KB request
 /// while TOTAL free read 54-66 KB, and two "fixes" were shipped and reverted
@@ -564,22 +570,47 @@ fn heap_span(_tag: &str, _since: &HeapMark) {}
 ///
 /// Cost: at most 8 alloc/free pairs once per `BEAT_SECS`. It runs on the UI loop,
 /// so keep it at beat cadence, never per-iteration.
-fn largest_free_block() -> usize {
-    // Sized around the observed failures: 3584, 4096, 4480, 16384.
+fn largest_free_block() -> (usize, usize) {
+    // Sized around the observed failures: 3584, 4096, 4480, 7168, 16384.
     const SIZES: [usize; 8] = [32768, 16384, 8192, 6144, 4096, 3584, 2048, 1024];
+    let region_used = |i: usize| -> usize {
+        esp_alloc::HEAP
+            .stats()
+            .region_stats[i]
+            .as_ref()
+            .map(|r| r.used)
+            .unwrap_or(0)
+    };
+    let mut global = 0usize;
+    let mut main_only = 0usize;
     for &sz in SIZES.iter() {
-        // SAFETY: size is non-zero and align 4 is valid for it; on success the
-        // block is freed with the identical layout before returning.
+        // SAFETY: size non-zero, align 4 valid for it; freed with the identical
+        // layout before continuing.
         unsafe {
             let layout = core::alloc::Layout::from_size_align_unchecked(sz, 4);
+            let before = region_used(0);
             let p = alloc::alloc::alloc(layout);
             if !p.is_null() {
+                // WHICH POOL SERVED IT, without hardcoding an address. `alloc_caps`
+                // walks region 0 then region 1 and falls through only on failure, so
+                // a rise in region 0's `used` means MAIN served this size. An
+                // address-range test would work too but would rot on any layout
+                // change; a `used` delta cannot.
+                let from_main = region_used(0) > before;
                 alloc::alloc::dealloc(p, layout);
-                return sz;
+                if global == 0 {
+                    global = sz;
+                }
+                if from_main && main_only == 0 {
+                    main_only = sz;
+                }
+                if main_only != 0 {
+                    break; // largest main-servable size found; nothing smaller matters
+                }
             }
         }
     }
-    0
+    (global, main_only)
 }
 
 /// Result of a [`harvest_free`] sweep.
@@ -1924,6 +1955,11 @@ async fn main(_spawner: Spawner) -> ! {
     // Sampling every iteration and reporting the floor is what tells us how
     // close an interaction actually came to the OOM that panicked at 7168 B.
     let mut heap_low: usize = usize::MAX;
+    // Per-window floor of the MAIN pool specifically. Floor-invariance across a long
+    // window is the argument that settled "leak vs capacity high-water" for total
+    // heap; per-pool it is strictly more informative, because main is the pool that
+    // actually has to serve the fatal allocations.
+    let mut main_low: usize = usize::MAX;
     /// Latch for the main-pool danger warning (#75) — see the beat block below.
     let mut main_pool_warned = false;
     // Time-sync provenance for the DIAG record (tsrc/tage fields).
@@ -2356,6 +2392,17 @@ async fn main(_spawner: Spawner) -> ! {
         if heap_now < heap_low {
             heap_low = heap_now;
         }
+        {
+            let mf = esp_alloc::HEAP
+                .stats()
+                .region_stats[0]
+                .as_ref()
+                .map(|r| r.free)
+                .unwrap_or(0);
+            if mf < main_low {
+                main_low = mf;
+            }
+        }
         if now >= next_beat {
             // Per-region split + largest allocatable block (#75). TOTAL free is
             // not the number that decides whether an allocation succeeds: a 3,584 B
@@ -2364,7 +2411,12 @@ async fn main(_spawner: Spawner) -> ! {
             // that big. `maxblk` is the only field that can distinguish "out of
             // memory" from "out of contiguous memory" — the ambiguity that got two
             // wrong fixes shipped.
+            // Snapshot BEFORE probing, so main=/recl= are pre-probe values. (Audited:
+            // this particular probe allocs and frees with an identical layout, so a
+            // `free` reading is immune to the ordering either way — but a future
+            // largest-hole reading would NOT be, so keep the order deliberate.)
             let hs = esp_alloc::HEAP.stats();
+            let (mb_global, mb_main) = largest_free_block();
             let region_free = |i: usize| {
                 hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0)
             };
@@ -2376,7 +2428,7 @@ async fn main(_spawner: Spawner) -> ! {
                 heap_low,
                 region_free(0),
                 region_free(1),
-                largest_free_block(),
+                mb_global,
             );
             // Pooled scene-vector capacities (#75). The vector that GROWS is the one
             // whose doubling can fail, and capacity is the only unambiguous way to
@@ -2384,7 +2436,18 @@ async fn main(_spawner: Spawner) -> ! {
             // count identifies neither, and `RawVec::grow_one` is foldable across
             // same-size types so an ELF symbol identifies neither either.
             let (ci, ct, cr, cs) = slint::platform::software_renderer::pool_capacities();
-            println!("[POOL] items={ci} tex={ct} rr={cr} state={cs}");
+            // `next` is the size of the NEXT doubling this UI would ask for — the
+            // honest danger threshold, which is not a constant: it tracks the live
+            // pool high-water, so it rises the first time a heavier screen is drawn.
+            // (`textures` is 28 B/elem, `items` 16 B, `rounded_rectangles` 26 B.)
+            let next = core::cmp::max(
+                core::cmp::max((ct as usize) * 28, (ci as usize) * 16),
+                (cr as usize) * 26,
+            ) * 2;
+            println!(
+                "[POOL] items={ci} tex={ct} rr={cr} state={cs} next={next} \
+                 main_low={main_low} maxblk_main={mb_main}"
+            );
             // MAIN-POOL DANGER LINE (#75). `maxblk` probes the GLOBAL allocator, so it
             // happily reports a 32 KB hole in the RECLAIMED pool while the main pool
             // is down to hundreds of bytes — it cannot express the condition that
@@ -2398,8 +2461,14 @@ async fn main(_spawner: Spawner) -> ! {
             // falls through into the reclaimed pool and one glyph-dense frame can take
             // its largest hole.
             //
-            // Latched: this is a standing condition, not an event, and a per-beat
-            // repeat would bury the log it is meant to make visible.
+            // NECESSARY, NOT SUFFICIENT — and this is the important caveat. `free` is
+            // a SUM of hole sizes, so main can hold 20 KB in 500 B crumbs and this
+            // stays silent. It would NOT have fired for the recorded failure of a
+            // 3,584 B request at 54,400 B free. `maxblk_main` on the [POOL] line is
+            // the fragmentation-aware companion; this is the cheap standing check.
+            //
+            // Latched: a standing condition, not an event; a per-beat repeat would
+            // bury the log it exists to make visible.
             if region_free(0) < MAIN_POOL_DANGER_B && !main_pool_warned {
                 main_pool_warned = true;
                 println!(
@@ -2411,6 +2480,7 @@ async fn main(_spawner: Spawner) -> ! {
             }
             next_beat = now + Duration::from_secs(BEAT_SECS);
             heap_low = heap_now; // per-window floor, not lifetime
+            main_low = region_free(0);
         }
 
         // === Net snapshot (#53) ===
