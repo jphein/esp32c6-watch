@@ -6,10 +6,29 @@ armed and waiting on a server-side change — read §1 before touching the daemo
 
 ---
 
-## 1. ⛔ DO NOT SHIP EQUIPMENT DATA FROM THE DAEMON YET
+## 1. ✅ RESOLVED — equipment data is safe to ship
 
-**Measured, 2/2 trials on real hardware:** with all 17 equipment/appearance slots
-populated, **opening Story's CHARACTER page reboots the watch.**
+**Fixed and verified 6/6 on hardware (3 warm, 3 cold): the case that rebooted 10/10 now
+survives, and `tex` holds at 256 in every post-tap reading — the 512 rung is never even
+requested.** `10aaf1a` (luna's windowed CHAR page) took `story(page3,len24)` from
+436 items / 429 textures to **230 / 220**, under the 256 ceiling, so the 14,336 B
+contiguous allocation that failed is no longer attempted. The CHAR tap now **releases**
+~7.4 KB (net −7,583 / −7,136 / −7,578 B) where it used to consume ~10.7 KB.
+
+Verified on `WSIGIL:Forged Smithy|4e98119|v0.12.1` carrying `story-stub-slots`, which
+forces all 17 slots populated — i.e. the exact state the daemon will create. That image
+has **416 B less stack** than the one that crashed, so it passed under more pressure than
+the failing config had.
+
+Protected from regression host-side: `tools/lunameter/measure.sh` fails any frame over
+256 textures, with no exemptions (`known_over` empty, cap 0). Currently 220/256.
+
+**The history below is kept because the mechanism is the reusable part.**
+
+### 1a. What the crash was
+
+**Measured, 10/10 trials on real hardware:** with all 17 equipment/appearance slots
+populated, **opening Story's CHARACTER page rebooted the watch.**
 
     story-p0   up=63s/65s   items 256  tex 256   reclMIN 23,748   app=Story
     story-p3   up=17s/18s   items 128  tex  64   reclMIN 65,536   app=Watchface
