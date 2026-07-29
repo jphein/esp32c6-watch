@@ -193,11 +193,42 @@ fn main() {
     //     rows were restructured in 15c3bad to fit a BUILD row by merging the chip
     //     and panel rows. Tightest layout in the tree + rows just moved + never
     //     measured is the same combination that hid the story character page.
+    // Setting `current-page` only sets the animation TARGET. Slint's animation
+    // clock is a STORED GLOBAL TICK (`AnimationDriver::global_instant`), not the
+    // platform clock, and it is advanced only by
+    // `slint::platform::update_timers_and_animations()` — which this harness never
+    // called. So every `animate` in the tree sat frozen at its start value, the
+    // pager's `x` never moved, and all five pages measured a bit-identical 92/62:
+    // page 0's numbers, five times.
+    //
+    // BOTH halves below are required and neither works alone. One tick call lands
+    // at ~t0 (animation progress ~0). A sleep alone changes nothing, because
+    // nothing reads the wall clock at render time — that asymmetry is exactly what
+    // distinguishes "the clock is never advanced" from "we raced a 260 ms window".
+    // Populate the rows FIRST. On the first run of this loop the pager frames
+    // executed before section 4's value assignments, so six of the SYSTEM page's
+    // seven rows rendered "--" and the page measured a lower bound — precisely the
+    // placeholder-content trap that had just been found on the About rows, walked
+    // straight into one section higher up. Placeholder content is not a
+    // measurement; the gap between "--" and a real value is unbounded.
+    ui.set_sigil_text("eldritch-lantern".into());
+    ui.set_fw_text("v0.12.1 \u{b7} d7cdcee".into());
+    ui.set_build_text("Smoldering Ironheart".into());
+    ui.set_heap_text("73620 B free".into());
+    ui.set_uptime_text("3d 14h 22m".into());
+    ui.set_battery_text("78 % \u{b7} 4012 mV".into());
+    let settle = || {
+        slint::platform::update_timers_and_animations(); // start the animation at t0
+        std::thread::sleep(std::time::Duration::from_millis(300)); // > the 260 ms
+        slint::platform::update_timers_and_animations(); // tick to t0+300 -> done
+    };
     for p in 0..5 {
         ui.set_current_page(p);
+        settle();
         frame(&format!("pager(page{p})"), &mut sink);
     }
     ui.set_current_page(0);
+    settle();
 
     // 4. Full Settings sweep — every page, every sub-view, worst-case content.
     ui.set_sigil_text("EMBER-7".into());

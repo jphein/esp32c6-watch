@@ -15,11 +15,20 @@ export component SystemPage {
 
     PageTitle { title: "SYSTEM"; }
 
+    // Rows lifted and tightened so the last one clears the shell's page-dot
+    // indicator. At y=120 with 6 px spacing the seventh row spanned 444-492 px and
+    // its value text centred at ~468, landing squarely in the dots' band (they end
+    // at y473) — "78 % - 4012 mV" rendered THROUGH the dots. Visible on shipped
+    // firmware and invisible to every measurement, because item counts cannot see
+    // overlap; it took rendering the page to a PPM to find it.
+    //
+    // 108 + 7*48 + 6*2 = 456, so the last row now centres at ~432 with 30 px of
+    // clearance, and the title above still has 18 px.
     VerticalLayout {
         x: (parent.width - 330px) / 2;
-        y: 120px;
+        y: 108px;
         width: 330px;
-        spacing: 6px;
+        spacing: 2px;
         StatRow { label: "CHIP"; value: root.chip-text; }
         StatRow { label: "BUILD"; value: root.build-text; value-color: Theme.accent; }
         StatRow { label: "FIRMWARE"; value: root.fw-text; }
