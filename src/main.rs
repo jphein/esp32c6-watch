@@ -464,6 +464,38 @@ fn log_heap(tag: &str) {
     );
 }
 
+/// Largest currently-allocatable block, in bytes (0 if even 1 KB fails).
+///
+/// The missing number of issue #75. Every OOM so far failed on a 3.3-16 KB request
+/// while TOTAL free read 54-66 KB, and two "fixes" were shipped and reverted
+/// because nobody could see whether a block of the needed SIZE existed at all.
+/// Total-free cannot answer that; neither can per-region free.
+///
+/// Probes descending sizes and returns the first that succeeds, freeing it
+/// immediately. `alloc::alloc::alloc` is the right primitive here: it returns NULL
+/// on failure rather than calling `handle_alloc_error`, so unlike `Vec`/`Box` it
+/// can ask "would this fit?" without panicking the watch we are measuring.
+///
+/// Cost: at most 8 alloc/free pairs once per `BEAT_SECS`. It runs on the UI loop,
+/// so keep it at beat cadence, never per-iteration.
+fn largest_free_block() -> usize {
+    // Sized around the observed failures: 3584, 4096, 4480, 16384.
+    const SIZES: [usize; 8] = [32768, 16384, 8192, 6144, 4096, 3584, 2048, 1024];
+    for &sz in SIZES.iter() {
+        // SAFETY: size is non-zero and align 4 is valid for it; on success the
+        // block is freed with the identical layout before returning.
+        unsafe {
+            let layout = core::alloc::Layout::from_size_align_unchecked(sz, 4);
+            let p = alloc::alloc::alloc(layout);
+            if !p.is_null() {
+                alloc::alloc::dealloc(p, layout);
+                return sz;
+            }
+        }
+    }
+    0
+}
+
 /// CFG key `R` boot debounce (reference main.rs REBOOT_DEBOUNCE_MS): within
 /// this window a retained/re-armed reboot command is consumed but ignored,
 /// so a stale `R` can never reboot-loop the watch.
@@ -2048,12 +2080,26 @@ async fn main(_spawner: Spawner) -> ! {
             heap_low = heap_now;
         }
         if now >= next_beat {
+            // Per-region split + largest allocatable block (#75). TOTAL free is
+            // not the number that decides whether an allocation succeeds: a 3,584 B
+            // request failed at 54,400 B free, and `alloc_caps` falls through to
+            // the reclaimed pool, so that failure means NEITHER pool held a hole
+            // that big. `maxblk` is the only field that can distinguish "out of
+            // memory" from "out of contiguous memory" — the ambiguity that got two
+            // wrong fixes shipped.
+            let hs = esp_alloc::HEAP.stats();
+            let region_free = |i: usize| {
+                hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0)
+            };
             println!(
-                "[LOOP] beat={} up={}s heap={} low={}",
+                "[LOOP] beat={} up={}s heap={} low={} main={} recl={} maxblk={}",
                 loop_beats,
                 now.as_secs(),
                 heap_now,
-                heap_low
+                heap_low,
+                region_free(0),
+                region_free(1),
+                largest_free_block(),
             );
             next_beat = now + Duration::from_secs(BEAT_SECS);
             heap_low = heap_now; // per-window floor, not lifetime
