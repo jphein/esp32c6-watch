@@ -356,12 +356,28 @@ export component WatchShell inherits Window {
 
     // Still excluded: `volume-overlay-open` — it is a 320x132 HUD card, not a
     // full-screen surface, so the watchface around it is genuinely visible (its
-    // own cost is only ~18 of the frame's 110 items); `ping-pulse-open` — a ~4 s
-    // bloom that is MEANT to read over whatever you were doing; and
-    // `shade-open` / `switcher-open`, which paint the same 95 %-opaque
-    // `Theme.scrim` as the launcher and so would be a visible (if tiny) change —
-    // measured in tools/lunameter, JP's call, not ours.
-    property <bool> covered: root.covered-invisibly;
+    // own cost is only ~18 of the frame's 110 items); and `ping-pulse-open` — a
+    // ~4 s bloom that is MEANT to read over whatever you were doing.
+
+    // The notification shade and the app switcher paint the SAME 95 %-opaque
+    // `Theme.scrim` the launcher does, so "translucent by design" was never a real
+    // distinction between them and the launcher — thanks to the audit that caught
+    // that hand-wave in 400a251. The honest difference is only that JP looked at
+    // the launcher's ~5 % ghost and chose to lose it. These two are the same trade
+    // and the same collision: their own eyebrow + title sit exactly where the
+    // shell's radio dots, battery pill and date pill ghost through (see the
+    // rendered comparison — "NOTIFICATIONS" arrives with a WIFI label and 78 %
+    // sitting inside it). Measured:
+    //
+    //   shade,    4 cards   264 items · 207 glyphs  ->  173 · 145   (8192 -> 4096 B)
+    //   switcher, 4 cards   210 items · 155 glyphs  ->  119 ·  93   (4096 -> 2048 B)
+    //
+    // The shade is the biggest single scene in the UI and this is what takes it off
+    // the 512-item rung. Kept on its own line, and on its own commit, so the pair
+    // can be dropped in ONE edit if JP wants their ghost back — without disturbing
+    // the pixel-identical culls above.
+    property <bool> covered: root.covered-invisibly
+        || root.shade-open || root.switcher-open;
 
     // ---- RULE, learned the hard way (0685985) ----------------------------------
     // NEVER gate an element on `covered` if that element can only become visible
