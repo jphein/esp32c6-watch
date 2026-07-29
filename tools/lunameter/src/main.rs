@@ -1,0 +1,298 @@
+// lunameter — renders the REAL WatchShell .slint tree through the REAL vendored
+// Slint software renderer and prints, per screen, the per-frame scene-vector
+// lengths that esp-alloc has to satisfy on the watch. See README.md for the cost
+// model and for why these counts are the #75 story.
+//
+// Host-only. Run via tools/lunameter/measure.sh (which stages the instrumented
+// renderer first). Never linked into the firmware.
+
+use slint::platform::software_renderer::{
+    LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
+};
+use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
+use std::cell::Cell;
+use std::rc::Rc;
+
+slint::include_modules!();
+
+const W: usize = 410;
+const H: usize = 502;
+
+struct HostPlatform {
+    window: Rc<MinimalSoftwareWindow>,
+    start: std::time::Instant,
+}
+
+impl Platform for HostPlatform {
+    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+        Ok(self.window.clone())
+    }
+    fn duration_since_start(&self) -> core::time::Duration {
+        self.start.elapsed()
+    }
+}
+
+struct Sink {
+    buf: Vec<Rgb565Pixel>,
+}
+
+impl LineBufferProvider for &mut Sink {
+    type TargetPixel = Rgb565Pixel;
+    fn process_line(
+        &mut self,
+        _line: usize,
+        range: core::ops::Range<usize>,
+        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
+    ) {
+        let base = _line * W;
+        render_fn(&mut self.buf[base + range.start..base + range.end]);
+    }
+}
+
+// Mirror of src/apps/registry.rs REGISTRY (name, icon_id, accent, section)
+// and src/ui/slint_shell.rs::build_launcher_pages (page-major, 9 slots/page).
+const REGISTRY: &[(&str, i32, u32, u8)] = &[
+    ("Snake", 0, 0x35e0b0, 1),
+    ("World Snake", 1, 0x00ff80, 1),
+    ("2048", 2, 0xf0d000, 1),
+    ("Tetris", 3, 0x00d0f0, 1),
+    ("Flappy Bird", 4, 0xffffff, 1),
+    ("Maze (Tilt)", 5, 0x8090ff, 1),
+    ("Settings", 6, 0xc0ffc0, 2),
+    ("WLED", 9, 0xffd166, 2),
+    ("Hunt", 10, 0xff7a3d, 1),
+    ("Energy", 11, 0x35e0b0, 2),
+    ("Climate", 12, 0xff9d5c, 2),
+    ("Voice", 7, 0xa78bfa, 0),
+    ("Sound", 8, 0x4fd6ff, 0),
+    ("Theme", 13, 0xa78bfa, 2),
+    ("Lights", 14, 0xffb454, 2),
+    ("Ping", 15, 0xffd166, 2),
+];
+const SECTIONS: [(u8, &str); 3] = [(0, "AUDIO"), (1, "GAMES"), (2, "SYSTEM")];
+
+fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<slint::SharedString>) {
+    let mut tiles = Vec::new();
+    let mut titles = Vec::new();
+    for (sec, label) in SECTIONS {
+        let apps: Vec<(usize, &(&str, i32, u32, u8))> =
+            REGISTRY.iter().enumerate().filter(|(_, d)| d.3 == sec).collect();
+        for chunk in apps.chunks(9) {
+            titles.push(label.into());
+            for (i, d) in chunk {
+                tiles.push(LauncherTile {
+                    name: d.0.into(),
+                    accent: slint::Color::from_rgb_u8(
+                        (d.2 >> 16) as u8,
+                        (d.2 >> 8) as u8,
+                        d.2 as u8,
+                    ),
+                    icon_id: d.1,
+                    idx: *i as i32,
+                    present: true,
+                });
+            }
+            for _ in chunk.len()..9 {
+                tiles.push(LauncherTile {
+                    name: "".into(),
+                    accent: slint::Color::from_rgb_u8(0, 0, 0),
+                    icon_id: 0,
+                    idx: 0,
+                    present: false,
+                });
+            }
+        }
+    }
+    (tiles, titles)
+}
+
+fn dump(tag: &str, buf: &[Rgb565Pixel]) {
+    let dir = std::env::var("LUNAMETER_OUT").unwrap_or_else(|_| ".".into());
+    let mut out = Vec::with_capacity(W * H * 3 + 32);
+    out.extend_from_slice(format!("P6\n{W} {H}\n255\n").as_bytes());
+    for px in buf {
+        let v = px.0;
+        let r = ((v >> 11) & 0x1f) as u32;
+        let g = ((v >> 5) & 0x3f) as u32;
+        let b = (v & 0x1f) as u32;
+        // 5/6/5 -> 8/8/8 with bit replication (what the panel shows)
+        out.push(((r << 3) | (r >> 2)) as u8);
+        out.push(((g << 2) | (g >> 4)) as u8);
+        out.push(((b << 3) | (b >> 2)) as u8);
+    }
+    std::fs::write(format!("{dir}/{tag}.ppm"), out).unwrap();
+}
+
+fn main() {
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    window.set_size(slint::PhysicalSize::new(W as u32, H as u32));
+    slint::platform::set_platform(Box::new(HostPlatform {
+        window: window.clone(),
+        start: std::time::Instant::now(),
+    }))
+    .unwrap();
+
+    let ui = WatchShell::new().unwrap();
+
+    // A realistic, populated watchface — the state the launcher opens over.
+    ui.set_time_text("10:42".into());
+    ui.set_seconds_text("07".into());
+    ui.set_date_text("WED 29 JUL".into());
+    ui.set_minute_progress(0.42);
+    ui.set_steps(4820);
+    ui.set_weather_text("21\u{b0}C CLEAR".into());
+    ui.set_cpu_text("160 MHz".into());
+    ui.set_battery_percent(78);
+    ui.set_wifi_on(true);
+    ui.set_mesh_peers(2);
+    ui.set_fam_known(true);
+    ui.set_fam_holding(true);
+    ui.set_fam_stage(2);
+
+    let (tiles, titles) = build_launcher_pages();
+    let page_count = titles.len() as i32;
+    ui.set_launcher_page_count(page_count);
+    ui.set_launcher_titles(slint::ModelRc::from(Rc::new(slint::VecModel::from(titles))));
+    ui.set_launcher_tiles(slint::ModelRc::from(Rc::new(slint::VecModel::from(tiles))));
+
+    ui.show().unwrap();
+
+    let mut sink = Sink { buf: vec![Rgb565Pixel(0); W * H] };
+
+    let mut frame = |label: &str, sink: &mut Sink| {
+        // Force a full-screen dirty region so every measurement is the
+        // worst case (== what an overlay open/page flip actually costs).
+        window.request_redraw();
+        eprintln!("--- FRAME {label} ---");
+        sink.buf.fill(Rgb565Pixel(0));
+        window.draw_if_needed(|r| {
+            r.render_by_line(&mut *sink);
+        });
+        dump(label, &sink.buf);
+    };
+
+    // 1. Watchface only, launcher closed.
+    ui.set_launcher_open(false);
+    frame("watchface(page0,closed)", &mut sink);
+
+    // 2. Launcher open, each section page.
+    ui.set_launcher_open(true);
+    for p in 0..page_count {
+        ui.set_launcher_page(p);
+        frame(&format!("launcher(page{p})"), &mut sink);
+    }
+    ui.set_launcher_open(false);
+
+    // 3. Re-show regression: closing the launcher must restore the watchface
+    //    byte-for-byte (the `visible` gate is the only thing that moved).
+    frame("watchface(reshow)", &mut sink);
+
+    // 4. Full Settings sweep — every page, every sub-view, worst-case content.
+    ui.set_sigil_text("EMBER-7".into());
+    ui.set_fw_text("v0.12.1".into());
+    ui.set_node_id(7);
+    ui.set_net_current("realm-roam-5g".into());
+    ui.set_net_status(2);
+    ui.set_ota_status("up to date".into());
+    ui.set_volume_level(11);
+    ui.set_mic_gain_db(0);
+    ui.set_settings_open(true);
+    for p in 0..6 {
+        ui.set_settings_page(p);
+        frame(&format!("settings(page{p})"), &mut sink);
+    }
+    // page 5 worst case: the longest ButtonAction label on all four slots
+    // (config.rs: "Power menu" / "Read aloud" are the 10-char maxima).
+    ui.set_settings_page(5);
+    ui.set_boot_short_action("Power menu".into());
+    ui.set_boot_long_action("Read aloud".into());
+    ui.set_pwron_short_action("Power menu".into());
+    ui.set_pwron_long_action("Read aloud".into());
+    frame("settings(page5-worst)", &mut sink);
+    // page 0 worst case: MUTED readout (5 glyphs, not 2) + max gain (+18 dB)
+    ui.set_settings_page(0);
+    ui.set_volume_muted(true);
+    ui.set_mic_gain_db(18);
+    frame("settings(page0-worst)", &mut sink);
+    ui.set_volume_muted(false);
+    ui.set_mic_gain_db(0);
+
+    // NETWORK sub-views: scan picker, then the keyboard.
+    let nets: Vec<WifiNet> = [
+        ("realm-roam-5g", 4, true), ("realm-iot", 3, true), ("realm-guest", 3, false),
+        ("Hein-Family", 2, true), ("XFINITY-2G4", 2, true), ("SpectrumSetup-9f", 1, true),
+    ].iter().map(|(s,b,sec)| WifiNet { ssid: (*s).into(), bars: *b, secured: *sec }).collect();
+    ui.set_wifi_nets(slint::ModelRc::from(Rc::new(slint::VecModel::from(nets))));
+    ui.set_settings_page(3);
+    ui.set_net_view(1);
+    frame("settings(net-picker)", &mut sink);
+    ui.set_kb_title("PASSWORD".into());
+    ui.set_kb_context("realm-roam-5g".into());
+    ui.set_kb_text("\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".into());
+    ui.set_net_view(2);
+    frame("settings(keyboard)", &mut sink);
+    ui.set_net_view(0);
+    ui.set_settings_open(false);
+
+    // 5. Theme picker.
+    ui.set_theme_open(true);
+    frame("theme-overlay", &mut sink);
+    ui.set_theme_open(false);
+
+    // 6. The three surfaces `covered` deliberately skips, plus AOD. All four
+    //    stack on top of the watchface's 92 items / 62 glyphs / 27 rounded.
+    let cards: Vec<NotifCard> = [
+        (3, "WiFi", "Joined realm-roam-5g", "2m"),
+        (1, "Battery", "Charging \u{2014} 78 %", "11m"),
+        (4, "Home Assistant", "Garage door left open", "34m"),
+        (2, "Update", "v0.12.1 downloaded, tap to apply", "1h"),
+    ].iter().map(|(src, t, b, a)| NotifCard {
+        source: *src, title: (*t).into(), body: (*b).into(), age: (*a).into(), present: true,
+    }).collect();
+    ui.set_notif_cards(slint::ModelRc::from(Rc::new(slint::VecModel::from(cards))));
+    ui.set_notif_total(7);
+    ui.set_shade_open(true);
+    frame("shade(4 cards)", &mut sink);
+    ui.set_shade_open(false);
+
+    let sw: Vec<LauncherTile> = [(0usize, "Snake"), (3, "Tetris"), (4, "Flappy Bird"), (5, "Maze (Tilt)")]
+        .iter().map(|(i, n)| LauncherTile {
+            name: (*n).into(),
+            accent: slint::Color::from_rgb_u8(0x35, 0xe0, 0xb0),
+            icon_id: REGISTRY[*i].1, idx: *i as i32, present: true,
+        }).collect();
+    ui.set_switcher_tiles(slint::ModelRc::from(Rc::new(slint::VecModel::from(sw))));
+    ui.set_switcher_count(4);
+    ui.set_switcher_open(true);
+    frame("switcher(4 cards)", &mut sink);
+    ui.set_switcher_open(false);
+
+    ui.set_volume_overlay_open(true);
+    frame("volume-hud", &mut sink);
+    ui.set_volume_overlay_open(false);
+
+    ui.set_aod(true);
+    frame("aod", &mut sink);
+    ui.set_aod(false);
+
+    // 7. INPUT PROBE — does `visible: false` cull hit-testing as well as draw?
+    //    My 400a251 comment asserted it does; verify rather than assert. The
+    //    WIFI RadioDot's hit area is (22,8)-(100,72); tap its centre.
+    let hit = Rc::new(Cell::new(false));
+    let h = hit.clone();
+    ui.on_wifi_tap(move || h.set(true));
+    let mut probe = |label: &str, ui: &WatchShell| {
+        hit.set(false);
+        let pos = slint::LogicalPosition::new(61.0, 40.0);
+        window.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left });
+        window.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Left });
+        window.dispatch_event(WindowEvent::PointerExited);
+        let _ = ui;
+        eprintln!("LUNAMETER probe {label}: wifi-tap fired = {}", hit.get());
+    };
+    ui.set_launcher_open(false);
+    probe("chrome exposed (launcher closed)", &ui);
+    ui.set_launcher_open(true);
+    probe("chrome visible:false (launcher open)", &ui);
+    ui.set_launcher_open(false);
+}

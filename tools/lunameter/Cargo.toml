@@ -1,0 +1,31 @@
+# Host-only measurement harness — see README.md. Deliberately NOT a member of
+# the firmware workspace (own `[workspace]` table below), so `cargo build` at the
+# repo root never sees it and the riscv target config never applies to it.
+[package]
+name = "lunameter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Same feature set the firmware uses (Cargo.toml), so the glyph/scene code paths
+# under measurement are the ones that actually ship.
+slint = { version = "1.17.1", default-features = false, features = [
+    "compat-1-2",
+    "unsafe-single-threaded",
+    "libm",
+    "renderer-software",
+] }
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+# measure.sh copies this harness to a staging dir OUTSIDE the repo (the repo's
+# .cargo/config.toml pins the riscv target for everything beneath it, and this is
+# a host build) and stages an instrumented renderer next to the copied manifest.
+# There is exactly ONE renderer copy in the repo: crates/i-slint-renderer-software.
+# Run measure.sh — plain `cargo run` here will not work.
+[patch.crates-io]
+i-slint-renderer-software = { path = "renderer-fork" }
+
+[workspace]
