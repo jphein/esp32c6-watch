@@ -1036,12 +1036,25 @@ def cmd_deploy(args) -> int:
         return EXIT_NOTFOUND
 
     never = refuse_if_never_ship(image)
-    if never:
+    if never and not getattr(args, "allow_never_ship", False):
         say(f"watchctl: REFUSING to flash — this image declares '{never}'.")
         say("  a never-ship build makes the watch render the worst frame in the UI "
             "permanently; it exists to be measured, not worn")
+        say("  if you are deliberately measuring it, pass --allow-never-ship")
         emit({"error": "never-ship", "marker": never})
         return EXIT_GATE
+    if never:
+        # The override exists so the gate can be OBEYED rather than deleted. The only
+        # way to confirm the CHAR-page fix on hardware is to flash a stub build and
+        # watch it NOT reboot — so an absolute refusal blocks the one test that
+        # validates the fix, and the predictable response to that is someone removing
+        # the check. A gate with no legitimate escape hatch becomes a gate that isn't
+        # there. Loud, explicit, per-invocation, and never a config default.
+        say("!" * 60)
+        say(f"watchctl: never-ship override ACTIVE — flashing '{never}'")
+        say("  this watch will render the worst frame in the UI. Reflash a production")
+        say("  image before wearing it.")
+        say("!" * 60)
     pinned = pin_image(image)
     if pinned != image:
         say(f"pinned -> {pinned}  (flashing the snapshot, not the shared path)")
@@ -1390,6 +1403,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "BOOTING slot + boot verify")
     p.add_argument("watch")
     p.add_argument("image", help="ELF (auto save-image) or app .bin")
+    p.add_argument("--allow-never-ship", action="store_true",
+                   help="flash an image carrying a NEVER-SHIP marker (test builds "
+                        "only; the watch will render a known-bad frame)")
     p.add_argument("--slot", default="auto",
                    help="auto (detect booting slot) | 0 | 1 | ota_0 | ota_1 "
                         "| 0x10000 | 0x410000")
