@@ -852,7 +852,20 @@ const AOD_LIGHT_SLEEP: bool = false;
 /// (#75). Set to the largest routine allocation: `SceneVectors::textures` doubling to
 /// capacity 256 is 7,168 B. Bracketed on hardware — the watch that panics sits at
 /// 892-6,588 B, the watch that does not holds >= 9,224 B.
+/// SUPERSEDED — see the POOL-WARN site. `maxblk_main = 0` is the measured steady state
+/// (12/12 arms incl. fresh-boot idle), so a main-pool threshold is permanently tripped
+/// and carries no information. Kept only because the constant is referenced in issue
+/// history; the live alarm uses `RECLAIMED_DANGER_B`.
+#[allow(dead_code)]
 const MAIN_POOL_DANGER_B: usize = 8 * 1024;
+
+/// Reclaimed-pool danger line. Reclaimed is the ENTIRE safety margin for every
+/// allocation, because main cannot serve >= 16 B. Set to the largest routine contiguous
+/// request in the UI: the scene texture vector doubling 256 -> 512 at 512 x 28 =
+/// 14,336 B, the allocation that rebooted the watch 10/10 with a populated character
+/// page. Measured floor with story open on that page after the fix: ~18.6 KB, so this
+/// leaves real warning distance rather than firing at the floor.
+const RECLAIMED_DANGER_B: usize = 14 * 1024 + 336;
 
 /// UI-loop heartbeat interval (#75). 15s is frequent enough to catch a wedge
 /// inside a one-minute trial, sparse enough that it never dominates a log.
@@ -2557,18 +2570,35 @@ async fn main(_spawner: Spawner) -> ! {
                 "[POOL] items={ci} tex={ct} rr={cr} state={cs} next={next} \
                  main_low={main_low} maxblk_main={mb_main}"
             );
-            // MAIN-POOL DANGER LINE (#75). `maxblk` probes the GLOBAL allocator, so it
-            // happily reports a 32 KB hole in the RECLAIMED pool while the main pool
-            // is down to hundreds of bytes — it cannot express the condition that
-            // actually kills the watch.
+            // MAIN-POOL DANGER LINE (#75).
             //
-            // Empirical bracket from two watches on identical firmware: the one that
-            // panics runs main at 892-6,588 B; the one that never panics holds main
-            // >= 9,224 B; the fatal request is 7,168 B (`textures` doubling to 256).
-            // So the danger line is "can main still serve the largest routine
-            // allocation", and that is ~8 KB. Below it, every scene-vector growth
-            // falls through into the reclaimed pool and one glyph-dense frame can take
-            // its largest hole.
+            // ⚠️ SUPERSEDED BY MEASUREMENT, kept because its reasoning is instructive
+            // and its conclusion was wrong. It fires on `mb_main < 8 KB`, chosen from a
+            // two-watch bracket: the watch that panicked ran main at 892-6,588 B, the
+            // one that did not held >= 9,224 B, and the fatal request was 7,168 B. The
+            // inference was "main below ~8 KB is the danger state".
+            //
+            // 2026-07-29 measured `maxblk_main = 0` in **12 of 12 arms, including
+            // fresh-boot watchface idle with the pools at their lowest rungs.** Main
+            // essentially NEVER serves >= 16 B — that is the designed behaviour of
+            // `alloc_caps` first-fit with main registered first, not a fault. So this
+            // condition is permanently true, the alarm fires on every boot in the
+            // healthy state, and it therefore **carries no information.**
+            //
+            // Observed live tonight on a watch that was fine: "main pool can serve only
+            // 0 B (< 8192 B) with 11848 B free" — 6x the free memory it had when it
+            // actually panicked, same warning.
+            //
+            // The two-watch bracket was also the cross-device comparison this project
+            // has been repeatedly burned by: it read a difference between two watches as
+            // a threshold, when both watches sit at `maxblk_main = 0` and what separated
+            // them was which screens a human had visited.
+            //
+            // What DOES discriminate is the reclaimed pool's headroom, because reclaimed
+            // is the entire safety margin for every allocation main cannot serve — i.e.
+            // all of them. Measured floors: ~18.6 KB with story open on the character
+            // page, and the crash was a 14,336 B contiguous request. So the honest line
+            // is "can RECLAIMED still serve the largest routine allocation".
             //
             // NECESSARY, NOT SUFFICIENT — and this is the important caveat. `free` is
             // a SUM of hole sizes, so main can hold 20 KB in 500 B crumbs and this
@@ -2584,15 +2614,24 @@ async fn main(_spawner: Spawner) -> ! {
             // not serve even 1 KB. `free` is a sum of hole sizes and cannot see that;
             // the probe can. This is the necessary-not-sufficient gap in the original
             // alarm, now closed with a measurement rather than an argument.
-            if mb_main < MAIN_POOL_DANGER_B && !main_pool_warned {
+            // Watches RECLAIMED, not main. Main at `maxblk_main = 0` is the normal
+            // state (12/12 arms), so alarming on it fires every boot and means nothing;
+            // reclaimed is where every allocation main cannot serve actually goes, so
+            // its headroom is the number that predicts a failure. Threshold is the
+            // largest routine contiguous ask — the texture vector's 256->512 doubling
+            // at 14,336 B, which is exactly the allocation that rebooted the watch
+            // 10/10 before the CHAR page was bounded.
+            let recl_now = region_free(1);
+            if recl_now < RECLAIMED_DANGER_B && !main_pool_warned {
                 main_pool_warned = true;
                 println!(
-                    "[POOL-WARN] main pool can serve only {} B (< {} B) with {} B free \
-                     — fragmented residue; every sizeable allocation now spills to the \
-                     reclaimed pool",
-                    mb_main,
-                    MAIN_POOL_DANGER_B,
+                    "[POOL-WARN] reclaimed pool down to {} B free (< {} B) — main holds \
+                     {} B in sub-16 B residue and cannot help, so reclaimed is the whole \
+                     margin; a {} B contiguous ask is now at risk",
+                    recl_now,
+                    RECLAIMED_DANGER_B,
                     region_free(0),
+                    RECLAIMED_DANGER_B,
                 );
             }
             next_beat = now + Duration::from_secs(BEAT_SECS);
