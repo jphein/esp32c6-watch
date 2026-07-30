@@ -5069,7 +5069,40 @@ async fn main(_spawner: Spawner) -> ! {
                             );
                             shell.render(&mut display);
 
-                            let mut stop_on_tap = || matches!(touch.read(), Ok(Some(_)));
+                            // HIT-TESTED, because during playback this closure is the ONLY
+                            // path a touch can take. `play_chapter` parks the main loop for
+                            // up to 18 minutes, so Slint's event dispatch never runs and its
+                            // callbacks cannot fire — which is why a PAUSE tile wired only
+                            // to a Slint `clicked` handler was unpressable, and every tap on
+                            // it read as "stop anywhere". Reported from glass: "after pause
+                            // play button does not appear", because the outcome was
+                            // Cancelled and nothing was ever marked paused.
+                            //
+                            // Geometry must match `story.slint`'s READ-page tiles exactly:
+                            // both are y 378..438, PAUSE x 22..198, STOP x 212..388. A tap
+                            // anywhere ELSE still stops — that escape hatch is deliberate
+                            // and predates this ("a visible stop turns 'it's frozen' into
+                            // 'I stopped it'"), so a mis-aimed tap fails safe toward
+                            // stopping rather than doing nothing.
+                            //
+                            // Duplicating the geometry in Rust is a real cost and the
+                            // alternative is worse: dispatching touches into Slint mid-chapter
+                            // means running the event loop and a repaint inside the audio
+                            // path, and paint already measures 21-25 ms against a 30 ms
+                            // budget. A stale constant here mis-routes a tap; a repaint there
+                            // drains the DMA ring and stutters the audio.
+                            let mut stop_on_tap = || match touch.read() {
+                                Ok(Some(p)) => {
+                                    let in_row = p.y >= 378 && p.y <= 438;
+                                    if in_row && p.x >= 22 && p.x <= 198 {
+                                        story_play::pause();
+                                        false // not a stop — the pause latch takes the exit
+                                    } else {
+                                        true
+                                    }
+                                }
+                                _ => false,
+                            };
                             // Volume during playback (#story). `play_chapter` is awaited
                             // for a whole chapter and owns `&mut audio_codec`, so the
                             // main loop's per-tick volume block never runs — and it is
