@@ -106,7 +106,43 @@ pub const PAINT_BUDGET_MS: u32 = 30;
 /// borrow. Same idiom as `voice_tts::SPEAK_CANCEL` and `audio_out::PLAYBACK_ACTIVE`.
 pub static PLAY_CANCEL: AtomicBool = AtomicBool::new(false);
 
+/// Pause request. Distinct from [`PLAY_CANCEL`] because the OUTCOME differs, not the
+/// mechanism: both exit `play_chapter` promptly, but cancel discards the position and
+/// pause hands it back to be fed straight in again.
+///
+/// # Why pause is a clean EXIT and not a held stream
+///
+/// The tempting implementation — stop pushing chunks and spin until resumed — is
+/// precisely the failure the paint gate exists to prevent, and this module already
+/// documents it: starving the feeder drains the DMA ring, the tail expires,
+/// `PLAYBACK_ACTIVE`/`AMP_REQUEST` fall, the amp powers down, and the next chunk opens a
+/// fresh session that waits on `AMP_READY`. So "hold the stream" cannot be held; the
+/// hardware tears it down underneath you and the resume is audibly worse than a
+/// re-entry.
+///
+/// Feeding silence instead would keep the session alive at the cost of streaming zeros
+/// over a link that is already the bottleneck (`retries` exists because it is flaky),
+/// and would burn battery on an idle amp for as long as the user is away.
+///
+/// The architecture already answers this. `play_chapter` takes `start_byte` and returns
+/// `position` — "feed straight back in to resume" in its own words — because a chapter's
+/// PCM (up to 25.7 MB) exceeds the entire 16 MB flash and Range-streaming was never
+/// optional. Byte offset is `ms * 32` exactly, with no frame table, so a resume is
+/// sample-accurate rather than approximate. Pause therefore costs one HTTP range request
+/// on resume and nothing at all while paused.
+pub static PLAY_PAUSE: AtomicBool = AtomicBool::new(false);
+
 /// Request that playback stop at the next chunk boundary.
+pub fn pause() {
+    PLAY_PAUSE.store(true, Ordering::Relaxed);
+}
+
+/// Clear the pause latch. Called by the resume path before re-entering
+/// `play_chapter`, so a stale request cannot pause the resumed stream instantly.
+pub fn clear_pause() {
+    PLAY_PAUSE.store(false, Ordering::Relaxed);
+}
+
 pub fn cancel() {
     PLAY_CANCEL.store(true, Ordering::Relaxed);
 }
@@ -256,6 +292,10 @@ pub enum Played {
     Cancelled,
     /// The playback session was torn down underneath us (DMA re-arm).
     Interrupted,
+    /// Paused by [`pause`]. The distinction from `Cancelled` is the whole point: the
+    /// caller must KEEP `Session::position` and offer resume, where a cancel drops it
+    /// and returns to the list. Same exit path, opposite meaning to the user.
+    Paused,
 }
 
 impl Played {
@@ -264,6 +304,7 @@ impl Played {
             Played::Complete => "complete",
             Played::Cancelled => "cancelled",
             Played::Interrupted => "interrupted",
+            Played::Paused => "paused",
         }
     }
 }
@@ -328,8 +369,11 @@ pub async fn play_chapter<I: I2c>(
     codec: &mut Es8311<I>,
     ui: &mut dyn PlaybackUi,
 ) -> Result<Session, Error> {
-    // Fresh playback: clear a stale cancel from a previous chapter.
+    // Fresh playback: clear a stale cancel or pause from a previous chapter. Without
+    // the pause clear, tapping PAUSE and then picking a different chapter would pause
+    // the new one on its first chunk.
     PLAY_CANCEL.store(false, Ordering::Relaxed);
+    PLAY_PAUSE.store(false, Ordering::Relaxed);
 
     let mut pos = story_proto::align_sample(start_byte.min(total_bytes));
     let mut gate = PaintGate::new();
@@ -623,6 +667,15 @@ async fn feed_pcm<I: I2c>(
         }
         if PLAY_CANCEL.load(Ordering::Relaxed) {
             return Some(Played::Cancelled);
+        }
+        // Checked HERE, at the same chunk boundary as cancel and BEFORE the push, so the
+        // pause lands on a whole 32-byte-aligned chunk. `*pos` has not yet advanced past
+        // it, so the position handed back is exactly the first unplayed sample — resume
+        // is sample-accurate, not "near enough". Both latches share this boundary
+        // deliberately: a pause that took a different exit path could leave the amp in a
+        // state cancel never produces, and there would be no test that ever covered it.
+        if PLAY_PAUSE.load(Ordering::Relaxed) {
+            return Some(Played::Paused);
         }
         if audio_out::stream_aborted() {
             // feeder.abort() tore the session down (DMA re-arm). Keep pushing

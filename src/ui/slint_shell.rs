@@ -268,6 +268,8 @@ pub struct ShellRequests {
     pub story_pick: Cell<Option<i32>>,
     /// Story: STOP tapped — ends playback at the next chunk boundary.
     pub story_stop: Cell<bool>,
+    pub story_pause: Cell<bool>,
+    pub story_resume: Cell<bool>,
     /// Story: DIRECTOR NOTE tapped — hand off to the push-to-talk STT path.
     pub story_note: Cell<bool>,
     /// Story: list paging, -1 newer / +1 older.
@@ -1484,6 +1486,18 @@ impl ShellUi {
     /// NEVER per frame: the paint has to fit inside the 48 ms DMA ring
     /// (`net::story_play::PAINT_BUDGET_MS`).
     #[allow(clippy::too_many_arguments)]
+    /// Whether a paused chapter can be resumed. Drives PAUSE vs RESUME on the READ
+    /// page, and suppresses the "tap a chapter in LIST to play" hint — which over a
+    /// paused chapter reads as "your place was lost".
+    pub fn set_story_paused(&self, paused: bool) {
+        // Scene may be suspended (a framebuffer game took the display), so the UI is an
+        // Option — matching every sibling setter.
+        let Some(ui) = self.ui.as_ref() else {
+            return;
+        };
+        ui.set_story_paused(paused);
+    }
+
     pub fn set_story_playback(
         &self,
         title: &str,
@@ -2170,6 +2184,10 @@ fn build_scene(
     {
         let r = req.clone();
         ui.on_story_stop(move || r.story_stop.set(true));
+        let r = req.clone();
+        ui.on_story_pause(move || r.story_pause.set(true));
+        let r = req.clone();
+        ui.on_story_resume(move || r.story_resume.set(true));
     }
     {
         let r = req.clone();

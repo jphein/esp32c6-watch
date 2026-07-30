@@ -201,6 +201,7 @@ export component WatchShell inherits Window {
     in property <bool> story-hp-known: false;
     in property <[StorySlot]> story-equipment;
     in property <[StorySlot]> story-appearance;
+    in property <bool> story-paused: false;
     in property <int> story-equipped-count: 0;
     in property <int> story-appearance-count: 0;
     // SoundLevel meter overlay (#28): live dBFS + peak-hold, both in [-60, 0],
@@ -314,6 +315,8 @@ export component WatchShell inherits Window {
     callback story-nav(int);
     callback story-pick(int);
     callback story-stop();
+    callback story-pause();
+    callback story-resume();
     callback story-note();
     callback story-page-prev();
     callback story-page-next();
@@ -931,6 +934,9 @@ export component WatchShell inherits Window {
         hp-known: root.story-hp-known;
         equipment: root.story-equipment;
         appearance: root.story-appearance;
+        paused: root.story-paused;
+        pause => { root.story-pause(); }
+        resume => { root.story-resume(); }
         equipped-count: root.story-equipped-count;
         appearance-count: root.story-appearance-count;
         nav(p) => { root.story-nav(p); }

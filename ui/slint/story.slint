@@ -90,6 +90,12 @@ export component StoryPage {
     // audio. Shown, because a feature that stops silently is a bug report later.
     in property <bool> highlight-off: false;
     callback stop();
+    callback pause();
+    callback resume();
+    // True when a chapter was paused and can be resumed. Separate from `playing`
+    // because the three states are distinct on screen: playing shows PAUSE, paused shows
+    // RESUME with the elapsed time HELD, and neither shows the "tap a chapter" hint.
+    in property <bool> paused: false;
 
     // ---- STATS / CHARACTER ----
     in property <string> subject;
@@ -358,17 +364,39 @@ export component StoryPage {
     // responsive firmware behind a stuck-looking UI. A visible stop turns
     // "it's frozen" into "I stopped it" — painted BEFORE audio starts, never
     // during.
+    // Two tiles side by side while playing: PAUSE (accent) and STOP (warn). Sized 176px
+    // each with a 14px gutter inside the 366px safe width, so both stay well over the
+    // 44px minimum touch target in both axes and neither can be hit by accident when
+    // aiming for the other.
     if root.page == 1 && root.playing: PressTile {
-        x: (root.width - 200px) / 2;
+        x: Theme.safe-side;
         y: 378px;
-        width: 200px;
+        width: 176px;
+        height: 60px;
+        ignite: Theme.accent;
+        clicked => { root.pause(); }
+
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 18px;
+            text: "PAUSE";
+            color: Theme.accent;
+            font-size: 21px;
+            font-weight: 700;
+            letter-spacing: 3px;
+        }
+    }
+    if root.page == 1 && root.playing: PressTile {
+        x: root.width - Theme.safe-side - 176px;
+        y: 378px;
+        width: 176px;
         height: 60px;
         ignite: Theme.warn;
         clicked => { root.stop(); }
 
         Text {
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: 18px;
             text: "STOP";
             color: Theme.warn;
             font-size: 21px;
@@ -376,7 +404,29 @@ export component StoryPage {
             letter-spacing: 3px;
         }
     }
-    if root.page == 1 && !root.playing: Text {
+
+    // Paused: RESUME takes the full width, because there is nothing to STOP — the stream
+    // is already closed and the position is just a number we are holding. A STOP here
+    // would only mean "forget where I was", which the LIST tab already does.
+    if root.page == 1 && root.paused && !root.playing: PressTile {
+        x: Theme.safe-side;
+        y: 378px;
+        width: root.width - 2 * Theme.safe-side;
+        height: 60px;
+        ignite: Theme.accent;
+        clicked => { root.resume(); }
+
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 18px;
+            text: "RESUME";
+            color: Theme.accent;
+            font-size: 21px;
+            font-weight: 700;
+            letter-spacing: 3px;
+        }
+    }
+    if root.page == 1 && !root.playing && !root.paused: Text {
         x: (parent.width - self.width) / 2;
         y: 396px;
         text: "tap a chapter in LIST to play";

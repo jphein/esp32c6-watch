@@ -1803,6 +1803,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut story_cur: u16 = 0;
     #[cfg(feature = "story")]
     let mut story_pos: u32 = 0;
+    // Chapter a PAUSE left mid-flight, so RESUME knows what to re-open. `story_pos`
+    // alone is not enough: a byte offset without a chapter number would resume the wrong
+    // audio at a plausible-looking position, which is worse than failing to resume.
+    #[cfg(feature = "story")]
+    let mut story_paused_ch: Option<u16> = None;
     /// A director note was requested: the next successful PTT transcript is
     /// POSTed to `/api/notes` instead of only being shown.
     #[cfg(feature = "story")]
@@ -4903,6 +4908,22 @@ async fn main(_spawner: Spawner) -> ! {
                             story_play_req = Some(n.min(u16::MAX as i32) as u16);
                         }
                     }
+                    // PAUSE: latch it and let the chunk boundary inside `play_chapter`
+                    // take the clean exit. Nothing else to do here — the main loop is
+                    // parked inside playback, so this tick only runs once it returns.
+                    if shell.req.story_pause.take() {
+                        story_play::pause();
+                    }
+                    // RESUME: clear the latch, then re-request the SAME chapter. The play
+                    // path already resumes rather than restarting when the chapter matches
+                    // `story_cur`, so this needs no second playback path — which is the
+                    // reason pause was built as a clean exit in the first place.
+                    if shell.req.story_resume.take() {
+                        if let Some(ch) = story_paused_ch {
+                            story_play::clear_pause();
+                            story_play_req = Some(ch);
+                        }
+                    }
                     if shell.req.story_stop.take() {
                         story_play::cancel();
                     }
@@ -5216,6 +5237,16 @@ async fn main(_spawner: Spawner) -> ! {
                                     // Report the cursor only on a real finish, so
                                     // stopping halfway never tells the daemon JP
                                     // consumed a chapter he did not.
+                                    // A pause KEEPS the position and remembers the
+                                    // chapter; every other outcome clears the pause so a
+                                    // stale RESUME can never appear over a stopped or
+                                    // finished chapter.
+                                    story_paused_ch =
+                                        if sess.outcome == story_play::Played::Paused {
+                                            Some(chapter)
+                                        } else {
+                                            None
+                                        };
                                     if sess.outcome == story_play::Played::Complete {
                                         story_pos = 0;
                                         if let Err(e) =
@@ -5238,6 +5269,11 @@ async fn main(_spawner: Spawner) -> ! {
                                         0,
                                         false,
                                     );
+                                    // Paused shows RESUME with the elapsed time held, so
+                                    // the screen says "you are 4:12 in" rather than
+                                    // resetting to zero and looking like the chapter was
+                                    // lost.
+                                    shell.set_story_paused(story_paused_ch.is_some());
                                 }
                                 Err(e) => {
                                     println!("[STORY] play failed: {e}");
