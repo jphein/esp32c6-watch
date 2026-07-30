@@ -92,7 +92,12 @@ export component Stepper inherits Rectangle {
 
     Text {
         x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2 + root.glyph-dy;
+        // Centred by a box of the parent's height offset by glyph-dy, which lands
+        // the glyph at exactly (parent.height - self.height) / 2 + glyph-dy — the
+        // same place, without reading the Text's own intrinsic height.
+        y: root.glyph-dy;
+        height: parent.height;
+        vertical-alignment: center;
         text: root.glyph;
         color: ta.pressed ? Theme.on-accent : Theme.accent;
         font-size: root.glyph-size;
@@ -126,7 +131,9 @@ export component PillButton inherits Rectangle {
 
     Text {
         x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
         text: root.text;
         color: ta.pressed ? Theme.on-accent : root.edge;
         font-size: root.text-size;
@@ -146,6 +153,11 @@ export component PillButton inherits Rectangle {
 // --- Recipe E — Seg -------------------------------------------------------
 // Segmented-control chip (climate HVAC modes). Momentary press ≠ persistent
 // selection: pressed lights accent-bg, ACTIVE fills solid accent and stays.
+// Centring note: `y: 0; height: parent.height; vertical-alignment: center` rather
+// than `(parent.height - self.height) / 2` — reading a Text's own intrinsic height
+// drags in the paragraph-layout binding chain. Full rationale and the measured
+// per-component costs are next to StatRow in theme.slint. The horizontal form is
+// NOT equivalent here: letter-spacing makes it shift ~1px.
 export component Seg inherits Rectangle {
     in property <string> label;
     in property <bool> active;
@@ -161,7 +173,9 @@ export component Seg inherits Rectangle {
 
     Text {
         x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
         text: root.label;
         color: root.active ? Theme.on-accent : Theme.soft;
         font-size: 13px;
