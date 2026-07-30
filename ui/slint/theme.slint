@@ -182,6 +182,51 @@ export global Theme {
 // only tokens + non-interactive helpers so controls.slint can import it without
 // an import cycle.
 
+// ===========================================================================
+// CENTRING A Text: USE alignment, NOT `(parent.h - self.h) / 2`
+// ===========================================================================
+// Reading a Text's OWN intrinsic size — `self.height` or `self.width` — is the
+// expensive part, and it is expensive for a non-obvious reason: that size is
+// itself a computed binding, so each read drags in the chain that lays the
+// paragraph out. Slint registers a dependency node per property read with no
+// dedup (i-slint-core/properties.rs), 16 B each on riscv32.
+//
+// Reading `parent.height` is NOT the problem. Measured both ways on StatRow: a
+// literal height and `height: parent.height` saved the SAME 268 nodes, so the
+// whole cost was `self.height`.
+//
+//   y: (parent.height - self.height) / 2      // reads self.height
+//   y: 0; height: parent.height;              // reads parent.height only
+//   vertical-alignment: center;               // pixel-identical
+//
+// Prefer `height: parent.height` over a literal in a SHARED component: call
+// sites override the height (power.slint gives StatRow 28px and 34px), and a
+// literal silently de-centres them. That was caught by a byte-exact render
+// compare, not by review.
+//
+// Measured cost of the idiom, per component, on this tree
+// (tools/trackermeter/measure.sh, A/B via WATCH_UI_ROOT):
+//
+//   StatRow    23 instantiations   -268 nodes  -4,288 B   <- resident on EVERY frame
+//   Seg        15                   -42          -672 B
+//   Stepper     8                   -24          -384 B
+//   PillButton 11                   -10          -160 B   marginal
+//
+// So: WRITE new centring the alignment way — it is free and identical. Do NOT
+// sweep existing single-instance uses; one live instance costs ~32-128 B, which
+// is not worth churning a working screen for. The cost scales with how many
+// instances are LIVE AT ONCE, which is not the same as how many times the
+// component is written (PillButton has more instantiations than Stepper and
+// costs less), and is not decidable by grepping for `for` bodies — a component
+// carrying the idiom multiplies wherever it is instantiated in a repeater.
+//
+// HORIZONTAL centring is NOT symmetric with vertical. `x: 0; width:
+// parent.width; horizontal-alignment: center` shifts glyphs by ~1px whenever
+// `letter-spacing` is set, because the trailing letter-space counts toward
+// intrinsic width but not toward alignment. Twelve frames differed on Seg. Only
+// convert the horizontal form where letter-spacing is unset, and verify with a
+// render compare.
+
 // One label/value line for stats-style pages.
 export component StatRow {
     in property <string> label;
@@ -192,7 +237,9 @@ export component StatRow {
 
     Text {
         x: 0;
-        y: (parent.height - self.height) / 2;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
         text: root.label;
         color: Theme.dim;
         font-size: 16px;
@@ -200,7 +247,9 @@ export component StatRow {
     }
     Text {
         x: parent.width - self.width;
-        y: (parent.height - self.height) / 2;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
         text: root.value;
         color: root.value-color;
         font-size: 22px;
