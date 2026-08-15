@@ -218,6 +218,26 @@ Now vendored at **`tools/watch-bridge/`** (approved by the orchestrator): the pa
 README. Both hosts' copies were verified byte-identical (`md5` match) before vendoring, so there is
 no fork to reconcile.
 
+> **⚠️ 2026-08-14 — read the paragraph above narrowly; it was true and still misled.**
+> "Both hosts' copies are byte-identical" was a claim about **host ↔ host**. It says nothing about
+> **repo ↔ host**, and for 17 days it was quietly read as if it did. `#68` then added `POST /tts`
+> *to the vendored copy only*: `deploy.sh` was never run, so the hosts stayed on the 134-line
+> STT-only build and `/tts` 404'd on both while `#11` sat closed as shipped.
+>
+> **Vendoring is not deploying.** A repo that vendors a live artifact acquires a second, invisible
+> obligation — keeping the hosts caught up — and nothing in the commit that adds a feature reminds
+> you of it. The parity assertion above is what stopped anyone from checking: it reads like an
+> all-clear, so no one ran the one command that would have shown the truth.
+>
+> **`./deploy.sh --host <h> --dry-run` is the staleness detector.** It diffs repo↔host and touches
+> nothing. Run it before believing any claim in this section; treat *this* sentence, not the
+> paragraph above, as the current guidance.
+>
+> Reconciled and deployed 2026-08-14 — both hosts now serve `/stt` **and** `/tts` at
+> `4e0a191e689daea13768fe75d3e4f402`, verified by a TTS→STT round trip on each
+> (`"the quick brown fox…"` synthesized, posted back, transcribed verbatim). The 134-line
+> predecessors are preserved on-host as `watch_bridge.py.bak-2026-08-14`.
+
 **No secret is vendored, and none ever should be.** The bridge still reads the Azure key from
 `~/.config/speech-to-cli/config.json` *on the bridge host at runtime*; `deploy.sh` refuses to ship a
 file that looks like it picked up a credential.
