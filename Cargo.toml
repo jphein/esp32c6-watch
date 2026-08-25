@@ -18,6 +18,12 @@ path = "./src/main.rs"
 [[bin]]
 name = "slint-demo"
 path = "./src/bin/slint_demo.rs"
+# C6-ONLY (#cyd-c5). This demo hand-rolls its own bring-up against the CO5300 +
+# FT3168 — it declares a hand-picked module subtree rather than using the crate's,
+# so it does not see the board seam at all. Porting it to a second panel would be
+# pure churn for a demo. `required-features` skips the binary on other boards
+# instead, which is the honest statement: it targets the C6 AMOLED.
+required-features = ["board-waveshare-c6"]
 
 [features]
 # `debug-console` is OPT-IN (NOT default): it disables AOD light-sleep and reads

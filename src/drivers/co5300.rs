@@ -158,6 +158,36 @@ impl<'d> Co5300Display<'d> {
         &mut self.bus
     }
 
+    // -- `PanelDriver` surface (#cyd-c5) -----------------------------------
+    // `drivers/panel.rs` puts the pixel-stream trio on the DISPLAY. This driver
+    // had them only on its BUS, reached via `bus_mut()` — so the panel contract's
+    // own reference implementation did not actually satisfy it, and that only
+    // became visible when a second board arrived and a board-generic flusher
+    // tried to call them. Three forwarders close it.
+    //
+    // Purely additive: `bus_mut()` stays for `TwoLineFlusher` and
+    // `framebuffer::flush`, which bind to the `display.bus_mut().write_pixels(..)`
+    // spelling. Both call shapes now work, and — the point — BOTH flushers now
+    // compile against BOTH drivers, so a method-name drift on either board is a
+    // build error on both arms instead of a silent un-porting.
+
+    /// Begin one raw pixel stream into the current window.
+    pub fn begin_pixels(&mut self) {
+        self.bus.begin_pixels();
+    }
+
+    /// Push logical RGB565 pixels into the open stream. Byte order is this
+    /// driver's problem (the CO5300 wants big-endian over QSPI); the swap lives
+    /// in `QspiBus`.
+    pub fn push_pixels(&mut self, pixels: &[u16]) {
+        self.bus.stream_pixels(pixels);
+    }
+
+    /// Close the pixel stream opened by [`Self::begin_pixels`].
+    pub fn end_pixels(&mut self) {
+        self.bus.end_pixels();
+    }
+
     /// Set display brightness (0x00 = off, 0xD0 = default, 0xFF = max).
     pub fn set_brightness(&mut self, brightness: u8) {
         self.bus.write_c8d8(CMD_BRIGHTNESS, brightness);

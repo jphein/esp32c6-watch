@@ -13,7 +13,7 @@ use slint::platform::{PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::apps::AppState;
-use crate::drivers::co5300::Co5300Display;
+use crate::board;
 use crate::net::names;
 // #58 climate: the real `climate-model` crate (oracle-t9 CONFIRMED-CLEAN @5c0d04c;
 // stub swapped out). Provides ClimateState / ClimateEntity / HvacMode.
@@ -21,7 +21,7 @@ use climate_model;
 use crate::net::smol_mesh::PeerView;
 use crate::peripherals::rtc::DateTime;
 use crate::peripherals::touch::{SwipeDirection, TouchPoint};
-use crate::ui::slint_platform::{init_platform, TwoLineFlusher, WIDTH};
+use crate::ui::slint_platform::{init_platform, STRIP_PX};
 
 slint::include_modules!(); // WatchShell, PeerRow
 
@@ -448,8 +448,8 @@ impl ShellUi {
             story_equipment,
             story_appearance,
             switcher_rows: heapless::Vec::new(),
-            line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
-            scratch: alloc::vec![0u16; WIDTH * 2],
+            line_buf: alloc::vec![Rgb565Pixel(0); STRIP_PX],
+            scratch: alloc::vec![0u16; STRIP_PX],
             touch_down: false,
             last_pos: slint::LogicalPosition::new(0.0, 0.0),
             last_second: 0xFF,
@@ -2096,7 +2096,7 @@ impl ShellUi {
 
     /// Run timers/animations and repaint if the scene is dirty. No-op while the
     /// scene is suspended (a game owns the panel via the framebuffer).
-    pub fn render(&mut self, display: &mut Co5300Display) {
+    pub fn render(&mut self, display: &mut board::BoardDisplay) {
         // `suspended` = a game owns the panel (#66). Previously this was implied
         // by `ui.is_none()`; the scene now stays alive, so check it explicitly
         // or the shell would repaint over the game's framebuffer.
@@ -2111,7 +2111,7 @@ impl ShellUi {
         slint::platform::update_timers_and_animations();
         self.window.draw_if_needed(|renderer| {
             let mut flusher =
-                TwoLineFlusher::new(display, &mut self.line_buf, &mut self.scratch);
+                board::BoardFlusher::new(display, &mut self.line_buf, &mut self.scratch);
             renderer.render_by_line(&mut flusher);
             flusher.flush_pending();
         });

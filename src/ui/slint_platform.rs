@@ -44,10 +44,19 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, WindowAdapter};
 
 use crate::board;
-use crate::drivers::co5300::Co5300Display;
 
-pub const WIDTH: usize = board::LCD_WIDTH as usize; // 410
-pub const HEIGHT: usize = board::LCD_HEIGHT as usize; // 502
+/// Post-rotation panel width, from the selected board module (410 on the C6,
+/// 320 on the CYD). Parametric since #cyd-c5 — the trailing dimension comments
+/// that used to live here were C6-only and went stale the moment a second board
+/// existed.
+pub const WIDTH: usize = board::LCD_WIDTH as usize;
+/// Post-rotation panel height (502 on the C6, 240 on the CYD).
+pub const HEIGHT: usize = board::LCD_HEIGHT as usize;
+
+/// Pixels a flusher's strip buffers must hold: `WIDTH * board::FLUSH_STRIP_LINES`
+/// (two lines on the CO5300, one on the ST7789). Sized here so `ShellUi`'s two
+/// `Vec`s and the flusher's own `debug_assert`s cannot drift apart.
+pub const STRIP_PX: usize = WIDTH * board::FLUSH_STRIP_LINES;
 
 /// Max spans staged per line: the dirty region has at most 3 rectangles, so a
 /// line intersects at most 3 disjoint x-ranges (+1 slack for future-proofing).
@@ -92,7 +101,7 @@ pub fn init_platform() -> Rc<MinimalSoftwareWindow> {
 /// both axes by the vendored renderer's region alignment. Spans whose pairing
 /// guarantee does not hold are skipped and counted, never guessed at.
 pub struct TwoLineFlusher<'a, 'd> {
-    display: &'a mut Co5300Display<'d>,
+    display: &'a mut board::BoardDisplay<'d>,
     /// 2 x WIDTH pixels: even line of the current pair in the first half, odd
     /// line in the second. Only rendered span columns are ever flushed.
     buf: &'a mut [Rgb565Pixel],
@@ -113,12 +122,13 @@ pub struct TwoLineFlusher<'a, 'd> {
 
 impl<'a, 'd> TwoLineFlusher<'a, 'd> {
     pub fn new(
-        display: &'a mut Co5300Display<'d>,
+        display: &'a mut board::BoardDisplay<'d>,
         buf: &'a mut [Rgb565Pixel],
         scratch: &'a mut [u16],
     ) -> Self {
         // A full-frame strip is WIDTH*2 pixels; buf holds two full-width lines and
-        // scratch stages the widest possible strip. Both must be exactly WIDTH*2.
+        // scratch stages the widest possible strip. Both must be exactly WIDTH*2 —
+        // which is what `STRIP_PX` resolves to on the board that uses this flusher.
         debug_assert_eq!(buf.len(), WIDTH * 2);
         debug_assert_eq!(scratch.len(), WIDTH * 2);
         Self {
@@ -170,6 +180,126 @@ impl<'a, 'd> TwoLineFlusher<'a, 'd> {
                 self.violations
             );
         }
+    }
+}
+
+/// ★ **The CYD's flusher of record**: one window per line.
+///
+/// Ported from `~/Projects/cyd-c5/watch-port/src/seam.rs` (vesper, 2026-08-24),
+/// blessed upstream the same day.
+///
+/// No row-pair staging, no span matching, no pairing contract and therefore **no
+/// violation class** — because the ST7789 accepts a 1-pixel-tall window, which is
+/// the single assumption [`TwoLineFlusher`] could not make. Half the state, half
+/// the buffer, and none of the failure modes.
+///
+/// The decision that made a per-board flusher possible is that
+/// [`crate::drivers::panel::PanelDriver`] stays *narrow* — `set_addr_window` plus
+/// a pixel push, and nothing about row pairs. That deliberately keeps the
+/// two-line apparatus a CO5300-private workaround instead of promoting one
+/// panel's hardware quirk into a fleet-wide interface.
+///
+/// ⚠️ **The vendored renderer still runs on this board.** An earlier version of
+/// this reasoning paired the single-line flusher with the *stock*
+/// `i-slint-renderer-software`, on the grounds that the ST7789 does not need the
+/// fork's even-alignment patch. That was wrong: the fork also carries the scene
+/// pooling and `pool_capacities()` instrumentation the whole `[POOL]`
+/// heap-attribution stack reads (#75), so dropping it on one board would blind
+/// the fleet's instruments there. Even-aligned spans are simply a legal subset of
+/// what this flusher accepts, so the fork costs the CYD nothing.
+///
+/// The two facts are independent, and conflating them is what produced the bad
+/// recommendation: *the renderer stays* (instrumentation) **and** *the flusher is
+/// per-board* (the contract is narrow enough not to care).
+///
+/// # ⚠️ Do not "optimise" this into larger strips
+///
+/// Throughput analysis for this panel favours fewer, larger pushes — a likely
+/// sweet spot in the 16-48 row band. That conclusion is real and **it does not
+/// apply here**, which matters because the numbers look like they license a
+/// rewrite:
+///
+///   * **This path cannot batch.** Slint's software renderer hands out one line
+///     at a time through `LineBufferProvider::process_line` and owns the buffer
+///     between calls. Accumulating 16 rows means holding 16 rows of pixels
+///     somewhere — which is a framebuffer, and the whole reason this flusher
+///     exists is that there isn't one.
+///   * **The row-band sweet spot belongs to the framebuffer path**
+///     (`drivers/framebuffer.rs::flush`), where the caller already owns a full
+///     backing store and genuinely chooses its own chunk size. Tune it there.
+///
+/// The general form, worth applying to any future throughput advice: **a
+/// batching recommendation silently assumes the caller owns the memory being
+/// batched.** Where the API hands you one unit at a time and reclaims it between
+/// calls, batching is not a tuning knob — it is an architecture change.
+pub struct SingleLineFlusher<'a, 'd> {
+    display: &'a mut board::BoardDisplay<'d>,
+    buf: &'a mut [Rgb565Pixel],
+    scratch: &'a mut [u16],
+}
+
+impl<'a, 'd> SingleLineFlusher<'a, 'd> {
+    pub fn new(
+        display: &'a mut board::BoardDisplay<'d>,
+        buf: &'a mut [Rgb565Pixel],
+        scratch: &'a mut [u16],
+    ) -> Self {
+        // One line, not two — `STRIP_PX` is `WIDTH * 1` on the board that uses
+        // this flusher.
+        debug_assert_eq!(buf.len(), WIDTH);
+        debug_assert_eq!(scratch.len(), WIDTH);
+        Self {
+            display,
+            buf,
+            scratch,
+        }
+    }
+
+    /// Present so the two flushers are drop-in interchangeable at the call site.
+    /// Nothing can be left pending here — every line is flushed as it arrives,
+    /// which is precisely the property that removes the failure class.
+    pub fn flush_pending(&mut self) {}
+}
+
+impl slint::platform::software_renderer::LineBufferProvider
+    for &mut SingleLineFlusher<'_, '_>
+{
+    type TargetPixel = Rgb565Pixel;
+
+    fn process_line(
+        &mut self,
+        line: usize,
+        range: core::ops::Range<usize>,
+        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
+    ) {
+        if range.is_empty() {
+            render_fn(&mut []);
+            return;
+        }
+        debug_assert!(line < HEIGHT && range.end <= WIDTH);
+
+        render_fn(&mut self.buf[range.clone()]);
+
+        let (x0, w) = (range.start, range.len());
+        for i in 0..w {
+            self.scratch[i] = self.buf[x0 + i].0;
+        }
+        // The contract surface, exactly: window → open → push → CLOSE. Byte
+        // order is the driver's problem from here (`push_pixels` takes logical
+        // u16 pixels).
+        //
+        // ⚠️ `end_pixels` is NOT optional, though vesper's original transcribed
+        // this loop without it — she copied the contract at 6e1aee7, before
+        // c9fcc16 added the close. On this board's SHARED bus an unclosed RAMWR
+        // stream is two silent failures: the next command lands in GRAM as
+        // pixels, and the next touch read asserts touch CS while LCD CS is still
+        // low, i.e. two devices driving one MISO line. `SharedSpiBus` also
+        // deselects defensively, which makes an omission survivable — a
+        // different claim from correct.
+        self.display.set_addr_window(x0 as u16, line as u16, w as u16, 1);
+        self.display.begin_pixels();
+        self.display.push_pixels(&self.scratch[..w]);
+        self.display.end_pixels();
     }
 }
 

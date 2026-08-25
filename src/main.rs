@@ -76,6 +76,7 @@ use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState, Sfx};
+#[cfg(feature = "board-waveshare-c6")]
 use crate::drivers::co5300::Co5300Display;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
@@ -83,6 +84,7 @@ use crate::net::voice_stt;
 #[cfg(feature = "tts")]
 use crate::net::voice_tts;
 use crate::drivers::framebuffer::Framebuffer;
+#[cfg(feature = "board-waveshare-c6")]
 use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::Es8311;
 use crate::peripherals::audio_out;
@@ -1064,9 +1066,19 @@ async fn main(_spawner: Spawner) -> ! {
     // audio_out::service_amp (per main-loop tick + inline after each
     // play_pcm): HIGH only while a queued SFX clip is in flight, LOW + codec
     // shutdown otherwise — power + pop discipline (#23).
+    // ⚠️ #cyd-c5: GPIO6 is this board's amp enable, but on the CYD it is the
+    // display's SPI CLOCK. There is no spare pin to point a fake amp at (the
+    // remaining free GPIOs are strapping pins or header breakouts), so the pin
+    // itself becomes honest — `NullAmp` accepts writes and drops them. That keeps
+    // all ten `service_amp(&mut amp_en, ..)` sites below textually identical
+    // instead of gating each one, the same trade `NullTouch`/`NullInput` make.
+    #[cfg(feature = "has-audio")]
     let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
+    #[cfg(not(feature = "has-audio"))]
+    let mut amp_en = audio_out::NullAmp;
 
     // === I2C bus (AXP2101 + FT3168 + PCF85063 + QMI8658) ===
+    #[cfg(feature = "board-waveshare-c6")]
     let i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(board::I2C_FREQ_HZ / 1000)),
@@ -1074,6 +1086,12 @@ async fn main(_spawner: Spawner) -> ! {
     .expect("I2C failed")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO7);
+    // None of the six I2C devices exist on the CYD, and the pins this bus would
+    // need are not free (GPIO7 is the panel's MOSI). `FakeI2c` errors on every
+    // transaction, which is what keeps the battery cascade from firing — read
+    // `board::fake_i2c`'s header before changing it to succeed.
+    #[cfg(feature = "board-cyd-c5")]
+    let i2c = crate::board::fake_i2c::FakeI2c;
     let i2c_ref = RefCell::new(i2c);
 
     // === Power (read-mostly: rails left as the bootloader configured them) ===
@@ -1081,24 +1099,87 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = power.enable_adc();
     println!("[POWER] OK");
 
-    // === Display: CO5300 over QSPI DMA at 80MHz ===
-    let spi_config = SpiConfig::default()
-        .with_frequency(Rate::from_mhz(80))
-        .with_mode(SpiMode::_0);
-    // Raw SpiDma (no SpiDmaBus wrapper): QspiBus owns a single TX DmaTxBuf and
-    // drives non-blocking DMA flushes itself (see drivers/qspi_bus.rs). No RX
-    // buffer is needed — the panel is write-only.
-    let spi = Spi::new(peripherals.SPI2, spi_config)
-        .expect("SPI failed")
-        .with_sck(peripherals.GPIO0)
-        .with_sio0(peripherals.GPIO1)
-        .with_sio1(peripherals.GPIO2)
-        .with_sio2(peripherals.GPIO3)
-        .with_sio3(peripherals.GPIO4)
-        .with_dma(peripherals.DMA_CH0);
-    let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
-    let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
-    let mut display = Co5300Display::new(QspiBus::new(spi, cs), reset);
+    // === Display ===
+    // The one place the two boards genuinely diverge. Both arms bind `display`,
+    // so all ~19 `display.` call sites below stay TEXTUALLY IDENTICAL — the
+    // drivers mirror each other's method names (`drivers/panel.rs`: satisfaction
+    // is structural), and `board::BoardDisplay` names whichever concrete type
+    // this arm produced.
+    //
+    // === C6: CO5300 over QSPI DMA at 80 MHz ===
+    #[cfg(feature = "board-waveshare-c6")]
+    let mut display = {
+        let spi_config = SpiConfig::default()
+            .with_frequency(Rate::from_mhz(80))
+            .with_mode(SpiMode::_0);
+        // Raw SpiDma (no SpiDmaBus wrapper): QspiBus owns a single TX DmaTxBuf and
+        // drives non-blocking DMA flushes itself (see drivers/qspi_bus.rs). No RX
+        // buffer is needed — the panel is write-only.
+        let spi = Spi::new(peripherals.SPI2, spi_config)
+            .expect("SPI failed")
+            .with_sck(peripherals.GPIO0)
+            .with_sio0(peripherals.GPIO1)
+            .with_sio1(peripherals.GPIO2)
+            .with_sio2(peripherals.GPIO3)
+            .with_sio3(peripherals.GPIO4)
+            .with_dma(peripherals.DMA_CH0);
+        let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+        let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
+        Co5300Display::new(QspiBus::new(spi, cs), reset)
+    };
+
+    // === CYD-C5: ST7789 over classic 4-wire SPI, SHARED with the XPT2046 ===
+    // Three things here have no C6 counterpart and all three are load-bearing:
+    //
+    //  1. `sd_cs` (GPIO10) is claimed and parked HIGH. The SD slot sits on this
+    //     same bus; a floating SD CS makes the card answer every clock edge a
+    //     display transaction generates. Claiming the pin here also makes it
+    //     impossible for another part of the firmware to take GPIO10 by accident.
+    //  2. `reset` is `None` — this board has NO display reset GPIO (the panel's
+    //     RESET is tied to the SoC's), so the driver issues SWRESET + 150 ms.
+    //     Do NOT pass GPIO0; see `board::cyd_c5`'s footgun note.
+    //  3. The backlight (GPIO25) goes INTO the driver, which is what lets all 12
+    //     `display.set_brightness(..)` sites below compile unchanged.
+    #[cfg(feature = "board-cyd-c5")]
+    let mut display = {
+        use crate::drivers::spi_bus::{SharedSpiBus, STAGE_BYTES};
+        use crate::drivers::st7789::St7789Display;
+        use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
+
+        let dc = Output::new(peripherals.GPIO24, Level::High, OutputConfig::default());
+        let lcd_cs = Output::new(peripherals.GPIO23, Level::High, OutputConfig::default());
+        let touch_cs = Output::new(peripherals.GPIO1, Level::High, OutputConfig::default());
+        let sd_cs = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
+        let backlight = Output::new(peripherals.GPIO25, Level::High, OutputConfig::default());
+
+        // RX only has to hold a 3-byte XPT2046 answer; TX holds one full strip.
+        // ⚠️ These are the buffers the DMA engine actually reads, and DMA cannot
+        // reach PSRAM on the C5 under esp-hal 1.1.x — keep them off any PSRAM
+        // allocator. (It fails as a typed `UnsupportedMemoryRegion`, not silent
+        // corruption, but the distinction is worth not learning at 2 a.m.)
+        let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+            esp_hal::dma_buffers!(64, STAGE_BYTES);
+        let dma_rx = DmaRxBuf::new(rx_descriptors, rx_buffer).expect("dma rx");
+        let dma_tx = DmaTxBuf::new(tx_descriptors, tx_buffer).expect("dma tx");
+
+        let spi_config = SpiConfig::default()
+            .with_frequency(Rate::from_hz(board::SPI_DISPLAY_HZ))
+            .with_mode(SpiMode::_0);
+        let spi = Spi::new(peripherals.SPI2, spi_config)
+            .expect("SPI failed")
+            .with_sck(peripherals.GPIO6)
+            .with_mosi(peripherals.GPIO7)
+            .with_miso(peripherals.GPIO2)
+            .with_dma(peripherals.DMA_CH0)
+            .with_buffers(dma_rx, dma_tx);
+
+        St7789Display::new(
+            SharedSpiBus::new(spi, dc, lcd_cs, touch_cs, sd_cs),
+            None,
+            backlight,
+        )
+    };
+
     display.init();
     println!("[DISPLAY] OK");
 
@@ -6517,7 +6598,7 @@ async fn main(_spawner: Spawner) -> ! {
 #[cfg(feature = "story")]
 struct StoryPlayUi<'a> {
     shell: &'a mut ShellUi,
-    display: &'a mut crate::drivers::co5300::Co5300Display<'static>,
+    display: &'a mut crate::board::BoardDisplay<'static>,
     /// Finger-down poll. A `dyn` closure rather than the touch driver so this
     /// struct carries no device generics — same reason `voice_tts::speak_text`
     /// takes `&mut dyn FnMut`.
@@ -6618,7 +6699,7 @@ fn run_fb_app(
     app: &mut dyn App,
     input: &AppInput,
     fb: &mut Framebuffer,
-    display: &mut Co5300Display,
+    display: &mut board::BoardDisplay,
     now: Instant,
     next_flush: &mut Instant,
 ) -> (bool, Option<Sfx>) {

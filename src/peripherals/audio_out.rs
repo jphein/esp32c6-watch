@@ -48,7 +48,6 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::Instant;
 use embedded_hal::i2c::I2c;
-use esp_hal::gpio::Output;
 use heapless::Vec;
 
 use crate::peripherals::audio::Es8311;
@@ -589,7 +588,42 @@ pub async fn next_clip() -> PcmChunk {
 ///   releases the first sample.
 /// - drop: amp LOW first, then full codec `shutdown()` (back to the boot
 ///   state, ~0 mA) — reverse order pops.
-pub fn service_amp<I: I2c>(amp: &mut Output<'static>, codec: &mut Es8311<I>) {
+/// A speaker-amp enable line on a board that has no speaker amp (#cyd-c5).
+///
+/// Same idiom as `peripherals::touch::NullTouch`/`NullInput`: rather than gate
+/// this function's ten call sites, the *pin* becomes honest and the call sites
+/// stay textually identical. Writes go nowhere because there is nowhere for them
+/// to go.
+///
+/// ⚠️ Why a stub rather than "point `amp_en` at some spare GPIO on the CYD":
+/// **GPIO6 on that board is the display's SPI clock.** A misdirected amp-enable
+/// would be driving the panel's SCK, and the next candidate pins are either
+/// strapping pins or broken out to headers. There is no harmless real pin to
+/// point it at, and inventing one would be exactly the "fake value" the
+/// fail-closed rule exists to forbid.
+pub struct NullAmp;
+
+impl embedded_hal::digital::ErrorType for NullAmp {
+    type Error = core::convert::Infallible;
+}
+
+impl embedded_hal::digital::OutputPin for NullAmp {
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Drive the amp + codec toward the requested state.
+///
+/// Generic over the pin (#cyd-c5) so a board with no amp can pass [`NullAmp`].
+/// `Output<'static>` satisfies `OutputPin`, so the C6 call sites are unchanged.
+pub fn service_amp<I: I2c, P: embedded_hal::digital::OutputPin>(
+    amp: &mut P,
+    codec: &mut Es8311<I>,
+) {
     let want = AMP_REQUEST.load(Ordering::Relaxed);
     let have = AMP_READY.load(Ordering::Relaxed);
     if want && !have {
@@ -598,11 +632,11 @@ pub fn service_amp<I: I2c>(amp: &mut Output<'static>, codec: &mut Es8311<I>) {
         // persisted master volume (#59) so every clip honors the stored level
         // (and stays silent when muted).
         let _ = codec.set_volume(MASTER_VOL_REG.load(Ordering::Relaxed));
-        amp.set_high();
+        let _ = amp.set_high();
         AMP_READY_MS.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
         AMP_READY.store(true, Ordering::Relaxed);
     } else if !want && have {
-        amp.set_low();
+        let _ = amp.set_low();
         let _ = codec.shutdown();
         AMP_READY.store(false, Ordering::Relaxed);
     }

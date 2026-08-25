@@ -38,6 +38,14 @@ pub const RTC_I2C_ADDR: u8 = 0x51;
 /// MUST mirror its `ui/slint/story.slint` tile exactly; the layout set and this
 /// module change together or not at all. The CYD board carries its own values
 /// for its own layout.
+/// Lines the renderer stages before a flush — **2 on this board**.
+///
+/// The CO5300's CASET/RASET windows must be even-aligned on both axes
+/// (datasheet §7.5.21/§7.5.22), so the flusher stages an even/odd row PAIR and
+/// writes it as one `[x0, y_even, w, 2]` window. That constraint is this panel's
+/// alone; see the CYD board module for the counterpart.
+pub const FLUSH_STRIP_LINES: usize = 2;
+
 pub mod ui {
     /// story READ page, PAUSE tile: x0, x1, y0, y1 (inclusive band).
     pub const STORY_PAUSE_RECT: (u16, u16, u16, u16) = (22, 198, 378, 438);
@@ -56,4 +64,22 @@ pub mod ui {
     pub const SHADE_CARD_PITCH: u16 = 92;
     /// Visible shade cards (the ring holds up to 8; overlay shows "+N").
     pub const SHADE_CARDS: usize = 4;
+    /// Bottom edge-swipe band: a touch starting at y >= this is an edge gesture
+    /// (swipe-up = launcher, hold = switcher). 85 % of the 502 px panel.
+    pub const EDGE_BOTTOM_Y: u16 = 427;
+    /// Top edge-swipe band: a touch starting at y <= this is an edge gesture
+    /// (swipe-down = shade).
+    pub const EDGE_TOP_Y: u16 = 75;
+    /// Max travel still counted as a hold rather than a drag.
+    ///
+    /// Invariant, and it is the invariant rather than the number that ports:
+    /// this must stay UNDER the swipe threshold so a **cancelled hold can still
+    /// classify as the edge-swipe**. Here 24 < 36.
+    pub const HOLD_SLOP_PX: u16 = 24;
+    /// Minimum dominant-axis travel for a lift-off to count as a swipe.
+    /// One value suffices on a near-square portrait panel: ~9 % of 410 wide and
+    /// ~7 % of 502 tall. See the CYD module for why landscape needs two.
+    pub const SWIPE_MIN_X: u32 = 36;
+    /// See [`SWIPE_MIN_X`].
+    pub const SWIPE_MIN_Y: u32 = 36;
 }
