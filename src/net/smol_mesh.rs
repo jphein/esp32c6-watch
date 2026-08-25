@@ -370,6 +370,15 @@ pub struct SmolMesh {
     last_ack_for_us_ms: u64,
     last_tick_ms: u64,
     pub other_frames_heard: u32,
+    /// #64/#36 multihop relay duty: the (origin, env_msgid) dedup ring for
+    /// UP2 forwarding, plus the counters smol's own relay arm keeps. The
+    /// watch is never the uplink GATEWAY (it serves no MQTT sink), so its
+    /// whole flood role is the RELAY arm — mirrored from smol's mode.rs
+    /// service arm, the no-fork rule made structural.
+    flood_seen: mesh_flood::flood::SeenSet,
+    pub fwd_count: u32,
+    pub dedup_drops: u32,
+    pub ttl_drops: u32,
     // --- RELAY leaf uplink state (mode.rs Relay, leaf side only) ---
     next_msgid: u16,
     relay_tx: RelayTx,
@@ -606,6 +615,10 @@ impl SmolMesh {
             last_ack_for_us_ms: 0,
             last_tick_ms: 0,
             other_frames_heard: 0,
+            flood_seen: mesh_flood::flood::SeenSet::new(),
+            fwd_count: 0,
+            dedup_drops: 0,
+            ttl_drops: 0,
             next_msgid: 0,
             relay_tx: RelayTx::new(),
             last_relay_emit_ms: 0,
@@ -1337,6 +1350,57 @@ impl SmolMesh {
                     }
                 }
                 _ => {}
+            }
+            return None;
+        }
+        // ---- #64/#36: multihop relay duty (UP2 / RELAYACK2) ----------------
+        // A UP2 envelope is a stranded leaf's uplink riding the managed flood;
+        // the watch forwards it exactly once per (origin, env_msgid) while the
+        // hop budget lasts — smol's mode.rs relay arm, mirrored. The watch
+        // never Reassembles (is_gateway = false, always: no uplink sink here).
+        // Escalating the watch's OWN uplinks over UP2 (HopLatch) is the next
+        // slice; v1 makes the watch a good CITIZEN of other nodes' floods.
+        if let Some((origin, env_msgid, hop, inner)) = mesh_flood::wire::parse_up2(data) {
+            self.upsert_peer(src, None, now_ms, rssi);
+            let seen = self.flood_seen.seen_or_insert(origin, env_msgid, 0);
+            match mesh_flood::flood::forward_decision(false, hop, seen) {
+                mesh_flood::flood::ForwardAction::Forward { hop: next_hop } => {
+                    self.fwd_count = self.fwd_count.saturating_add(1);
+                    let mut fb = [0u8; 250];
+                    let len =
+                        mesh_flood::wire::encode_up2(origin, env_msgid, next_hop, inner, &mut fb);
+                    send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &fb[..len])
+                        .await;
+                    // Every-8th log, smol's own cadence — per-frame would spam.
+                    if self.fwd_count % 8 == 1 {
+                        println!(
+                            "[MESH] fwd #{} (origin id{origin} msgid {env_msgid} -> h{next_hop})",
+                            self.fwd_count
+                        );
+                    }
+                }
+                mesh_flood::flood::ForwardAction::DedupDrop => {
+                    self.dedup_drops = self.dedup_drops.saturating_add(1);
+                }
+                mesh_flood::flood::ForwardAction::TtlDrop => {
+                    self.ttl_drops = self.ttl_drops.saturating_add(1);
+                }
+                mesh_flood::flood::ForwardAction::Reassemble => {}
+            }
+            return None;
+        }
+        // The flooded ACK travels back the same distance: forward while hops
+        // remain unless it names US. (The watch doesn't originate UP2 yet, so
+        // target == our id only matters after the escalation slice — handled
+        // now anyway so that slice can't forget it.)
+        if let Some((target, msgid, bitmap, hop)) = mesh_flood::wire::parse_relayack2(data) {
+            self.upsert_peer(src, None, now_ms, rssi);
+            if target == self.id {
+                println!("[MESH] ack2 for us (msgid {msgid} bitmap {bitmap:#04x}) — no UP2 origination yet");
+            } else if hop > 1 {
+                let mut fb = [0u8; 40];
+                let len = mesh_flood::wire::encode_relayack2(target, msgid, bitmap, hop - 1, &mut fb);
+                send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &fb[..len]).await;
             }
             return None;
         }

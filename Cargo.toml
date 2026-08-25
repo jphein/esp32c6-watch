@@ -277,6 +277,7 @@ hunt = { path = "crates/hunt" }
 # hysteresis / partition merge — properties that cannot be observed on glass.
 # MUST stay byte-identical with smol's copy or the fleet partitions silently.
 mesh-elect = { path = "crates/mesh-elect" }
+mesh-flood = { path = "crates/mesh-flood" }
 # #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —
 # replaces src/net/climate_model_stub.rs.
 climate-model = { path = "crates/climate-model" }
