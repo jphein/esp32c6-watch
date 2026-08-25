@@ -74,6 +74,31 @@ import { CydPageTitle, CydStatRow, CydBacklightToggle } from "controls_cyd.slint
 // This is the only place in the port where the right answer was to delete a
 // two-sided constant instead of re-deriving it.
 //
+// ⏳ FLAGGED FOR MEASUREMENT — THIS PAGE IS THE TREE'S SCATTERED-UPDATE CASE
+// -----------------------------------------------------------------------------
+// `set_power` rewrites all SIX cells once a second while this page shows, and
+// each cell is a separate 148x34 box in a 2x3 arrangement. That is **six
+// independent dirty rects per second**, not one band — the exact pattern the
+// paint-budget doctrine says to flag rather than assume (per-strip command
+// overhead favours FEWER LARGER regions while RAM favours smaller, and the
+// crossover is a measurement).
+//
+// Two things make it probably-fine and one makes it worth checking anyway:
+//   * six 34-row boxes is 204 row-writes if they merge badly, but only ~30 KB of
+//     pixels — well under the ~117-full-width-row bit budget;
+//   * 1 Hz, and only while the page is visible;
+//   * BUT if the renderer coalesces them into one bounding box, that box is
+//     x8..312 by y36..150 — **114 rows, i.e. essentially the whole optimistic
+//     30 ms budget**, once a second.
+//
+// So: measure before this is load-bearing. If it does not hold up, the cheap fix
+// is Rust-side and needs no layout change — drop `set_power`'s cadence to 2 s
+// (the SYSTEM page already runs at 2 s for the same kind of content), which
+// halves the cost without touching a single coordinate here.
+//
+// The same shape exists more mildly on `ui/cyd/system.slint`: six right-anchored
+// values at 2 s. Noted there too.
+//
 // THE REBOOT BUTTON IS NOW LOAD-BEARING
 // -----------------------------------------------------------------------------
 // On the C6, REBOOT exists in two places: here and in the power MENU raised by

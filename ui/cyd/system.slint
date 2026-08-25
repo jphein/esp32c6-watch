@@ -34,6 +34,19 @@ import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
 //
 // So the merge the C6 was forced into is not needed here; every row is one fact.
 //
+// ⏳ A MILD SCATTERED-UPDATE CASE, NOTED SO IT IS NOT A SURPRISE
+// -----------------------------------------------------------------------------
+// Rust refreshes this page every 2 s, and only two of the six values actually
+// change on that cadence (HEAP and UPTIME) — CHIP, BUILD, FIRMWARE and SIGIL are
+// set once and never move. So the real per-tick dirty region is TWO
+// right-anchored value boxes, which is well inside any budget.
+//
+// It is written down because the SHAPE is the one the paint-budget doctrine warns
+// about (several independent right-aligned boxes rather than one band), and
+// because that shape is load-bearing on `ui/cyd/power.slint` at 1 Hz with six
+// live cells. If a future change makes more of these rows live, this page joins
+// that flag rather than inheriting a clean bill from this comment.
+//
 // ONE FACTUALLY FALSE DEFAULT, CORRECTED
 // -----------------------------------------------------------------------------
 // `chip-text` defaults to `"ESP32-C6 · 410x502"` and Rust never overrides it —
