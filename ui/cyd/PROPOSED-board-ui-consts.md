@@ -57,8 +57,12 @@ the swipe threshold so a **cancelled hold can still classify as the edge-swipe**
 |---|---|---|---|
 | `SLIDER_BAND` | `330..=430` | ⏳ entirely off-panel; moves with the power page's brightness slider | power |
 | `HUB_SLIDER_BAND` | `170..=240` | ⏳ clips exactly at the bottom edge; moves with the Settings DISPLAY slider. ⚠️ `settings.slint:360-363`'s comment says `180..220` while the code says `170..240` — **they already disagree, and whoever moves it must reconcile both** | settings |
+| `STORY_PAUSE_RECT` | `(22,198,378,438)` | ⏳ currently `(0,0,0,0)` on the C5, which **gates story playback off** — so nobody can ship a mis-mapped story page by accident. Duplicated in `main.rs`'s inline hit-test, whose own comment warns the geometry *"must match story.slint's READ-page tiles exactly"* | story |
+| `VISIBLE_CHAPTERS` | `5` | **`3`** (`Geom.max-chapters`) — ⚠️ it is also the **pager stride**, so NEWER/OLDER paging behaviour changes with it | story |
 
-### Switcher and shade — DECIDED, and the stacks stayed VERTICAL on purpose
+---
+
+## 2b. Switcher and shade — DECIDED, and the stacks stayed VERTICAL on purpose
 
 The spec's landscape answer for both was a horizontal card strip. It is the
 better-looking answer and it is the wrong one, for a reason that only shows up on
@@ -93,8 +97,6 @@ watch. Scene-item counts do not shrink with the panel (items are per-element, no
 per-pixel) and `PrepareScene`'s Vecs grow by DOUBLING, so the rungs that fail at
 54-66 kB free sit exactly where they did on the C6. 3 cards with a one-line body
 is fewer items on the one scene that was already at the top of the ladder.
-| `STORY_PAUSE_RECT` | `(22,198,378,438)` | ⏳ currently `(0,0,0,0)` on the C5, which **gates story playback off** — so nobody can ship a mis-mapped story page by accident. Duplicated in `main.rs`'s inline hit-test, whose own comment warns the geometry *"must match story.slint's READ-page tiles exactly"* | story |
-| `VISIBLE_CHAPTERS` | `5` | **`3`** (`Geom.max-chapters`) — ⚠️ it is also the **pager stride**, so NEWER/OLDER paging behaviour changes with it | story |
 
 ---
 
