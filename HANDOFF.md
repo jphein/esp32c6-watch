@@ -9,7 +9,7 @@ JP's standing goal: **the watch as a full smol target, all features + parity, on
 - **S3** (eldritch-insignia, 162): builds COMPLETE from main — full landscape scene (isel workaround fdfe822), ILI9341V driver + ActivePanel seam (2827ce9), FT6336U touch (e69a8ea). Bench flash armed at the s3-cyd session (their serial-pinned guard; wconfig partition carved at 0xC20000; provision --config-offset). Waits on #427's merge.
 
 ## Next session's headline candidates
-1. **mesh-OTA (#86)** — the plan is fully enumerated on the issue (ota-proto is complete; mirror smol's OtaLeafSession; half-day).
+1. ~~mesh-OTA (#86)~~ **LANDED same day** (293c117) — remaining: live verify vs a serving gateway + the persisted anti-rollback floor (config byte). #64 also complete in code. WorldSnake was ALREADY mesh_snake (audit corrected).
 2. **On-device verification batch** (needs mythic tethered): BLE reclaim heap bracket + 5x50 soak; #90 announce live test; eldritch-lantern factory-table migration (flash-full + provision — see the factory-partition memory).
 3. **Story E2E**: blocked ONLY on JP's AP fix (#89 — the 'admin' SSID L2-isolates on one AP; he took it).
 4. #36 epic remainder: etx → ledger/crdt → mesh_snake → cfgsched/cast → bard (audit + order on the issue).
