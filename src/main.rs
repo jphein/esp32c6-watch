@@ -54,10 +54,7 @@ use esp_hal::rtc_cntl::sleep::{GpioWakeupSource, TimerWakeupSource};
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    dma::DmaDescriptor,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent},
-    i2c::master::{Config as I2cConfig, I2c},
-    rtc_cntl::{wakeup_cause, Rtc},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     spi::{
         master::{Config as SpiConfig, Spi},
         Mode as SpiMode,
@@ -65,7 +62,20 @@ use esp_hal::{
     time::Rate,
     timer::timg::TimerGroup,
 };
+// Capability-scoped imports (#cyd-c5). Kept as separate `use`s rather than one
+// list so each is gated by the same feature that gates its only consumer — an
+// ungated list here means every board-gated block leaves a warning behind, and
+// warnings that are expected are warnings nobody reads.
+#[cfg(feature = "has-audio")]
+use esp_hal::dma::DmaDescriptor;
+#[cfg(feature = "has-light-sleep")]
+use esp_hal::gpio::WakeEvent;
+#[cfg(feature = "has-pmu")]
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+#[cfg(feature = "has-light-sleep")]
+use esp_hal::rtc_cntl::{wakeup_cause, Rtc};
 use esp_println::println;
+#[cfg(feature = "has-ble")]
 use esp_radio::ble::controller::BleConnector;
 use static_cell::StaticCell;
 
@@ -96,7 +106,9 @@ use crate::peripherals::mic_capture;
 use crate::peripherals::power::{Axp2101Power, PowerKey};
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
 use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
-use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
+#[cfg(feature = "has-cap-touch")]
+use crate::peripherals::touch::Ft3168Touch;
+use crate::peripherals::touch::SwipeDirection;
 use crate::ui::slint_shell::{self, ShellUi};
 
 extern crate alloc;
@@ -6179,11 +6191,97 @@ async fn main(_spawner: Spawner) -> ! {
                     // stops; PWRON (128ms ONLEVEL) powers back on. On USB the
                     // PMIC re-powers immediately = a cold reboot (the menu
                     // caption says so while VBUS is live).
-                    println!("[PKEY] SHUTDOWN -> AXP2101 poweroff (0x10 bit0)");
-                    if power.shutdown().is_err() {
-                        // Still alive = the write never landed. Keep the menu
-                        // up rather than pretending; the log tells the story.
-                        println!("[PKEY] poweroff write FAILED (I2C)");
+                    #[cfg(feature = "has-pmu")]
+                    {
+                        println!("[PKEY] SHUTDOWN -> AXP2101 poweroff (0x10 bit0)");
+                        if power.shutdown().is_err() {
+                            // Still alive = the write never landed. Keep the menu
+                            // up rather than pretending; the log tells the story.
+                            println!("[PKEY] poweroff write FAILED (I2C)");
+                        }
+                    }
+                    // === SOFT DOUSE (#cyd-c5) ===
+                    //
+                    // A board with no PMIC cannot cut its own rails, and deep
+                    // sleep is version-blocked here (esp-hal 1.1.x has no C5
+                    // sleep driver, and 1.2 — which does — breaks esp-radio, so
+                    // it is radio XOR sleep). This board is mains-powered, so
+                    // the point was never current draw: it is LOOKING off, with
+                    // an instant relight.
+                    //
+                    // The contract is BINDING and it is the shipped caption:
+                    // "screen and radios off · tap the glass to wake"
+                    // (board::cyd_c5's soft-douse block). A user reads that
+                    // sentence to learn how to UNDO this, so every clause has to
+                    // be true — which is why the wake is a real touch-IRQ wait
+                    // and the radios really come back.
+                    #[cfg(not(feature = "has-pmu"))]
+                    {
+                        // Restore-to-PRE-DOUSE, not force-on: the promise is
+                        // no-lost-state. If the link was down before, waking must
+                        // not switch it on.
+                        let wifi_was_wanted = net.wanted;
+                        println!(
+                            "[DOUSE] soft douse — wifi_was={} · tap the glass to wake",
+                            wifi_was_wanted
+                        );
+
+                        // Radios down. `Drop(User)` also clears `Burst`, and
+                        // deliberately does NOT tear down a Session/Story/Voice
+                        // hold — a background flow surviving a screen-off is
+                        // correct, and dropping it would lose state the caption
+                        // promises to keep.
+                        let _ = crate::net::net_task::send(
+                            crate::net::net_task::NetCmd::Drop(
+                                crate::net::net_task::Hold::User,
+                            ),
+                        );
+
+                        // Screen off: backlight dark AND the panel asleep. The
+                        // backlight alone would leave a faintly-lit black frame
+                        // on an IPS panel — "off" has to survive being looked at
+                        // in a dark room.
+                        shell.set_power_menu_open(false);
+                        display.set_brightness(0);
+                        display.display_off();
+
+                        // Wait for a FRESH tap. The finger that pressed DOUSE is
+                        // very likely still on the glass, and GPIO3 is level-ish
+                        // (PENIRQ is held low while pressed) — so waiting for a
+                        // falling edge immediately would either miss the edge
+                        // that already happened or wake on the press that caused
+                        // the douse. Require release first, then an edge.
+                        while touch_int.is_low() {
+                            Timer::after(Duration::from_millis(40)).await;
+                        }
+                        touch_int.wait_for_falling_edge().await;
+
+                        // Relight. `display_on` is SLPOUT + DISPON, undoing the
+                        // `display_off` above; brightness restores the backlight.
+                        display.display_on();
+                        display.set_brightness(brightness);
+
+                        // Radios back WITH the screen — clause (b) of the
+                        // contract, and the one that would be easiest to quietly
+                        // skip.
+                        if wifi_was_wanted {
+                            let _ = crate::net::net_task::send(
+                                crate::net::net_task::NetCmd::Raise(
+                                    crate::net::net_task::Hold::User,
+                                ),
+                            );
+                        }
+
+                        // Rejoin the loop as a normal wake — same state the AOD
+                        // tap-wake path sets, so the next tick renders a live
+                        // clock rather than a stale AOD frame.
+                        last_interaction = Instant::now();
+                        screen_state = 3;
+                        next_flush = last_interaction;
+                        shell.set_aod(false);
+                        shell.hint_wake();
+                        shell.request_redraw();
+                        println!("[DOUSE] woke on touch — screen + radios restored");
                     }
                 }
                 // === App switcher (#31) ===
