@@ -55,7 +55,7 @@ board-waveshare-c6 = [
     "esp-storage/esp32c6", "esp-bootloader-esp-idf/esp32c6",
     "esp-println/esp32c6", "esp-backtrace/esp32c6",
     "has-pmu", "has-imu", "has-audio", "has-cap-touch",
-    "has-die-temp", "has-light-sleep",
+    "has-die-temp", "has-light-sleep", "has-ble",
 ]
 board-cyd-c5 = [
     "esp-hal/esp32c5", "esp-rtos/esp32c5", "esp-radio/esp32c5",
@@ -81,6 +81,13 @@ has-die-temp = []
 # replaces the AOD light-sleep poll with a plain timer wait — same cadence,
 # more current, no chip-specific code.
 has-light-sleep = []
+# BLE host stack (trouble-host + the NimBLE controller blob). A CAPABILITY rather
+# than a chip fact: the C5 has BLE silicon, but `BleConnector::new` costs ~29.5 KB
+# of heap UNCONDITIONALLY at boot — before `watch_cfg` is even loaded, so it
+# cannot consult the runtime toggle — and the C5 does not have 29.5 KB to spend
+# on a radio that boots off. Turn this on for the CYD once radio init moves after
+# config load and can be made lazy.
+has-ble = []
 
 debug-console = ["dep:embedded-io-async"]
 # `tts` (read notifications aloud) is now ON BY DEFAULT — see `default` above.

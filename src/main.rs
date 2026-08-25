@@ -1666,18 +1666,42 @@ async fn main(_spawner: Spawner) -> ! {
     // was never bracketed by anything and had to be inferred from config
     // constants. It is also unconditional: the watch pays it even though the
     // radios are logged as OFF at boot.
-    let mark_ble = heap_mark();
-    let ble_connector =
-        BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
-    log_heap("post-ble");
-    heap_span("BleConnector::new", &mark_ble);
-    // trouble-host GATT server: wrap the HCI transport and hand it to the
-    // host task. The task parks until the watchface BLE button fires.
-    let ble_controller: peripherals::ble::WatchController =
-        trouble_host::prelude::ExternalController::new(ble_connector);
-    _spawner.spawn(
-        peripherals::ble::ble_host_task(ble_controller).expect("ble_host_task token"),
-    );
+    //
+    // ⚠️ #cyd-c5: gated OFF on boards without `has-ble`, and the reason is the
+    // sentence directly above — this cost is UNCONDITIONAL. On the C5 that is
+    // not a rounding error, it is the difference between booting and not:
+    // measured on glass, WiFi leaves main_free at 940 B and this block then
+    // takes the last 940 plus 28,564 B of the reclaimed pool, ~29.5 KB, for a
+    // radio that is switched off. Boots via POWERON threaded the needle; the
+    // soft-reset path OOM'd in `alloc.rs` and panic-looped.
+    //
+    // Growing the main pool is NOT the alternative — that pool is a `.bss`
+    // array whose end IS the stack floor, so +32 KB of pool is −32 KB of stack,
+    // and the C5 has 2,520 B of margin. The reclaimed pool is already at its
+    // full 64 KB `dram2_seg`. Demand is the only lever, so this is it.
+    //
+    // The real fix is ORDERING and it belongs to both boards: this runs at boot
+    // because `watch_cfg` (which holds `ble_on`) is not loaded until ~15 lines
+    // below, so the init CANNOT consult the setting — the C6 pays ~29.5 KB for
+    // a parked stack too. Move radio init after config load and spawn lazily on
+    // the toggle, and this gate can go away.
+    #[cfg(feature = "has-ble")]
+    {
+        let mark_ble = heap_mark();
+        let ble_connector =
+            BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
+        log_heap("post-ble");
+        heap_span("BleConnector::new", &mark_ble);
+        // trouble-host GATT server: wrap the HCI transport and hand it to the
+        // host task. The task parks until the watchface BLE button fires.
+        let ble_controller: peripherals::ble::WatchController =
+            trouble_host::prelude::ExternalController::new(ble_connector);
+        _spawner.spawn(
+            peripherals::ble::ble_host_task(ble_controller).expect("ble_host_task token"),
+        );
+    }
+    #[cfg(not(feature = "has-ble"))]
+    println!("[BLE] stack not built on this board (has-ble off) — ~29.5 KB kept");
     println!("[RADIO] stack ready (WiFi OFF, BLE advertising OFF)");
 
     // Credentials: flash config wins; compile-time env is the fallback seed.
@@ -2074,6 +2098,12 @@ async fn main(_spawner: Spawner) -> ! {
     // #46 (BLE bit): restore the persisted BLE toggle (config v4) so BLE-on —
     // and with it the stable-address Bermuda registration (#47) — survives
     // reboots and OTAs. The parked trouble host starts within ~250 ms.
+    // Without the host task there is nothing to start, so the persisted bit must
+    // not be honoured — a UI that says ON while no stack exists is worse than a
+    // board that says OFF honestly.
+    #[cfg(not(feature = "has-ble"))]
+    let mut ble_on = false;
+    #[cfg(feature = "has-ble")]
     let mut ble_on = watch_cfg.ble_on;
     if ble_on {
         crate::peripherals::ble::BLE_START_REQUEST
@@ -3918,6 +3948,16 @@ async fn main(_spawner: Spawner) -> ! {
         // single-connection peripheral host.)
         if ble_toggle_request {
             ble_toggle_request = false;
+            // No host task on this board — say so instead of flipping a dot that
+            // represents nothing. See the `has-ble` gate at the radio init.
+            #[cfg(not(feature = "has-ble"))]
+            {
+                shell.set_toast("BLE: not on this board");
+                toast_active = true;
+                toast_until = Instant::now() + Duration::from_secs(3);
+            }
+            #[cfg(feature = "has-ble")]
+            {
             let persist_intent;
             if !ble_on {
                 ble_on = true;
@@ -3958,6 +3998,7 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
             power_stats.ble_on = ble_on;
+            }
         }
 
         // Push radio chrome (wifi/ble/mesh-peers) only when it actually changed —
