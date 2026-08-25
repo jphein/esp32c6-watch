@@ -293,7 +293,12 @@ async fn run(
     // (The FlashMutex's GuardedFlash range-check backstops this again at
     // every individual write.)
     if target_entry.offset() == booted.offset() {
-        return Err("target slot == running slot (refused)");
+        // "refused:" PREFIX, not suffix — net_task classifies terminal errors by
+        // e.starts_with("refused:"), and a suffix reads identically to a human
+        // while being invisible to the classifier (morpheus caught his chip-id
+        // string with exactly that shape; this line had it too). A retry can
+        // never make the running slot stop being the target slot.
+        return Err("refused: target slot == running slot");
     }
     let slot_size = target_entry.len() as u64;
 
