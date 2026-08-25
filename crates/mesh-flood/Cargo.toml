@@ -1,0 +1,9 @@
+[package]
+name = "mesh-flood"
+version = "0.1.0"
+edition = "2021"
+
+# Pure no_std — the host-testable-crates pattern (mesh-elect's sibling).
+[dependencies]
+# The wire codec's HMAC-SHA256 (frame auth) — same pin as smol's clock crate.
+sha2 = { version = "0.11", default-features = false }
