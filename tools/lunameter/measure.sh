@@ -24,7 +24,11 @@ root="$(cd "$here/../.." && pwd)"
 # staging tree and one dies with "cannot remove …: Directory not empty" — observed
 # live 2026-07-29 in a session running several agents in parallel. Default to a
 # unique dir; `LUNAMETER_STAGE` still pins it for anyone who wants build reuse.
-stage="${LUNAMETER_STAGE:-$(mktemp -d "${TMPDIR:-/tmp}/lunameter-$(id -u)-XXXXXX")}"
+# Scratch defaults to the PROJECT tmp/ (gitignored), not /tmp — katana's /tmp
+# is a 16GB tmpfs (RAM+swap) and build trees starved the machine once
+# (JP directive, 2026-08-25). TMPDIR still wins if a caller sets it.
+mkdir -p "$here/../../tmp"
+stage="${LUNAMETER_STAGE:-$(mktemp -d "${TMPDIR:-$here/../../tmp}/lunameter-$(id -u)-XXXXXX")}"
 rm -rf "$stage"
 mkdir -p "$stage"
 cp "$here/Cargo.toml" "$here/build.rs" "$stage/"

@@ -28,7 +28,11 @@ root="$(cd "$here/../.." && pwd)"
 # live 2026-07-29 in a session running several agents in parallel, so the default
 # is unique per run; TRACKERMETER_STAGE still pins it for anyone who wants build
 # reuse and knows they are the only runner.
-stage="${TRACKERMETER_STAGE:-$(mktemp -d "${TMPDIR:-/tmp}/trackermeter-$(id -u)-XXXXXX")}"
+# Scratch defaults to the PROJECT tmp/ (gitignored), not /tmp — katana's /tmp
+# is a 16GB tmpfs (RAM+swap) and build trees starved the machine once
+# (JP directive, 2026-08-25). TMPDIR still wins if a caller sets it.
+mkdir -p "$here/../../tmp"
+stage="${TRACKERMETER_STAGE:-$(mktemp -d "${TMPDIR:-$here/../../tmp}/trackermeter-$(id -u)-XXXXXX")}"
 rm -rf "$stage"
 mkdir -p "$stage/src"
 cp "$here/Cargo.toml" "$here/build.rs" "$stage/"

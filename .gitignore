@@ -7,3 +7,4 @@ __pycache__/
 # specs go to docs/superpowers/specs/; this is the compaction-proof staging area
 # and includes a vendored third-party checkout that must never be committed here.
 scratch/
+tmp/
