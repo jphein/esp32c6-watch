@@ -1,0 +1,243 @@
+import { Theme } from "../slint/theme.slint";
+import { PillButton } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydStatRow, CydBacklightToggle, CydBacklightSlider } from "controls_cyd.slint";
+
+// ============================================================================
+// POWER PAGE — kept, and stubbed for a MAINS-POWERED board.
+// ============================================================================
+//
+// JP, 2026-08-24: the page stays; the battery half goes. This file is the
+// smallest thing that is TRUE on this board, not the largest thing that fits.
+//
+// WHAT IS FALSE HERE, AND HOW FALSE
+// -----------------------------------------------------------------------------
+// `power_stats.rs` is a pure MODEL — no hardware behind it on either board. On
+// the C6 that model is calibrated against a real cell, so its output is an
+// estimate. Here there is no cell at all, which changes the kind of wrong:
+//
+//   TOTAL      a sum of modelled per-subsystem draws, for a supply that is a
+//              USB cable. Not an estimate of anything.
+//   RUNTIME    `full_runtime_hours(BATTERY_CAPACITY_MAH)` — the model divided
+//              by the capacity of a battery that does not exist. It would
+//              cheerfully report "100%: 4h · left: ~3h" for a device that runs
+//              until unplugged.
+//
+// Both are DROPPED. Not dimmed, not zeroed: a number on a power page is read as
+// a measurement, and there is no phrasing of "3 hours left" that is honest for a
+// mains device.
+//
+// ⏳ WHAT LAYOUT CANNOT FIX — and the one-line Rust change proposed for it
+// -----------------------------------------------------------------------------
+// The six subsystem cells are each ONE string, fused by Rust:
+//
+//   ui.set_cpu_cell(format!("{}MHz \u{00b7} {}mA", stats.cpu_mhz, stats.base_ma()))
+//
+// The left half is a FACT (the CPU really is at 160 MHz; WiFi really is on). The
+// right half is the same absent-battery model. Slint cannot split a string it is
+// handed, so this file renders both halves and the mA figures survive against
+// JP's decision.
+//
+// The seam is in `set_power`, not here: drop the `· NNmA` suffix under
+// `#[cfg(not(feature = "has-pmu"))]` and every cell becomes state-only with no
+// layout change at all. Written up in PROPOSED-board-ui-consts.md. The cells are
+// laid out as if that has already landed — state-only strings are SHORTER, so
+// the page does not reflow when it does.
+//
+// The cells are kept rather than dropped with the rest because the state halves
+// are the only subsystem visibility on the whole watch, and "is WiFi actually
+// up" is exactly what someone opens this page to learn.
+//
+// LP CORE IS DROPPED TOO, AND FOR A SEPARATE REASON
+// -----------------------------------------------------------------------------
+// Not honesty — usefulness. It is an availability indicator for a core whose
+// offload proposal got a RED verdict (task #24), pushed once at boot, and its C6
+// value ("idle · 20 MHz") is a C6 clock. It was the least informative row on the
+// page before the port and the port made the page 60 % shorter. Property kept.
+//
+// 🟥 THERE IS NO SLIDER, SO THERE IS NO SWIPE GUARD TO MOVE
+// -----------------------------------------------------------------------------
+// This board has **no backlight PWM** — not unwired, absent from the HAL
+// generation — so brightness is binary and the control is a TOGGLE
+// (`CydBacklightToggle`, shared with the Settings DISPLAY page; see its header
+// for why a slider here would be a lie and why the toggle cannot soft-brick).
+//
+// That deletes a hazard rather than relocating one. `SLIDER_BAND = 330..=430`
+// exists to stop a horizontal DRAG on the slider being read as page navigation.
+// At 330 it is entirely off a 240 px panel, so today every drag on this page's
+// slider would also flip the page — but a toggle is a TAP, and taps were never
+// what the band guarded. Proposed: make the range never-match (`1..=0`) on the
+// C5 arm rather than retune it, so the check costs nothing and nothing has to
+// stay in sync with a control that no longer drags. Same for
+// `HUB_SLIDER_BAND`. Both in PROPOSED-board-ui-consts.md.
+//
+// This is the only place in the port where the right answer was to delete a
+// two-sided constant instead of re-deriving it.
+//
+// ⏳ FLAGGED FOR MEASUREMENT — THIS PAGE IS THE TREE'S SCATTERED-UPDATE CASE
+// -----------------------------------------------------------------------------
+// `set_power` rewrites all SIX cells once a second while this page shows, and
+// each cell is a separate 148x34 box in a 2x3 arrangement. That is **six
+// independent dirty rects per second**, not one band — the exact pattern the
+// paint-budget doctrine says to flag rather than assume (per-strip command
+// overhead favours FEWER LARGER regions while RAM favours smaller, and the
+// crossover is a measurement).
+//
+// Two things make it probably-fine and one makes it worth checking anyway:
+//   * six 34-row boxes is 204 row-writes if they merge badly, but only ~30 KB of
+//     pixels — well under the ~117-full-width-row bit budget;
+//   * 1 Hz, and only while the page is visible;
+//   * BUT if the renderer coalesces them into one bounding box, that box is
+//     x8..312 by y36..150 — **114 rows, i.e. essentially the whole optimistic
+//     30 ms budget**, once a second.
+//
+// So: measure before this is load-bearing. If it does not hold up, the cheap fix
+// is Rust-side and needs no layout change — drop `set_power`'s cadence to 2 s
+// (the SYSTEM page already runs at 2 s for the same kind of content), which
+// halves the cost without touching a single coordinate here.
+//
+// The same shape exists more mildly on `ui/cyd/system.slint`: six right-anchored
+// values at 2 s. Noted there too.
+//
+// THE REBOOT BUTTON IS NOW LOAD-BEARING
+// -----------------------------------------------------------------------------
+// On the C6, REBOOT exists in two places: here and in the power MENU raised by
+// the AXP2101 PWRON long-press. This board has no AXP2101 and no power key, so
+// **the power menu may be unreachable and this is the only reboot on the watch.**
+// It keeps a full 44 px hit box and its danger variant, and it did not get
+// squeezed for the slider — they sit side by side, which is what landscape is
+// for.
+// ============================================================================
+
+// One subsystem read-out cell: dim name over its value. 38 -> 34 px; the value
+// face stays 16 px and the name 12 px, both existing tiers.
+component PowerCell {
+    in property <string> name;
+    in property <string> value;
+    height: 34px;
+    Text {
+        x: 0; y: 0;
+        text: root.name;
+        color: Theme.dim; font-size: Geom.t-caption; letter-spacing: 2px;
+    }
+    Text {
+        x: 0; y: 14px;
+        text: root.value;
+        color: Theme.ink; font-size: 16px; font-weight: 600;
+    }
+}
+
+export component PowerPage {
+    // Six live cells, formatted by Rust `set_power` from PowerStats.
+    in property <string> cpu-cell: "--";
+    in property <string> display-cell: "--";
+    in property <string> wifi-cell: "--";
+    in property <string> ble-cell: "--";
+    in property <string> imu-cell: "--";
+    in property <string> audio-cell: "--";
+    // Declared because slint_shell.rs writes them; NOT rendered — see header.
+    in property <int> total-ma: -1;
+    in property <string> runtime-text: "--";
+    in property <int> left-hours: 999;
+    in property <string> lp-core-text: "--";
+    in-out property <float> brightness;
+    // See CydBacklightToggle: the on-state is Rust-pushed (isel workaround).
+    in property <bool> backlight-on;
+    in property <bool> backlight-dimmable;
+    callback brightness-changed(float);
+    callback reboot-tap();
+
+    CydPageTitle { title: "POWER"; }
+
+    // --- subsystem grid: 2 columns x 3 rows, absolute --------------------
+    // The C6 uses a `GridLayout` here — the tree's only one. It is dropped for
+    // the usual reason: a layout manager sizes children from their intrinsic
+    // dimensions, and every one of these cells is two Texts that Rust rewrites
+    // once a second while the page shows. Six fixed cells at a known pitch need
+    // no measuring, and the pitch is now written down instead of implied by a
+    // `spacing:`.
+    PowerCell { x: Geom.content-x; y:  36px; width: Geom.col-w;
+                name: "CPU";     value: root.cpu-cell; }
+    PowerCell { x: Geom.col2-x;    y:  36px; width: Geom.col-w;
+                name: "DISPLAY"; value: root.display-cell; }
+    PowerCell { x: Geom.content-x; y:  76px; width: Geom.col-w;
+                name: "WIFI";    value: root.wifi-cell; }
+    PowerCell { x: Geom.col2-x;    y:  76px; width: Geom.col-w;
+                name: "BLE";     value: root.ble-cell; }
+    PowerCell { x: Geom.content-x; y: 116px; width: Geom.col-w;
+                name: "IMU";     value: root.imu-cell; }
+    PowerCell { x: Geom.col2-x;    y: 116px; width: Geom.col-w;
+                name: "AUDIO";   value: root.audio-cell; }
+
+    // --- the honesty line, standing where TOTAL and RUNTIME used to be ------
+    // Placed deliberately: this is the spot a C6 user's eye goes for the total
+    // draw, so it is the spot that has to explain why there is no total.
+    Text {
+        x: Geom.content-x;
+        y: 154px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        // BOARD-FACT: assumes no PMU. True on the C5; verify per board.
+        text: "MAINS POWERED \u{00b7} no cell, no current measurement";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+
+    // --- backlight ----------------------------------------------------------
+    // §1d control split, chosen by `backlight-dimmable` (a Rust-pushed board
+    // fact): a slider where PWM exists, a toggle where the hardware is binary
+    // — binary hardware stated as binary, dimmable hardware not thrown away.
+    // Both ride the same `brightness` / `brightness-changed(float)` contract
+    // the C6 slider uses, so `slint_shell.rs` is untouched.
+    if root.backlight-dimmable: CydBacklightSlider {
+        x: Geom.content-x;
+        y: 178px;
+        width: 210px;
+        label: "BACKLIGHT";
+        value <=> root.brightness;
+        changed(f) => { root.brightness-changed(f); }
+    }
+    if !root.backlight-dimmable: CydBacklightToggle {
+        x: Geom.content-x;
+        y: 178px;
+        width: 210px;
+        label: "BACKLIGHT";
+        on: root.backlight-on;
+        value <=> root.brightness;
+        changed(f) => { root.brightness-changed(f); }
+    }
+    // The recovery, STATED — toggle boards only. Switching a binary backlight
+    // off darkens the screen that carries the switch; a user who cannot see
+    // the screen cannot explore it, so the way back must be readable BEFORE
+    // the tap, not discoverable after it.
+    if !root.backlight-dimmable: Text {
+        x: Geom.content-x;
+        y: 222px;
+        text: "no PWM \u{2014} tap the screen to relight";
+        color: Theme.faint; font-size: Geom.t-caption; letter-spacing: 1px;
+    }
+
+    // --- reboot -------------------------------------------------------------
+    // Beside the backlight control rather than under it: the C6 had to stack
+    // them and then spend a comment on clearing the page dots by 2 px. There are
+    // no page dots over this page and there is width to spare, so the two
+    // controls that are both about "the device" sit on one line.
+    //
+    // Danger variant (Recipe D): pressed inverts to solid warn with on-accent
+    // text — an unmistakable "you are about to reboot". 84x38 visual padded to a
+    // 92x46 finger target.
+    reboot := PillButton {
+        x: 228px;
+        y: 181px;
+        width: 84px; height: 38px;
+        danger: true;
+        text: "REBOOT";
+        text-size: Geom.t-label;
+        tracking: 2px;
+        hit-pad-x: 4px;
+        hit-pad-top: 4px;
+        hit-pad-bottom: 4px;
+        clicked => { root.reboot-tap(); }
+    }
+}

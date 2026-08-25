@@ -11,6 +11,7 @@ pub mod cpu_clock;
 // Die-temp helper: pre-staged, wired into main.rs's system-page push once
 // light-sleep (#29) frees up main.rs. Unused until then → dead-code warning.
 #[allow(dead_code)]
+#[cfg(feature = "has-die-temp")]
 pub mod die_temp;
 pub mod imu;
 // MC2 mic capture (I2S RX -> mono PCM). Unwired until MC5 spawns the task from

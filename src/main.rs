@@ -44,17 +44,20 @@ use embedded_hal_bus::i2c::RefCellDevice;
 use esp_backtrace as _;
 
 include!("panic_reboot.rs");
+// Chip-gated esp-hal surfaces (#cyd-c5): the C5's esp-hal 1.1.x has no `i2s`
+// module and no `rtc_cntl::sleep`. Gated by CAPABILITY, not chip, per the board
+// model — the board feature says what the hardware has, code asks the capability.
+#[cfg(feature = "has-audio")]
+use esp_hal::i2s::master::{Config as I2sConfig, DataFormat, I2s};
+#[cfg(feature = "has-light-sleep")]
+use esp_hal::rtc_cntl::sleep::{GpioWakeupSource, TimerWakeupSource};
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     dma::DmaDescriptor,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, WakeEvent},
     i2c::master::{Config as I2cConfig, I2c},
-    i2s::master::{Config as I2sConfig, DataFormat, I2s},
-    rtc_cntl::{
-        sleep::{GpioWakeupSource, TimerWakeupSource},
-        wakeup_cause, Rtc,
-    },
+    rtc_cntl::{wakeup_cause, Rtc},
     spi::{
         master::{Config as SpiConfig, Spi},
         Mode as SpiMode,
@@ -84,6 +87,7 @@ use crate::drivers::qspi_bus::QspiBus;
 use crate::peripherals::audio::Es8311;
 use crate::peripherals::audio_out;
 use crate::peripherals::es7210::Es7210;
+#[cfg(feature = "has-die-temp")]
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::mic_capture;
@@ -262,6 +266,7 @@ fn us_pacific_offset_secs(days_since_epoch: i32) -> i64 {
 ///      stays on the select-tick loop, like debug-console builds).
 ///
 /// Returns `true` when light sleep is safe (calibration hardware works).
+#[cfg(feature = "has-light-sleep")]
 fn rtc_sleep_cal_init(delay: &Delay) -> bool {
     use esp_hal::peripherals::{LP_AON, LP_CLKRST, PCR, PMU, TIMG0};
 
@@ -933,7 +938,24 @@ async fn main(_spawner: Spawner) -> ! {
     // If you change it, `STACK_FLOOR`'s boot assert is the authority on whether
     // the result is safe — not this comment. Real fix still on the books: box
     // the session/voice socket buffers out of .bss so the pool can be restored.
+    #[cfg(feature = "board-waveshare-c6")]
         esp_alloc::heap_allocator!(size: 186 * 1024);
+    // C5 FIRST-LINK PLACEHOLDER, not a budget. The C6's 186 KB is a MEASURED
+    // C6 number (the #65/#75 bracket); inheriting it on the C5 fails to even
+    // LINK — the C5 has less HP SRAM and the first link attempt came up
+    // 17,664 B short of placing `.stack`. 160 KB is "the largest round number
+    // that links with margin", which is a statement about the LINKER, not
+    // about safety: the real budget comes from the measured-floor recipe
+    // (readelf gap + radio-up soak, 4+ trials) on hardware, per smol's
+    // ChipBudget contract. Do not tune this by feel; measure it.
+    //
+    // 160 KB LINKED with a stack region of 8,960 B — a link the C6's own
+    // history calls a guaranteed boot crash (61 KB = 5/5 panics there; a
+    // successful link has never been evidence of a runnable image). 96 KB
+    // moves the freed 64 KB into the stack region: 8,960 + 65,536 = ~74.5 KB,
+    // in the band the C6 boots from. Still a placeholder; still measure.
+    #[cfg(not(feature = "board-waveshare-c6"))]
+        esp_alloc::heap_allocator!(size: 96 * 1024);
     // ROM-reclaimed region (dram2_seg). Second pool so nothing goes to waste; it
     // sits ABOVE the stack ceiling and is independent of _bss_end, so its size has
     // ZERO effect on the stack.
@@ -1007,7 +1029,21 @@ async fn main(_spawner: Spawner) -> ! {
         // Keep this floor ABOVE the measured failure point with real margin.
         // If it trips, GROW the stack (trim the MAIN heap_allocator!) — do not
         // lower the floor.
-        const STACK_FLOOR: usize = 70 * 1024;
+        //
+        // BOARD SPLIT (#cyd-c5): every number above is C6 evidence — the
+        // failure address, the 61/73 KB bracket, and the 70 KB floor are
+        // measurements of the C6 WiFi blob's .bss layout. The C5 blob lays
+        // its globals out differently and NOTHING has bracketed it yet, so
+        // its floor is PROVISIONAL: the C6 value as a stand-in, not a fact
+        // (budgets are measured, never inherited). Replace it via the
+        // radio-up soak (RADIO-UP, associate, 5x at descending gaps) before
+        // trusting any C5 image that boots past this assert. Note for
+        // tools/preflight.sh: it parses these consts and FAILS if they ever
+        // diverge, because it gates one board and must then be told which.
+        #[cfg(feature = "board-waveshare-c6")]
+        const STACK_FLOOR: usize = 70 * 1024; // MEASURED (#65)
+        #[cfg(not(feature = "board-waveshare-c6"))]
+        const STACK_FLOOR: usize = 70 * 1024; // PROVISIONAL — see BOARD SPLIT
         println!("[STACK] gap = {} B ({} KB)", gap, gap / 1024);
         assert!(
             gap >= STACK_FLOOR,
@@ -1103,16 +1139,29 @@ async fn main(_spawner: Spawner) -> ! {
     }
 
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
-    let mut touch_rst = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
-    let mut touch_int = Input::new(
-        peripherals.GPIO15,
-        InputConfig::default().with_pull(Pull::Up),
+    #[cfg(feature = "has-cap-touch")]
+    let (mut touch_int, mut touch) = {
+        let mut touch_rst =
+            Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
+        let touch_int = Input::new(
+            peripherals.GPIO15,
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        touch_rst.set_low();
+        delay.delay_millis(10);
+        touch_rst.set_high();
+        delay.delay_millis(50);
+        (touch_int, Ft3168Touch::new(RefCellDevice::new(&i2c_ref)))
+    };
+    // No cap-touch on this board (the CYD's XPT2046 lands with its own driver
+    // against drivers/panel.rs). The stubs keep every consumer site compiling:
+    // NullTouch reads Ok(None) forever, NullInput's falling-edge future never
+    // resolves — which inside a select is exactly "this board has no touch IRQ".
+    #[cfg(not(feature = "has-cap-touch"))]
+    let (mut touch_int, mut touch) = (
+        crate::peripherals::touch::NullInput,
+        crate::peripherals::touch::NullTouch,
     );
-    touch_rst.set_low();
-    delay.delay_millis(10);
-    touch_rst.set_high();
-    delay.delay_millis(50);
-    let mut touch = Ft3168Touch::new(RefCellDevice::new(&i2c_ref));
     let _ = touch.init();
     println!("[TOUCH] OK");
 
@@ -1131,9 +1180,15 @@ async fn main(_spawner: Spawner) -> ! {
     // divide-by-zero inside sleep_light), seed a sane STORE1 slowclk period if
     // the boot calibration failed, and probe whether light sleep is safe.
     // MUST run before the first `sleep_light` below.
+    #[cfg(feature = "has-light-sleep")]
     let sleep_cal_ok = rtc_sleep_cal_init(&delay);
+    // No light sleep on this board: the flag exists so the AOD arm's guard
+    // compiles; it can never be consulted on a path that sleeps.
+    #[cfg(not(feature = "has-light-sleep"))]
+    let sleep_cal_ok = false;
 
     // C6 on-die temperature sensor (#54) — read on the sensors page.
+    #[cfg(feature = "has-die-temp")]
     let die_temp = DieTemp::new(peripherals.TSENS);
 
     // === IMU ===
@@ -1172,86 +1227,99 @@ async fn main(_spawner: Spawner) -> ! {
     // TX's clock (ES8311 = external slave). This is what makes the ES8311 ADC actually
     // clock data onto ASDOUT (a plain RX-master did not; vendor firmware proved the HW
     // is fine — the topology was the gap).
-    println!("[AUDIO] Init I2S (full-duplex, shared clock)...");
-    let i2s_config = I2sConfig::default()
-        .with_sample_rate(Rate::from_hz(16000))
-        .with_data_format(DataFormat::Data16Channel16)
-        .with_signal_loopback(true);
-    let i2s_periph = I2s::new(peripherals.I2S0, peripherals.DMA_CH1, i2s_config)
-        .expect("I2S failed")
-        .with_mclk(peripherals.GPIO19);
-    // TX is the I2S MASTER: it drives the shared BCLK(GPIO20)/WS(GPIO22) + MCLK. A
-    // continuous SILENT circular TX (below) keeps them free-running so the ES8311 ADC
-    // clocks data onto ASDOUT; the RX slaves to this clock via signal_loopback (internal).
-    // A circular TX needs EXACTLY descriptor_count() descriptors for its ring buffer.
-    const TX_RING_LEN: usize = audio_out::TX_RING_LEN; // 3072 bytes → 3 descriptors
-    const TX_CIRC_DESCS: usize =
-        esp_hal::dma::descriptor_count(TX_RING_LEN, esp_hal::dma::CHUNK_SIZE, true);
-    static I2S_TX_DESC: StaticCell<[DmaDescriptor; TX_CIRC_DESCS]> = StaticCell::new();
-    let mut i2s_tx = i2s_periph
-        .i2s_tx
-        .with_bclk(peripherals.GPIO20) // TX-master BCLK → codec (shared w/ RX via loopback)
-        .with_ws(peripherals.GPIO22)   // TX-master WS/LRCK → codec
-        .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
-        .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; TX_CIRC_DESCS]));
-    // === I2S RX for mic capture (#42 voice + #28 meter) — SLAVE via signal_loopback ===
-    // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx). With
-    // signal_loopback=true the RX shares the TX-master WS/BCK internally (configure()
-    // sets rx_slave_mod + sig_loopback from the Config flag) and just reads DIN(GPIO21)=
-    // ASDOUT — NO with_bclk/with_ws, NO GPIO-matrix hack. This is the ONLY place
-    // I2S0/DMA_CH1 is claimed; voice PTT + the SoundLevel meter subscribe to MIC_CH.
-    // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
-    // mic_capture_task drives it via read_dma_circular + poll.
-    //
-    // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
-    // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds its
-    // walk from chain.last() expecting last.next → first; a padded array leaves trailing
-    // EMPTY descriptors whose next=null, so the first available() poll derefs null.
-    // descriptor_count() gives the exact count (3 for the ring @ CHUNK_SIZE=4092).
-    const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
-        mic_capture::MIC_RING_LEN,
-        esp_hal::dma::CHUNK_SIZE,
-        true, // circular
-    );
-    static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
-    let i2s_rx = i2s_periph
-        .i2s_rx
-        .with_din(peripherals.GPIO21) // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
-        .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
-    // Mic PCM channel (capture task → consumers) + the DMA capture ring.
-    // Channel::new() is const → a plain static; the ring needs a StaticCell.
-    // MIC_RING_LEN is 3 × STEREO_CHUNK = 3072 B (it was 8 KB until the
-    // three-descriptor rework — see mic_capture.rs for the live value).
+    // MIC_CH is declared OUTSIDE the audio gate on purpose: the channel type is
+    // chip-agnostic and its receivers (voice PTT, the SoundLevel meter) live in
+    // ungated code. On a board without audio the channel simply never receives —
+    // the consumers' timeout paths already handle silence, because a real mic
+    // can be silent too.
     static MIC_CH: mic_capture::MicChannel = mic_capture::MicChannel::new();
-    static MIC_RING: StaticCell<[u8; mic_capture::MIC_RING_LEN]> = StaticCell::new();
-    let mic_ring = MIC_RING.init([0u8; mic_capture::MIC_RING_LEN]);
-    _spawner.spawn(
-        mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
-            .expect("mic_capture_task token"),
-    );
-    println!("[AUDIO] I2S RX (mic) ready on GPIO21 (DIN <- ES8311 ASDOUT)");
 
-    // === Continuous full-duplex TX — the clock generator + playback ring ===
-    // The mic ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
-    // I2S MASTER, our TX must free-run those shared clocks continuously; RX slaves to
-    // them (signal_loopback). We stream this ring forever: the shared BCLK/WS keep
-    // toggling and the ADC keeps clocking real mic data into the RX DMA. The ring is
-    // ZEROS except while a queued SFX clip plays (#23): the clock task substitutes
-    // clip samples via DmaTransferTxCircular::push, and the feeder's tail scrubs the
-    // ring back to all-silence before the amp drops — idle is exactly the proven
-    // silent-clock behavior (amp GPIO6 LOW, data all-zero; no tone, no blasting).
-    static TX_RING: StaticCell<[u8; TX_RING_LEN]> = StaticCell::new();
-    let tx_ring: &'static [u8] = TX_RING.init([0u8; TX_RING_LEN]);
-    // Clock + playback task; re-arms on CLOCK_REARM (AOD light sleep clock-gates
-    // I2S; the task restarts the DMA after each wake) and per playback session
-    // (see silent_clock_task docs: esp-hal's circular push-state goes Late after
-    // any idle lap, so each session opens on a fresh transfer). This produces the
-    // shared MCLK/BCLK/WS the ES7210 mic ADC (I2S slave) needs.
-    _spawner.spawn(
-        mic_capture::silent_clock_task(i2s_tx, tx_ring)
-            .expect("silent_clock_task token"),
-    );
-    println!("[AUDIO] I2S TX clock+playback task spawned (full-duplex master, re-arms after sleep)");
+    // Whole-block gate rather than per-line: everything from the I2S config to
+    // the TX clock task exists only where the codec + mics do (has-audio). The
+    // C5's esp-hal has no `i2s` module, so none of this can even name its types.
+    #[cfg(feature = "has-audio")]
+    {
+        println!("[AUDIO] Init I2S (full-duplex, shared clock)...");
+        let i2s_config = I2sConfig::default()
+            .with_sample_rate(Rate::from_hz(16000))
+            .with_data_format(DataFormat::Data16Channel16)
+            .with_signal_loopback(true);
+        let i2s_periph = I2s::new(peripherals.I2S0, peripherals.DMA_CH1, i2s_config)
+            .expect("I2S failed")
+            .with_mclk(peripherals.GPIO19);
+        // TX is the I2S MASTER: it drives the shared BCLK(GPIO20)/WS(GPIO22) + MCLK. A
+        // continuous SILENT circular TX (below) keeps them free-running so the ES8311 ADC
+        // clocks data onto ASDOUT; the RX slaves to this clock via signal_loopback (internal).
+        // A circular TX needs EXACTLY descriptor_count() descriptors for its ring buffer.
+        const TX_RING_LEN: usize = audio_out::TX_RING_LEN; // 3072 bytes → 3 descriptors
+        const TX_CIRC_DESCS: usize =
+            esp_hal::dma::descriptor_count(TX_RING_LEN, esp_hal::dma::CHUNK_SIZE, true);
+        static I2S_TX_DESC: StaticCell<[DmaDescriptor; TX_CIRC_DESCS]> = StaticCell::new();
+        let mut i2s_tx = i2s_periph
+            .i2s_tx
+            .with_bclk(peripherals.GPIO20) // TX-master BCLK → codec (shared w/ RX via loopback)
+            .with_ws(peripherals.GPIO22)   // TX-master WS/LRCK → codec
+            .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
+            .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; TX_CIRC_DESCS]));
+        // === I2S RX for mic capture (#42 voice + #28 meter) — SLAVE via signal_loopback ===
+        // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx). With
+        // signal_loopback=true the RX shares the TX-master WS/BCK internally (configure()
+        // sets rx_slave_mod + sig_loopback from the Config flag) and just reads DIN(GPIO21)=
+        // ASDOUT — NO with_bclk/with_ws, NO GPIO-matrix hack. This is the ONLY place
+        // I2S0/DMA_CH1 is claimed; voice PTT + the SoundLevel meter subscribe to MIC_CH.
+        // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
+        // mic_capture_task drives it via read_dma_circular + poll.
+        //
+        // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
+        // a CIRCULAR RX chain must be sized EXACTLY to the ring. RxCircularState seeds its
+        // walk from chain.last() expecting last.next → first; a padded array leaves trailing
+        // EMPTY descriptors whose next=null, so the first available() poll derefs null.
+        // descriptor_count() gives the exact count (3 for the ring @ CHUNK_SIZE=4092).
+        const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
+            mic_capture::MIC_RING_LEN,
+            esp_hal::dma::CHUNK_SIZE,
+            true, // circular
+        );
+        static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
+        let i2s_rx = i2s_periph
+            .i2s_rx
+            .with_din(peripherals.GPIO21) // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
+            .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
+        // Mic PCM channel (capture task → consumers) + the DMA capture ring.
+        // Channel::new() is const → a plain static; the ring needs a StaticCell.
+        // MIC_RING_LEN is 3 × STEREO_CHUNK = 3072 B (it was 8 KB until the
+        // three-descriptor rework — see mic_capture.rs for the live value).
+        static MIC_RING: StaticCell<[u8; mic_capture::MIC_RING_LEN]> = StaticCell::new();
+        let mic_ring = MIC_RING.init([0u8; mic_capture::MIC_RING_LEN]);
+        _spawner.spawn(
+            mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
+                .expect("mic_capture_task token"),
+        );
+        println!("[AUDIO] I2S RX (mic) ready on GPIO21 (DIN <- ES8311 ASDOUT)");
+
+        // === Continuous full-duplex TX — the clock generator + playback ring ===
+        // The mic ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
+        // I2S MASTER, our TX must free-run those shared clocks continuously; RX slaves to
+        // them (signal_loopback). We stream this ring forever: the shared BCLK/WS keep
+        // toggling and the ADC keeps clocking real mic data into the RX DMA. The ring is
+        // ZEROS except while a queued SFX clip plays (#23): the clock task substitutes
+        // clip samples via DmaTransferTxCircular::push, and the feeder's tail scrubs the
+        // ring back to all-silence before the amp drops — idle is exactly the proven
+        // silent-clock behavior (amp GPIO6 LOW, data all-zero; no tone, no blasting).
+        static TX_RING: StaticCell<[u8; TX_RING_LEN]> = StaticCell::new();
+        let tx_ring: &'static [u8] = TX_RING.init([0u8; TX_RING_LEN]);
+        // Clock + playback task; re-arms on CLOCK_REARM (AOD light sleep clock-gates
+        // I2S; the task restarts the DMA after each wake) and per playback session
+        // (see silent_clock_task docs: esp-hal's circular push-state goes Late after
+        // any idle lap, so each session opens on a fresh transfer). This produces the
+        // shared MCLK/BCLK/WS the ES7210 mic ADC (I2S slave) needs.
+        _spawner.spawn(
+            mic_capture::silent_clock_task(i2s_tx, tx_ring)
+                .expect("silent_clock_task token"),
+        );
+        println!("[AUDIO] I2S TX clock+playback task spawned (full-duplex master, re-arms after sleep)");
+    }
+
 
     // === ES7210 mic ADC — the ACTUAL microphone codec ===
     // The mics are wired to the ES7210 (SDOUT1 -> GPIO21), NOT the ES8311. It MUST be
@@ -1279,14 +1347,21 @@ async fn main(_spawner: Spawner) -> ! {
     } else {
         println!("[POWER] PWRON event arm FAILED (I2C)");
     }
-    Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
+    // Constructed unconditionally — it is just an I2C address wrapper and later
+    // code (the AOD-wake re-init) references it outside the audio gate; on a
+    // board with no mic ADC every access is an I2C error the callers already
+    // handle. Only the INIT is audio-gated.
     let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
-    match mic_adc.init() {
-        Ok(()) => {
-            let g = mic_adc.read_reg(0x43).unwrap_or(0xEE);
-            println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1d)", g);
+    #[cfg(feature = "has-audio")]
+    {
+        Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
+        match mic_adc.init() {
+            Ok(()) => {
+                let g = mic_adc.read_reg(0x43).unwrap_or(0xEE);
+                println!("[ES7210] init OK (MIC1 gain reg43=0x{:02x}, expect 0x1d)", g);
+            }
+            Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
         }
-        Err(_) => println!("[ES7210] init FAILED (I2C at 0x40)"),
     }
 
     // Pre-synthesize the SFX clips (#23) — MONO 16 kHz s16le, the play_pcm
@@ -2323,28 +2398,42 @@ async fn main(_spawner: Spawner) -> ! {
             // the HP core awake. Side benefit: the AOD minute-repaint lag drops
             // from up to 60 s to <1 s.
             const AOD_POLL_MS: u64 = 700;
-            let timer_wake =
-                TimerWakeupSource::new(core::time::Duration::from_millis(AOD_POLL_MS));
-            let gpio_wake = GpioWakeupSource::new();
-            let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
-            let _ = boot_button.wakeup_enable(true, WakeEvent::LowLevel);
             let t0 = Instant::now();
-            // #43: re-assert the REF_TICK divider feeding the RC_FAST
-            // calibration that `sleep_light` runs internally — cheap (one MMIO
-            // write per AOD poll), and shields against anything since boot
-            // (radio glue, a future esp-hal) having cleared the bits, which
-            // would bring back the divide-by-zero.
-            esp_hal::peripherals::PCR::regs()
-                .ctrl_tick_conf()
-                .modify(|_, w| unsafe {
-                    w.fosc_tick_num().bits(255);
-                    w.tick_enable().set_bit()
-                });
-            rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
-            let cause = wakeup_cause();
-            // Disarm so normal falling-edge IRQ handling resumes.
-            let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
-            let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+            #[cfg(feature = "has-light-sleep")]
+            let cause = {
+                let timer_wake =
+                    TimerWakeupSource::new(core::time::Duration::from_millis(AOD_POLL_MS));
+                let gpio_wake = GpioWakeupSource::new();
+                let _ = touch_int.wakeup_enable(true, WakeEvent::LowLevel);
+                let _ = boot_button.wakeup_enable(true, WakeEvent::LowLevel);
+                // #43: re-assert the REF_TICK divider feeding the RC_FAST
+                // calibration that `sleep_light` runs internally — cheap (one MMIO
+                // write per AOD poll), and shields against anything since boot
+                // (radio glue, a future esp-hal) having cleared the bits, which
+                // would bring back the divide-by-zero.
+                esp_hal::peripherals::PCR::regs()
+                    .ctrl_tick_conf()
+                    .modify(|_, w| unsafe {
+                        w.fosc_tick_num().bits(255);
+                        w.tick_enable().set_bit()
+                    });
+                rtc_lp.sleep_light(&[&timer_wake, &gpio_wake]);
+                let cause = wakeup_cause();
+                // Disarm so normal falling-edge IRQ handling resumes.
+                let _ = touch_int.wakeup_enable(false, WakeEvent::LowLevel);
+                let _ = boot_button.wakeup_enable(false, WakeEvent::LowLevel);
+                cause
+            };
+            // No light sleep on this board: the AOD poll keeps its exact cadence
+            // as a plain timer wait. Same loop shape, same repaint math, more
+            // current — a truthful degradation, not an emulation. The "cause" on
+            // this arm is a label, because nothing slept and nothing woke us but
+            // the timer.
+            #[cfg(not(feature = "has-light-sleep"))]
+            let cause = {
+                Timer::after(Duration::from_millis(AOD_POLL_MS)).await;
+                "timer-poll (no light sleep on this board)"
+            };
             // PWRON poll re-arm (#48): embassy-time paused during the sleep,
             // so `next_pkey` set to a pre-sleep `+250ms` may never elapse.
             // Backdate it to the pre-sleep stamp — the poll below then runs
@@ -5144,8 +5233,12 @@ async fn main(_spawner: Spawner) -> ! {
                             // drains the DMA ring and stutters the audio.
                             let mut stop_on_tap = || match touch.read() {
                                 Ok(Some(p)) => {
-                                    let in_row = p.y >= 378 && p.y <= 438;
-                                    if in_row && p.x >= 22 && p.x <= 198 {
+                                    // Geometry from the BOARD's ui module, which mirrors
+                                    // this board's .slint tile — never inline numbers,
+                                    // which diverge silently when a layout moves.
+                                    let (x0, x1, y0, y1) = board::ui::STORY_PAUSE_RECT;
+                                    let in_row = p.y >= y0 && p.y <= y1;
+                                    if in_row && p.x >= x0 && p.x <= x1 {
                                         story_play::pause();
                                         false // not a stop — the pause latch takes the exit
                                     } else {
@@ -5439,6 +5532,7 @@ async fn main(_spawner: Spawner) -> ! {
                 match page {
                     slint_shell::PAGE_SENSORS => {
                         shell.set_sensors(accel, gyro_data, imu_temp);
+                        #[cfg(feature = "has-die-temp")]
                         shell.set_die_temp(die_temp.decidegrees());
                     }
                     slint_shell::PAGE_SYSTEM => {

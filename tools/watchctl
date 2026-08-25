@@ -56,6 +56,16 @@ FLEET = {
     # sigil            : efuse MAC == USB serial (udev ID_SERIAL_SHORT)
     "eldritch-lantern": "98:A3:16:A7:2F:E4",
     "mythic-throne":    "98:A3:16:A5:A7:F8",
+    # NM-CYD-C5 (ESP32-C5, smol convergence target — feat/cyd-c5-target). The
+    # sigil is DERIVED from this MAC by sigil-id, same as the watches: verified
+    # against the crate itself, not hand arithmetic (which got it wrong — the
+    # exact drift the pinned table exists to prevent). Derived node id is 121;
+    # smol has ALLOCATED 176 for this board, provisioned via the config-id
+    # override (config id != 42 beats the derived id). NOTE this serial is the
+    # NATIVE USB port only — the board's CH341 UART has NO serial and is
+    # identified by chip-MAC readback in the cyd session's flash guard; all
+    # flashing of this board stays behind that guard, not watchctl deploy.
+    "arcane-beacon":    "3C:DC:75:99:8D:18",
 }
 ESPRESSIF_VID = "303a"          # USB-Serial-JTAG debug unit VID (PID 1001)
 

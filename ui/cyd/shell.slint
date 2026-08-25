@@ -1,0 +1,1113 @@
+// ============================================================================
+// CYD-C5 SCENE ROOT — 320x240 LANDSCAPE (NM-CYD-C5, ST7789, backlit LCD)
+// ============================================================================
+//
+// `build.rs` selects this file for `board-cyd-c5` and `ui/slint/shell.slint`
+// for `board-waveshare-c6`. Both roots export the same `WatchShell` component
+// surface — 168 properties + 55 callbacks — because `src/ui/slint_shell.rs`
+// (~2,400 lines of Rust) compiles against whichever one is selected. Total
+// freedom over layout; ZERO freedom over the API. `cargo check
+// --no-default-features --features board-cyd-c5` compiling IS the parity test.
+//
+// THE ONE DESIGN DECISION THAT SHAPES EVERY PAGE: NO PERSISTENT CHROME
+// -----------------------------------------------------------------------------
+// JP, 2026-08-24. The C6 shell rides a status band and a page-dot row on all
+// five pages: three 78x64 RadioDots at y8..72 (30 % of a 240 px panel) plus a
+// right-anchored battery pill. At 320 px wide those two OVERLAP — the pill
+// lands at x~183 and MESH spans x182..260, so the pill sits inside MESH's hit
+// target. There is no set of numbers that fixes it, because the collision is
+// between "a status strip wide enough to read" and "a panel 90 px narrower".
+//
+// The decision removes the collision instead of solving it. Chrome is not
+// persistent: it lives on the CLOCK page — the boot page, where a watch's
+// status belongs — and PEEKS on the wake shimmer over any page. Everywhere
+// else the page owns the full 320x240.
+//
+// The peek costs no new Rust. `hint-sides` / `hint-down` are already armed and
+// sequenced by `ShellUi::hint_wake` at every wake-to-bright seam (bloom 150ms,
+// fade 2600ms, destroy 3200ms); the chrome band and the page rail simply ride
+// the same gate the edge hints do. So status is one wrist-raise away from any
+// page, and resident on none.
+//
+// LANDSCAPE PUTS PAGE INDICATION ON A SIDE RAIL, NOT A BOTTOM BAND
+// -----------------------------------------------------------------------------
+// Width is the axis with slack (-22 % against height's -52 %). A 44 px right
+// rail costs 13.75 % of the abundant axis; the C6's equivalent bottom band cost
+// 44 px of the scarce one, i.e. 18 % of everything a page had. The rail is also
+// where the eye already is after a horizontal page swipe.
+//
+// 🟥 THE CAROUSEL NO LONGER SLIDES, AND THAT IS THE DISPLAY LINK'S RULING
+// -----------------------------------------------------------------------------
+// The carousel's GEOMETRY survived the port untouched — it is expressed entirely
+// in `pages.width` with `clip: true` and `x: (N - current-page) * pages.width`,
+// the one genuinely dimension-independent structure in the C6 tree. Its MOTION
+// did not.
+//
+// Measured arithmetic (c5-psram.md §3): a full 320x240 RGB565 repaint over this
+// panel's SPI link is **61.4 ms at the vendor's 20 MHz**, and **37.2 ms even at
+// the 33 MHz hard ceiling**. A full frame cannot fit a 30 ms budget at any legal
+// clock, so dirty-rectangle updating is MANDATORY here — more binding than on
+// the watch's QSPI AMOLED, not less.
+//
+// A 260 ms slide is a full-screen dirty region on every frame of it: ~4 frames
+// at 61.4 ms, i.e. a 16 fps wipe with ZERO time left for rendering. So the
+// `animate x` is gone from all five pages and a page change is now a HARD CUT —
+// one full-frame paint, once, instead of four in a row.
+//
+// 🟢 That makes the carousel consistent with the launcher, which already worked
+// this way and already wrote down why: *"a single hard-cut full-frame render —
+// instant, no intermediate frames"*. The C6 reached that conclusion for the
+// launcher from fps measurements; this panel reaches it for everything from the
+// serial bit rate. Same answer, harder floor.
+//
+// ⚠️ The budget number that belongs at the UI level is **~117 of 240 rows per
+// 30 ms, treated as OPTIMISTIC** — it is serial-bit-rate-only and excludes
+// per-strip command overhead. Never design up to the line. Any "strip size"
+// figures in the driver scratch docs are driver-side tuning bands, not layout
+// units.
+//
+// HOUSE RULES THIS FILE OBEYS (each was litigated on hardware — see geom.slint)
+// -----------------------------------------------------------------------------
+//   * ABSOLUTE positioning, `parent`-relative expressions where possible.
+//     No layout managers except the fixed non-text dot rail.
+//   * NEVER read a Text's own intrinsic size in a band that repaints often.
+//   * PAGINATION, never `Flickable` (measured 6-11 fps on this sw renderer —
+//     and now with the display link under it: a scroll's cost IS its dirty
+//     region, and a shorter viewport dirties more of itself per pixel of travel).
+//   * NO FULL-SCREEN MOTION. No slides, no wipes, no cross-fades. Anything that
+//     animates must dirty ONE SMALL CONTIGUOUS BAND — the rule story.slint's
+//     PLAY page was written under now applies tree-wide.
+//   * Prefer state changes that dirty ONE contiguous region over many scattered
+//     small ones: per-strip command overhead favours fewer larger rects while
+//     RAM favours smaller, and the crossover is a MEASUREMENT, not an axiom.
+//   * `visible:` gating, never `if`, for anything that toggles — each `if`
+//     instantiates a generated inner component at ~3-6 KB.
+//   * Font sizes only from the existing glyph budget.
+//   * 44 px minimum touch targets (resistive XPT2046, finger-driven).
+//
+// PORT STATUS — 22 of 22 IN THIS BRANCH
+// -----------------------------------------------------------------------------
+// Every scene this root reaches is landscape-native EXCEPT the two held back at
+// the bottom of this note. The other files imported from `../slint/` are the ones
+// with NO absolute geometry, imported on purpose so there is exactly one copy:
+//
+//   theme.slint     the `Theme` global (palette, type scale, spacing, radii) and
+//                   the PeerRow / WifiNet structs. ONE `global Theme` in the
+//                   graph, so Rust's `set_scheme` is untouched.
+//   controls.slint  seven token-driven recipes with no geometry of their own —
+//                   PressTile, IconButton, Stepper, PillButton, Seg,
+//                   SliderControl, OverlaySwallow. Re-authoring them would fork
+//                   the touch-feedback contract that exists to live in one place.
+//   launcher.slint  `LauncherTile` (Rust constructs it) and `AppIcon` — 17
+//                   hand-drawn 46x46 vector glyphs shared with the app switcher.
+//
+// `ui/slint/scan.slint` is deliberately absent: it is the 802.15.4 Radio Scan
+// page and this root never reached it on either board. Its structs live in
+// theme.slint.
+//
+// switcher + shade: LANDED with their Rust halves (one commit, by design)
+// -----------------------------------------------------------------------------
+// Both were held at 42dd687 until `slint_shell::switcher_slot()` /
+// `shade_slot()` stopped being pure unvalidated arithmetic — at mismatched
+// geometry they returned a WRONG INDEX rather than `None` (a kill-swipe kills
+// the wrong session, silently). The landing commit moved the card geometry to
+// `board::ui` (per-board consts, sourced from these files' port headers) and
+// bounded both slot lookups by the LIVE model at the call sites, so drift now
+// fails as a visible no-op. The standing rule survives: card geometry changes
+// land in the scene file AND `src/board/*.rs`'s `ui` mod in the SAME commit.
+// ============================================================================
+
+import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
+import { SwitcherOverlay } from "switcher.slint";
+import { ShadeOverlay, NotifCard } from "shade.slint";
+import { Geom } from "geom.slint";
+import { RadioChip, StatusChip } from "controls_cyd.slint";
+
+// --- landscape-native pages -------------------------------------------------
+import { ClockPage } from "clock.slint";
+import { PowerMenu } from "power_menu.slint";
+import { VolumeOverlay } from "volume.slint";
+import { LauncherOverlay, LauncherTile } from "launcher.slint";
+import { SensorsPage } from "sensors.slint";
+import { SystemPage } from "system.slint";
+import { MeshPage } from "mesh.slint";
+import { WledRemote } from "wled.slint";
+import { HuntPage } from "hunt.slint";
+import { ThemeOverlay } from "theme_overlay.slint";
+import { EnergyPage } from "energy.slint";
+import { ClimateOverlay, ClimateCard } from "climate.slint";
+import { LightsOverlay } from "lights.slint";
+import { PingOverlay, PingPulse } from "ping.slint";
+import { PowerPage } from "power.slint";
+import { VoicePage } from "voice.slint";
+import { SoundLevel, SpecBand } from "soundlevel.slint";
+import { SettingsHub } from "settings.slint";
+import { StoryPage, StoryChapter, StorySlot } from "story.slint";
+
+// --- PENDING: still the C6 portrait layouts (render cropped) ----------------
+
+// Re-export so the generated Rust module keeps exposing these types —
+// slint_shell.rs constructs PeerRow / LauncherTile / ClimateCard / SpecBand /
+// NotifCard / WifiNet directly, and drives the scheme selector through
+// `ui.global::<Theme>().set_scheme(n)`. The export list is part of the API
+// contract with the C6 root: same names, same order.
+export { PeerRow, ClimateCard, LauncherTile, Theme, WifiNet, SpecBand, NotifCard }
+
+export component WatchShell inherits Window {
+    width: 320px;
+    height: 240px;
+    background: Theme.bg;
+
+    // --- clock ---
+    in property <string> time-text: "--:--";
+    in property <string> seconds-text: "--";
+    in property <string> date-text: "SYNCING RTC";
+    in property <float> minute-progress: 0.0;
+    in property <int> steps: 0;
+    in property <string> weather-text: "";
+    in property <string> cpu-text: "160 MHz";
+    in property <bool> gyro-on: false;
+    in property <length> par-x: 0px;
+    in property <length> par-y: 0px;
+    // Mesh Familiar (clock nook); fed by ShellUi::set_fam.
+    in property <bool> fam-known: false;
+    in property <bool> fam-holding: false;
+    in property <int> fam-mood: 0;
+    in property <int> fam-hunger: 0;
+    in property <int> fam-stage: 0;
+
+    // sensors page (live at 100ms while showing)
+    in property <string> accel-text: "--";
+    in property <string> gyro-text: "--";
+    in property <string> imu-temp-text: "--";
+    in property <string> die-temp-text: "--";
+
+    // system page (live at 2s while showing); chip/display are constants and
+    // keep their SystemPage component defaults. fw-text is set once from Cargo.
+    in property <string> fw-text: "--";
+    in property <string> sigil-text: "--";
+    in property <string> build-text: "--";
+    in property <string> heap-text: "--";
+    in property <string> uptime-text: "--";
+    in property <string> battery-text: "--";
+
+    // power page (live at 1s while showing). ⚠️ On this board the mA estimator
+    // and the battery gauge have no hardware behind them (no AXP2101): the
+    // properties stay in the API because slint_shell.rs writes them, but the
+    // CYD power page does not display the current figures. See the port notes.
+    in property <string> cpu-cell: "--";
+    in property <string> display-cell: "--";
+    in property <string> wifi-cell: "--";
+    in property <string> ble-cell: "--";
+    in property <string> imu-cell: "--";
+    in property <string> audio-cell: "--";
+    in property <int> total-ma: -1;
+    in property <string> runtime-text: "--";
+    in property <int> left-hours: 999;
+    in property <string> lp-core-text: "--";
+
+    // --- battery / radios (chrome) ---
+    // `battery-percent` / `charging` stay declared (slint_shell.rs sets them and
+    // removing a property breaks the build) but are NOT rendered on this board:
+    // it is mains-powered, and a pill that always reads "--" is worse than no
+    // pill, because a status indicator is trusted.
+    in property <int> battery-percent: -1;
+    in property <bool> charging: false;
+    in property <bool> wifi-on: false;
+    in property <bool> ble-on: false;
+    in property <int> mesh-peers: 0;
+
+    // mesh page data
+    in property <string> mesh-self-text: "";
+    in property <[PeerRow]> mesh-rows: [];
+
+    // --- paging / modes ---
+    in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
+    in-out property <bool> launcher-open: false;
+    in property <[LauncherTile]> launcher-tiles: [];
+    in property <[string]> launcher-titles: [];
+    in property <int> launcher-page-count: 1;
+    in-out property <int> launcher-page: 0;
+    in-out property <bool> wled-open: false;
+    in property <string> wled-status: "";
+    in-out property <bool> hunt-open: false;
+    in property <string> hunt-seek: "SEEK --";
+    in property <string> hunt-hero: "LOST";
+    in property <string> hunt-arrow: "";
+    in property <float> hunt-bar: 0.0;
+    in property <string> hunt-rssi: "";
+    in property <string> hunt-bucket: "";
+    in property <bool> hunt-hot: false;
+    in property <bool> hunt-found: false;
+    in property <bool> hunt-warmer: false;
+    in property <bool> hunt-colder: false;
+    in-out property <bool> energy-open: false;
+    in property <int> energy-batt: 0;
+    in property <int> energy-solar-w: 0;
+    in property <int> energy-grid-w: 0;
+    in property <bool> energy-charging: false;
+    in property <int> energy-conn: 0;
+    in-out property <bool> climate-open: false;
+    in property <[ClimateCard]> climate-cards;
+    in property <int> climate-conn: 0;
+    in-out property <int> climate-selected: -1;
+    in-out property <bool> lights-open: false;
+    in property <string> lights-area: "";
+    in property <int> lights-on-count: 0;
+    in property <int> lights-total: 0;
+    in property <int> lights-status: 0;
+    in property <int> lights-pending: 0;
+    in-out property <bool> ping-open: false;
+    in property <string> ping-peer: "";
+    in property <int> ping-state: 0;
+    in property <string> ping-result: "";
+    in property <bool> ping-cooling: false;
+    in property <bool> ping-pulse-open: false;
+    in property <string> ping-pulse-from: "";
+    in property <bool> ping-pulse-lit: false;
+    in-out property <bool> voice-open: false;
+    in property <int> voice-state: 0;
+    in property <float> voice-level: 0.0;
+    in property <string> voice-transcript;
+    in property <string> voice-error;
+
+    in-out property <bool> story-open: false;
+    in-out property <int> story-page: 0;
+    in property <[StoryChapter]> story-chapters;
+    in property <bool> story-loading: false;
+    in property <string> story-error;
+    in property <int> story-more: 0;
+    in property <string> story-play-title;
+    in property <string> story-speaker;
+    in property <int> story-speaker-kind: 0;
+    in property <float> story-progress: 0.0;
+    in property <string> story-elapsed: "0:00";
+    in property <string> story-total: "0:00";
+    in property <int> story-seg-index: 0;
+    in property <int> story-seg-count: 0;
+    in property <bool> story-playing: false;
+    in property <bool> story-no-manifest: false;
+    in property <bool> story-highlight-off: false;
+    in property <string> story-subject;
+    in property <string> story-level: "—";
+    in property <string> story-xp: "—";
+    in property <string> story-gold: "—";
+    in property <string> story-location: "—";
+    in property <string> story-status;
+    in property <string> story-hp-text: "—";
+    in property <float> story-hp-frac: 0.0;
+    in property <bool> story-hp-known: false;
+    in property <[StorySlot]> story-equipment;
+    in property <[StorySlot]> story-appearance;
+    in property <bool> story-paused: false;
+    in property <int> story-equipped-count: 0;
+    in property <int> story-appearance-count: 0;
+    in-out property <bool> mic-open: false;
+    in property <float> mic-dbfs: -60;
+    in property <float> mic-peak: -60;
+    in property <[SpecBand]> mic-spectrum: [];
+    in property <int> mic-gain-db: 0;
+    in-out property <bool> theme-open: false;
+    in-out property <bool> settings-open: false;
+    in-out property <int> settings-page: 0;
+    in property <int> net-view: 0;
+    in property <bool> touch-sound-on: true;
+    in property <bool> mesh-enabled: false;
+    in property <bool> wifi-intent: false;
+    in property <int> node-id: 0;
+    in property <string> ota-status: "";
+    in property <string> net-current: "";
+    in property <int> net-status: 0;
+    in property <bool> net-scanning: false;
+    in property <[WifiNet]> wifi-nets: [];
+    in property <string> kb-title: "";
+    in property <string> kb-context: "";
+    in property <string> kb-text: "";
+    in property <bool> kb-plain: false;
+    in property <string> boot-short-action: "Volume +";
+    in property <string> boot-long-action: "Launcher";
+    in property <string> pwron-short-action: "Volume \u{2212}";
+    in property <string> pwron-long-action: "Power menu";
+    in property <bool> volume-overlay-open: false;
+    in property <int> volume-level: 11;
+    in property <bool> volume-muted: false;
+    in-out property <float> volume-frac: 0.73;
+    in-out property <bool> switcher-open: false;
+    in property <[LauncherTile]> switcher-tiles: [];
+    in property <int> switcher-count: 0;
+    in property <int> suspended-count: 0;
+    in-out property <bool> shade-open: false;
+    in property <[NotifCard]> notif-cards: [];
+    in property <int> notif-total: 0;
+    in property <int> notif-unread: 0;
+    in property <bool> hint-sides: false;
+    in property <bool> hint-up: false;
+    in property <bool> hint-down: false;
+    in property <bool> hints-lit: false;
+    in property <bool> aod: false;
+    in property <string> toast-text: "";
+    in-out property <bool> power-menu-open: false;
+    in property <bool> vbus-on: false;
+
+    // --- callbacks (drained by the Rust loop via request cells) ---
+    callback brightness-changed(float);
+    callback wifi-tap();
+    callback ble-tap();
+    callback mesh-tap();
+    callback cpu-tap();
+    callback gyro-tap();
+    callback reboot-tap();
+    callback launch-app(int);
+    callback wled-emit(int);
+    callback wled-close();
+    callback hunt-next();
+    callback hunt-close();
+    callback energy-close();
+    callback climate-set-temp(int, float);
+    callback climate-set-mode(int, int);
+    callback climate-closed();
+    callback lights-cmd(int);
+    callback lights-closed();
+    callback ping-send();
+    callback ping-pulse-tap();
+    callback voice-ptt-pressed();
+    callback voice-ptt-released();
+
+    callback story-nav(int);
+    callback story-pick(int);
+    callback story-stop();
+    callback story-pause();
+    callback story-resume();
+    callback story-note();
+    callback story-page-prev();
+    callback story-page-next();
+    callback mic-gain-down();
+    callback mic-gain-up();
+    callback theme-changed(int);
+    callback touch-sound-tap();
+    callback settings-ota-tap();
+    callback net-open();
+    callback net-pick(int);
+    callback net-manual();
+    callback net-back();
+    callback kb-key(string);
+    callback kb-bksp-down();
+    callback kb-bksp-up();
+    callback kb-eye();
+    callback kb-done();
+    callback button-cycle(int);
+    callback volume-down();
+    callback volume-up();
+    callback volume-mute-tap();
+    callback volume-changed(float);
+    callback power-shutdown-tap();
+    callback open-switcher();
+    callback switcher-resume(int);
+    callback open-shade();
+    callback notif-dismiss(int);
+    callback notif-clear();
+
+    in-out property <float> brightness: 0.8;
+    // Rust-pushed backlight on-state (CydBacklightToggle isel workaround).
+    in property <bool> backlight-on: true;
+    // Board identity (Luna's §1d): Rust formats these from board::*/capability
+    // features at scene create; no shared scene hardcodes a board fact again.
+    in property <string> board-chip;
+    in property <string> board-mem;
+    in property <string> board-caps;
+    in property <bool> backlight-dimmable;
+    in property <bool> has-boot-key;
+
+    // ==================== takeover gate (#75) ====================
+    // Carried over verbatim from the C6 root, and it matters MORE here, not
+    // less. The software renderer has no occlusion culling: it builds a scene
+    // item per glyph and per rectangle behind an opaque cover, so hidden
+    // content costs exactly as much per-frame heap as visible content.
+    //
+    // ⚠️ Scene-item counts do NOT shrink with the panel. Pixels drop 63 %
+    // (205,820 -> 76,800) but items are per-element, and `PrepareScene`'s Vecs
+    // grow by DOUBLING — so the 256/128/128 rungs that OOM at 54-66 kB free
+    // (#75) sit exactly where they did. Every one of those measurements has to
+    // be RE-TAKEN on this board, never scaled from the C6 numbers.
+    property <bool> covered-invisibly: root.launcher-open || root.settings-open
+        || root.wled-open || root.hunt-open || root.energy-open
+        || root.climate-open || root.lights-open || root.ping-open
+        || root.voice-open || root.mic-open || root.theme-open
+        || root.power-menu-open || root.aod;
+
+    property <bool> covered: root.covered-invisibly
+        || root.shade-open || root.switcher-open
+        || root.story-open;
+
+    // ---- RULE, learned the hard way (0685985) ----------------------------------
+    // NEVER gate an element on `covered` if that element can only become visible
+    // BECAUSE a covered surface is up. Three toasts fire only while an overlay is
+    // up ("No WiFi credentials — set in Settings" is raised by a WIFI tap, which
+    // by construction happens with `settings-open == true`), so gating the toast
+    // made that button silently dead. Before adding `!root.covered` to anything,
+    // grep for who SETS it, not just where it sits in z.
+    // ---------------------------------------------------------------------------
+
+    // The wake peek. `hint-sides` / `hint-down` are armed and sequenced by
+    // ShellUi::hint_wake on the render clock; this shell only draws. Reusing
+    // that gate for the chrome band is what makes "no persistent chrome"
+    // cost zero new Rust.
+    property <bool> peek: root.hint-sides || root.hint-down;
+    // Chrome is on the clock page always, and everywhere else only in the peek.
+    property <bool> chrome-shown: !root.covered
+        && (root.current-page == 0 || root.peek);
+    // On the clock page it is solid; on a peek it rides the hint tween.
+    property <float> chrome-alpha: root.current-page == 0
+        ? 1.0 : (root.hints-lit ? 1.0 : 0.0);
+
+    // Page backdrop. On the dark schemes `Theme.bg` is solid #000000. NOTE for
+    // this panel: black is no longer free. The C6 comment called true black
+    // "self-emissive, battery-optimal" — that is an AMOLED property. The ST7789
+    // is BACKLIT, so a black page costs exactly what a white one does. It is
+    // kept because it looks right and the palette is shared, not to save power.
+    Rectangle {
+        width: 100%; height: 100%;
+        background: Theme.bg;
+    }
+
+    pages := Rectangle {
+        width: 100%; height: 100%;
+        clip: true;
+        // #75: one `visible` on the container culls all five pages' draw AND
+        // input in a single check.
+        visible: !root.covered;
+
+        ClockPage {
+            x: (0 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            time-text: root.time-text;
+            seconds-text: root.seconds-text;
+            date-text: root.date-text;
+            minute-progress: root.minute-progress;
+            steps: root.steps;
+            weather-text: root.weather-text;
+            cpu-text: root.cpu-text;
+            gyro-on: root.gyro-on;
+            par-x: root.par-x;
+            par-y: root.par-y;
+            fam-known: root.fam-known;
+            fam-holding: root.fam-holding;
+            fam-mood: root.fam-mood;
+            fam-hunger: root.fam-hunger;
+            fam-stage: root.fam-stage;
+            cpu-tap => { root.cpu-tap(); }
+            gyro-tap => { root.gyro-tap(); }
+            apps-tap => { root.launcher-open = true; }
+        }
+
+        SensorsPage {
+            x: (1 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            board-chip: root.board-chip;
+            board-mem: root.board-mem;
+            board-caps: root.board-caps;
+            accel-text: root.accel-text;
+            gyro-text: root.gyro-text;
+            imu-temp-text: root.imu-temp-text;
+            die-temp-text: root.die-temp-text;
+            steps: root.steps;
+        }
+
+        SystemPage {
+            x: (2 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            board-chip: root.board-chip;
+            fw-text: root.fw-text;
+            sigil-text: root.sigil-text;
+            build-text: root.build-text;
+            heap-text: root.heap-text;
+            uptime-text: root.uptime-text;
+            battery-text: root.battery-text;
+        }
+
+        PowerPage {
+            x: (3 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            cpu-cell: root.cpu-cell;
+            display-cell: root.display-cell;
+            wifi-cell: root.wifi-cell;
+            ble-cell: root.ble-cell;
+            imu-cell: root.imu-cell;
+            audio-cell: root.audio-cell;
+            total-ma: root.total-ma;
+            runtime-text: root.runtime-text;
+            left-hours: root.left-hours;
+            lp-core-text: root.lp-core-text;
+            brightness <=> root.brightness;
+            backlight-on: root.backlight-on;
+            backlight-dimmable: root.backlight-dimmable;
+            brightness-changed(f) => { root.brightness-changed(f); }
+            reboot-tap => { root.reboot-tap(); }
+        }
+
+        MeshPage {
+            x: (4 - root.current-page) * pages.width;
+            width: pages.width; height: pages.height;
+            self-text: root.mesh-self-text;
+            rows: root.mesh-rows;
+        }
+    }
+
+    // ==================== gesture hints (wake shimmer) ====================
+    // Four TIGHT edge strips — deliberately NOT one full-screen container — so
+    // the opacity tween's dirty region stays small under the partial renderer.
+    // Re-anchored for landscape: the side strips shrink 100 -> 72 px tall
+    // (30 % of this axis, same fraction of the panel the C6 pair had) and the
+    // top/bottom handles move to the real edges of a 240 px panel.
+    //
+    // ⚠️ The BOTTOM handle is the visual half of a Rust constant. Its Rust half
+    // is `EDGE_BOTTOM_Y = 427` in slint_shell.rs — entirely off a 240 px panel,
+    // which makes bottom-edge swipe-up (launcher) and hold-to-switcher
+    // UNREACHABLE until it moves. Proposed value: 204. See
+    // `ui/cyd/PROPOSED-board-ui-consts.patch`.
+
+    // Left edge: page carousel, more content behind the left bezel.
+    Rectangle {
+        visible: root.hint-sides && !root.covered;
+        x: 0; y: 84px; width: 30px; height: 72px;
+        opacity: root.hints-lit ? 1.0 : 0.0;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        Rectangle { // aurora bar hugging the bezel
+            x: 2px; y: 8px; width: 3px; height: 56px; border-radius: 1.5px;
+            background: Theme.accent2.with-alpha(0.45);
+        }
+        Text { // primary chevron
+            x: 8px; y: 0; height: parent.height; vertical-alignment: center;
+            text: "\u{2039}"; color: Theme.accent.with-alpha(0.85);
+            font-size: 30px;
+        }
+        Text { // trailing echo — the page sliding in
+            x: 18px; y: 0; height: parent.height; vertical-alignment: center;
+            text: "\u{2039}"; color: Theme.accent.with-alpha(0.3);
+            font-size: 30px;
+        }
+    }
+
+    // Right edge: mirror of the left strip. Sits UNDER the page rail's x-range
+    // by design — they are never both up in a way that reads as clutter (the
+    // rail is 6 px of tick, the strip is a chevron pair at the bezel).
+    Rectangle {
+        visible: root.hint-sides && !root.covered;
+        x: parent.width - self.width; y: 84px; width: 30px; height: 72px;
+        opacity: root.hints-lit ? 1.0 : 0.0;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        Rectangle {
+            x: parent.width - 5px; y: 8px; width: 3px; height: 56px;
+            border-radius: 1.5px;
+            background: Theme.accent2.with-alpha(0.45);
+        }
+        Text {
+            x: parent.width - self.width - 8px;
+            y: 0; height: parent.height; vertical-alignment: center;
+            text: "\u{203a}"; color: Theme.accent.with-alpha(0.85);
+            font-size: 30px;
+        }
+        Text {
+            x: parent.width - self.width - 18px;
+            y: 0; height: parent.height; vertical-alignment: center;
+            text: "\u{203a}"; color: Theme.accent.with-alpha(0.3);
+            font-size: 30px;
+        }
+    }
+
+    // Bottom edge: edge-swipe up -> launcher (#29).
+    Rectangle {
+        visible: root.hint-up && !root.covered;
+        x: (parent.width - self.width) / 2; y: 214px;
+        width: 104px; height: 22px;
+        opacity: root.hints-lit ? 1.0 : 0.0;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        Rectangle { // echo — narrower and fainter, "rising"
+            x: (parent.width - self.width) / 2; y: 3px;
+            width: 48px; height: 4px; border-radius: 2px;
+            background: Theme.accent2.with-alpha(0.5);
+        }
+        Rectangle { // the handle
+            x: (parent.width - self.width) / 2; y: 12px;
+            width: 84px; height: 5px; border-radius: 2.5px;
+            background: Theme.accent.with-alpha(0.9);
+        }
+    }
+
+    // Top edge: edge-swipe down -> notification shade (#32).
+    //
+    // ⚠️ This is the one hint the landscape re-composition genuinely squeezed,
+    // and it is worth stating why rather than leaving the numbers to be read as
+    // arbitrary. On the C6 the handle sat at y2..28 ABOVE the radio dots, whose
+    // visible row starts ~y38 — 36 px of clear bezel to draw in. Here the
+    // chrome band's visible content starts at y6 and its chips span x8..318, so
+    // there is no clear span left: not centred (lands on BLE), not right (lands
+    // on the status chips), not below (that is content).
+    //
+    // So the handle collapses to a 4 px hairline in the top 6 px — the only
+    // pixels the chrome band does not claim. It reads as an edge, which is what
+    // it means, and it drops the "descending echo" because a 6 px band cannot
+    // express motion. It stays INSIDE the proposed `EDGE_TOP_Y = 44` zone, so
+    // the affordance is where the gesture actually is.
+    Rectangle {
+        visible: root.hint-down && !root.covered;
+        x: (parent.width - self.width) / 2; y: 0;
+        width: 104px; height: 6px;
+        opacity: root.hints-lit ? 1.0 : 0.0;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        Rectangle { // the handle
+            x: (parent.width - self.width) / 2; y: 1px;
+            width: 84px; height: 4px; border-radius: 2px;
+            background: Theme.accent.with-alpha(0.9);
+        }
+    }
+
+    // ==================== chrome band (NOT persistent) ====================
+    // One container, so the whole band is a single `visible` check, a single
+    // opacity tween, and a single dirty region rather than five.
+    //
+    // Row arithmetic, stated because it is the number the C6 chrome could not
+    // make work: three 70 px radio chips at x 8 / 80 / 152 end at x 222, and
+    // two 44 px status chips at x 228 / 274 end at x 318. Total 320 with 6 px
+    // of slack — where the C6 needed 330 in 320 and overlapped. What bought
+    // the room: labels lose the battery pill (no PMU on this board, and a pill
+    // reading "--" forever is worse than none) and `MESH·4` replaces `MESH 4`.
+    //
+    // The band is 44 px of hit area (the touch floor) presenting a 28 px visual
+    // at y 6..34 — the chips pad their own TouchAreas outward rather than
+    // growing the visual. Transparent container, so it consumes nothing: a
+    // plain Rectangle does not eat clicks, which is the same fact
+    // `OverlaySwallow` exists to work around.
+    //
+    // ⚠️ THIS IS THE LARGEST ANIMATED REGION LEFT IN THE TREE, and it is
+    // deliberately the only full-WIDTH one. 320x44 is **44 of the ~117
+    // full-width rows** a 30 ms paint can afford — 38 % of an optimistic budget,
+    // for ~8 frames of a 480 ms tween.
+    //
+    // It survives the no-full-screen-motion rule on three grounds, all of which
+    // have to hold together:
+    //   * 44 rows is a BAND, not a screen. The rule is one small contiguous
+    //     region, and this is one contiguous region.
+    //   * It only ever tweens on a PEEK over a non-clock page. On the clock page
+    //     `chrome-alpha` is the constant 1.0, so no tween is triggered at all —
+    //     the resident case costs nothing.
+    //   * A peek is armed by `hint_wake`, which fires at a wake-to-bright seam:
+    //     nothing else is repainting and there is no audio in flight.
+    // If any of those three stops being true, this becomes a hard cut (delete
+    // the `animate` line) and the peek simply appears.
+    Rectangle {
+        visible: root.chrome-shown;
+        x: 0; y: 0;
+        width: parent.width;
+        height: Geom.chrome-hit;
+        opacity: root.chrome-alpha;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+
+        RadioChip {
+            x: Geom.safe-side; y: Geom.chrome-y;
+            label: "WIFI"; active: root.wifi-on;
+            tapped => { root.wifi-tap(); }
+        }
+        RadioChip {
+            x: 80px; y: Geom.chrome-y;
+            label: "BLE"; active: root.ble-on;
+            tapped => { root.ble-tap(); }
+        }
+        RadioChip {
+            x: 152px; y: Geom.chrome-y;
+            label: root.mesh-peers > 0 ? "MESH\u{00b7}\{root.mesh-peers}" : "MESH";
+            active: root.mesh-peers > 0;
+            tapped => { root.mesh-tap(); }
+        }
+
+        // Unread notifications (#32) and suspended apps (#31). `visible:`-gated
+        // rather than `if`-gated: each `if` would cost a ~3-6 KB generated
+        // inner component, and these are chrome that is resident anyway.
+        StatusChip {
+            visible: root.notif-unread > 0;
+            x: 228px; y: Geom.chrome-y;
+            glyph-kind: 1;
+            count: root.notif-unread;
+            tapped => { root.open-shade(); }
+        }
+        StatusChip {
+            visible: root.suspended-count > 0;
+            x: 274px; y: Geom.chrome-y;
+            glyph-kind: 0;
+            count: root.suspended-count;
+            tapped => { root.open-switcher(); }
+        }
+    }
+
+    // ==================== page rail (NOT persistent) ====================
+    // Five ticks on the RIGHT EDGE, vertical. Tap advances, exactly as the C6
+    // bottom dot row did — but on the axis with slack. Same gate as the chrome
+    // band: resident on the clock page, a peek everywhere else.
+    //
+    // 44x88 hit area (the floor on both axes) presenting six-pixel ticks at
+    // x 305..311. It overlaps page content in x, which is safe BECAUSE it is
+    // gated: `visible: false` culls hit-testing as well as draw — verified on
+    // the C6 by dispatching a pointer press at a covered control and observing
+    // that the callback does not fire.
+    //
+    // The tick column is the one layout manager in this file. That is the
+    // sanctioned exception: a small, fixed-size, NON-TEXT element row, which is
+    // the same thing the C6 dot row does. Layout managers size children from
+    // their intrinsic dimensions, which for `Text` is the 16 B-per-read
+    // allocation two recent commits exist to delete — so no text goes near one.
+    rail := TouchArea {
+        visible: root.chrome-shown;
+        x: parent.width - 44px;
+        y: (parent.height - 88px) / 2;
+        width: 44px;
+        height: 88px;
+        opacity: root.chrome-alpha;
+        animate opacity { duration: 480ms; easing: ease-in-out; }
+        clicked => { root.current-page = mod(root.current-page + 1, 5); }
+        VerticalLayout {
+            x: 33px;
+            y: (parent.height - 70px) / 2;
+            spacing: 10px;
+            for i in 5: Rectangle {
+                width: 6px; height: 6px; border-radius: 3px;
+                background: root.current-page == i ? Theme.accent
+                    : (rail.pressed ? Theme.soft : Theme.line);
+            }
+        }
+    }
+
+    // ==================== launcher overlay ====================
+    if root.launcher-open: LauncherOverlay {
+        width: 100%; height: 100%;
+        tiles: root.launcher-tiles;
+        titles: root.launcher-titles;
+        page-count: root.launcher-page-count;
+        page <=> root.launcher-page;
+        launch-app(idx) => { root.launch-app(idx); }
+    }
+
+    // ==================== WLED remote overlay ====================
+    if root.wled-open: WledRemote {
+        width: 100%; height: 100%;
+        status: root.wled-status;
+        emit(a) => { root.wled-emit(a); }
+        close => { root.wled-close(); }
+    }
+
+    // ==================== Hunt overlay ====================
+    if root.hunt-open: HuntPage {
+        width: 100%; height: 100%;
+        seek-text: root.hunt-seek;
+        hero-text: root.hunt-hero;
+        arrow: root.hunt-arrow;
+        bar-frac: root.hunt-bar;
+        rssi-text: root.hunt-rssi;
+        bucket: root.hunt-bucket;
+        hot: root.hunt-hot;
+        found: root.hunt-found;
+        warmer: root.hunt-warmer;
+        colder: root.hunt-colder;
+        next-target => { root.hunt-next(); }
+        close => { root.hunt-close(); }
+    }
+
+    // ==================== Energy overlay ====================
+    if root.energy-open: EnergyPage {
+        width: 100%; height: 100%;
+        battery-pct: root.energy-batt;
+        solar-w: root.energy-solar-w;
+        grid-w: root.energy-grid-w;
+        charging: root.energy-charging;
+        conn-state: root.energy-conn;
+        close => { root.energy-close(); }
+    }
+
+    // ==================== Climate overlay (#58) ====================
+    if root.climate-open: ClimateOverlay {
+        width: 100%; height: 100%;
+        cards: root.climate-cards;
+        conn-state: root.climate-conn;
+        selected-index <=> root.climate-selected;
+        set-temp(id, t) => { root.climate-set-temp(id, t); }
+        set-mode(id, m) => { root.climate-set-mode(id, m); }
+        closed => { root.climate-closed(); }
+    }
+
+    // ==================== Lights overlay (#39) ====================
+    if root.lights-open: LightsOverlay {
+        width: 100%; height: 100%;
+        area: root.lights-area;
+        on-count: root.lights-on-count;
+        total-count: root.lights-total;
+        status: root.lights-status;
+        pending: root.lights-pending;
+        cmd(a) => { root.lights-cmd(a); }
+        closed => { root.lights-closed(); }
+    }
+
+    // ==================== Ping overlay (#35) ====================
+    if root.ping-open: PingOverlay {
+        width: 100%; height: 100%;
+        peer: root.ping-peer;
+        state: root.ping-state;
+        result: root.ping-result;
+        cooling: root.ping-cooling;
+        mesh-on: root.mesh-enabled;
+        send => { root.ping-send(); }
+        closed => { root.ping-open = false; }
+    }
+
+    // ==================== Voice overlay ====================
+    // ⚠️ NO MIC ON THIS BOARD. Kept declared (slint_shell.rs references every
+    // member) but dropped from the launcher registry rather than stubbed, per
+    // JP: an app that renders and cannot work is a bug report waiting to be
+    // filed. The overlay is unreachable, not absent.
+    if root.voice-open: VoicePage {
+        width: 100%; height: 100%;
+        voice-state: root.voice-state;
+        level: root.voice-level;
+        transcript: root.voice-transcript;
+        error-text: root.voice-error;
+        ptt-pressed => { root.voice-ptt-pressed(); }
+        ptt-released => { root.voice-ptt-released(); }
+        close => { root.voice-open = false; }
+    }
+
+    // ==================== Story overlay (#story) ====================
+    if root.story-open: StoryPage {
+        width: 100%;
+        height: 100%;
+        page: root.story-page;
+        chapters: root.story-chapters;
+        loading: root.story-loading;
+        error-text: root.story-error;
+        more-count: root.story-more;
+        play-title: root.story-play-title;
+        speaker: root.story-speaker;
+        speaker-kind: root.story-speaker-kind;
+        progress: root.story-progress;
+        elapsed: root.story-elapsed;
+        total: root.story-total;
+        seg-index: root.story-seg-index;
+        seg-count: root.story-seg-count;
+        playing: root.story-playing;
+        no-manifest: root.story-no-manifest;
+        highlight-off: root.story-highlight-off;
+        subject: root.story-subject;
+        level: root.story-level;
+        xp: root.story-xp;
+        gold: root.story-gold;
+        location: root.story-location;
+        status: root.story-status;
+        hp-text: root.story-hp-text;
+        hp-frac: root.story-hp-frac;
+        hp-known: root.story-hp-known;
+        equipment: root.story-equipment;
+        appearance: root.story-appearance;
+        paused: root.story-paused;
+        pause => { root.story-pause(); }
+        resume => { root.story-resume(); }
+        equipped-count: root.story-equipped-count;
+        appearance-count: root.story-appearance-count;
+        nav(p) => { root.story-nav(p); }
+        pick(n) => { root.story-pick(n); }
+        stop => { root.story-stop(); }
+        note => { root.story-note(); }
+        page-prev => { root.story-page-prev(); }
+        page-next => { root.story-page-next(); }
+        close => { root.story-open = false; }
+    }
+
+    // ==================== SoundLevel meter overlay ====================
+    // ⚠️ NO MIC. Same treatment as Voice: declared, dropped from the launcher.
+    if root.mic-open: SoundLevel {
+        width: 100%; height: 100%;
+        mic-dbfs: root.mic-dbfs;
+        mic-peak: root.mic-peak;
+        spectrum: root.mic-spectrum;
+        gain-db: root.mic-gain-db;
+        gain-down => { root.mic-gain-down(); }
+        gain-up => { root.mic-gain-up(); }
+        close => { root.mic-open = false; }
+    }
+
+    // ==================== Theme picker overlay ====================
+    if root.theme-open: ThemeOverlay {
+        width: 100%; height: 100%;
+        changed(n) => { root.theme-changed(n); }
+        close => { root.theme-open = false; }
+    }
+
+    // ==================== Settings hub (v0.9.0) ====================
+    if root.settings-open: SettingsHub {
+        width: 100%; height: 100%;
+        page <=> root.settings-page;
+        net-view: root.net-view;
+        touch-sound: root.touch-sound-on;
+        gain-db: root.mic-gain-db;
+        brightness <=> root.brightness;
+        backlight-on: root.backlight-on;
+        backlight-dimmable: root.backlight-dimmable;
+        has-boot-key: root.has-boot-key;
+        ble-on: root.ble-on;
+        mesh-on: root.mesh-enabled;
+        wifi-intent: root.wifi-intent;
+        wifi-live: root.wifi-on;
+        net-current: root.net-current;
+        net-status: root.net-status;
+        scanning: root.net-scanning;
+        nets: root.wifi-nets;
+        kb-title: root.kb-title;
+        kb-context: root.kb-context;
+        kb-text: root.kb-text;
+        kb-plain: root.kb-plain;
+        sigil: root.sigil-text;
+        fw: root.fw-text;
+        build: root.build-text;
+        node-id: root.node-id;
+        ota-status: root.ota-status;
+        volume-level: root.volume-level;
+        volume-muted: root.volume-muted;
+        boot-short-action: root.boot-short-action;
+        boot-long-action: root.boot-long-action;
+        pwron-short-action: root.pwron-short-action;
+        pwron-long-action: root.pwron-long-action;
+        toggle-touch-sound => { root.touch-sound-tap(); }
+        gain-down => { root.mic-gain-down(); }
+        gain-up => { root.mic-gain-up(); }
+        vol-down => { root.volume-down(); }
+        vol-up => { root.volume-up(); }
+        vol-mute => { root.volume-mute-tap(); }
+        button-cycle(s) => { root.button-cycle(s); }
+        brightness-changed(f) => { root.brightness-changed(f); }
+        ble-tap => { root.ble-tap(); }
+        mesh-tap => { root.mesh-tap(); }
+        wifi-tap => { root.wifi-tap(); }
+        net-open => { root.net-open(); }
+        net-rescan => { root.net-open(); }
+        net-pick(i) => { root.net-pick(i); }
+        net-manual => { root.net-manual(); }
+        nav-back => { root.net-back(); }
+        close => { root.settings-open = false; }
+        ota-tap => { root.settings-ota-tap(); }
+        kb-key(k) => { root.kb-key(k); }
+        kb-bksp-down => { root.kb-bksp-down(); }
+        kb-bksp-up => { root.kb-bksp-up(); }
+        kb-eye => { root.kb-eye(); }
+        kb-done => { root.kb-done(); }
+    }
+
+    // ==================== Power menu (#48) ====================
+    // ⚠️ NO PMU. `power-shutdown-tap` has no hardware path to power off on this
+    // board; deep sleep is the plausible substitute and is a firmware decision,
+    // not a layout one. The menu still owns REBOOT, which works.
+    if root.power-menu-open: PowerMenu {
+        width: 100%; height: 100%;
+        battery-percent: root.battery-percent;
+        charging: root.charging;
+        vbus-on: root.vbus-on;
+        reboot-tap => { root.reboot-tap(); }
+        shutdown-tap => { root.power-shutdown-tap(); }
+        close => { root.power-menu-open = false; }
+    }
+
+    // ==================== App switcher (#31) ====================
+    if root.switcher-open: SwitcherOverlay {
+        width: 100%; height: 100%;
+        tiles: root.switcher-tiles;
+        count: root.switcher-count;
+        resume(i) => {
+            root.switcher-open = false;
+            root.switcher-resume(i);
+        }
+        close => { root.switcher-open = false; }
+    }
+
+    // ==================== Notification shade (#32) ====================
+    if root.shade-open: ShadeOverlay {
+        width: 100%; height: 100%;
+        cards: root.notif-cards;
+        total: root.notif-total;
+        dismiss(i) => { root.notif-dismiss(i); }
+        clear-all => { root.notif-clear(); }
+        close => { root.shade-open = false; }
+    }
+
+    // ==================== Ping receiver pulse (#35) ====================
+    if root.ping-pulse-open: PingPulse {
+        width: 100%; height: 100%;
+        from: root.ping-pulse-from;
+        lit: root.ping-pulse-lit;
+        dismissed => { root.ping-pulse-tap(); }
+    }
+
+    // ==================== Volume HUD (#59) ====================
+    if root.volume-overlay-open: VolumeOverlay {
+        width: 100%; height: 100%;
+        level: root.volume-level;
+        muted: root.volume-muted;
+        frac <=> root.volume-frac;
+        changed(f) => { root.volume-changed(f); }
+    }
+
+    // ==================== AOD overlay ====================
+    // Landscape AOD: the 84 px hero fits comfortably on the wide axis (a 5-glyph
+    // "12:34" is ~230 px of 320) where it took 45 % of the C6's vertical budget.
+    // Kept at 84 rather than dropped to 66 like the clock hero, because AOD is
+    // read at arm's length and has the whole panel to itself.
+    if root.aod: Rectangle {
+        width: 100%; height: 100%;
+        background: #000000;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 58px;
+            text: root.time-text;
+            color: #6b7690;
+            font-size: 84px;
+            font-weight: 300;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 166px;
+            text: root.date-text;
+            color: Theme.faint;
+            font-size: 18px;
+            letter-spacing: 2px;
+        }
+    }
+
+    // ==================== Toast — MUST BE LAST ====================
+    //
+    // ⚠️ POSITION IS LOAD-BEARING — do not move this block up.
+    //
+    // It used to sit above the overlay conditionals on the C6 root. Later
+    // siblings paint on top, every full-screen overlay draws an opaque
+    // `Theme.bg` backdrop first, and the software renderer has no occlusion
+    // culling — so the toast's glyphs were built into the scene and then
+    // completely overpainted. Proof: `story(page0)` and
+    // `story(page0,+toast31)` rendered BYTE-IDENTICAL PPMs while the scene grew
+    // by 32 items and 31 glyphs. Full price, zero pixels.
+    //
+    // Also deliberately NOT `covered`-gated, for the reason in the RULE above:
+    // three of its emit sites can only fire while an overlay IS up.
+    //
+    // Landscape: 300 px max width (was 360 — off-panel here) and raised to
+    // y 186 so a 36 px card clears the bottom edge with the safe inset.
+    Rectangle {
+        visible: root.toast-text != "";
+        x: (parent.width - self.width) / 2;
+        y: 186px;
+        width: min(300px, toast-label.width + 32px);
+        height: 36px;
+        border-radius: 18px;
+        background: #1a2233ee;
+        border-width: 1px; border-color: Theme.line;
+        toast-label := Text {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: root.toast-text; color: Theme.ink; font-size: Geom.t-body;
+        }
+    }
+}

@@ -1,0 +1,106 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
+
+// ============================================================================
+// CAROUSEL PAGE 1 — "BOARD". The honest capability page, per JP's ruling.
+// ============================================================================
+//
+// ⚠️ NAME MISMATCH, ON PURPOSE. Rust calls this slot `PAGE_SENSORS = 1` and
+// `slint_shell.rs` pushes `accel-text` / `gyro-text` / `imu-temp-text` /
+// `die-temp-text` into it every 100 ms while it shows. The component keeps that
+// name and every one of those properties. The TITLE says "BOARD", because that
+// is what the page is now about.
+//
+// WHY THE SLOT SURVIVED
+// -----------------------------------------------------------------------------
+// The C6 page is five sensor rows and every one is dead here:
+//
+//   ACCEL / GYRO / STEPS   the QMI8658 IMU does not exist on this board
+//   IMU TEMP               same chip, same absence
+//   DIE TEMP               was the graceful fallback when the IMU is quiet —
+//                          but the ESP32-C5 has no `TSENS` peripheral either, so
+//                          the fallback dies with the thing it was covering
+//
+// That last line made it the strongest drop candidate in the port: most pages
+// lose a feature, this one loses every reading it has AND the reading it fell
+// back to.
+//
+// But `current-page` is Rust-owned — `PAGE_SENSORS = 1`, `PAGE_COUNT = 5`, with
+// `PAGE_SYSTEM`/`PAGE_POWER`/`PAGE_MESH` numbered after it. Removing the slot is
+// a renumbering of constants this workstream does not own, plus a 5-tick rail
+// becoming 4. So JP's ruling: keep the five-page carousel and make page 1 state
+// plainly what this board IS and lacks.
+//
+// WHY FACTS AND NOT FIVE ROWS OF "--"
+// -----------------------------------------------------------------------------
+// A row that can only ever say one thing is not a row, it is a rumour. Five of
+// them read as *"the sensors are broken"* — a bug report waiting to be filed —
+// where naming the silicon and then saying `none` twice is a statement about the
+// hardware that nobody can misread.
+//
+// It also makes the page genuinely useful, which the drop-everything version was
+// not: this is now the only place on the watch that says what board you are
+// holding. The SYSTEM page's `chip-text` names the chip too; the overlap is
+// deliberate, because a reader who swiped here looking for sensors should not
+// have to swipe again to learn why there are none.
+//
+// 🟥 THE FIVE VALUES ARE LITERALS, AND THAT REASONING HAS SINCE BROKEN.
+// -----------------------------------------------------------------------------
+// The original argument was: they are facts about the silicon, so state them
+// where they are true rather than plumbing them through Rust — and a literal is
+// constant-folded, so the rows cost bindings rather than bindings plus a push
+// path. Both halves of that were correct when this tree served ONE board.
+//
+// It serves two now. The S3-CYD compiles this same scene, so "where they are
+// true" is no longer where they are written: every value below answers for the
+// C5 on a page the S3 also renders. `DIE TEMP: none` is the sharpest case — that
+// part has a temperature sensor, so on the S3 this page does not merely name the
+// wrong chip, it denies a capability the board has.
+//
+// The premise moved and the decision did not, which is the failure mode worth
+// naming: nothing re-examines a choice when its condition changes, least of all
+// when the change arrives from somewhere else entirely. The condition is written
+// down now, next to the decision, and the fix is a per-board property set —
+// PROPOSED-board-ui-consts.md §1d.
+// ============================================================================
+
+export component SensorsPage {
+    // All five are declared because slint_shell.rs writes them every 100 ms
+    // while this page shows; none is rendered. Removing a property breaks the
+    // build, and gating the Rust-side tick is the driver workstream's call.
+    in property <string> accel-text;
+    in property <string> gyro-text;
+    in property <string> imu-temp-text;
+    in property <string> die-temp-text;
+    in property <int> steps;
+    in property <string> board-chip;
+    in property <string> board-mem;
+    in property <string> board-caps;
+
+    CydPageTitle { title: "BOARD"; }
+
+    // Board identity from Rust (§1d): the same properties on both roots, fed
+    // from board::* consts and the capability cfg gates — this page can no
+    // longer disagree with the build it is part of. (Its previous literals
+    // said "DIE TEMP: none" on a board with a TSENS.)
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +   6px; height: 30px;
+                 label: "CHIP";     value: root.board-chip; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  38px; height: 30px;
+                 label: "MEMORY";   value: root.board-mem; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  70px; height: 30px;
+                 // `faint` rather than `warn`: an absence named here is not an
+                 // error state, and a presence is not a boast.
+                 label: "SENSORS";  value: root.board-caps; value-color: Theme.faint; }
+
+    Text {
+        x: Geom.content-x;
+        y: Geom.content-y + 172px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: root.board-caps;
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}

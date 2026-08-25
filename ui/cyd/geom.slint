@@ -1,0 +1,321 @@
+// ============================================================================
+// CYD-C5 LANDSCAPE GEOMETRY TOKENS — 320x240, ST7789, backlit LCD
+// ============================================================================
+//
+// WHY THIS FILE EXISTS AND WHY IT IS NOT A FORK OF theme.slint
+// -----------------------------------------------------------------------------
+// `ui/slint/theme.slint` carries two unrelated things under one `global Theme`:
+// the PALETTE (84 colours across 4 schemes, plus the type/spacing/radius
+// scales) and the SAFE-AREA GEOMETRY (`safe-top: 30px` etc.). The palette is
+// panel-independent and must stay shared — forking it means every future
+// scheme tune rots on one board. The geometry is panel-specific and must not
+// be shared at all.
+//
+// The layout spec's recommended split (palette.slint + per-board
+// theme_geom.slint) would have to edit the import line of all 26 C6 files,
+// which is outside this work's tree ownership. So instead:
+//
+//   * `Theme` is imported from `../slint/theme.slint` UNCHANGED and stays the
+//     ONE global of that name in the compilation graph — which matters because
+//     Rust drives the scheme selector through it
+//     (`ui.global::<Theme>().set_scheme(n)`). Two `global Theme` declarations
+//     would collide; there is exactly one.
+//   * `Geom` (this file) carries every value that differs on this panel. CYD
+//     files read `Geom.safe-top`, never `Theme.safe-top`.
+//
+// Nothing in `ui/slint/` is modified. The C6 scene is untouched by construction.
+//
+// THE ONE NUMBER THAT EXPLAINS THIS WHOLE TREE
+// -----------------------------------------------------------------------------
+//   410x502 portrait  ->  320x240 landscape
+//   width   -22 %          height  -52 %
+//
+// Height more than halves; width barely moves. Every vertical stack in the C6
+// scene breaks; most horizontal rows survive. So the landscape set is a
+// RE-COMPOSITION (stacked -> side-by-side), not a scale-down.
+//
+// THE FREE WIN, TAKEN HERE
+// -----------------------------------------------------------------------------
+// `theme.slint:76-87` says in its own words that the 30/24/22/30 safe insets
+// exist for the AMOLED's physically ROUNDED CORNERS. This panel is rectangular
+// glass. Those insets were 54 px of reserved vertical margin — 22.5 % of this
+// panel's scarce axis — protecting arcs that do not exist. They are reclaimed
+// below and the names are kept, so consumers read the same token.
+//
+// ROM BUDGET — READ BEFORE ADDING A FONT SIZE
+// -----------------------------------------------------------------------------
+// Every DISTINCT `font-size` in the compiled scene embeds a whole pre-rendered
+// glyph atlas (~70 KB at 40 px, ~160 KB at 84 px). The sizes that already exist
+// in this tree are:
+//
+//   12 13 14 15 16 17 18 19 20 21 22 26 30 40 50 66 84 108
+//
+// Every tier below lands on one of those. Adding a tier costs ~100-160 KB of
+// ROM; picking 21 instead of 20 because it "looks better" is not a free choice.
+// The clock hero is 66, NOT 72 — 66 exists, 72 does not.
+// ============================================================================
+
+// ============================================================================
+// 🟥 THE PAINT BUDGET — READ THIS BEFORE ADDING ANY MOTION ANYWHERE IN ui/cyd/
+// ============================================================================
+//
+// Established by measurement-grade arithmetic (c5-psram.md §3), and it is the
+// single hardest constraint on this board:
+//
+//   a full 320x240 RGB565 repaint over this panel's SPI link takes
+//     61.4 ms  at the vendor's 20 MHz
+//     37.2 ms  at 33 MHz — the absolute hard-ceiling clock
+//
+// **A full frame cannot fit a 30 ms budget at ANY legal clock.** Dirty-rectangle
+// updating is therefore MANDATORY here, and MORE binding than on the C6's QSPI
+// AMOLED, not less. The C6 reached "no scrolling, no tweens" from a 6-11 fps
+// software-renderer measurement; this board reaches the same place from the
+// serial bit rate, which is a floor no amount of render-side tuning lifts.
+//
+// THE ONLY BUDGET NUMBER THAT BELONGS AT THE UI LEVEL
+// -----------------------------------------------------------------------------
+//   ~117 of 240 full-width rows per 30 ms — and treat it as OPTIMISTIC.
+//
+// It is serial-bit-rate-only and EXCLUDES per-strip command overhead, so real
+// times are worse. **Never design up to the line.** Any "strip size" figures
+// (16-48 rows and similar) in the driver scratch docs are DRIVER-side tuning
+// bands contingent on a framebuffer-backed path existing — they are not layout
+// budget units, and Slint's line-by-line flusher cannot batch anyway.
+//
+// A narrow band costs far less than its row count suggests, because rows are
+// streamed row-major: a 30x72 strip is 72 rows but only 2,160 px, against 37,440
+// px for 117 full-width rows. Row count bounds the COMMAND overhead; pixel count
+// bounds the BITS. Both matter, which is why the next rule is a tension and not
+// an axiom.
+//
+// THE FOUR RULES THIS TREE FOLLOWS
+// -----------------------------------------------------------------------------
+//  1. **NO FULL-SCREEN MOTION.** No slides, no wipes, no cross-fades. A
+//     full-screen transition is ~61 ms per frame best case — ~16 fps with zero
+//     time left to render. Page changes are HARD CUTS. Removed during the port:
+//     the five-page carousel's 260 ms slide, climate's 200 ms list/detail
+//     cross-fade, and the ping pulse's 1100 ms ring tween.
+//  2. **Anything that animates must dirty ONE SMALL CONTIGUOUS BAND.** This is
+//     `story.slint`'s PLAY-page rule, promoted from one page to the whole tree.
+//     What survives: the clock's minute bar (180x8), ping's cooldown sweep
+//     (100x4), the four wake-hint strips (all narrow), and the chrome band
+//     (320x44 — the largest, documented at its site).
+//  3. **Prefer ONE contiguous dirty region per state change over many scattered
+//     small ones.** Per-strip command overhead favours fewer larger rects while
+//     RAM favours smaller; the crossover is a MEASUREMENT, not a design axiom.
+//     ⏳ So any layout whose interaction dirties many independent widgets at once
+//     must be FLAGGED for measurement before it becomes load-bearing. In this
+//     tree that is exactly one thing: climate's Flickable (noted in that file).
+//  4. **Pagination, never `Flickable`** — now with a harder floor under the
+//     original ruling: a scroll's cost IS its dirty region, and a shorter
+//     viewport dirties a larger fraction of itself per pixel of travel. The one
+//     carve-out (a list whose length is data) is unchanged and used once.
+//
+// ⚠️ DO NOT DESIGN ASSUMING A FAST FRAMEBUFFER ARRIVES LATER. The wall is the
+// DISPLAY LINK, not memory — so PSRAM does not move it. (PSRAM may well host a
+// framebuffer if a framebuffer path is ever built; that is a different question
+// and it does not change any number above.)
+// ============================================================================
+//
+// ============================================================================
+// 🟥 BOARD FACTS HARDCODED IN A SHARED SCENE — 12 SITES, GREP `BOARD-FACT:`
+// ============================================================================
+// **This tree is now the scene root for TWO boards.** The S3-CYD links all of
+// `ui/cyd/` as its real scene, not just as a reference — same 320x240 landscape
+// panel, different silicon. So "this board" in any string below means whichever
+// board is compiling, and twelve strings currently answer for only one of them.
+//
+// 🟥 THE WORST ONE IS A BUG THIS PORT INTRODUCED WHILE FIXING ITS TWIN.
+// `system.slint`'s `chip-text` defaulted to `"ESP32-C6 - 410x502"` on the C6 — a
+// component default Rust never overrides, so it would have rendered the C6's name
+// verbatim on a C5. That was called out in this port as *"both halves wrong,
+// stated with total confidence"*, and replaced with `"ESP32-C5 - 320x240"`.
+//
+// Which is now wrong on the S3, for EXACTLY the same reason. The fix reintroduced
+// the bug one board over — because the fix was a better literal, and the defect
+// was never the literal's value. It was that a shared scene names a board at all.
+//
+// So the rule, learned twice: **a scene compiled for more than one board must not
+// state a fact about silicon in a literal.** Those facts belong in `board::*` and
+// arrive as properties.
+//
+// §1d LANDED — the property set (board-chip / board-mem / board-caps /
+// backlight-dimmable / has-boot-key, both roots, Rust-pushed) retired the
+// sharp sites:
+//
+//   sensors.slint    ✅ RETIRED — CHIP/MEMORY/SENSORS rows + caption now read
+//                    the properties; the page can no longer disagree with the
+//                    build (its DIE TEMP literal denied the S3's real sensor).
+//   system.slint     ✅ RETIRED — chip half from board-chip; the 320x240 half
+//                    stays literal because it is a PANEL fact both boards share.
+//   settings.slint   ✅ RETIRED — has-boot-key piped from board::HAS_BOOT_KEY;
+//                    the backlight control splits on backlight-dimmable
+//                    (slider on PWM boards, toggle + relight caption on binary).
+//   power.slint      ✅ backlight split as above. ⚠️ "MAINS POWERED - no cell"
+//                    still literal (rides has-pmu later; probably true on both
+//                    CYDs, and "probably" is what this index exists to stop).
+//   power_menu.slint ⚠️ still literal — "MAINS POWER - NO CELL", "tap the
+//                    glass to wake" (the caption is a CONTRACT on the C5 —
+//                    see cyd_c5.rs's douse block; verify the S3 wake path
+//                    before sharing it).
+//   voice.slint      ⚠️ still literal — "no ES7210 - no codec - no I2S";
+//                    unreachable without has-audio, so it can ride that
+//                    capability when an S3 audio pass happens.
+//
+// ⚠️ ALSO PER-BOARD, though not a string: **the paint budget below is the C5's SPI
+// arithmetic** (61.4 ms at 20 MHz). A board that clocks its panel differently has
+// a different number, and the RULES that follow from it — no full-screen motion,
+// one contiguous band — would still hold but with different slack. Re-derive per
+// board before treating 117 rows as this tree's constant rather than the C5's.
+//
+// 🟢 What is genuinely SHARED and needs no per-board seam: everything geometric.
+// Both boards are 320x240 rectangular glass, so every inset, band, column, grid
+// and hit-rect in this file is a fact about the PANEL, not the part. That is the
+// parameterisation working — composition shared, `board::*` per-board.
+//
+// The property set proposed to close this is in PROPOSED-board-ui-consts.md §1d:
+// 3 strings + 2 bools, added to BOTH roots in one commit so parity holds at
+// 173 + 55.
+// ============================================================================
+//
+// ============================================================================
+// 🟥 DIVERGENCES FROM ui/slint/ — DELIBERATE. DO NOT "SYNC WITH C6".
+// ============================================================================
+// A future sweep that diffs `ui/cyd/*` against its `ui/slint/*` counterpart will
+// find these and they will look like drift. They are not. Each is recorded at
+// its own site as well, in the same way the `ui/slint` files record theirs; this
+// is the index.
+//
+//  1. **Hot-band centring.** `x: N; width: W; horizontal-alignment: center`
+//     replaces `x: (parent.width - self.width) / 2` wherever a string changes
+//     often. Never exposes `self.width` to the dependency graph, so a changing
+//     string re-lays-out one paragraph instead of re-deriving a layout — the
+//     `a4a86a3` / `5ca474d` class exactly. Sites: `hunt` (hero + arrow + readout,
+//     rewritten every tick), `lights`/`ping` (status column), `mesh`, `sensors`,
+//     `story`. ⚠️ EXCEPT where `letter-spacing` is set: trailing letter-space
+//     counts toward intrinsic width but not toward alignment, so switching
+//     methods shifts glyphs ~1 px. `story`'s speaker chip and `CydPageTitle`
+//     therefore KEEP the intrinsic read, on purpose.
+//  2. **No layout managers around text.** 5 instantiations against the C6's 32,
+//     and none of the five wraps a `Text`. Absolute rows with the pitch written
+//     down replace `spacing:`.
+//  3. **No `animate` on anything larger than a band.** See the paint budget
+//     above. Three C6 animations are gone, not retuned.
+//  4. **`Geom` instead of `Theme` for geometry.** `Theme` is imported UNCHANGED
+//     so there is exactly one `global Theme` and Rust's `set_scheme` still works.
+//  5. **`CydBacklightToggle` replaces `SliderControl`** on the power and Settings
+//     DISPLAY pages — this board has no backlight PWM.
+//
+// 🟢 Per the watch session: the flow-back of (1) to `ui/slint/hunt.slint` is on
+// the someday list, measured on the C6 first, and is NOT this workstream's path.
+// A convergence acceptance test is expected to enforce these later.
+// ============================================================================
+
+export global Geom {
+    // --- panel ---------------------------------------------------------------
+    out property <length> panel-w: 320px;
+    out property <length> panel-h: 240px;
+
+    // --- safe area (RECTANGULAR glass: no corner arc to dodge) --------------
+    // Small uniform optical margins, not clipping insets. `safe-corner` is 2px
+    // rather than 0 purely so corner-anchored chrome does not kiss the bezel;
+    // on the C6 it was 30px of arc avoidance.
+    out property <length> safe-top: 6px;
+    out property <length> safe-bottom: 6px;
+    out property <length> safe-side: 8px;
+    out property <length> safe-corner: 2px;
+
+    // --- the chrome band (NOT PERSISTENT — see shell.slint) -----------------
+    // JP's decision, 2026-08-24: no chrome rides every page. The status band
+    // and the page indicator appear on the CLOCK page and on the wake peek,
+    // and nowhere else. So this height is a budget the CLOCK page pays, not a
+    // tax on all five pages: leaf pages get the full 240.
+    out property <length> chrome-y: 6px;      // visible band top
+    out property <length> chrome-h: 28px;     // visible band height (6..34)
+    out property <length> chrome-hit: 44px;   // hit band (0..44) — touch floor
+
+    // --- page title strip ---------------------------------------------------
+    // The C6 `PageTitle` sits at `y: 56px` with a 26 px face: the title alone
+    // eats y56..~90, i.e. 38 % of a 240 px panel before any content draws. Here
+    // it is a 24 px strip at the very top and the face drops 26 -> 20.
+    out property <length> title-y: 8px;
+    out property <length> title-h: 24px;      // strip 8..32
+
+    // --- the content band every leaf page draws into ------------------------
+    // 240 - 34 (title strip + 2) - 6 (safe-bottom) = 200 px of height, and
+    // 320 - 2*8 = 304 px of width. Use these instead of re-deriving; a page
+    // that hardcodes 200 will not follow a strip-height change.
+    out property <length> content-y: 34px;
+    out property <length> content-h: 200px;
+    out property <length> content-x: 8px;
+    out property <length> content-w: 304px;
+    // Half-width column for the two-column recomposition (the landscape answer
+    // to a broken vertical stack). 304 = 148 + 8 gutter + 148.
+    out property <length> col-w: 148px;
+    out property <length> col-gap: 8px;
+    out property <length> col2-x: 164px;      // content-x + col-w + col-gap
+
+    // --- rows ---------------------------------------------------------------
+    // 34 px rows fit FIVE per column (5*34 + 4*4 gap = 186 of 200), i.e. TEN
+    // stat rows on one landscape page against the C6's seven portrait rows.
+    // The C6 StatRow is 48 px tall and 330 px WIDE — 10 px off a 320 px panel.
+    out property <length> row-h: 34px;
+    out property <length> row-gap: 4px;
+    // Interactive rows get the touch floor instead, always.
+    out property <length> row-hit: 44px;
+
+    // --- type tiers (all present in the existing glyph budget) --------------
+    out property <length> t-hero: 66px;    // clock digits, meter heroes (was 108)
+    out property <length> t-big: 40px;     // seconds, secondary heroes
+    out property <length> t-title: 20px;   // page titles (was 26)
+    out property <length> t-value: 20px;   // stat-row values (was 22)
+    out property <length> t-body: 15px;    // tile labels, body copy
+    out property <length> t-label: 13px;   // field labels
+    out property <length> t-caption: 12px; // hints, eyebrows
+
+    // --- the shared hero circle (lights + ping) -----------------------------
+    // `lights.slint` and `ping.slint` use ONE hero geometry BY DESIGN — ping's
+    // own comment calls it *"lights.slint's proven placement"*. On the C6 that
+    // agreement is a COMMENT and two independent sets of literals, which is
+    // exactly how two pages drift apart. Here it is a token, so they cannot.
+    //
+    // 200 -> 130 px, and the centre moves off the panel's midline: the hero sits
+    // LEFT and the status column sits right of it, which is the whole landscape
+    // re-composition for both pages. cx 84 is the tightest the circle can sit
+    // and still fit its widest ring (`hero-d + 36` = 166 -> x1..167) on-panel.
+    out property <length> hero-d: 130px;
+    out property <length> hero-cx: 84px;
+    out property <length> hero-cy: 132px;
+    // The status column right of the hero: x176..312.
+    out property <length> hero-col-x: 176px;
+    out property <length> hero-col-w: 136px;
+
+    // --- touch --------------------------------------------------------------
+    // Resistive XPT2046, finger-driven, uncalibrated on day one. 44 px is a
+    // floor, not a target. Where a control must LOOK smaller than 44 px, pad
+    // its TouchArea outward (the PillButton hit-pad idiom) — never shrink the
+    // hit area to make room for chrome.
+    out property <length> touch-min: 44px;
+
+    // --- row-count budgets (JP's defaults, 2026-08-24) ----------------------
+    // Landscape forces reductions and each one is a product call, not a layout
+    // call. These are the agreed starting values; JP may revise.
+    //   mesh peers      7 -> 4
+    //   story chapters  5 -> 3   (⚠️ ALSO a Rust constant: VISIBLE_CHAPTERS in
+    //                             slint_shell.rs + main.rs — it is the pager
+    //                             stride, so NEWER/OLDER paging changes with it)
+    //   network APs     6 -> 3   (the 6 was an OOM guard, not a preference;
+    //                             going DOWN is always safe, up never is)
+    out property <int> max-peers: 4;
+    out property <int> max-chapters: 3;
+    out property <int> max-nets: 3;
+    // Launcher slots per page. TWO-SIDED CONSTANT: `LAUNCHER_PAGE_SLOTS` in
+    // slint_shell.rs must equal this or `page * slots + slot` launches the
+    // wrong app — silently, with no error to observe.
+    out property <int> launcher-slots: 8;
+    // Visible card slots for the switcher and the shade. ALSO two-sided:
+    // `switcher_slot()` / `shade_slot()` invert a start_y back to an index by
+    // arithmetic and return a WRONG INDEX rather than None at the wrong
+    // geometry, so a dismiss-swipe dismisses the wrong notification.
+    out property <int> max-cards: 3;
+}

@@ -1,0 +1,93 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
+
+// ============================================================================
+// SYSTEM PAGE — six stat rows, one column, full width.
+// ============================================================================
+//
+// The C6 page is the tightest in the tree by its own account: *"EXACTLY full at
+// seven 48 px rows (120 + 7*48 + 6*6 = 492 of 502)"*, and `build-text` could
+// only be added there by MERGING two static rows onto one line. It also carries
+// a bug-fix comment worth reading before touching any row geometry — at y120 the
+// seventh row's value centred at ~468 and rendered THROUGH the page dots, on
+// shipped firmware, invisible to every measurement because item counts cannot
+// see overlap. It took rendering the page to a PPM to find.
+//
+// That whole class of bug is gone here, for a structural reason rather than a
+// careful one: **there are no page dots over this page.** Chrome is not
+// persistent (JP, 2026-08-24), so the content band runs to the real bottom edge
+// and nothing can be overlapped by something it does not know about.
+//
+// HOW SEVEN PORTRAIT ROWS BECOME SIX LANDSCAPE ROWS IN LESS SPACE
+// -----------------------------------------------------------------------------
+//   * Row height 48 -> 30. The C6's 48 carries a 22 px value with generous
+//     leading; at 20 px the row only needs 30, and six of them plus 2 px gaps is
+//     190 px of the 200 px content band.
+//   * Row WIDTH stops being wrong. `StatRow` is `width: 330px` on the C6 — ten
+//     pixels wider than this entire panel, on all five pages that use it.
+//     `CydStatRow` defaults to the 304 px content band.
+//   * BATTERY is dropped. There is no AXP2101 on this board, so `battery-text`
+//     is never written and the row could only ever read "--". The property stays
+//     declared because `slint_shell.rs` sets it and removing it breaks the
+//     build — the row is what goes, not the API.
+//
+// So the merge the C6 was forced into is not needed here; every row is one fact.
+//
+// ⏳ A MILD SCATTERED-UPDATE CASE, NOTED SO IT IS NOT A SURPRISE
+// -----------------------------------------------------------------------------
+// Rust refreshes this page every 2 s, and only two of the six values actually
+// change on that cadence (HEAP and UPTIME) — CHIP, BUILD, FIRMWARE and SIGIL are
+// set once and never move. So the real per-tick dirty region is TWO
+// right-anchored value boxes, which is well inside any budget.
+//
+// It is written down because the SHAPE is the one the paint-budget doctrine warns
+// about (several independent right-aligned boxes rather than one band), and
+// because that shape is load-bearing on `ui/cyd/power.slint` at 1 Hz with six
+// live cells. If a future change makes more of these rows live, this page joins
+// that flag rather than inheriting a clean bill from this comment.
+//
+// ONE FACTUALLY FALSE DEFAULT, CORRECTED
+// -----------------------------------------------------------------------------
+// `chip-text` defaults to `"ESP32-C6 · 410x502"` and Rust never overrides it —
+// it is a component default, which means the C6 string would render verbatim on
+// a C5 with a 320x240 panel. Both halves wrong, stated with total confidence.
+// ============================================================================
+
+export component SystemPage {
+    // §1d: the chip half comes from Rust (board::CHIP_NAME); the panel half
+    // is a literal because BOTH boards drive this same 320x240 glass — a
+    // panel fact, which is exactly what this shared scene is allowed to know.
+    // (This line was a full literal twice, and wrong for a different board
+    // each time. The defect was never the value.)
+    in property <string> board-chip;
+    property <string> chip-text: root.board-chip + " \u{00b7} 320x240";
+    in property <string> fw-text;      // "v0.12.1 · d8f228e" (version + git hash)
+    in property <string> build-text;   // "White-Hot Wright" (realm-sigil forge name)
+    in property <string> sigil-text;   // per-device sigil (#34)
+    in property <string> heap-text;    // "123k free"
+    in property <string> uptime-text;
+    // Declared because slint_shell.rs writes it; NOT rendered — see the header.
+    in property <string> battery-text;
+
+    CydPageTitle { title: "SYSTEM"; }
+
+    // Absolute rows rather than a VerticalLayout. The C6 wraps these in one, and
+    // a layout manager sizes children from their INTRINSIC dimensions — which for
+    // a Text is the 16 B-per-read dependency-node allocation that two recent
+    // commits (a4a86a3, 5ca474d) exist purely to remove. Six rows at a known
+    // pitch need no measuring, and `y: Geom.content-y + n * 32px` says the pitch
+    // out loud where a `spacing:` hides it.
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +   2px; height: 30px;
+                 label: "CHIP";     value: root.chip-text; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  34px; height: 30px;
+                 label: "BUILD";    value: root.build-text; value-color: Theme.accent; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  66px; height: 30px;
+                 label: "FIRMWARE"; value: root.fw-text; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  98px; height: 30px;
+                 label: "SIGIL";    value: root.sigil-text; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y + 130px; height: 30px;
+                 label: "HEAP";     value: root.heap-text; value-color: Theme.accent; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y + 162px; height: 30px;
+                 label: "UPTIME";   value: root.uptime-text; }
+}

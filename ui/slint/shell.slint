@@ -358,6 +358,18 @@ export component WatchShell inherits Window {
     callback notif-clear();
 
     in-out property <float> brightness: 0.8;
+    // DORMANT on this board: the CYD scene's CydBacklightToggle needs its
+    // on-state pushed from Rust (Xtensa isel workaround — see the CYD set);
+    // slint_shell.rs compiles against BOTH roots, so the property must exist
+    // here too. Nothing in this scene reads it.
+    in property <bool> backlight-on: true;
+    // Board identity (Luna's §1d): Rust formats these from board::*/capability
+    // features at scene create; no shared scene hardcodes a board fact again.
+    in property <string> board-chip;
+    in property <string> board-mem;
+    in property <string> board-caps;
+    in property <bool> backlight-dimmable;
+    in property <bool> has-boot-key;
 
     // ==================== takeover gate (#75) ====================
     // TRUE while a full-screen surface completely hides the watchface pages and

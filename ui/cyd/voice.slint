@@ -1,0 +1,83 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// VOICE (#42) — DROPPED ON THIS BOARD. Declared, laid out, unreachable.
+// ============================================================================
+//
+// WHY IT IS NOT LAID OUT PROPERLY, WHICH IS A DELIBERATE CHOICE
+// -----------------------------------------------------------------------------
+// Voice-to-text needs FOUR independent things this board does not have: an
+// ES7210 mic ADC, an ES8311 codec, I2S (and the speaker-side TX running, because
+// capture shares the bus), and a PMU mic rail. It is not one missing chip, it is
+// the whole audio subsystem. JP dropped it, 2026-08-24 — the launcher tile is
+// removed, so nothing can open this overlay.
+//
+// So a full landscape re-composition of the push-to-talk hero would be work
+// spent on pixels no one can reach, and worse, it would LOOK finished — the next
+// person to read `ui/cyd/` would have no way to tell this page from a working
+// one. A page that states its own absence cannot be mistaken for a page that
+// works.
+//
+// WHY IT EXISTS AT ALL
+// -----------------------------------------------------------------------------
+// `slint_shell.rs` references every member below, and removing a property or a
+// callback breaks the build. That is the whole reason: the API is the contract,
+// the reachability is the registry's business. If the CYD ever grows an audio
+// board, this file is the place the real layout goes, and its properties are
+// already wired.
+//
+// ONE CAPTION REMOVED
+// -----------------------------------------------------------------------------
+// The C6 file calls its backdrop an "Opaque AMOLED backdrop". It is an opaque
+// backdrop; there is no AMOLED. The word is gone rather than corrected, because
+// "opaque backdrop" already says the only thing that mattered.
+// ============================================================================
+
+export component VoicePage {
+    // All declared because slint_shell.rs writes them. `voice-state`:
+    // 0 idle · 1 listening · 2 sending · 3 result · 4 error · 5 connecting.
+    in property <int> voice-state: 0;
+    in property <float> level: 0.0;
+    in property <string> transcript;
+    in property <string> error-text;
+    callback ptt-pressed();
+    callback ptt-released();
+    callback close();
+
+    // Opaque backdrop.
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "VOICE"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    Text {
+        x: Geom.content-x; y: 88px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "NO MICROPHONE ON THIS BOARD";
+        color: Theme.faint;
+        font-size: 18px;
+        letter-spacing: 3px;
+    }
+    Text {
+        x: Geom.content-x; y: 124px; width: Geom.content-w;
+        horizontal-alignment: center;
+        // BOARD-FACT: names the C5-CYD's absent parts. Some S3 CYDs carry an
+        // amp and codec, in which case this whole page is the wrong page.
+        text: "no ES7210 \u{00b7} no codec \u{00b7} no I2S";
+        color: Theme.dim;
+        font-size: Geom.t-body;
+        letter-spacing: 2px;
+    }
+    Text {
+        x: Geom.content-x; y: 150px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "this app is not in the launcher";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}

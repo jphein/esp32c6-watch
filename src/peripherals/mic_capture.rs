@@ -21,6 +21,14 @@ use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_time::{Duration, Timer};
+// The i2s-typed HALF of this module is capability-gated (#cyd-c5): the C5's
+// esp-hal 1.1.x has no `i2s` module, so the two tasks and their helpers cannot
+// even name their types there. The statics/constants/gain API below stay
+// chip-agnostic — 28 consumer sites across main.rs, voice_tts and audio_out
+// compile unchanged on every board, and a board without `has-audio` simply
+// never spawns the tasks (the spawn sites live inside main.rs's gated audio
+// bring-up block).
+#[cfg(feature = "has-audio")]
 use esp_hal::i2s::master::{I2sRx, I2sTx};
 use esp_hal::Blocking;
 use heapless::Vec;
@@ -132,6 +140,7 @@ const PUSH_POLL_MS: u64 = 4;
 /// up via [`audio_out::PlaybackFeeder`]: clip samples (mono → stereo) while
 /// staged, silence otherwise. Any `Late`/DMA error mid-session aborts the
 /// clip and re-arms — the mic clock always comes back.
+#[cfg(feature = "has-audio")]
 #[embassy_executor::task]
 pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, ring: &'static [u8]) {
     use crate::peripherals::audio_out::{self, PlaybackFeeder};
@@ -216,6 +225,7 @@ async fn rearm_requested() {
 /// the stage buffer drains it in ≤ one-descriptor slices; `& !3` guards whole
 /// stereo frames. Plain fn (not async) so the 1 KB stage stays off the
 /// statically-allocated task future.
+#[cfg(feature = "has-audio")]
 fn top_up(
     xfer: &mut esp_hal::dma::DmaTransferTxCircular<'_, I2sTx<'static, Blocking>>,
     feeder: &mut crate::peripherals::audio_out::PlaybackFeeder,
@@ -280,6 +290,7 @@ async fn recording_cleared() {
 /// [`RECORDING`] it pops stereo frames, extracts mono, and `try_send`s chunks
 /// (dropping on channel-full = shed oldest audio under backpressure); while idle
 /// it drains-and-discards so the circular ring never overflows.
+#[cfg(feature = "has-audio")]
 #[embassy_executor::task]
 pub async fn mic_capture_task(
     mut i2s_rx: I2sRx<'static, Blocking>,

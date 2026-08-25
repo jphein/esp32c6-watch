@@ -1,0 +1,75 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// SOUND LEVEL (#28/#30) — DROPPED ON THIS BOARD. Declared, unreachable.
+// ============================================================================
+//
+// The dBFS meter and the 12-band FFT spectrum both drain the shared mic capture.
+// No ES7210 on this board, so the meter would pin at `DBFS_FLOOR` and the twelve
+// bands would sit flat at -60 forever: the page renders perfectly and is inert.
+// JP dropped it, 2026-08-24, and the launcher tile is gone with it.
+//
+// Same treatment and same reasoning as `voice.slint`: this states its own absence
+// rather than presenting a beautiful dead instrument. A meter reading zero is the
+// single most misleading thing a UI can show, because zero is a valid reading.
+//
+// `SpecBand` is declared HERE and nowhere else in this tree. `ui/slint/
+// soundlevel.slint` is not in this root's import graph, so there is exactly one
+// `SpecBand` in the compiled scene and it keeps the field names `slint_shell.rs`
+// constructs — which is why the struct survives a page that does not draw it.
+//
+// The C6 file's "Opaque AMOLED backdrop" comment is gone: opaque, yes; AMOLED,
+// no. Same edit as voice.slint.
+// ============================================================================
+
+// One FFT band's bar: current level and peak-hold, both 0..1 fractions
+// normalised by Rust from dBFS in [-60, 0].
+export struct SpecBand {
+    level: float,
+    peak: float,
+}
+
+export component SoundLevel {
+    // All declared because slint_shell.rs writes them.
+    in property <float> mic-dbfs: -60;
+    in property <float> mic-peak: -60;
+    in property <[SpecBand]> spectrum: [];
+    in property <int> gain-db: 0;
+    callback gain-down();
+    callback gain-up();
+    callback close();
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "SOUND LEVEL"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    Text {
+        x: Geom.content-x; y: 88px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "NO MICROPHONE ON THIS BOARD";
+        color: Theme.faint;
+        font-size: 18px;
+        letter-spacing: 3px;
+    }
+    Text {
+        x: Geom.content-x; y: 124px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "a meter reading zero looks like silence";
+        color: Theme.dim;
+        font-size: Geom.t-body;
+        letter-spacing: 1px;
+    }
+    Text {
+        x: Geom.content-x; y: 150px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "this app is not in the launcher";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}

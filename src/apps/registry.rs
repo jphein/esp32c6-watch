@@ -140,6 +140,23 @@ pub static REGISTRY: &[AppDescriptor] = &[
     AppDescriptor { state: AppState::Story,      name: "Story",       icon_id: 16, accent: 0xa78bfa, section: Audio,  kind: Overlay,     flags: AppFlags::WIFI },    // idx 16
 ];
 
+impl AppDescriptor {
+    /// True when this board carries the hardware the app needs. The launcher
+    /// filters on this; the row itself is NEVER deleted or cfg'd out — idx is
+    /// a persistence contract (suspended-session records, persisted mappings,
+    /// an OTA'd device holding stale state), and removing a row shifts every
+    /// later app onto the wrong index — the switcher-map silent-wrong-index
+    /// class. Same doctrine as the story tile's gate above: an absent tile
+    /// beats a dead one, and a shifted one is worst of all.
+    pub fn hardware_present(&self) -> bool {
+        match self.state {
+            AppState::Maze => cfg!(feature = "has-imu"), // tilt-driven
+            AppState::Voice | AppState::Sound => cfg!(feature = "has-audio"),
+            _ => true,
+        }
+    }
+}
+
 /// Look up a launchable app's descriptor by state (linear scan, ≤15 entries).
 /// `None` for non-launchable states (Watchface / Launcher / Mp3Player / SmartHome).
 pub fn descriptor(state: AppState) -> Option<&'static AppDescriptor> {

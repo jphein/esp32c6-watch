@@ -7,10 +7,42 @@ fn main() {
 
     // Slint UI for the `slint-demo` binary: compile the .slint file with
     // resources (fonts/images) pre-rendered for the no_std software renderer.
+    // PER-BOARD SCENE ROOT (#cyd-c5). The Slint layouts are absolute-positioned
+    // for a specific panel, so each board compiles its own root:
+    //
+    //   board-waveshare-c6  -> ui/slint/shell.slint   (410x502 portrait)
+    //   board-cyd-c5        -> ui/cyd/shell.slint     (320x240 landscape)
+    //
+    // Both roots must export the same component surface (WatchShell + its
+    // properties/callbacks) — slint_shell.rs compiles against whichever is
+    // selected. The CYD set may import shared pieces from ui/slint/ (theme,
+    // controls) where their fixed sizes fit the smaller panel; that judgement
+    // is the layout work's, not this build script's.
+    //
+    // FALLBACK while the CYD set is being built: if the CYD root does not exist
+    // yet, compile the C6 scene and say so loudly — a 410x502 scene on a 320x240
+    // panel renders cropped garbage, but it LINKS, which is what the C5 arm
+    // needs for stack/image measurement before the layouts land. The warning is
+    // the discriminator between "wrong layout by fallback" and "wrong layout by
+    // bug".
+    // The S3 CYD is the same 320x240 landscape class, so it shares the ui/cyd
+    // scene set until a layout pass says otherwise (board_es3c28p.rs's panel
+    // facts differ driver-side — MADCTL/inversion — not scene-side).
+    let cyd = std::env::var("CARGO_FEATURE_BOARD_CYD_C5").is_ok()
+        || std::env::var("CARGO_FEATURE_BOARD_ESP32S3_CYD").is_ok();
+    let cyd_root = "ui/cyd/shell.slint";
+    let ui_root = if cyd && std::path::Path::new(cyd_root).exists() {
+        cyd_root
+    } else {
+        if cyd {
+            println!("cargo:warning=cyd-class board: {cyd_root} not present yet — compiling the C6 scene as a LINK-ONLY fallback (renders cropped on this panel)");
+        }
+        "ui/slint/shell.slint"
+    };
     let slint_config = slint_build::CompilerConfiguration::new()
         .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer);
-    slint_build::compile_with_config("ui/slint/shell.slint", slint_config)
-        .expect("failed to compile ui/slint/shell.slint");
+    slint_build::compile_with_config(ui_root, slint_config)
+        .unwrap_or_else(|e| panic!("failed to compile {ui_root}: {e}"));
 }
 
 /// Stamp this build with a **realm-sigil forge name + short hash**, so the
@@ -246,6 +278,20 @@ fn git_stdin(args: &[&str], input: &str) -> Option<String> {
 /// `memory.x` as a build input** — a stale file otherwise persists across builds
 /// and you measure, or flash, the wrong artifact.
 fn widen_rom_region() {
+    // C6-ONLY until measured. This function rewrites esp-hal's GENERATED
+    // esp32c6 memory.x (4 MiB -> the 6 MiB partitions.csv reserves); the C5 has
+    // a different memory map, different generated file, and possibly no need —
+    // its first linking image may sit under 4 MiB. Budgets are measured, never
+    // inherited: the C5 gets its own arm here IF its measured image size
+    // demands one, seeded from the first link on real hardware (cyd session
+    // reports it). Silently applying C6 arithmetic to a C5 layout is the exact
+    // class of inherited-number bug this repo spent 2026-07-29 rooting out.
+    #[cfg(not(feature = "board-waveshare-c6"))]
+    {
+        println!("cargo:warning=widen_rom_region: skipped (not the C6 board) — if the image fails to LINK on ROM size, this is where the per-chip arm goes");
+        return;
+    }
+
     const STOCK: &str = "LENGTH = 0x400000 - 0x20";
     const WIDE: &str = "LENGTH = 0x600000 - 0x20";
 
@@ -346,6 +392,12 @@ fn linker_be_nice() {
         std::process::exit(0);
     }
 
+    // LLD-ONLY. The RISC-V boards link with rust-lld, which understands
+    // --error-handling-script (the friendly undefined-symbol hints above). The
+    // S3's xtensa target links through xtensa-esp32s3-elf-GCC, which rejects
+    // the flag outright ("unrecognized command-line option") and kills the
+    // link — so the S3 arm trades the nice hints for a link that happens.
+    #[cfg(not(feature = "board-esp32s3-cyd"))]
     println!(
         "cargo:rustc-link-arg=--error-handling-script={}",
         std::env::current_exe().unwrap().display()

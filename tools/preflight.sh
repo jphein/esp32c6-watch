@@ -95,50 +95,78 @@ CARGO=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
 # STACK_FLOOR is the boot assert's own value; hardcoding it here would let the
 # gate and the firmware disagree, which is the failure mode this file exists to
 # prevent.
-STACK_FLOOR=$(grep -oE 'const STACK_FLOOR: usize = [0-9]+ \* 1024' src/main.rs \
-              | grep -oE '[0-9]+ \* 1024' | awk '{print $1 * 1024}')
-if [[ -z "${STACK_FLOOR:-}" ]]; then
+# NOTE: main.rs carries one STACK_FLOOR per board (cfg-split); the values are
+# equal today (the C5's is PROVISIONAL, inheriting the C6 number until its own
+# radio-up soak). This gate runs the C6 matrix, so it takes the C6 value — but
+# if the consts ever DIVERGE, taking "the first grep hit" would silently gate
+# one board against the other's floor. Fail loudly instead: at that point this
+# script needs a --board argument, not a lucky ordering.
+FLOORS=$(grep -oE 'const STACK_FLOOR: usize = [0-9]+ \* 1024' src/main.rs \
+              | grep -oE '[0-9]+ \* 1024' | awk '{print $1 * 1024}' | sort -u)
+if [[ -z "${FLOORS:-}" ]]; then
   echo "preflight: could not parse STACK_FLOOR from src/main.rs" >&2
   exit 2
 fi
+if [[ $(wc -l <<<"$FLOORS") -gt 1 ]]; then
+  echo "preflight: main.rs has DIVERGING per-board STACK_FLOOR values ($(tr '\n' ' ' <<<"$FLOORS")) — this script gates one board and must be told which (add --board before trusting any verdict)" >&2
+  exit 2
+fi
+STACK_FLOOR=$FLOORS
 
-# ROM region end comes from the GENERATED memory.x (build.rs widens it per #67),
-# so this tracks whatever the build actually linked against rather than a
-# constant that goes stale. Falls back to reporting-only if it cannot be found.
-# In fambuild mode the generated memory.x lives on the build host, so read it
-# there — the limit must come from what was ACTUALLY linked against, not a
-# constant that goes stale the next time build.rs changes it.
-rom_limit() {
-  local len=""
-  if [[ "$BUILDER" == "fambuild" ]]; then
-    len=$(ssh familiar "grep -h -oE 'ROM : ORIGIN =[^,]+, LENGTH = 0x[0-9A-Fa-f]+' \
-          \$HOME/fambuild/$(basename "$REPO")/target/$TRIPLE/release/build/esp-hal-*/out/memory.x \
-          2>/dev/null | head -1" 2>/dev/null | grep -oE '0x[0-9A-Fa-f]+$')
-  else
-    local mx
-    mx=$(find target -path '*esp-hal*' -name memory.x 2>/dev/null | head -1)
-    [[ -n "$mx" ]] && len=$(grep -oE 'ROM : ORIGIN =[^,]+, LENGTH = 0x[0-9A-Fa-f]+' "$mx" \
-          | grep -oE '0x[0-9A-Fa-f]+$' | head -1)
+# ROM region comes from the GENERATED memory.x (build.rs widens it per #67), so
+# this tracks whatever the build actually linked against rather than a constant
+# that goes stale. In fambuild mode the generated memory.x lives on the build
+# host, so read it there. Falls back to reporting-only if it cannot be found.
+#
+# Emits "base length" (decimal) for the ROM region — BOTH parsed, because the
+# base is a CHIP fact, not a constant of this script (#cyd-c5: the window was
+# hardcoded 0x42000000..0x42800000, the C6's map; a C5 arm would have measured
+# flash high-water against the WRONG window and still printed a verdict —
+# nebula's finding: the ROM arm computed from zero matching sections and
+# passed). Cached after the first call: one matrix run links one board, so the
+# region cannot change mid-run.
+ROM_REGION_CACHE=""
+rom_region() {
+  if [[ -z "$ROM_REGION_CACHE" ]]; then
+    local line=""
+    if [[ "$BUILDER" == "fambuild" ]]; then
+      line=$(ssh familiar "grep -h -oE 'ROM : ORIGIN =[^,]+, LENGTH = [^,]+' \
+            \$HOME/fambuild/$(basename "$REPO")/target/$TRIPLE/release/build/esp-hal-*/out/memory.x \
+            2>/dev/null | head -1" 2>/dev/null)
+    else
+      local mx
+      mx=$(find target -path '*esp-hal*' -name memory.x 2>/dev/null | head -1)
+      [[ -n "$mx" ]] && line=$(grep -oE 'ROM : ORIGIN =[^,]+, LENGTH = [^,]+' "$mx" | head -1)
+    fi
+    [[ -z "$line" ]] && return 1
+    # "ROM : ORIGIN = 0x42000000 + 0x20, LENGTH = 0x600000 - 0x20" — take the
+    # first hex of each side; the alignment nudge cancels at region scale.
+    local base len
+    base=$(grep -oE '0x[0-9A-Fa-f]+' <<<"${line%%,*}" | head -1)
+    len=$(grep -oE '0x[0-9A-Fa-f]+' <<<"${line#*LENGTH}" | head -1)
+    [[ -z "$base" || -z "$len" ]] && return 1
+    ROM_REGION_CACHE="$(( base )) $(( len ))"
   fi
-  [[ -z "$len" ]] && return 1
-  printf '%d\n' $(( 0x42000000 + len ))
+  printf '%s\n' "$ROM_REGION_CACHE"
+  return 0
 }
 
 # --- measurement -----------------------------------------------------------
-# Emits "gap rom_used rom_end" for an ELF.
+# Emits "gap rom_used rom_end" for an ELF. rom_used/rom_end are 0 when the ROM
+# region cannot be parsed — the caller treats that as report-only, never PASS.
 measure() {
-  local elf="$1" limit
-  limit=$(rom_limit || echo 0)
-  "$NM" "$elf" 2>/dev/null | awk -v lim="$limit" '
+  local elf="$1" base=0 len=0
+  read -r base len <<<"$(rom_region || echo '0 0')"
+  "$NM" "$elf" 2>/dev/null | awk '
     / _bss_end$/     { b = strtonum("0x" $1) }
     / _stack_start$/ { s = strtonum("0x" $1) }
     END { printf "%d ", s - b }'
-  "$RE" -S -W "$elf" 2>/dev/null | awk -v lim="$limit" '
+  "$RE" -S -W "$elf" 2>/dev/null | awk -v base="$base" -v len="$len" '
     /^  \[/ {
       a = strtonum("0x" $4); z = strtonum("0x" $6)
-      if (a >= 0x42000000 && a < 0x42800000 && z > 0 && a + z > m) m = a + z
+      if (base > 0 && a >= base && a < base + len && z > 0 && a + z > m) m = a + z
     }
-    END { printf "%d %d\n", m - 0x42000000, lim }'
+    END { printf "%d %d\n", (m ? m - base : 0), (len ? base + len : 0) }'
 }
 
 # --- host crates -----------------------------------------------------------
@@ -368,7 +396,10 @@ add it to the list in stamp_build_sigil()."
 
   margin=$(( gap - STACK_FLOOR ))
   if [[ "$rom_end" -gt 0 ]]; then
-    rom_free=$(( rom_end - 0x42000000 - rom_used ))
+    # rom_used is already region-relative (measure subtracts the parsed base),
+    # so free is just LENGTH - used — no hardcoded base (#cyd-c5).
+    read -r _rr_base _rr_len <<<"$(rom_region)"
+    rom_free=$(( _rr_len - rom_used ))
     rom_txt="$rom_free"
   else
     rom_txt="(unknown)"

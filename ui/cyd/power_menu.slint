@@ -1,0 +1,225 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PillButton } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// POWER MENU — the LANDSCAPE IDIOM PILOT.
+// ============================================================================
+//
+// Chosen as the pilot because it is the least-coupled overlay in the set: three
+// actions, no data model, no repeater, no Rust geometry. Whatever a landscape
+// page looks like gets settled here, cheaply, before sixteen more pages copy it.
+// (The clock page went first only because it is the boot page and needs no
+// working touch to reach — a different question.)
+//
+// THE IDIOM, stated once so the rest of the tree can point at it
+// -----------------------------------------------------------------------------
+//  1. Title in the 24 px top strip (`Geom.title-y`), 20 px face, centred.
+//     `CydBackChevron` self-positions at 4,4,44x44 and clears the title.
+//  2. Everything else lives in the content band: `Geom.content-y`(34) to 234,
+//     `Geom.content-x`(8) to 312. Never derive those numbers again.
+//  3. A BROKEN VERTICAL STACK BECOMES A ROW. This file is the smallest possible
+//     demonstration: the C6 stacks REBOOT (y172) and SHUT DOWN (y256) 84 px
+//     apart and runs to y432. Side by side they occupy ONE 56 px band.
+//  4. Peer actions get EQUAL WIDTH from `Geom.col-w`-style arithmetic, not from
+//     hand-tuned literals, so a strip-height or inset change moves them together.
+//  5. Bottom-anchor anything that must hug the bottom edge, off
+//     `root.height - Geom.safe-bottom - N` — the one page-level idiom in the C6
+//     tree that self-relocates on a dimension change (`story.slint:238-241`).
+//
+// WHAT CHANGED IN THE CONTENT, NOT JUST THE GEOMETRY
+// -----------------------------------------------------------------------------
+// The C6 header line reads "BATTERY 82% · CHARGING" and the honesty caption
+// ("on USB power — restarts after shutdown") is gated on `vbus-on`. On this
+// board BOTH are dead statements:
+//
+//   * There is no AXP2101, so `battery-percent` is never set and the line would
+//     read "BATTERY --" forever. A status line that can only say one thing is
+//     not a status line.
+//   * `vbus-on` is fed from the same absent PMIC, so it is permanently false and
+//     the caption could never appear — which is the worse failure, because the
+//     honesty it was carrying is still TRUE and now goes unsaid.
+//
+// So the header states the real situation and the caption is made
+// unconditional — and what it says changed too, once JP ruled on the semantic.
+// See the DOUSE note below.
+//
+// SHUT DOWN BECAME "DOUSE", AND IT IS A SOFT DOUSE
+// -----------------------------------------------------------------------------
+// JP's rulings, 2026-08-25, in two steps — and the second one changed the design,
+// so both are recorded rather than just the outcome.
+//
+//   FIRST: `power-shutdown-tap` becomes a deep sleep on this board, woken by
+//   BOOT. "SHUT DOWN" on a device that wakes on a button press is a promise the
+//   hardware does not keep, so the word and the caption had to change with it.
+//
+//   THEN: deep sleep turned out to be VERSION-BLOCKED on the C5 — the HAL
+//   generation that has sleep breaks the radio. So the ruling became **SOFT
+//   DOUSE**: screen off, radios off, UI halted, and **TAP THE GLASS TO WAKE**.
+//
+// That second step is not a smaller version of the first, it is a different
+// affordance, and this file had one line of it wrong for an hour: the caption
+// said "press BOOT to relight". Wrong twice over — BOOT's existence on this board
+// is itself unconfirmed (see settings.slint's BUTTONS page), and the wake is a
+// TOUCH now. Sending a user hunting for a button that may not exist, to recover
+// from a state they deliberately entered, is the worst failure this menu could
+// have.
+//
+// So the wake affordance is the GLASS, and it is stated in words AND drawn,
+// because this is the one caption in the tree that a user reads in order to
+// undo something. The touch IRQ line is confirmed wake-capable, and this board
+// may be touch-only by design — so "tap to wake" is not a fallback here, it is
+// the native gesture.
+//
+// WHY "DOUSE" IS STILL THE RIGHT WORD
+// -----------------------------------------------------------------------------
+//   * "SLEEP" already means something else on this watch — the auto-dim/AOD
+//     ladder that happens by itself after 8 s and 15 s. A menu item called SLEEP
+//     beside a screen that sleeps on its own is two meanings on one word.
+//   * A douse is something you do TO a light, deliberately, and it stays out
+//     until you relight it. A SOFT douse fits it better than the deep sleep did:
+//     the watch is not off, it is dark and holding, one touch from lit.
+//   * It keeps the fleet's register, in firmware that names its builds with
+//     realm sigils.
+//
+// It keeps the DANGER variant even though nothing is destroyed and the recovery
+// is one tap. That is deliberate: it is still the button that makes the watch
+// stop responding, and it is the only control here whose undo is a separate
+// deliberate act. Warn-on-press is about consequence, not data loss.
+// ============================================================================
+
+export component PowerMenu {
+    in property <int> battery-percent: -1;
+    in property <bool> charging: false;
+    in property <bool> vbus-on: false;
+    callback reboot-tap();
+    callback shutdown-tap();
+    callback close();
+
+    // Opaque backdrop in the active scheme.
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    // Input swallow — declared before the content so the content stays topmost.
+    // A plain Rectangle does NOT consume clicks, so without this the chrome
+    // beneath an overlay stays hit-testable through its dead zones (#54).
+    OverlaySwallow {}
+
+    CydPageTitle { title: "POWER"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    // Status line. Not gated, not conditional, and not about a battery.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 44px;
+        // BOARD-FACT: assumes no PMU. Verify per board.
+        text: "MAINS POWER \u{00b7} NO CELL";
+        color: Theme.soft;
+        font-size: Geom.t-body;
+        letter-spacing: 2px;
+    }
+
+    // --- the two actions, side by side ---------------------------------------
+    // 136 px each in the 304 px content band with a 24 px gutter:
+    // x 20..156 and 164..300. 56 px tall — above the 44 px floor, and tall
+    // enough that an 18 px face with tracking reads as a primary action.
+    //
+    // Both faces are 18 px with 3 px tracking — the C6's sizing, which fits again
+    // now that the danger button says DOUSE (5 chars) rather than SHUT DOWN (9).
+    // An earlier revision had to drop to 16 px because "SHUT DOWN" at 18/3
+    // measures ~135 px and did not fit 136 with any margin at all.
+    PillButton {
+        x: 20px;
+        y: 74px;
+        width: 136px; height: 56px;
+        text: "REBOOT";
+        text-size: 18px;
+        tracking: 3px;
+        clicked => { root.reboot-tap(); }
+    }
+
+    // Danger variant: pressed inverts to solid warn with on-accent text.
+    // One-frame swap, never an animation: at this renderer's frame budget a tween
+    // yields 0-1 intermediate frames and queues wasted full repaints.
+    //
+    // "DOUSE" is 5 characters where "SHUT DOWN" was 9, so the face goes back UP
+    // to 18 px — the size the C6 uses and the size this pair wanted before the
+    // longer word forced 16. The two buttons stay matched.
+    PillButton {
+        x: 164px;
+        y: 74px;
+        width: 136px; height: 56px;
+        danger: true;
+        text: "DOUSE";
+        text-size: 18px;
+        tracking: 3px;
+        clicked => { root.shutdown-tap(); }
+    }
+
+    // --- the wake affordance: drawn, then said ------------------------------
+    // A tap mark: a filled core inside a ring, centred above the caption. Drawn
+    // from rectangles because the embedded font has no emoji — the same
+    // constraint every icon in this UI is built under.
+    //
+    // It earns its 20 px because of WHERE it is: this is the only caption in the
+    // tree that a user reads in order to UNDO something, and the recovery has to
+    // be legible at a glance rather than parsed. A ring-and-dot reads as "touch
+    // here" without language.
+    tap-mark := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 138px;
+        width: 20px; height: 20px;
+        border-radius: 10px;
+        border-width: 2px;
+        border-color: Theme.accent.with-alpha(0.55);
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 8px; height: 8px; border-radius: 4px;
+            background: Theme.accent;
+        }
+    }
+    // Honesty caption — UNCONDITIONAL here (see the header on why the C6's
+    // `vbus-on` gate could never fire on this board). It says what DOUSE does and
+    // how to undo it, in that order, because the second half is the one a user
+    // needs at the moment they regret the first.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 164px;
+        // BOARD-FACT: the touch-IRQ wake is confirmed on the C5. If a sibling
+        // board wakes differently, this caption is a promise it cannot keep —
+        // and it is the one caption a user reads in order to UNDO something.
+        text: "screen and radios off \u{00b7} tap the glass to wake";
+        color: Theme.dim;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+
+    // --- CANCEL --------------------------------------------------------------
+    // Neutral ghost row (the scan-overlay idiom): hairline border, Theme.pressed
+    // held fill. Also reachable via chevron and right-swipe, so it is the third
+    // route to the same exit rather than the only one.
+    //
+    // BOTTOM-ANCHORED off `root.height`, which is the point of the pilot: this
+    // row does not need editing if the safe inset or the panel changes.
+    cancel := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.height - Geom.safe-bottom - 44px;
+        width: 200px; height: 44px;
+        border-radius: 22px;
+        border-width: 1px;
+        border-color: cancel-ta.pressed ? Theme.soft : Theme.line;
+        background: cancel-ta.pressed ? Theme.pressed : transparent;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: "CANCEL";
+            color: cancel-ta.pressed ? Theme.soft : Theme.dim;
+            font-size: 16px;
+            letter-spacing: 2px;
+        }
+        cancel-ta := TouchArea { clicked => { root.close(); } }
+    }
+}

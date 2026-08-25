@@ -1,6 +1,14 @@
 #![no_std]
 #![no_main]
 
+// This bin demos the WAVESHARE C6 hardware specifically (its pins, its panel).
+// On any other board it compiles to a parked stub rather than being excluded,
+// because a Cargo bin cannot be feature-gated out of existence — `required-
+// features` would make `cargo build` fail instead of skip. Parking is honest:
+// nothing here pretends to run.
+#![cfg_attr(not(feature = "board-waveshare-c6"), allow(unused))]
+
+
 include!("../panic_reboot.rs");
 
 // `heap-hooks` is a CRATE-WIDE feature that turns on `esp-alloc/alloc-hooks`, and
@@ -37,7 +45,7 @@ extern crate alloc;
 // Reuse the existing firmware modules without touching src/main.rs.
 // (Crate-root file: `#[path]` is relative to src/bin/, and inside inline
 // modules the inline module name is appended to the base directory.)
-#[path = "../board.rs"]
+#[path = "../board/mod.rs"]
 #[allow(dead_code)]
 mod board;
 
@@ -126,6 +134,17 @@ const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
 
 // === Entry point ===================================================
 
+#[cfg(not(feature = "board-waveshare-c6"))]
+#[esp_rtos::main]
+async fn main(_spawner: Spawner) -> ! {
+    // Parked: this demo drives the Waveshare C6's specific hardware. See the
+    // crate-attr note at the top of the file.
+    loop {
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
+    }
+}
+
+#[cfg(feature = "board-waveshare-c6")]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();

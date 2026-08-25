@@ -1,0 +1,321 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PressTile, Stepper, Seg } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// HA CLIMATE — a card LIST and a two-column DETAIL.
+// ============================================================================
+//
+// Pure presentation: the climate model + MQTT/Node-RED bridge live in the loop;
+// this emits set-temp / set-mode and reflects the pushed `cards` model.
+//
+// mode ids: 0 off · 1 heat · 2 cool · 3 auto · 4 fan · 5 dry
+// action ids: 0 idle · 1 heating · 2 cooling   modes-mask: bit m set = mode m
+//
+// THE FLICKABLE STAYS, AND IT IS NOT AN EXCEPTION TO THE NO-SCROLL RULE
+// -----------------------------------------------------------------------------
+// Pagination is the house pattern because continuous scroll dirties the whole
+// viewport every frame and measured 6-11 fps. The rule has one stated carve-out
+// — *"only for lists whose length is unknown at design time"* — and this list is
+// the canonical instance: the card count is however many climate entities Home
+// Assistant reports. There is no page count to compute at design time, so there
+// is nothing to paginate INTO.
+//
+// So the Flickable is kept, deliberately, on the same terms the C6 kept it. What
+// changed is the card height (92 -> 60), which means three cards are on screen
+// where the C6 showed four — and a shorter card is a cheaper scroll, since the
+// dirty region is what the fps number was about.
+//
+// ⚠️ It is kept because there is nothing to paginate INTO, not because scrolling
+// is cheap here. It is the most expensive interaction in this tree and the only
+// one whose cost is unbounded by design. **Flag for measurement before it is
+// load-bearing** — if it does not hold up on glass, the fallback is a Rust-owned
+// page index over the model (which turns an unknown-length list into a known
+// page count) rather than a smaller card.
+//
+// 🟥 The LIST->DETAIL transition is a HARD CUT, not the C6's cross-fade. See the
+// note at the layer itself: a full-screen fade is ~3 frames of a 16 fps wipe on
+// this panel.
+//
+// THE DETAIL VIEW IS WHERE THE HEIGHT WENT
+// -----------------------------------------------------------------------------
+// The C6 detail is a 274 px vertical stack against a 200 px band: name, an 84 px
+// hero, action, a 72 px stepper row, a 62 px mode strip, caption. Two columns
+// resolve it without dropping a control:
+//
+//   x 8..156                 x 164..312
+//   Living Room              72°F            ← setpoint, 40 px
+//   72°F      (50 px hero)   [ − ]    [ + ]  ← 56x56 steppers
+//   HEATING
+//   [ OFF | HEAT | COOL | AUTO | FAN | DRY ]  ← full-width, 44 px
+//
+// The hero drops 84 -> 50, which is a real loss and the right one: at 84 px
+// "72°F" measures ~184 px and there is no second column left, so keeping it
+// would cost the steppers their place. 50 already exists in the glyph budget
+// (hunt's hero) — a distinct 46 or 60 would cost ~98 KB of ROM for nothing.
+//
+// 🟥 THE SIX-CHIP TOUCH FLOOR, WHICH THE C6 FAILED
+// -----------------------------------------------------------------------------
+// The layout spec flagged this as a hard violation: six `Seg`s in the C6's
+// 350 px-wide strip with 6 px spacing gives 38 px chips, **6 px under the 44 px
+// floor**, on a capacitive panel. This board's touch is RESISTIVE and
+// uncalibrated, which makes an under-floor target worse, not better.
+//
+// It fixes itself with the full content band and tighter spacing:
+// `(304 - 5*4) / 6 = 47.3` px. Six chips, every one over the floor, on the
+// narrower panel. The C6's strip was inset 30 px each side for the corner arc —
+// 60 px this rectangular glass does not owe anyone.
+//
+// The detail caption ("tap ‹ to go back · via Home Assistant") is dropped. The
+// mode strip ends at y222 and a 12 px caption needs ~14 of the remaining 12, but
+// that is not why: half the sentence explained the chevron, which is visible two
+// inches above it, and the other half duplicates the provenance the LIST view
+// already carries. It stopped being worth a band.
+//
+// ⚠️ The mode strip keeps its `HorizontalLayout`. That is a considered exception:
+// the seg COUNT is a runtime bitmask (`modes-mask`), so the chips genuinely
+// cannot be placed absolutely, and mode changes are user-initiated — this is not
+// a per-tick repaint band, which is where intrinsic-size reads actually cost.
+// ============================================================================
+
+export struct ClimateCard {
+    id: int,
+    name: string,
+    cur: string,        // Rust-formatted current temp, e.g. "72" ("--" if unknown)
+    setpoint: float,    // numeric setpoint (stepper + display)
+    mode: int,          // current hvac mode 0..5
+    action: int,        // hvac action 0 idle / 1 heating / 2 cooling
+    min: float,
+    max: float,
+    step: float,
+    modes-mask: int,    // supported modes bitmask (bit m = mode m)
+    unit: string,       // "°F" (passthrough, no conversion)
+}
+
+export component ClimateOverlay {
+    in property <[ClimateCard]> cards;
+    in property <int> conn-state: 0;
+    in-out property <int> selected-index: -1;
+    callback set-temp(int, float);
+    callback set-mode(int, int);
+    callback closed();
+
+    // hvac-action → accent (heating amber, cooling blue, idle neutral).
+    pure function action-color(a: int) -> color {
+        a == 1 ? Theme.warm : (a == 2 ? Theme.accent2 : Theme.dim)
+    }
+    pure function action-label(a: int) -> string {
+        a == 1 ? "HEATING" : (a == 2 ? "COOLING" : "IDLE")
+    }
+    pure function mode-label(m: int) -> string {
+        m == 0 ? "OFF" : (m == 1 ? "HEAT" : (m == 2 ? "COOL"
+            : (m == 3 ? "AUTO" : (m == 4 ? "FAN" : "DRY"))))
+    }
+    // Slint has no bitwise ops → arithmetic bit test: bit for divisor 2^m set?
+    pure function bit-set(mask: int, div: int) -> bool {
+        mod(floor(mask / div), 2) == 1
+    }
+    // Safe index for the always-present (opacity-gated) detail layer — never OOB
+    // even when selected-index is -1 (list mode); the layer is just invisible then.
+    property <int> di: clamp(root.selected-index, 0, max(0, root.cards.length - 1));
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "CLIMATE"; }
+
+    // In detail → back to list; in list → close (return to the carousel).
+    CydBackChevron {
+        clicked => {
+            if (root.selected-index >= 0) { root.selected-index = -1; }
+            else { root.closed(); }
+        }
+    }
+
+    // ==================== states ====================
+    if root.conn-state == 1: Text {
+        x: Geom.content-x; y: 108px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "connecting\u{2026}"; color: Theme.dim; font-size: 20px; letter-spacing: 1px;
+    }
+    if root.conn-state == 2: Text {
+        x: Geom.content-x; y: 108px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "HA unreachable"; color: Theme.warn; font-size: 20px; font-weight: 600;
+    }
+    if root.conn-state == 0 && root.cards.length == 0: Text {
+        x: Geom.content-x; y: 108px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "no climate devices"; color: Theme.dim; font-size: 18px; letter-spacing: 1px;
+    }
+
+    // ==================== LIST view ====================
+    // Present when ready+non-empty; CUT to invisible under the detail on
+    // selection. Card taps disabled while the detail is up, so no ghost flashes
+    // beneath it.
+    if root.conn-state == 0 && root.cards.length > 0: Flickable {
+        // 🟥 NO CROSSFADE. The C6 slides and fades this layer against the detail
+        // over 200 ms — a FULL-SCREEN dirty region per frame, which this panel's
+        // SPI link cannot serve: a full 320x240 RGB565 repaint is 61.4 ms at
+        // 20 MHz (37.2 ms even at the 33 MHz ceiling), so a 200 ms cross-fade is
+        // ~3 frames of a 16 fps wipe with nothing left for rendering.
+        //
+        // So `x` is now FIXED and the opacity flip is a HARD CUT. Same
+        // conclusion the launcher's paging reached from fps measurements, reached
+        // here from the serial bit rate.
+        x: Geom.content-x;
+        y: Geom.content-y;
+        width: Geom.content-w;
+        height: Geom.content-h;
+        opacity: root.selected-index < 0 ? 1.0 : 0.0;
+        viewport-height: root.cards.length * 68px;
+        VerticalLayout {
+            spacing: 8px;
+            // PressTile (Recipe A): the row lights on finger-down — the tap used
+            // to wait ~200 ms for the detail crossfade before ANY acknowledgment.
+            for card[idx] in root.cards: PressTile {
+                height: 60px;
+                enabled: root.selected-index < 0;
+                clicked => { root.selected-index = idx; }
+                // action accent bar (left) — hard swap, no animate.
+                Rectangle {
+                    x: 0; y: 8px; width: 4px; height: parent.height - 16px;
+                    border-radius: 2px;
+                    background: root.action-color(card.action);
+                }
+                // name — bounded so the 40 px temp to its right is never crowded
+                Text {
+                    x: 14px; y: 6px; width: 130px; overflow: elide;
+                    text: card.name; color: Theme.soft;
+                    font-size: Geom.t-body; font-weight: 600;
+                }
+                // setpoint (small)
+                Text {
+                    x: 14px; y: 30px;
+                    text: "set \{round(card.setpoint)}\{card.unit}";
+                    color: Theme.dim; font-size: Geom.t-caption;
+                }
+                // big current temp. 40 px, NOT 38: every distinct font-size
+                // embeds a whole pre-rendered glyph set (~70 KB at this size) and
+                // 40 already exists (clock seconds).
+                Text {
+                    x: parent.width - self.width - 66px;
+                    y: 0; height: parent.height; vertical-alignment: center;
+                    text: card.cur + card.unit;
+                    color: Theme.ink; font-size: Geom.t-big; font-weight: 700;
+                }
+                // mode chip (right)
+                Rectangle {
+                    x: parent.width - self.width - 10px; y: 8px;
+                    width: 50px; height: 22px; border-radius: 11px;
+                    background: Theme.track;
+                    Text {
+                        x: (parent.width - self.width) / 2;
+                        y: 0; height: parent.height; vertical-alignment: center;
+                        text: root.mode-label(card.mode);
+                        color: root.action-color(card.action) == Theme.dim
+                            ? Theme.soft : root.action-color(card.action);
+                        font-size: Geom.t-caption; font-weight: 600;
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================== DETAIL view ====================
+    // No own background: the root bg is the backdrop and the list layer is
+    // opacity-gated to invisible in detail mode, so nothing bleeds through — and
+    // crucially the always-on title + chevron, declared above these layers, stay
+    // visible on top instead of being occluded.
+    if root.cards.length > 0: Rectangle {
+        // Hard cut, for the reason on the LIST layer above. `x` fixed at 0.
+        opacity: root.selected-index >= 0 ? 1.0 : 0.0;
+        x: 0;
+
+        // --- left column: what the room IS ---
+        Text {
+            x: Geom.content-x; y: 38px;
+            width: Geom.col-w;
+            overflow: elide;
+            text: root.cards[root.di].name;
+            color: Theme.soft; font-size: Geom.t-body; letter-spacing: 1px;
+        }
+        Text {
+            x: Geom.content-x; y: 58px;
+            text: root.cards[root.di].cur + root.cards[root.di].unit;
+            color: Theme.ink; font-size: 50px; font-weight: 700;
+        }
+        Text {
+            x: Geom.content-x; y: 124px;
+            text: root.action-label(root.cards[root.di].action);
+            color: root.action-color(root.cards[root.di].action) == Theme.dim
+                ? Theme.dim : root.action-color(root.cards[root.di].action);
+            font-size: Geom.t-caption; letter-spacing: 2px;
+        }
+
+        // --- right column: what you are ASKING FOR ---
+        // Setpoint above its own controls, so the number the steppers change is
+        // adjacent to them rather than across the page. The C6 had to interleave
+        // them (− NN° +) because a vertical stack has only one axis to spend.
+        Text {
+            x: Geom.col2-x; y: 40px;
+            width: Geom.col-w;
+            horizontal-alignment: center;
+            text: "\{round(root.cards[root.di].setpoint * 10) / 10}\{root.cards[root.di].unit}";
+            color: Theme.accent; font-size: Geom.t-big; font-weight: 700;
+        }
+        // Shared Stepper (Recipe C): pressed is a FULL INVERT to solid accent
+        // with the glyph in on-accent — the boldest 1-frame delta, which is what
+        // a repeat-tap control wants. 72x72 -> 56x56, still well over the floor.
+        minus := Stepper {
+            x: Geom.col2-x; y: 96px; width: 56px; height: 56px;
+            glyph: "\u{2212}";
+            glyph-size: 30px;
+            enabled: root.selected-index >= 0;
+            clicked => {
+                root.set-temp(root.cards[root.di].id,
+                    clamp(root.cards[root.di].setpoint - root.cards[root.di].step,
+                          root.cards[root.di].min, root.cards[root.di].max));
+            }
+        }
+        plus := Stepper {
+            x: 256px; y: 96px; width: 56px; height: 56px;
+            glyph: "+";
+            glyph-size: 30px;
+            enabled: root.selected-index >= 0;
+            clicked => {
+                root.set-temp(root.cards[root.di].id,
+                    clamp(root.cards[root.di].setpoint + root.cards[root.di].step,
+                          root.cards[root.di].min, root.cards[root.di].max));
+            }
+        }
+
+        // --- mode strip: full width, six chips, every one over the floor ---
+        // Wrapped in `if selected>=0` so the segments do not exist (and cannot
+        // catch taps) in list mode while this layer is faded out over the list.
+        if root.selected-index >= 0: HorizontalLayout {
+            x: Geom.content-x; y: 178px;
+            width: Geom.content-w; height: 44px;
+            spacing: 4px;
+            if root.bit-set(root.cards[root.di].modes-mask, 1): Seg {
+                label: "OFF"; active: root.cards[root.di].mode == 0;
+                tapped => { root.set-mode(root.cards[root.di].id, 0); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 2): Seg {
+                label: "HEAT"; active: root.cards[root.di].mode == 1;
+                tapped => { root.set-mode(root.cards[root.di].id, 1); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 4): Seg {
+                label: "COOL"; active: root.cards[root.di].mode == 2;
+                tapped => { root.set-mode(root.cards[root.di].id, 2); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 8): Seg {
+                label: "AUTO"; active: root.cards[root.di].mode == 3;
+                tapped => { root.set-mode(root.cards[root.di].id, 3); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 16): Seg {
+                label: "FAN"; active: root.cards[root.di].mode == 4;
+                tapped => { root.set-mode(root.cards[root.di].id, 4); } }
+            if root.bit-set(root.cards[root.di].modes-mask, 32): Seg {
+                label: "DRY"; active: root.cards[root.di].mode == 5;
+                tapped => { root.set-mode(root.cards[root.di].id, 5); } }
+        }
+    }
+}

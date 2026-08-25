@@ -1,0 +1,442 @@
+import { Theme } from "../slint/theme.slint";
+import { IconButton, PressTile, SliderControl } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+
+// ============================================================================
+// LANDSCAPE CHROME + LIST PRIMITIVES for the CYD scene set.
+//
+// WHAT IS IMPORTED RATHER THAN RE-AUTHORED, AND WHY
+// -----------------------------------------------------------------------------
+// Seven of the nine components in `../slint/controls.slint` carry NO absolute
+// geometry — they are token-driven recipes sized entirely by their call site
+// (PressTile, IconButton, Stepper, PillButton, Seg, SliderControl,
+// OverlaySwallow). Those are imported here and across the CYD tree verbatim:
+// re-authoring them would fork the touch-feedback contract (rest -> pressed ->
+// disabled) that exists precisely so it lives in one place.
+//
+// The two that DO carry absolute geometry are the two re-authored below:
+//
+//   RadioDot     78x64, its visible dot+label offset 30 px down so it aligns
+//                with the C6 battery pill. 64 px is 27 % of this panel, and
+//                three of them at x 22/102/182 run to x 260 — which on 320 px
+//                glass lands underneath the battery pill. That collision is
+//                the one thing in the C6 chrome that no substitution fixes.
+//   BackChevron  self-positions at 14,8,78x64 — 64 px tall lands squarely on
+//                the landscape title strip.
+//
+// THE TOUCH-FLOOR IDIOM USED THROUGHOUT
+// -----------------------------------------------------------------------------
+// Landscape wants VISUALLY short chrome (28 px) and the resistive panel needs
+// 44 px hit targets. Those are reconciled the way `PillButton` already does it:
+// the visible box stays 28 px and its TouchArea is padded OUTWARD past the box.
+// Nothing here shrinks a hit area to make room for chrome.
+//
+// A TouchArea declared FIRST in the element list still wins the tap: Slint
+// hit-tests topmost-first, but a plain Rectangle does not consume clicks (this
+// is the same fact `OverlaySwallow` is built on). So the visuals may be
+// declared after it and paint over it.
+// ============================================================================
+
+// --- Page title -------------------------------------------------------------
+// The C6 `PageTitle` fills its parent and drops a 26 px face at `y: 56px`. Here
+// the face is 20 px in a 24 px strip at the top of the panel, which hands ~60 px
+// of height back to EVERY page in the set at once. Fills its parent the same
+// way, so call sites are unchanged: `CydPageTitle { title: "MESH"; }`.
+//
+// Centring reads `parent.width` and `self.width` — the horizontal form is the
+// one case where the cheap substitute is NOT pixel-equivalent (letter-spacing
+// counts toward intrinsic width but not toward alignment, which shifts glyphs
+// ~1 px), so the intrinsic read stays. One instance per page, ~32-128 B; the
+// measured cost that mattered was 23 live StatRows, not a single title.
+export component CydPageTitle {
+    in property <string> title;
+    x: 0; y: 0;
+    width: 100%; height: 100%;
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: Geom.title-y;
+        text: root.title;
+        color: Theme.soft;
+        font-size: Geom.t-title;
+        font-weight: 600;
+        letter-spacing: 4px;
+    }
+}
+
+// --- Back chevron -----------------------------------------------------------
+// SELF-POSITIONED, exactly like the C6 original: drop
+// `CydBackChevron { clicked => {...} }` into an overlay and it lands
+// identically every time, so the seven overlays that use it cannot drift.
+//
+// 44x44 at (4,4) instead of 78x64 at (14,8): the hit box is the touch floor and
+// no more, because at 64 px tall it would sit on top of the title strip. The
+// glyph is left-anchored and vertically centred within it, so it reads as the
+// same control.
+export component CydBackChevron {
+    x: 4px;
+    y: 4px;
+    width: 44px;
+    height: 44px;
+    callback clicked();
+
+    ib := IconButton {
+        width: 100%; height: 100%;
+        clicked => { root.clicked(); }
+        Text {
+            x: 6px;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: "\u{2039}";
+            color: ib.pressed ? Theme.accent : Theme.soft;
+            font-size: 30px;
+        }
+    }
+}
+
+// --- Stat row ---------------------------------------------------------------
+// Landscape replacement for `theme.slint`'s StatRow. Two changes that matter:
+//
+//   1. WIDTH IS NO LONGER FIXED. The C6 row is `width: 330px` — 10 px WIDER
+//      than this entire panel, so every one of the five pages that uses it was
+//      drawing off-glass. Here width defaults to the parent, which also makes
+//      the component usable at full width (304) AND in a 148 px column with no
+//      variant.
+//   2. 48 -> 34 px tall, value 22 -> 20 px, label 16 -> 13 px. Five rows now
+//      fit a column, so ten fit a page against the C6's seven.
+//
+// The vertical centring is the CHEAP form (`y: 0; height: parent.height;
+// vertical-alignment: center`), not `(parent.height - self.height) / 2`.
+// Reading a Text's own intrinsic height allocates a 16 B dependency node per
+// read and drags in the paragraph-layout chain; removing that idiom from the
+// C6 StatRow alone measured -268 nodes / -4,288 B, and this is the component
+// that is resident on every frame. `height: parent.height` (not a literal) is
+// also deliberate: call sites override the row height, and a literal silently
+// de-centres them.
+export component CydStatRow {
+    in property <string> label;
+    in property <string> value;
+    in property <color> value-color: Theme.ink;
+    // Defaults to the full content band. A component ROOT cannot read `parent`
+    // in Slint, so "inherit the parent's width" is not expressible here — the
+    // default is the common case and column call sites pass `width: Geom.col-w`.
+    // Either way it is never WIDER than the panel, which the C6's `width: 330px`
+    // was by 10 px on every page that used it.
+    width: Geom.content-w;
+    height: Geom.row-h;
+
+    Text {
+        x: 0;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: Theme.dim;
+        font-size: Geom.t-label;
+        letter-spacing: 2px;
+    }
+    Text {
+        x: parent.width - self.width;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.value;
+        color: root.value-color;
+        font-size: Geom.t-value;
+        font-weight: 600;
+    }
+}
+
+// --- Radio chip -------------------------------------------------------------
+// The landscape RadioDot. 70x28 visible, 70x44 hit.
+//
+// The C6 dot is 78x64 with its visible content pushed 30 px down, because on
+// that panel the hit strip had to span y8..72 to catch a finger reaching for
+// the top row. Here the whole band is only 34 px tall, so the visible content
+// sits at the top of its own box and the hit area grows DOWNWARD past it.
+//
+// Selected != pressed, preserved from the original: the persistent `active`
+// state keeps the accent dot, while pressed lights the halo and ignites the
+// label. `MESH·4` rather than `MESH 4` — the interpunct is narrower, and at
+// three chips plus two status chips the row has 6 px of slack, not 60.
+export component RadioChip {
+    in property <string> label;
+    in property <bool> active;
+    callback tapped();
+    width: 70px;
+    height: Geom.chrome-h;
+
+    ta := TouchArea {
+        x: 0;
+        // Grows the hit box to the 44 px floor by reaching 6 px above and
+        // 10 px below the 28 px visual. Placed at chrome-y (6) this spans the
+        // panel's top 44 px exactly.
+        y: -6px;
+        width: parent.width;
+        height: Geom.chrome-hit;
+        clicked => { root.tapped(); }
+    }
+    // Pressed halo, drawn behind the content.
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        border-radius: parent.height / 2;
+        background: ta.pressed ? Theme.accent-bg : transparent;
+    }
+    Rectangle {
+        x: 8px;
+        y: (parent.height - 10px) / 2;
+        width: 10px; height: 10px; border-radius: 5px;
+        background: root.active ? Theme.accent
+            : (ta.pressed ? Theme.soft : Theme.off-dot);
+    }
+    Text {
+        x: 24px;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: ta.pressed ? Theme.accent
+            : (root.active ? Theme.soft : Theme.faint);
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}
+
+// --- Status chip ------------------------------------------------------------
+// The shell's two badge chips (suspended apps, unread notifications) collapsed
+// to one component, because in landscape they must be identical width to share
+// the chrome row's right end. 44x28 visible, 44x44 hit — 44 wide is the touch
+// floor, which is also why they are not 40.
+//
+// `glyph-kind`: 0 = stacked cards (app switcher), 1 = filled dot
+// (notifications). Both are DRAWN, not typed: the embedded font has no emoji,
+// which is why every icon in this UI is rectangles.
+export component StatusChip {
+    in property <int> count;
+    in property <int> glyph-kind: 0;
+    callback tapped();
+    width: 44px;
+    height: Geom.chrome-h;
+
+    ta := TouchArea {
+        x: 0; y: -6px;
+        width: parent.width;
+        height: Geom.chrome-hit;
+        clicked => { root.tapped(); }
+    }
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        border-radius: parent.height / 2;
+        background: ta.pressed ? Theme.accent-bg : transparent;
+    }
+    // Stacked-cards glyph — "something's put away back there".
+    Rectangle {
+        visible: root.glyph-kind == 0;
+        x: 5px; y: 10px; width: 12px; height: 9px; border-radius: 2px;
+        border-width: 1px;
+        border-color: ta.pressed ? Theme.accent : Theme.dim;
+    }
+    Rectangle {
+        visible: root.glyph-kind == 0;
+        x: 8px; y: 7px; width: 12px; height: 9px; border-radius: 2px;
+        border-width: 1px;
+        border-color: ta.pressed ? Theme.accent : Theme.soft;
+        background: Theme.panel;
+    }
+    // Unread dot.
+    Rectangle {
+        visible: root.glyph-kind == 1;
+        x: 7px;
+        y: (parent.height - 11px) / 2;
+        width: 11px; height: 11px; border-radius: 5.5px;
+        background: ta.pressed ? Theme.accent : Theme.warm;
+    }
+    Text {
+        x: 24px;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: "\{root.count}";
+        color: ta.pressed ? Theme.accent : Theme.soft;
+        font-size: Geom.t-label;
+        font-weight: 600;
+    }
+}
+
+// --- Eyebrow --------------------------------------------------------------
+// The tiny all-caps line above a title, which in the C6 tree is written out by
+// hand at `font-size: 12px` in four separate files (launcher, switcher, shade,
+// volume) — a fifth glyph raster that was never declared in the type scale.
+// One component, one size token, so it cannot drift again.
+export component CydEyebrow {
+    in property <string> text;
+    in property <color> tint: Theme.dim;
+    height: 14px;
+    Text {
+        x: 0; y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.text;
+        color: root.tint;
+        font-size: Geom.t-caption;
+        letter-spacing: 3px;
+    }
+}
+
+// --- Chip button ------------------------------------------------------------
+// The rounded 44 px-tall action chip used by the clock row and several pages.
+// A thin wrapper over PressTile so the radius and the label tier are stated
+// once. Kept here (not inlined per page) because a landscape page has room for
+// three of these and they must be the same height everywhere.
+export component CydChip {
+    in property <string> text;
+    in property <color> tint: Theme.soft;
+    in property <color> rest: Theme.panel;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: Geom.touch-min;
+
+    tile := PressTile {
+        width: 100%; height: 100%;
+        border-radius: parent.height / 2;
+        rest-background: root.rest;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: root.text;
+            color: root.tint;
+            font-size: Geom.t-body;
+            letter-spacing: 1px;
+        }
+    }
+}
+
+// --- Backlight toggle ------------------------------------------------------
+// 🟥 THIS BOARD HAS NO BACKLIGHT PWM. Not "not wired yet" — hardware PWM does not
+// exist for the C5 in this HAL generation, so the backlight is a plain GPIO and
+// brightness is BINARY for the foreseeable future. The driver layer exposes
+// `is_dimmable()` precisely so the UI can render a control that tells the truth.
+//
+// A slider whose middle 80 % does nothing is the worst available option: it
+// invites a drag, acknowledges the drag (the knob moves, because the knob is
+// Slint-side), and changes nothing on glass. That is indistinguishable from a
+// broken driver, and it is the same class of lie as a meter reading zero.
+//
+// So: one switch, in the settings-row visual language, shared by the power page
+// and the Settings DISPLAY page. Shared as a COMPONENT rather than agreed by
+// comment — the `lights`/`ping` hero lesson, applied before the drift happens.
+//
+// ⚠️ WHY IT CANNOT SOFT-BRICK, which is the real design risk here. Switching a
+// binary backlight OFF makes the screen unreadable, and the control you need to
+// switch it back is on the screen you just darkened. That is a soft-brick unless
+// something else relights it — and something does: `main.rs`'s wake block runs
+// on ANY touch and drives the same auto-dim/AOD ladder back up. So the caption at
+// both call sites names that recovery. The recovery has to be STATED, not
+// discovered, because a user who cannot see the screen cannot explore it.
+//
+// It emits 0.0 / 1.0 through the same `brightness` / `brightness-changed(float)`
+// contract the C6 slider uses, so nothing in `slint_shell.rs` changes and the
+// 223-member API is untouched. If PWM ever arrives, this component is the one
+// edit — and the call sites keep their geometry.
+export component CydBacklightToggle {
+    in-out property <float> value: 1.0;
+    in property <string> label: "BACKLIGHT";
+    callback changed(float);
+    // PUSHED FROM RUST, deliberately NOT derived from `value` here: any
+    // float arithmetic in this component's property bindings crashes the
+    // Xtensa LLVM isel (PCREL_WRAPPER float constpool — bisected 2026-08-25,
+    // tools/build-s3.sh has the full ladder; `value > 0.5` and an
+    // int-mediated rewrite both crash, float-free bindings link). Rust
+    // computes the same predicate in set_brightness_from_raw and pushes it
+    // through root `backlight-on`. Costs one frame of latency between a tap
+    // and the label flipping; buys the S3 the entire landscape scene.
+    in property <bool> on;
+    height: 44px;
+
+    ta := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => {
+            root.value = root.on ? 0.0 : 1.0;
+            root.changed(root.value);
+        }
+    }
+    Text {
+        x: 0; y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: Theme.dim;
+        font-size: Geom.t-caption;
+        letter-spacing: 2px;
+    }
+    // The state IN WORDS as well as in the switch. A switch alone reads as
+    // on/off by position, which needs a reference the first time you see it.
+    Text {
+        x: parent.width - 118px;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        width: 46px;
+        horizontal-alignment: right;
+        text: root.on ? "ON" : "OFF";
+        color: root.on ? Theme.accent : Theme.faint;
+        font-size: Geom.t-label;
+        font-weight: 600;
+    }
+    // Switch visual — knob JUMPS, no animate (and now with the display link
+    // under that rule as well as the renderer).
+    Rectangle {
+        x: parent.width - 48px;
+        y: (parent.height - 28px) / 2;
+        width: 48px; height: 28px; border-radius: 14px;
+        background: root.on ? Theme.accent : Theme.track;
+        border-width: 1px;
+        border-color: root.on || ta.pressed ? Theme.accent : Theme.line;
+        Rectangle {
+            x: root.on ? parent.width - 25px : 3px;
+            y: 3px;
+            width: 22px; height: 22px; border-radius: 11px;
+            background: root.on ? Theme.on-accent
+                : (ta.pressed ? Theme.ink : Theme.soft);
+        }
+    }
+}
+
+// --- Backlight slider (dimmable boards) --------------------------------------
+// The §1d control split: a board WITH backlight PWM (`backlight-dimmable`,
+// pushed from Rust) gets a real slider; the toggle above stays the honest
+// control for binary-GPIO boards. A SIBLING component rather than a mode
+// inside CydBacklightToggle, deliberately: that component's bindings must
+// stay FLOAT-FREE (Xtensa isel crash — tools/build-s3.sh has the bisection),
+// and a slider is nothing but float bindings. SliderControl carries its
+// floats in its OWN component, which links on all three arms (volume.slint
+// is the proof). Instantiation sites choose with `if root.backlight-dimmable`.
+export component CydBacklightSlider {
+    in-out property <float> value: 1.0;
+    in property <string> label: "BACKLIGHT";
+    callback changed(float);
+    height: 44px;
+
+    Text {
+        x: 0; y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: Theme.dim;
+        font-size: Geom.t-caption;
+        letter-spacing: 2px;
+    }
+    SliderControl {
+        x: parent.width - 130px;
+        y: (parent.height - self.height) / 2;
+        width: 130px;
+        value <=> root.value;
+        changed(f) => { root.changed(f); }
+    }
+}
