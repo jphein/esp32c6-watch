@@ -1029,7 +1029,21 @@ async fn main(_spawner: Spawner) -> ! {
         // Keep this floor ABOVE the measured failure point with real margin.
         // If it trips, GROW the stack (trim the MAIN heap_allocator!) — do not
         // lower the floor.
-        const STACK_FLOOR: usize = 70 * 1024;
+        //
+        // BOARD SPLIT (#cyd-c5): every number above is C6 evidence — the
+        // failure address, the 61/73 KB bracket, and the 70 KB floor are
+        // measurements of the C6 WiFi blob's .bss layout. The C5 blob lays
+        // its globals out differently and NOTHING has bracketed it yet, so
+        // its floor is PROVISIONAL: the C6 value as a stand-in, not a fact
+        // (budgets are measured, never inherited). Replace it via the
+        // radio-up soak (RADIO-UP, associate, 5x at descending gaps) before
+        // trusting any C5 image that boots past this assert. Note for
+        // tools/preflight.sh: it parses these consts and FAILS if they ever
+        // diverge, because it gates one board and must then be told which.
+        #[cfg(feature = "board-waveshare-c6")]
+        const STACK_FLOOR: usize = 70 * 1024; // MEASURED (#65)
+        #[cfg(not(feature = "board-waveshare-c6"))]
+        const STACK_FLOOR: usize = 70 * 1024; // PROVISIONAL — see BOARD SPLIT
         println!("[STACK] gap = {} B ({} KB)", gap, gap / 1024);
         assert!(
             gap >= STACK_FLOOR,
