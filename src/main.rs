@@ -1265,7 +1265,25 @@ async fn main(_spawner: Spawner) -> ! {
     // against drivers/panel.rs). The stubs keep every consumer site compiling:
     // NullTouch reads Ok(None) forever, NullInput's falling-edge future never
     // resolves — which inside a select is exactly "this board has no touch IRQ".
-    #[cfg(not(feature = "has-cap-touch"))]
+    // No cap-touch on this board — but the CYD does have touch: an XPT2046 on
+    // the display's SPI bus. `touch_int` is the REAL PENIRQ line (GPIO3,
+    // confirmed on glass), so `wait_for_falling_edge` genuinely sleeps the
+    // executor until a finger lands instead of spinning a poll.
+    //
+    // GPIO3 has exactly one owner and it is here: the driver is deliberately
+    // built WITHOUT `.with_irq()`. Two ADC conversions on an idle poll is the
+    // price; a wake source that parks the executor is what it buys.
+    #[cfg(all(not(feature = "has-cap-touch"), feature = "board-cyd-c5"))]
+    let (mut touch_int, mut touch) = (
+        Input::new(
+            peripherals.GPIO3,
+            InputConfig::default().with_pull(Pull::Up),
+        ),
+        crate::peripherals::touch::XptTouch::new(display.rotation()),
+    );
+    // A board with neither: stubs whose semantics are honest — read() is
+    // Ok(None) forever and the falling-edge future never resolves.
+    #[cfg(all(not(feature = "has-cap-touch"), not(feature = "board-cyd-c5")))]
     let (mut touch_int, mut touch) = (
         crate::peripherals::touch::NullInput,
         crate::peripherals::touch::NullTouch,
@@ -3036,7 +3054,14 @@ async fn main(_spawner: Spawner) -> ! {
         let touch_active = screen_state >= 2 && (int_low || was_touching);
         was_touching = int_low;
         if touch_active {
-            if let Ok((point, event)) = touch.poll() {
+            // The bus argument is the CYD's shared-SPI reality made explicit:
+            // borrowing the display for the call is what makes "never poll touch
+            // inside a pixel transaction" a compile error. See `XptTouch`.
+            #[cfg(feature = "board-cyd-c5")]
+            let polled = touch.poll(display.bus_mut());
+            #[cfg(not(feature = "board-cyd-c5"))]
+            let polled = touch.poll();
+            if let Ok((point, event)) = polled {
                 touch_point = point;
                 if let Some(swipe) = event {
                     swipe_event = Some(swipe.direction);
@@ -4865,6 +4890,9 @@ async fn main(_spawner: Spawner) -> ! {
                         // the latch dies with it.
                         voice_latch = None;
                     } else {
+                        #[cfg(feature = "board-cyd-c5")]
+                        let finger_down = matches!(touch.read(display.bus_mut()), Ok(Some(_)));
+                        #[cfg(not(feature = "board-cyd-c5"))]
                         let finger_down = matches!(touch.read(), Ok(Some(_)));
                         if finger_down {
                             voice_latch_up = 0;
@@ -4933,6 +4961,9 @@ async fn main(_spawner: Spawner) -> ! {
                                 peak_dbfs = dbfs;
                             }
                             // Authoritative finger-present via I2C (fingers == 0 ⇒ up).
+                            #[cfg(feature = "board-cyd-c5")]
+                            let finger_down = matches!(touch.read(display.bus_mut()), Ok(Some(_)));
+                            #[cfg(not(feature = "board-cyd-c5"))]
                             let finger_down = matches!(touch.read(), Ok(Some(_)));
                             if finger_down {
                                 up = 0;

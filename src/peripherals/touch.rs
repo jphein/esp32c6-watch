@@ -254,3 +254,108 @@ impl NullInput {
         core::future::pending::<()>().await
     }
 }
+
+// ============================================================================
+// CYD-C5: the XPT2046 behind the same surface main.rs already calls (#cyd-c5)
+// ============================================================================
+
+/// Adapts vesper's [`Xpt2046`](crate::drivers::xpt2046::Xpt2046) to the surface
+/// `main.rs` uses for the FT3168, and converts its types to this module's.
+///
+/// # Why the bus is a PARAMETER here and not a field
+///
+/// On this board the touch controller and the panel share one SPI peripheral,
+/// and [`St7789Display`](crate::drivers::st7789::St7789Display) owns it —
+/// deliberately, so the strip-flush hot path keeps a plain `&mut` instead of
+/// paying a `RefCell` borrow per strip. So a touch read has to reach the bus
+/// through the display, and the honest way to say that is in the signature.
+///
+/// ★ **The payoff is that the bus-sharing rule stops being a rule.** Passing
+/// `display.bus_mut()` takes a `&mut` on the display for exactly the duration of
+/// the call, and a live flusher also holds `&mut display` — so "never poll touch
+/// inside a pixel transaction" becomes a borrow-checker error rather than a
+/// comment someone has to remember. The two failure modes it prevents are not
+/// subtle: a command clocked into an open RAMWR stream lands in GRAM as pixels,
+/// and touch CS asserted under a low LCD CS puts two devices on one MISO line.
+///
+/// The FT3168 needs no such parameter (it is on I2C, behind its own
+/// `RefCellDevice`), which is why the C5 call sites carry the extra argument and
+/// the C6 ones do not. That asymmetry is the hardware's, not an abstraction leak.
+#[cfg(feature = "board-cyd-c5")]
+pub struct XptTouch<'d> {
+    inner: crate::drivers::xpt2046::Xpt2046<'d>,
+}
+
+#[cfg(feature = "board-cyd-c5")]
+impl<'d> XptTouch<'d> {
+    /// Built from the board's calibration and the display's CURRENT rotation —
+    /// passed in rather than read from `board::DEFAULT_ROTATION` so the two
+    /// cannot drift if the display is ever rotated at runtime.
+    pub fn new(rotation: crate::drivers::Rotation) -> Self {
+        Self {
+            // No `.with_irq()`: GPIO3 is one wire with one owner, and the
+            // firmware keeps it as `touch_int` for `wait_for_falling_edge`,
+            // which sleeps the executor instead of spinning. Costs two ADC
+            // conversions on an idle poll; buys a strictly better use of the
+            // same PENIRQ signal. See the driver's `irq` field docs.
+            inner: crate::drivers::xpt2046::Xpt2046::new(crate::board::TOUCH_CAL, rotation),
+        }
+    }
+
+    /// Nothing to bring up: the XPT2046 has no init sequence — it converts on
+    /// demand and powers down between conversions. `Ok` keeps the call site
+    /// shaped like the FT3168's.
+    pub fn init(&mut self) -> Result<(), core::convert::Infallible> {
+        Ok(())
+    }
+
+    /// Current contact, or `None`. `Infallible` because SPI has no
+    /// acknowledgement — a read cannot fail, it can only report "nothing
+    /// pressed".
+    pub fn read(
+        &mut self,
+        bus: &mut crate::drivers::spi_bus::SharedSpiBus<'d>,
+    ) -> Result<Option<TouchPoint>, core::convert::Infallible> {
+        Ok(self.inner.read(bus).map(conv_point))
+    }
+
+    /// Position + lift-off gesture, matching `Ft3168Touch::poll`'s semantics: a
+    /// live touch is `(Some(point), None)`, the poll on which the finger leaves
+    /// is `(None, Some(event))`, idle is `(None, None)`.
+    pub fn poll(
+        &mut self,
+        bus: &mut crate::drivers::spi_bus::SharedSpiBus<'d>,
+    ) -> Result<(Option<TouchPoint>, Option<SwipeEvent>), core::convert::Infallible> {
+        let (p, e) = self.inner.poll(bus);
+        Ok((p.map(conv_point), e.map(conv_swipe)))
+    }
+}
+
+#[cfg(feature = "board-cyd-c5")]
+fn conv_point(p: crate::drivers::xpt2046::TouchPoint) -> TouchPoint {
+    TouchPoint {
+        x: p.x,
+        y: p.y,
+        fingers: p.fingers,
+    }
+}
+
+#[cfg(feature = "board-cyd-c5")]
+fn conv_swipe(e: crate::drivers::xpt2046::SwipeEvent) -> SwipeEvent {
+    use crate::drivers::xpt2046::SwipeDirection as D;
+    SwipeEvent {
+        // Written out rather than transmuted: the two enums are declared in
+        // different crates' worth of code and only happen to agree today.
+        direction: match e.direction {
+            D::Up => SwipeDirection::Up,
+            D::Down => SwipeDirection::Down,
+            D::Left => SwipeDirection::Left,
+            D::Right => SwipeDirection::Right,
+            D::Tap => SwipeDirection::Tap,
+        },
+        start_x: e.start_x,
+        start_y: e.start_y,
+        end_x: e.end_x,
+        end_y: e.end_y,
+    }
+}
