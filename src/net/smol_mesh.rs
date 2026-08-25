@@ -198,6 +198,15 @@ pub const TICK_MS: u64 = 2000;
 /// retry decision, or an OTA-relay proof: don't. Use an ACK frame, or first
 /// port smol's TX_ABANDONED drain (their PHASE3-PLAN, step B) so a stale
 /// status is discarded before the next send trusts the callback.
+///
+/// **The "esp-radio Drops are landmines" family** (fleet-recorded 2026-08-25,
+/// found on the S3 spike): `SendFuture` has NO Drop impl (that's the bug
+/// above), while `WifiController`'s Drop DEINITS THE WHOLE DRIVER — opposite
+/// hazards from the same crate. This firmware holds its controller for the
+/// process lifetime (`net_task` owns it across every raise/idle cycle), so we
+/// are safe today — but a refactor toward scoped/temporary controllers would
+/// tear down WiFi on scope exit with no compiler complaint. Check the Drop
+/// impl of any esp-radio handle before changing who owns it.
 pub async fn send_bounded(
     esp_now: &mut EspNow<'_>,
     addr: &[u8; 6],
