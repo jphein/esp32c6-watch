@@ -108,3 +108,12 @@ pub mod ui {
 /// capture, and therefore the label every log gets filed under.
 /// Waveshare ESP32-C6-Touch-AMOLED-2.06 (CO5300 410x502).
 pub const BANNER: &str = "C6 AMOLED";
+
+/// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for this
+/// board's SoC — ESP32-C6 = 0x000D.
+///
+/// MEASURED from real images built by `espflash save-image`, not taken from a
+/// table: both arms' images start with the same 0xE9 magic, so this is the first
+/// byte pair that actually distinguishes them. `ota_http` refuses a mismatch
+/// before the first flash write.
+pub const ESP_IMAGE_CHIP_ID: u16 = 0x000D;

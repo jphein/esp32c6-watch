@@ -334,8 +334,34 @@ async fn run(
 
     loop {
         if chunk_len == CHUNK || (received == content_len && chunk_len > 0) {
-            if flashed == 0 && chunk[0] != ESP_IMAGE_MAGIC {
-                return Err("not an esp app image (bad magic)");
+            if flashed == 0 {
+                if chunk[0] != ESP_IMAGE_MAGIC {
+                    return Err("not an esp app image (bad magic)");
+                }
+                // ⚠️ The magic byte alone does NOT identify the chip, and with a
+                // second board in the fleet that stopped being academic: a C6
+                // app image and a C5 app image BOTH start 0xE9 (verified on real
+                // images — `xxd -l 16`). So pushing the wrong arm's image passed
+                // every pre-write check, got written to the inactive slot, and
+                // was only caught by the BOOTLOADER on the next boot — costing a
+                // full download, a failed boot and a rollback to discover a
+                // mistake that is visible in byte 12.
+                //
+                // The esp-idf image header carries `chip_id` as a LE u16 at
+                // bytes 12..14. Measured, not recalled: **C6 = 0x000D, C5 =
+                // 0x0017.** Refusing here is what makes "refuse BEFORE writing"
+                // true for the wrong-chip case, not just for a non-ESP payload.
+                if chunk_len >= 14 {
+                    let img_chip = u16::from_le_bytes([chunk[12], chunk[13]]);
+                    if img_chip != crate::board::ESP_IMAGE_CHIP_ID {
+                        println!(
+                            "[OTA] chip mismatch: image chip_id 0x{:04X}, this board 0x{:04X}",
+                            img_chip,
+                            crate::board::ESP_IMAGE_CHIP_ID
+                        );
+                        return Err("image is for a different chip (refused)");
+                    }
+                }
             }
             {
                 // One 4 KB sector per lock: a concurrent config save waits at

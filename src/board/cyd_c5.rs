@@ -440,3 +440,12 @@ pub mod ui {
 /// capture, and therefore the label every log gets filed under.
 /// RockBase NM-CYD-C5 (ST7789 320x240 landscape + XPT2046).
 pub const BANNER: &str = "C5 CYD";
+
+/// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for this
+/// board's SoC — ESP32-C5 = 0x0017.
+///
+/// MEASURED from real images built by `espflash save-image`, not taken from a
+/// table: both arms' images start with the same 0xE9 magic, so this is the first
+/// byte pair that actually distinguishes them. `ota_http` refuses a mismatch
+/// before the first flash write.
+pub const ESP_IMAGE_CHIP_ID: u16 = 0x0017;
