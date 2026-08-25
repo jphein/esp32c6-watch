@@ -359,7 +359,23 @@ async fn run(
                             img_chip,
                             crate::board::ESP_IMAGE_CHIP_ID
                         );
-                        return Err("image is for a different chip (refused)");
+                        // The `refused:` PREFIX is load-bearing, not prose.
+                        // net_task classifies terminal failures with
+                        // `e.starts_with("refused:")` — a suffix like
+                        // "... (refused)" reads identically to a human and is
+                        // invisible to that check, so the wrong-chip case would
+                        // be retried and its retained announce re-queued
+                        // forever. Wrong chip is the most permanently
+                        // unretryable verdict there is: the same bytes can never
+                        // become correct for different silicon.
+                        // The ids are NOT in this string and cannot be: the error
+                        // type is `&'static str`, so nothing runtime-formatted
+                        // fits. They go to the println! directly above, which is
+                        // the right place anyway — the string is a VERDICT the
+                        // classifier reads, the log line is the evidence a human
+                        // reads. Keeping them separate is what lets the verdict
+                        // stay a stable predicate.
+                        return Err("refused: chip mismatch");
                     }
                 }
             }
