@@ -55,7 +55,7 @@ the swipe threshold so a **cancelled hold can still classify as the edge-swipe**
 
 | constant | C6 value | fate | owned by wave |
 |---|---|---|---|
-| `SLIDER_BAND` | `330..=430` | ⏳ entirely off-panel; moves with the power page's brightness slider | power |
+| `SLIDER_BAND` | `330..=430` | **`182..=230`** — the CYD power page's slider sits at y186..226, padded for finger slop. ⚠️ At 330 the band is entirely off a 240 px panel, so TODAY every drag on that slider would ALSO flip the page | power ✅ |
 | `HUB_SLIDER_BAND` | `170..=240` | ⏳ clips exactly at the bottom edge; moves with the Settings DISPLAY slider. ⚠️ `settings.slint:360-363`'s comment says `180..220` while the code says `170..240` — **they already disagree, and whoever moves it must reconcile both** | settings |
 | `STORY_PAUSE_RECT` | `(22,198,378,438)` | ⏳ currently `(0,0,0,0)` on the C5, which **gates story playback off** — so nobody can ship a mis-mapped story page by accident. Duplicated in `main.rs`'s inline hit-test, whose own comment warns the geometry *"must match story.slint's READ-page tiles exactly"* | story |
 | `VISIBLE_CHAPTERS` | `5` | **`3`** (`Geom.max-chapters`) — ⚠️ it is also the **pager stride**, so NEWER/OLDER paging behaviour changes with it | story |
@@ -97,6 +97,31 @@ watch. Scene-item counts do not shrink with the panel (items are per-element, no
 per-pixel) and `PrepareScene`'s Vecs grow by DOUBLING, so the rungs that fail at
 54-66 kB free sit exactly where they did on the C6. 3 cards with a one-line body
 is fewer items on the one scene that was already at the top of the ladder.
+
+---
+
+## 2c. Not a hit-rect — a one-line Rust change the power page needs
+
+`set_power` fuses each subsystem cell into ONE string:
+
+```rust
+ui.set_cpu_cell(slint::format!("{}MHz \u{00b7} {}mA", stats.cpu_mhz, stats.base_ma()));
+```
+
+The left half is a **fact** (the CPU really is at 160 MHz; WiFi really is on). The right
+half is `power_stats.rs`'s model — which on this board is a model of current drawn from a
+battery that does not exist. Slint cannot split a string it is handed, so `ui/cyd/power.slint`
+renders both halves and the mA figures survive against JP's "no mA estimator readings".
+
+**Proposed:** drop the `· NNmA` suffix for the six cells under
+`#[cfg(not(feature = "has-pmu"))]`. Every cell becomes state-only with **no layout change** —
+the CYD page is already laid out for the shorter strings, so nothing reflows when this lands.
+
+`total-ma`, `runtime-text`, `left-hours` and `lp-core-text` need no Rust change: the CYD page
+simply does not render them. `runtime_text` is the worst of the four — it is
+`full_runtime_hours(BATTERY_CAPACITY_MAH)`, the model divided by the capacity of a cell that
+is not there, and it would cheerfully report "100%: 4h · left: ~3h" for a device that runs
+until unplugged.
 
 ---
 
