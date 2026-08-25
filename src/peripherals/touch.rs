@@ -198,3 +198,59 @@ impl<I: I2c> Ft3168Touch<I> {
         })
     }
 }
+
+// ============================================================================
+// Null stubs (#cyd-c5) — boards without the FT3168 (`has-cap-touch` off).
+//
+// These exist so the ~60 touch consumer sites in main.rs compile UNCHANGED on a
+// board whose touch arrives later through a different driver (the CYD's
+// XPT2046, via drivers/panel.rs). The semantics are honest, not emulated:
+// NullTouch never reports a contact, and NullInput's falling-edge future never
+// resolves — inside a `select` that is exactly "this board has no touch IRQ
+// line", so the timer arm wins every race, which is the correct behaviour for
+// poll-only hardware.
+// ============================================================================
+
+/// A touch controller that is not there. `read()` is `Ok(None)` forever.
+pub struct NullTouch;
+
+impl NullTouch {
+    pub fn read(&mut self) -> Result<Option<TouchPoint>, core::convert::Infallible> {
+        Ok(None)
+    }
+    pub fn read_gesture(&mut self) -> Result<Gesture, core::convert::Infallible> {
+        Ok(Gesture::None)
+    }
+    pub fn init(&mut self) -> Result<(), core::convert::Infallible> {
+        Ok(())
+    }
+    pub fn poll(
+        &mut self,
+    ) -> Result<(Option<TouchPoint>, Option<SwipeEvent>), core::convert::Infallible> {
+        Ok((None, None))
+    }
+}
+
+/// An interrupt line that is not wired. Mirrors the `esp_hal::gpio::Input`
+/// surface main.rs actually uses.
+pub struct NullInput;
+
+impl NullInput {
+    pub fn is_low(&self) -> bool {
+        false
+    }
+    pub fn is_high(&self) -> bool {
+        true
+    }
+    pub fn wakeup_enable(
+        &mut self,
+        _enable: bool,
+        _event: esp_hal::gpio::WakeEvent,
+    ) -> Result<(), core::convert::Infallible> {
+        Ok(())
+    }
+    /// Never resolves: no IRQ line exists to fall.
+    pub async fn wait_for_falling_edge(&mut self) {
+        core::future::pending::<()>().await
+    }
+}
