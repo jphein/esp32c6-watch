@@ -179,7 +179,7 @@ pub const TICK_MS: u64 = 2000;
 ///
 /// Returns true if the frame completed within the deadline. Callers may ignore
 /// it — these are broadcast beacons, and a dropped one is corrected by the next.
-p/// ## ⚠️ The returned status LIES after any timeout — by upstream design
+/// ## ⚠️ The returned status LIES after any timeout — by upstream design
 ///
 /// (Characterized by the smol session from esp-radio 0.18 source, verified here:
 /// `esp_now/mod.rs:55-57` are GLOBAL statics, the callback stores into them at
@@ -198,7 +198,7 @@ p/// ## ⚠️ The returned status LIES after any timeout — by upstream design
 /// retry decision, or an OTA-relay proof: don't. Use an ACK frame, or first
 /// port smol's TX_ABANDONED drain (their PHASE3-PLAN, step B) so a stale
 /// status is discarded before the next send trusts the callback.
-ub async fn send_bounded(
+pub async fn send_bounded(
     esp_now: &mut EspNow<'_>,
     addr: &[u8; 6],
     data: &[u8],
