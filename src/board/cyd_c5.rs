@@ -68,3 +68,14 @@ pub const RTC_I2C_ADDR: u8 = 0x51;
 pub mod ui {
     pub const STORY_PAUSE_RECT: (u16, u16, u16, u16) = (0, 0, 0, 0);
 }
+
+// === Soft-douse contract (BINDING — set by the shipped power-menu caption) ===
+// The CYD power menu reads: "screen and radios off · tap the glass to wake"
+// (with a drawn tap-mark — the one caption a user reads to UNDO something).
+// The Rust that implements soft douse (no deep sleep on this board: esp-hal
+// 1.1.1 is radio XOR sleep) must therefore:
+//   (a) wake on the TOUCH IRQ (XPT2046 /IRQ on GPIO3 — glass-verified), and
+//   (b) bring the radios back WITH the screen — no further user action.
+// If the relight path cannot restore radios, the caption changes BEFORE this
+// firmware ships, not after. Whoever lands douse owns keeping that sentence
+// true.

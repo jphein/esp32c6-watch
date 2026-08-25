@@ -2459,11 +2459,21 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
     };
     let mut tiles: Vec<LauncherTile> = Vec::new();
     let mut titles: Vec<SharedString> = Vec::new();
-    for sec in [Section::Audio, Section::Games, Section::System] {
+    // Audio leads on boards that can speak. Without has-audio the section
+    // holds at most Story, and a launcher that opens onto a near-empty page
+    // reads as breakage — the six games lead instead.
+    let order = if cfg!(feature = "has-audio") {
+        [Section::Audio, Section::Games, Section::System]
+    } else {
+        [Section::Games, Section::System, Section::Audio]
+    };
+    for sec in order {
         let apps: Vec<(usize, &AppDescriptor)> = REGISTRY
             .iter()
             .enumerate()
-            .filter(|(_, d)| d.section == sec)
+            // hardware_present: capability gate (has-imu / has-audio). Rows
+            // stay in REGISTRY so launch indexes never shift — see its doc.
+            .filter(|(_, d)| d.section == sec && d.hardware_present())
             .collect();
         for chunk in apps.chunks(LAUNCHER_PAGE_SLOTS) {
             titles.push(SharedString::from(sec.label()));
