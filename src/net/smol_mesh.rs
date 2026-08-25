@@ -179,6 +179,25 @@ pub const TICK_MS: u64 = 2000;
 ///
 /// Returns true if the frame completed within the deadline. Callers may ignore
 /// it — these are broadcast beacons, and a dropped one is corrected by the next.
+/// ## ⚠️ The returned status LIES after any timeout — by upstream design
+///
+/// (Characterized by the smol session from esp-radio 0.18 source, verified here:
+/// `esp_now/mod.rs:55-57` are GLOBAL statics, the callback stores into them at
+/// `:842`, and every `SendFuture::poll` reads them.) When our timer arm wins,
+/// `select` drops the send future — safe, it has no `Drop` impl, which is why
+/// this fix escapes the unbounded spin — but the radio still completes the send
+/// later, and that LATE callback writes the global state that the NEXT send's
+/// future reads. So after any timeout, the following send's `Ok/Err` may belong
+/// to the abandoned frame: silent status misattribution.
+///
+/// **This firmware is immune BY STRUCTURE, and that structure is load-bearing:
+/// no call site consumes this function's return value as evidence.** Every
+/// delivery claim in the mesh ("delivered to <sigil>", relay completion) comes
+/// from RECEIVED ACK FRAMES — end-to-end evidence the link-layer callback
+/// cannot pollute. If you are about to bind this return value for a counter, a
+/// retry decision, or an OTA-relay proof: don't. Use an ACK frame, or first
+/// port smol's TX_ABANDONED drain (their PHASE3-PLAN, step B) so a stale
+/// status is discarded before the next send trusts the callback.
 pub async fn send_bounded(
     esp_now: &mut EspNow<'_>,
     addr: &[u8; 6],

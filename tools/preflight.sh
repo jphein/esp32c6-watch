@@ -301,7 +301,16 @@ for feat in "${COMBOS[@]}"; do
   #   script unusable        -> FAIL (we cannot know, so we do not pass)
   #   script says "no git"   -> a real answer; the image must agree ("unknown")
   #   script returns a hash  -> must match the image, or the stamp is stale
-  stamp_got=$(strings -a "$elf" 2>/dev/null | grep -o 'WSIGIL:.*' | head -1)
+  # PIPE-FREE on purpose. The first version piped `strings -a | grep -q`, and
+  # under `pipefail` that FAILS ON SUCCESS: grep -q exits at the first match and
+  # closes the pipe, strings dies of SIGPIPE (141), and the pipeline reports
+  # failure precisely because the marker was found early. Verified by bash -x on
+  # the first real fambuild-mode run — where stamp_got had ALREADY extracted the
+  # full stamp two lines above the "no stamp" verdict. grep -a reads the ELF
+  # itself: no pipe, no SIGPIPE, no lie. (And a confession the trace forced: this
+  # gate shipped bash -n'd but never EXECUTED in fambuild mode — the acceptance
+  # run was its first, which is the exact unexecuted-gate sin it polices.)
+  stamp_got=$(grep -a -o 'WSIGIL:[^|]*|[^|]*|v[0-9][0-9.]*' "$elf" 2>/dev/null | head -1)
   stamp_got_hash=$(printf '%s' "$stamp_got" | cut -d'|' -f2)
   if [[ ! -f "$REPO/tools/build_hash.sh" ]]; then
     fail "$label: tools/build_hash.sh is missing, so the build-stamp gate cannot \
@@ -336,7 +345,7 @@ add it to the list in stamp_build_sigil()."
   # failure would be silent: the flash tooling would just stop printing a sigil
   # and every image would look like a pre-stamp build. This is the one check that
   # cannot rot, because it reads the shipped bytes.
-  if ! strings -a "$elf" | grep -q 'WSIGIL:'; then
+  if ! grep -aq 'WSIGIL:' "$elf"; then
     fail "$label: no WSIGIL build stamp in the ELF — \`#[used]\` on src/net/sigil.rs::BUILD_STAMP was defeated (a new --gc-sections link arg is the likely cause). Without it, flash/OTA cannot report which image it wrote."
   fi
 
