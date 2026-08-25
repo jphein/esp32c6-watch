@@ -3935,6 +3935,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-ledger"
+version = "0.1.0"
+dependencies = [
+ "ed25519-compact",
+ "ed25519-dalek",
+ "log",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "mic-dsp"
 version = "0.1.0"
 dependencies = [

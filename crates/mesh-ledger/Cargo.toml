@@ -1,0 +1,24 @@
+[package]
+name = "mesh-ledger"
+version = "0.1.0"
+edition = "2021"
+
+# L1/L2/L4 are dep-free pure no_std (the hasher is INJECTED). ledger_link —
+# the L1–L3 binding — supplies the concrete sha256/ed25519, so it carries the
+# deps, per-arch like ota-proto's (ed25519-compact crashes the Xtensa backend
+# at every opt level; dalek is the xtensa arm).
+[features]
+default = ["link"]
+link = ["dep:sha2", "dep:ed25519-compact", "dep:ed25519-dalek", "dep:log"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false, optional = true }
+log = { version = "0.4", default-features = false, optional = true }
+
+[target.'cfg(not(target_arch = "xtensa"))'.dependencies]
+ed25519-compact = { version = "2", default-features = false, optional = true }
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+ed25519-dalek = { version = "2", default-features = false, optional = true }
+
+[dev-dependencies]
+sha2 = "0.10"
