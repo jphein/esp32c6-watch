@@ -129,7 +129,11 @@ else
     # 3. ELF -> app image. fambuild keeps target/ on familiar, so fetch the ELF.
     WORKTREE_NAME="$(basename "$ROOT")"
     ELF_REMOTE="fambuild/$WORKTREE_NAME/target/riscv32imac-unknown-none-elf/release/esp32c6-watch"
-    TMP="$(mktemp -d)"
+    # Project tmp/, never katana's RAM-backed /tmp (JP directive 2026-08-25) —
+    # an 80MB ELF was being copied into tmpfs with no cleanup on every push.
+    mkdir -p "$(dirname "$0")/../tmp"
+    TMP="$(mktemp -d "$(dirname "$0")/../tmp/ota-push-XXXXXX")"
+    trap 'rm -rf "$TMP"' EXIT
     trap 'rm -rf "$TMP"' EXIT
     scp -q "familiar:$ELF_REMOTE" "$TMP/esp32c6-watch.elf"
     # espflash may be absent from a non-login shell's PATH; fall back to cargo bin.
