@@ -42,17 +42,32 @@ import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
 //     honesty it was carrying is still TRUE and now goes unsaid.
 //
 // So the header states the real situation and the caption is made
-// unconditional. The claim it makes is the one this board actually needs: SHUT
-// DOWN has no hardware path to cut power here.
+// unconditional — and what it says changed too, once JP ruled on the semantic.
+// See the DOUSE note below.
 //
-// SHUT DOWN IS LEFT ENABLED ON PURPOSE
+// SHUT DOWN BECAME "DOUSE", AND THAT IS A SEMANTIC CHANGE NOT A RENAME
 // -----------------------------------------------------------------------------
-// `PillButton` has an `enabled: false` state (opacity 0.4 + dead TouchArea) and
-// disabling it would be the tidier-looking choice. It is not taken: deep sleep
-// is the plausible substitute for poweroff on this board, and repointing
-// `power-shutdown-tap`'s drain in `main.rs` is a firmware decision. A layout
-// file must not be the thing that forbids it. The caption tells the truth today;
-// deleting one line makes it right tomorrow.
+// JP's ruling, 2026-08-25: on this board `power-shutdown-tap` becomes a DEEP
+// SLEEP, woken by BOOT. The Rust lands in the watch session's lane; the label and
+// the caption are this file's job, and they have to say **sleep, not off** —
+// because "SHUT DOWN" on a device that wakes on a button press is a promise the
+// hardware does not keep.
+//
+// So the word is DOUSE and the caption names the wake key. Three reasons that
+// word rather than "SLEEP":
+//   * "SLEEP" already means something else on this watch — the auto-dim/AOD
+//     ladder that happens by itself after 8 s and 15 s. A menu item called SLEEP
+//     beside a screen that sleeps on its own is two meanings, one word.
+//   * A douse is a thing you do TO a light, deliberately, and it stays out until
+//     you relight it. That is exactly the state: display off, radios down, RAM
+//     held, one button to come back.
+//   * It keeps the fleet's voice. This firmware names its builds with realm
+//     sigils; "DOUSE / relight with BOOT" belongs in the same register.
+//
+// It keeps the DANGER variant even though nothing is destroyed. That is
+// deliberate: it is still the button that makes the watch stop responding, and
+// on a board with no power key it is the only one whose recovery needs a
+// deliberate act. Warn-on-press is about consequence, not about data loss.
 // ============================================================================
 
 export component PowerMenu {
@@ -87,41 +102,48 @@ export component PowerMenu {
     // --- the two actions, side by side ---------------------------------------
     // 136 px each in the 304 px content band with a 24 px gutter:
     // x 20..156 and 164..300. 56 px tall — above the 44 px floor, and tall
-    // enough that a 16 px face with tracking reads as a primary action.
+    // enough that an 18 px face with tracking reads as a primary action.
     //
-    // Face is 16 px, not the C6's 18: "SHUT DOWN" with 3 px tracking measures
-    // ~135 px at 18 px, which does not fit 136 with any margin at all. 16 exists
-    // in the glyph budget; 17 also exists but buys 4 px and nothing else.
+    // Both faces are 18 px with 3 px tracking — the C6's sizing, which fits again
+    // now that the danger button says DOUSE (5 chars) rather than SHUT DOWN (9).
+    // An earlier revision had to drop to 16 px because "SHUT DOWN" at 18/3
+    // measures ~135 px and did not fit 136 with any margin at all.
     PillButton {
         x: 20px;
         y: 74px;
         width: 136px; height: 56px;
         text: "REBOOT";
-        text-size: 16px;
-        tracking: 2px;
+        text-size: 18px;
+        tracking: 3px;
         clicked => { root.reboot-tap(); }
     }
 
-    // Danger variant: pressed inverts to solid warn with on-accent text —
-    // unmistakable before a power cut. One-frame swap, never an animation: at
-    // this renderer's frame budget a tween yields 0-1 intermediate frames and
-    // queues wasted full repaints.
+    // Danger variant: pressed inverts to solid warn with on-accent text.
+    // One-frame swap, never an animation: at this renderer's frame budget a tween
+    // yields 0-1 intermediate frames and queues wasted full repaints.
+    //
+    // "DOUSE" is 5 characters where "SHUT DOWN" was 9, so the face goes back UP
+    // to 18 px — the size the C6 uses and the size this pair wanted before the
+    // longer word forced 16. The two buttons stay matched.
     PillButton {
         x: 164px;
         y: 74px;
         width: 136px; height: 56px;
         danger: true;
-        text: "SHUT DOWN";
-        text-size: 16px;
-        tracking: 2px;
+        text: "DOUSE";
+        text-size: 18px;
+        tracking: 3px;
         clicked => { root.shutdown-tap(); }
     }
 
-    // Honesty caption — UNCONDITIONAL here, see the header note.
+    // Honesty caption — UNCONDITIONAL here (see the header note on why the C6's
+    // `vbus-on` gate could never fire on this board). It names the WAKE KEY,
+    // which is the one fact a user needs before pressing DOUSE and the one thing
+    // the button's own label cannot carry.
     Text {
         x: (parent.width - self.width) / 2;
         y: 142px;
-        text: "no PMU on this board \u{2014} SHUT DOWN cannot cut power";
+        text: "DOUSE is deep sleep \u{2014} press BOOT to relight";
         color: Theme.dim;
         font-size: Geom.t-caption;
         letter-spacing: 1px;

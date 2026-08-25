@@ -1,7 +1,7 @@
 import { Theme } from "../slint/theme.slint";
-import { PillButton, SliderControl } from "../slint/controls.slint";
+import { PillButton } from "../slint/controls.slint";
 import { Geom } from "geom.slint";
-import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
+import { CydPageTitle, CydStatRow, CydBacklightToggle } from "controls_cyd.slint";
 
 // ============================================================================
 // POWER PAGE — kept, and stubbed for a MAINS-POWERED board.
@@ -55,14 +55,24 @@ import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
 // value ("idle · 20 MHz") is a C6 clock. It was the least informative row on the
 // page before the port and the port made the page 60 % shorter. Property kept.
 //
-// ⚠️ THE SLIDER MOVED, SO ITS RUST GUARD BAND MUST MOVE
+// 🟥 THERE IS NO SLIDER, SO THERE IS NO SWIPE GUARD TO MOVE
 // -----------------------------------------------------------------------------
-// `SLIDER_BAND = 330..=430` in slint_shell.rs excludes horizontal swipes that
-// start on the brightness slider from being read as page navigation. At 330 it is
-// entirely off a 240 px panel — so today every drag on this slider would ALSO
-// flip the page. The slider now sits at y186..226; proposed band **182..=230**.
-// See PROPOSED-board-ui-consts.md. Moving one without the other is the failure
-// this page's C6 comment already warns about.
+// This board has **no backlight PWM** — not unwired, absent from the HAL
+// generation — so brightness is binary and the control is a TOGGLE
+// (`CydBacklightToggle`, shared with the Settings DISPLAY page; see its header
+// for why a slider here would be a lie and why the toggle cannot soft-brick).
+//
+// That deletes a hazard rather than relocating one. `SLIDER_BAND = 330..=430`
+// exists to stop a horizontal DRAG on the slider being read as page navigation.
+// At 330 it is entirely off a 240 px panel, so today every drag on this page's
+// slider would also flip the page — but a toggle is a TAP, and taps were never
+// what the band guarded. Proposed: make the range never-match (`1..=0`) on the
+// C5 arm rather than retune it, so the check costs nothing and nothing has to
+// stay in sync with a control that no longer drags. Same for
+// `HUB_SLIDER_BAND`. Both in PROPOSED-board-ui-consts.md.
+//
+// This is the only place in the port where the right answer was to delete a
+// two-sided constant instead of re-deriving it.
 //
 // THE REBOOT BUTTON IS NOW LOAD-BEARING
 // -----------------------------------------------------------------------------
@@ -145,38 +155,41 @@ export component PowerPage {
         letter-spacing: 1px;
     }
 
-    // --- brightness ---------------------------------------------------------
-    Text {
+    // --- backlight ----------------------------------------------------------
+    // A toggle, not a slider — binary hardware, stated as binary. It rides the
+    // same `brightness` / `brightness-changed(float)` contract the C6 slider
+    // uses (emitting 0.0 / 1.0), so `slint_shell.rs` is untouched.
+    CydBacklightToggle {
         x: Geom.content-x;
-        y: 170px;
-        text: "BRIGHTNESS";
-        color: Theme.dim; font-size: Geom.t-caption; letter-spacing: 2px;
-    }
-    // Shared SliderControl (Recipe F): the knob grows and brightens to accent
-    // while the finger holds it — the one place a size change earns its cost,
-    // because the drag itself is the motion so there is still no `animate`.
-    //
-    // ⚠️ y186..226. Rust's SLIDER_BAND must become 182..=230.
-    slider := SliderControl {
-        x: Geom.content-x;
-        y: 186px;
+        y: 178px;
         width: 210px;
+        label: "BACKLIGHT";
         value <=> root.brightness;
         changed(f) => { root.brightness-changed(f); }
     }
+    // The recovery, STATED. Switching a binary backlight off darkens the screen
+    // that carries the switch; a user who cannot see the screen cannot explore
+    // it, so the way back must be readable BEFORE the tap, not discoverable
+    // after it.
+    Text {
+        x: Geom.content-x;
+        y: 222px;
+        text: "no PWM \u{2014} tap the screen to relight";
+        color: Theme.faint; font-size: Geom.t-caption; letter-spacing: 1px;
+    }
 
     // --- reboot -------------------------------------------------------------
-    // Beside the slider rather than under it: the C6 had to stack them and then
-    // spend a comment on clearing the page dots by 2 px. There are no page dots
-    // over this page and there is width to spare, so the two controls that are
-    // both about "the device" sit on one line.
+    // Beside the backlight control rather than under it: the C6 had to stack
+    // them and then spend a comment on clearing the page dots by 2 px. There are
+    // no page dots over this page and there is width to spare, so the two
+    // controls that are both about "the device" sit on one line.
     //
     // Danger variant (Recipe D): pressed inverts to solid warn with on-accent
     // text — an unmistakable "you are about to reboot". 84x38 visual padded to a
     // 92x46 finger target.
     reboot := PillButton {
         x: 228px;
-        y: 188px;
+        y: 181px;
         width: 84px; height: 38px;
         danger: true;
         text: "REBOOT";

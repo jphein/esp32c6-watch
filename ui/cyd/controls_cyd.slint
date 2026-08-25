@@ -316,3 +316,86 @@ export component CydChip {
         }
     }
 }
+
+// --- Backlight toggle ------------------------------------------------------
+// 🟥 THIS BOARD HAS NO BACKLIGHT PWM. Not "not wired yet" — hardware PWM does not
+// exist for the C5 in this HAL generation, so the backlight is a plain GPIO and
+// brightness is BINARY for the foreseeable future. The driver layer exposes
+// `is_dimmable()` precisely so the UI can render a control that tells the truth.
+//
+// A slider whose middle 80 % does nothing is the worst available option: it
+// invites a drag, acknowledges the drag (the knob moves, because the knob is
+// Slint-side), and changes nothing on glass. That is indistinguishable from a
+// broken driver, and it is the same class of lie as a meter reading zero.
+//
+// So: one switch, in the settings-row visual language, shared by the power page
+// and the Settings DISPLAY page. Shared as a COMPONENT rather than agreed by
+// comment — the `lights`/`ping` hero lesson, applied before the drift happens.
+//
+// ⚠️ WHY IT CANNOT SOFT-BRICK, which is the real design risk here. Switching a
+// binary backlight OFF makes the screen unreadable, and the control you need to
+// switch it back is on the screen you just darkened. That is a soft-brick unless
+// something else relights it — and something does: `main.rs`'s wake block runs
+// on ANY touch and drives the same auto-dim/AOD ladder back up. So the caption at
+// both call sites names that recovery. The recovery has to be STATED, not
+// discovered, because a user who cannot see the screen cannot explore it.
+//
+// It emits 0.0 / 1.0 through the same `brightness` / `brightness-changed(float)`
+// contract the C6 slider uses, so nothing in `slint_shell.rs` changes and the
+// 223-member API is untouched. If PWM ever arrives, this component is the one
+// edit — and the call sites keep their geometry.
+export component CydBacklightToggle {
+    in-out property <float> value: 1.0;
+    in property <string> label: "BACKLIGHT";
+    callback changed(float);
+    property <bool> on: root.value > 0.5;
+    height: 44px;
+
+    ta := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => {
+            root.value = root.on ? 0.0 : 1.0;
+            root.changed(root.value);
+        }
+    }
+    Text {
+        x: 0; y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: Theme.dim;
+        font-size: Geom.t-caption;
+        letter-spacing: 2px;
+    }
+    // The state IN WORDS as well as in the switch. A switch alone reads as
+    // on/off by position, which needs a reference the first time you see it.
+    Text {
+        x: parent.width - 118px;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        width: 46px;
+        horizontal-alignment: right;
+        text: root.on ? "ON" : "OFF";
+        color: root.on ? Theme.accent : Theme.faint;
+        font-size: Geom.t-label;
+        font-weight: 600;
+    }
+    // Switch visual — knob JUMPS, no animate (and now with the display link
+    // under that rule as well as the renderer).
+    Rectangle {
+        x: parent.width - 48px;
+        y: (parent.height - 28px) / 2;
+        width: 48px; height: 28px; border-radius: 14px;
+        background: root.on ? Theme.accent : Theme.track;
+        border-width: 1px;
+        border-color: root.on || ta.pressed ? Theme.accent : Theme.line;
+        Rectangle {
+            x: root.on ? parent.width - 25px : 3px;
+            y: 3px;
+            width: 22px; height: 22px; border-radius: 11px;
+            background: root.on ? Theme.on-accent
+                : (ta.pressed ? Theme.ink : Theme.soft);
+        }
+    }
+}

@@ -1,7 +1,7 @@
 import { Theme, WifiNet } from "../slint/theme.slint";
-import { OverlaySwallow, IconButton, PressTile, PillButton, Stepper, SliderControl } from "../slint/controls.slint";
+import { OverlaySwallow, IconButton, PressTile, PillButton } from "../slint/controls.slint";
 import { Geom } from "geom.slint";
-import { CydEyebrow, CydPageTitle, CydBackChevron, CydStatRow } from "controls_cyd.slint";
+import { CydEyebrow, CydPageTitle, CydBackChevron, CydStatRow, CydBacklightToggle } from "controls_cyd.slint";
 import { KeyboardPane } from "keyboard.slint";
 
 // ============================================================================
@@ -42,16 +42,20 @@ import { KeyboardPane } from "keyboard.slint";
 // of them and removing one breaks the build. A section can go quiet; the API
 // cannot.
 //
-// ⚠️ THE HUB SLIDER'S RUST GUARD BAND, AND A DISAGREEMENT TO RECONCILE
+// 🟥 THERE IS NO DISPLAY SLIDER, WHICH RETIRES A CONSTANT RATHER THAN MOVING IT
 // -----------------------------------------------------------------------------
-// `HUB_SLIDER_BAND` excludes horizontal swipes starting on the DISPLAY slider
-// from being read as page-flips or back-navigation. On the C6 the CODE says
-// `170..=240` and `settings.slint`'s own comment says `180..220` — **they already
-// disagree**, so whoever moves this must reconcile both, not just retune one.
+// This board has no backlight PWM, so the DISPLAY page's control is a TOGGLE
+// (`CydBacklightToggle`, shared with the power page — one component, so the two
+// surfaces cannot drift). A tap is not a drag, and `HUB_SLIDER_BAND` exists only
+// to stop a DRAG on the slider being read as a page-flip or back-navigation.
 //
-// Here the slider sits at absolute y70..110. Proposed band: **66..=114**. Note
-// that the C6 band's upper bound (240) was the panel edge; on this panel 240 IS
-// the edge, so a stale value would swallow every horizontal swipe on the page.
+// So: propose a never-matching range (`1..=0`) on the C5 arm rather than a new
+// one. That is worth more than a retune, because the C6 value is already
+// self-contradictory — the CODE says `170..=240` while `settings.slint`'s own
+// comment says `180..220`. A constant nobody can state consistently is better
+// retired than re-derived. And its old upper bound (240) was the C6 panel's
+// EDGE; on this panel 240 IS the edge, so a stale value would swallow *every*
+// horizontal swipe on the page rather than just the ones near a slider.
 // ============================================================================
 
 // One label + caption + switch row. The WHOLE row is the finger target (Recipe A
@@ -310,32 +314,29 @@ export component SettingsHub {
         // --- page 1 · DISPLAY ---
         if root.page == 1: Rectangle {
             x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
-            Text {
-                x: 0; y: 10px;
-                text: "BRIGHTNESS";
-                color: Theme.dim; font-size: 16px; letter-spacing: 2px;
-            }
-            // ⚠️ Absolute y70..110. Rust's HUB_SLIDER_BAND must become 66..=114
-            // — and see the header: the C6's code and comment already disagree
-            // about the old value, so BOTH need reconciling, not just retuning.
-            SliderControl {
-                x: 0; y: 36px; width: parent.width;
+            // Toggle, not a slider — see the header. Same component the power
+            // page uses, so the two surfaces cannot disagree about what the
+            // backlight control IS on this board.
+            CydBacklightToggle {
+                x: 0; y: 14px; width: parent.width;
+                label: "BACKLIGHT";
                 value <=> root.brightness;
                 changed(f) => { root.brightness-changed(f); }
             }
+            // The recovery, stated before the tap rather than discovered after it.
             Text {
-                x: 0; y: 92px;
+                x: 0; y: 64px;
                 width: parent.width; wrap: word-wrap;
-                text: "auto-dims after 8s \u{00b7} AOD after 15s";
+                text: "plain GPIO, no PWM \u{2014} tap the screen to relight";
                 color: Theme.faint; font-size: Geom.t-caption;
             }
-            // The backlight on this board is a plain GPIO, not a PWM channel —
-            // so the slider's intermediate steps depend on whether the driver
-            // wires PWM at all. Said here rather than discovered on glass.
+            // The ladder that dims the screen WITHOUT this toggle. Kept because
+            // it is the answer to "why did it go dark on its own", which is a
+            // different question from the one the toggle answers.
             Text {
-                x: 0; y: 118px;
+                x: 0; y: 96px;
                 width: parent.width; wrap: word-wrap;
-                text: "backlight is a plain GPIO on this board \u{2014} steps depend on the driver";
+                text: "auto-dims after 8s \u{00b7} AOD after 15s";
                 color: Theme.faint; font-size: Geom.t-caption;
             }
         }
