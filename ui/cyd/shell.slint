@@ -36,29 +36,60 @@
 // 44 px of the scarce one, i.e. 18 % of everything a page had. The rail is also
 // where the eye already is after a horizontal page swipe.
 //
-// WHAT DID NOT NEED TO CHANGE
+// 🟥 THE CAROUSEL NO LONGER SLIDES, AND THAT IS THE DISPLAY LINK'S RULING
 // -----------------------------------------------------------------------------
-// The page carousel. It is expressed entirely in `pages.width` with
-// `clip: true` and `x: (N - current-page) * pages.width`, so it survived the
-// dimension substitution untouched — the one genuinely dimension-independent
-// structure in the C6 tree.
+// The carousel's GEOMETRY survived the port untouched — it is expressed entirely
+// in `pages.width` with `clip: true` and `x: (N - current-page) * pages.width`,
+// the one genuinely dimension-independent structure in the C6 tree. Its MOTION
+// did not.
+//
+// Measured arithmetic (c5-psram.md §3): a full 320x240 RGB565 repaint over this
+// panel's SPI link is **61.4 ms at the vendor's 20 MHz**, and **37.2 ms even at
+// the 33 MHz hard ceiling**. A full frame cannot fit a 30 ms budget at any legal
+// clock, so dirty-rectangle updating is MANDATORY here — more binding than on
+// the watch's QSPI AMOLED, not less.
+//
+// A 260 ms slide is a full-screen dirty region on every frame of it: ~4 frames
+// at 61.4 ms, i.e. a 16 fps wipe with ZERO time left for rendering. So the
+// `animate x` is gone from all five pages and a page change is now a HARD CUT —
+// one full-frame paint, once, instead of four in a row.
+//
+// 🟢 That makes the carousel consistent with the launcher, which already worked
+// this way and already wrote down why: *"a single hard-cut full-frame render —
+// instant, no intermediate frames"*. The C6 reached that conclusion for the
+// launcher from fps measurements; this panel reaches it for everything from the
+// serial bit rate. Same answer, harder floor.
+//
+// ⚠️ The budget number that belongs at the UI level is **~117 of 240 rows per
+// 30 ms, treated as OPTIMISTIC** — it is serial-bit-rate-only and excludes
+// per-strip command overhead. Never design up to the line. Any "strip size"
+// figures in the driver scratch docs are driver-side tuning bands, not layout
+// units.
 //
 // HOUSE RULES THIS FILE OBEYS (each was litigated on hardware — see geom.slint)
 // -----------------------------------------------------------------------------
 //   * ABSOLUTE positioning, `parent`-relative expressions where possible.
 //     No layout managers except the fixed non-text dot rail.
 //   * NEVER read a Text's own intrinsic size in a band that repaints often.
-//   * PAGINATION, never `Flickable` (measured 6-11 fps on this sw renderer).
+//   * PAGINATION, never `Flickable` (measured 6-11 fps on this sw renderer —
+//     and now with the display link under it: a scroll's cost IS its dirty
+//     region, and a shorter viewport dirties more of itself per pixel of travel).
+//   * NO FULL-SCREEN MOTION. No slides, no wipes, no cross-fades. Anything that
+//     animates must dirty ONE SMALL CONTIGUOUS BAND — the rule story.slint's
+//     PLAY page was written under now applies tree-wide.
+//   * Prefer state changes that dirty ONE contiguous region over many scattered
+//     small ones: per-strip command overhead favours fewer larger rects while
+//     RAM favours smaller, and the crossover is a MEASUREMENT, not an axiom.
 //   * `visible:` gating, never `if`, for anything that toggles — each `if`
 //     instantiates a generated inner component at ~3-6 KB.
 //   * Font sizes only from the existing glyph budget.
 //   * 44 px minimum touch targets (resistive XPT2046, finger-driven).
 //
-// PORT STATUS — COMPLETE
+// PORT STATUS — 20 of 22 IN THIS BRANCH (switcher + shade held, see below)
 // -----------------------------------------------------------------------------
-// Every scene this root reaches is landscape-native. The only files still
-// imported from `../slint/` are the ones with NO absolute geometry, imported on
-// purpose so there is exactly one copy of each:
+// Every scene this root reaches is landscape-native EXCEPT the two held back at
+// the bottom of this note. The other files imported from `../slint/` are the ones
+// with NO absolute geometry, imported on purpose so there is exactly one copy:
 //
 //   theme.slint     the `Theme` global (palette, type scale, spacing, radii) and
 //                   the PeerRow / WifiNet structs. ONE `global Theme` in the
@@ -73,9 +104,39 @@
 // `ui/slint/scan.slint` is deliberately absent: it is the 802.15.4 Radio Scan
 // page and this root never reached it on either board. Its structs live in
 // theme.slint.
+//
+// 🟥 TWO EXCEPTIONS, HELD BACK DELIBERATELY: switcher + shade
+// -----------------------------------------------------------------------------
+// `SwitcherOverlay` and `ShadeOverlay` still come from `../slint/` and WILL
+// render cropped. Their landscape versions are written and reviewed — they are
+// at commit **42dd687** — and they are being held out of this branch on the
+// watch session's instruction, because they must not land ahead of their Rust
+// halves.
+//
+// Why, in one sentence: `slint_shell::switcher_slot()` / `shade_slot()` invert a
+// swipe's `start_y` to a slot index by pure arithmetic with **no validation**
+// (`slint_shell.rs:770`), so at mismatched geometry they return a **WRONG INDEX
+// rather than `None`** — a kill-swipe kills the wrong session, a dismiss-swipe
+// dismisses the wrong notification, and there is no error to observe. Landing
+// the `.slint` first would create exactly that window.
+//
+// The plan (watch session): ONE commit carrying this branch's card geometry,
+// their Rust halves, AND a defensive bounds-check that returns `None` on
+// mismatch so any future drift fails VISIBLY instead of silently.
+//
+// To restore both files into a working tree:
+//     git checkout 42dd687 -- ui/cyd/switcher.slint ui/cyd/shade.slint
+// then re-point the two imports above at "switcher.slint" / "shade.slint".
+//
+// The geometry that commit needs:
+//     SWITCHER_CARD_TOP 40 · _H 52 · _PITCH 58 · SWITCHER_CARDS 3
+//     SHADE_CARD_TOP    38 · _H 60 · _PITCH 66 · SHADE_CARDS    3
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
+// ⚠️ HELD BACK ON PURPOSE — NOT AN OVERSIGHT. See the note below.
+import { SwitcherOverlay } from "../slint/switcher.slint";
+import { ShadeOverlay, NotifCard } from "../slint/shade.slint";
 import { Geom } from "geom.slint";
 import { RadioChip, StatusChip } from "controls_cyd.slint";
 
@@ -89,8 +150,6 @@ import { SystemPage } from "system.slint";
 import { MeshPage } from "mesh.slint";
 import { WledRemote } from "wled.slint";
 import { HuntPage } from "hunt.slint";
-import { SwitcherOverlay } from "switcher.slint";
-import { ShadeOverlay, NotifCard } from "shade.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
 import { EnergyPage } from "energy.slint";
 import { ClimateOverlay, ClimateCard } from "climate.slint";
@@ -429,7 +488,6 @@ export component WatchShell inherits Window {
         ClockPage {
             x: (0 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
-            animate x { duration: 260ms; easing: ease-out; }
             time-text: root.time-text;
             seconds-text: root.seconds-text;
             date-text: root.date-text;
@@ -453,7 +511,6 @@ export component WatchShell inherits Window {
         SensorsPage {
             x: (1 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
-            animate x { duration: 260ms; easing: ease-out; }
             accel-text: root.accel-text;
             gyro-text: root.gyro-text;
             imu-temp-text: root.imu-temp-text;
@@ -464,7 +521,6 @@ export component WatchShell inherits Window {
         SystemPage {
             x: (2 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
-            animate x { duration: 260ms; easing: ease-out; }
             fw-text: root.fw-text;
             sigil-text: root.sigil-text;
             build-text: root.build-text;
@@ -476,7 +532,6 @@ export component WatchShell inherits Window {
         PowerPage {
             x: (3 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
-            animate x { duration: 260ms; easing: ease-out; }
             cpu-cell: root.cpu-cell;
             display-cell: root.display-cell;
             wifi-cell: root.wifi-cell;
@@ -495,7 +550,6 @@ export component WatchShell inherits Window {
         MeshPage {
             x: (4 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
-            animate x { duration: 260ms; easing: ease-out; }
             self-text: root.mesh-self-text;
             rows: root.mesh-rows;
         }
@@ -626,6 +680,23 @@ export component WatchShell inherits Window {
     // growing the visual. Transparent container, so it consumes nothing: a
     // plain Rectangle does not eat clicks, which is the same fact
     // `OverlaySwallow` exists to work around.
+    //
+    // ⚠️ THIS IS THE LARGEST ANIMATED REGION LEFT IN THE TREE, and it is
+    // deliberately the only full-WIDTH one. 320x44 is **44 of the ~117
+    // full-width rows** a 30 ms paint can afford — 38 % of an optimistic budget,
+    // for ~8 frames of a 480 ms tween.
+    //
+    // It survives the no-full-screen-motion rule on three grounds, all of which
+    // have to hold together:
+    //   * 44 rows is a BAND, not a screen. The rule is one small contiguous
+    //     region, and this is one contiguous region.
+    //   * It only ever tweens on a PEEK over a non-clock page. On the clock page
+    //     `chrome-alpha` is the constant 1.0, so no tween is triggered at all —
+    //     the resident case costs nothing.
+    //   * A peek is armed by `hint_wake`, which fires at a wake-to-bright seam:
+    //     nothing else is repainting and there is no audio in flight.
+    // If any of those three stops being true, this becomes a hard cut (delete
+    // the `animate` line) and the peek simply appears.
     Rectangle {
         visible: root.chrome-shown;
         x: 0; y: 0;

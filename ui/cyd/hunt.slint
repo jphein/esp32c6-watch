@@ -12,6 +12,20 @@ import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
 // the 200 px content band, even keeping the hero at full size. So this page is a
 // re-anchoring, not a re-composition.
 //
+// 🟥 DELIBERATE DIVERGENCE FROM ui/slint/hunt.slint — DO NOT "SYNC WITH C6"
+// -----------------------------------------------------------------------------
+// The hero centring below is NOT the C6's, and the difference will look like
+// drift to any sweep that diffs these two files. It is not. Recorded here in the
+// same way the `ui/slint` files record their own divergences, and indexed in
+// `geom.slint`'s DIVERGENCES block.
+//
+// Reviewed and APPROVED by the watch session (owner of `ui/slint/hunt.slint`) as
+// the correct call and the `a4a86a3` class exactly. Two notes from them:
+//   * flowing this back to the C6's `hunt.slint` is on the someday list, to be
+//     measured on the C6 first — it is not this workstream's path;
+//   * a convergence acceptance test is expected to enforce this idiom later,
+//     so what follows is "building to the gate before the gate exists".
+//
 // THE ONE REAL CHANGE: THE HERO STOPPED BEING A LAYOUT
 // -----------------------------------------------------------------------------
 // The C6 centres the hero word + trend arrow with a `HorizontalLayout` at

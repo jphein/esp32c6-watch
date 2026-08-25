@@ -55,6 +55,101 @@
 // The clock hero is 66, NOT 72 — 66 exists, 72 does not.
 // ============================================================================
 
+// ============================================================================
+// 🟥 THE PAINT BUDGET — READ THIS BEFORE ADDING ANY MOTION ANYWHERE IN ui/cyd/
+// ============================================================================
+//
+// Established by measurement-grade arithmetic (c5-psram.md §3), and it is the
+// single hardest constraint on this board:
+//
+//   a full 320x240 RGB565 repaint over this panel's SPI link takes
+//     61.4 ms  at the vendor's 20 MHz
+//     37.2 ms  at 33 MHz — the absolute hard-ceiling clock
+//
+// **A full frame cannot fit a 30 ms budget at ANY legal clock.** Dirty-rectangle
+// updating is therefore MANDATORY here, and MORE binding than on the C6's QSPI
+// AMOLED, not less. The C6 reached "no scrolling, no tweens" from a 6-11 fps
+// software-renderer measurement; this board reaches the same place from the
+// serial bit rate, which is a floor no amount of render-side tuning lifts.
+//
+// THE ONLY BUDGET NUMBER THAT BELONGS AT THE UI LEVEL
+// -----------------------------------------------------------------------------
+//   ~117 of 240 full-width rows per 30 ms — and treat it as OPTIMISTIC.
+//
+// It is serial-bit-rate-only and EXCLUDES per-strip command overhead, so real
+// times are worse. **Never design up to the line.** Any "strip size" figures
+// (16-48 rows and similar) in the driver scratch docs are DRIVER-side tuning
+// bands contingent on a framebuffer-backed path existing — they are not layout
+// budget units, and Slint's line-by-line flusher cannot batch anyway.
+//
+// A narrow band costs far less than its row count suggests, because rows are
+// streamed row-major: a 30x72 strip is 72 rows but only 2,160 px, against 37,440
+// px for 117 full-width rows. Row count bounds the COMMAND overhead; pixel count
+// bounds the BITS. Both matter, which is why the next rule is a tension and not
+// an axiom.
+//
+// THE FOUR RULES THIS TREE FOLLOWS
+// -----------------------------------------------------------------------------
+//  1. **NO FULL-SCREEN MOTION.** No slides, no wipes, no cross-fades. A
+//     full-screen transition is ~61 ms per frame best case — ~16 fps with zero
+//     time left to render. Page changes are HARD CUTS. Removed during the port:
+//     the five-page carousel's 260 ms slide, climate's 200 ms list/detail
+//     cross-fade, and the ping pulse's 1100 ms ring tween.
+//  2. **Anything that animates must dirty ONE SMALL CONTIGUOUS BAND.** This is
+//     `story.slint`'s PLAY-page rule, promoted from one page to the whole tree.
+//     What survives: the clock's minute bar (180x8), ping's cooldown sweep
+//     (100x4), the four wake-hint strips (all narrow), and the chrome band
+//     (320x44 — the largest, documented at its site).
+//  3. **Prefer ONE contiguous dirty region per state change over many scattered
+//     small ones.** Per-strip command overhead favours fewer larger rects while
+//     RAM favours smaller; the crossover is a MEASUREMENT, not a design axiom.
+//     ⏳ So any layout whose interaction dirties many independent widgets at once
+//     must be FLAGGED for measurement before it becomes load-bearing. In this
+//     tree that is exactly one thing: climate's Flickable (noted in that file).
+//  4. **Pagination, never `Flickable`** — now with a harder floor under the
+//     original ruling: a scroll's cost IS its dirty region, and a shorter
+//     viewport dirties a larger fraction of itself per pixel of travel. The one
+//     carve-out (a list whose length is data) is unchanged and used once.
+//
+// ⚠️ DO NOT DESIGN ASSUMING A FAST FRAMEBUFFER ARRIVES LATER. The wall is the
+// DISPLAY LINK, not memory — so PSRAM does not move it. (PSRAM may well host a
+// framebuffer if a framebuffer path is ever built; that is a different question
+// and it does not change any number above.)
+// ============================================================================
+//
+// ============================================================================
+// 🟥 DIVERGENCES FROM ui/slint/ — DELIBERATE. DO NOT "SYNC WITH C6".
+// ============================================================================
+// A future sweep that diffs `ui/cyd/*` against its `ui/slint/*` counterpart will
+// find these and they will look like drift. They are not. Each is recorded at
+// its own site as well, in the same way the `ui/slint` files record theirs; this
+// is the index.
+//
+//  1. **Hot-band centring.** `x: N; width: W; horizontal-alignment: center`
+//     replaces `x: (parent.width - self.width) / 2` wherever a string changes
+//     often. Never exposes `self.width` to the dependency graph, so a changing
+//     string re-lays-out one paragraph instead of re-deriving a layout — the
+//     `a4a86a3` / `5ca474d` class exactly. Sites: `hunt` (hero + arrow + readout,
+//     rewritten every tick), `lights`/`ping` (status column), `mesh`, `sensors`,
+//     `story`. ⚠️ EXCEPT where `letter-spacing` is set: trailing letter-space
+//     counts toward intrinsic width but not toward alignment, so switching
+//     methods shifts glyphs ~1 px. `story`'s speaker chip and `CydPageTitle`
+//     therefore KEEP the intrinsic read, on purpose.
+//  2. **No layout managers around text.** 5 instantiations against the C6's 32,
+//     and none of the five wraps a `Text`. Absolute rows with the pitch written
+//     down replace `spacing:`.
+//  3. **No `animate` on anything larger than a band.** See the paint budget
+//     above. Three C6 animations are gone, not retuned.
+//  4. **`Geom` instead of `Theme` for geometry.** `Theme` is imported UNCHANGED
+//     so there is exactly one `global Theme` and Rust's `set_scheme` still works.
+//  5. **`CydBacklightToggle` replaces `SliderControl`** on the power and Settings
+//     DISPLAY pages — this board has no backlight PWM.
+//
+// 🟢 Per the watch session: the flow-back of (1) to `ui/slint/hunt.slint` is on
+// the someday list, measured on the C6 first, and is NOT this workstream's path.
+// A convergence acceptance test is expected to enforce these later.
+// ============================================================================
+
 export global Geom {
     // --- panel ---------------------------------------------------------------
     out property <length> panel-w: 320px;

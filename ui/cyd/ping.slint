@@ -22,8 +22,9 @@ import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
 //   whatever is showing. Rust owns the choreography clock
 //   (`ShellUi::tick_ping_pulse`, the gesture-hint idiom): the pulse is CREATED
 //   dark with `lit:false` (so the wake frame stays cheap) and Rust flips `lit` a
-//   beat later — the `animate` on `p` is what expands the rings. Slint property
-//   anims only; no Rust per-frame state.
+//   beat later. On the C6 an `animate` on `p` expands the rings smoothly; HERE
+//   IT DOES NOT — the tween is gone and each flip is one hard cut. See the note
+//   at `p` itself.
 //
 // 🟥 THE PULSE RINGS WERE WIDER THAN THIS PANEL
 // -----------------------------------------------------------------------------
@@ -38,9 +39,10 @@ import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
 // taller panel.
 //
 // Feedback contract (design spec §3/§8): every press is a hard 1-frame token swap
-// (Recipe C invert on the hero — no `animate` on press at 6-11 fps). The PULSE is
-// the sanctioned exception: a notification bloom, not press feedback, driven by
-// Slint property animation exactly like the wake-hint tweens.
+// (Recipe C invert on the hero — no `animate` on press at 6-11 fps). On the C6
+// the PULSE was the sanctioned exception; on this panel there is no exception,
+// because a 220-row dirty region cannot be tweened over a link that needs
+// 61.4 ms for a full frame. Everything here is a hard swap.
 // ============================================================================
 
 export component PingOverlay {
@@ -231,8 +233,32 @@ export component PingPulse {
     in property <bool> lit: false;
     callback dismissed();
 
+    // 🟥 NO TWEEN. `p` is a HARD two-state swap, not an animation.
+    //
+    // The C6 tweens this over 1100 ms and calls itself the sanctioned exception —
+    // *"a notification bloom, not press feedback"*. That exception does not
+    // survive this panel's display link. The outer ring's bounding box at full
+    // travel is 220x220: **220 of the ~117 full-width rows a 30 ms paint can
+    // afford**, on every frame of a 1100 ms tween. It is the single most
+    // expensive motion the port inherited.
+    //
+    // So `p` flips between 0 and 1 with no `animate`, which is exactly what the
+    // design spec already demands of every press in this UI: *"at 6-11 fps a
+    // tween yields 0-1 intermediate frames and queues wasted full repaints."*
+    // The bloom does not disappear — Rust's `tick_ping_pulse` already flips `lit`
+    // SEVERAL times across the ~4 s window ("breathe out / in / out"), so what
+    // was a tween becomes three or four distinct hard-cut frames. A stepped
+    // bloom, at a cost the link can actually serve.
+    //
+    // ⚠️ FLAGGED FOR THE FIRMWARE LANE, because layout cannot fix it: this pulse
+    // blooms over EVERYTHING but AOD, which includes story PLAYBACK. Even as
+    // hard cuts, a >117-row repaint during playback overruns the 48 ms audio DMA
+    // ring — the exact failure `PaintGate` exists to prevent, arriving from
+    // outside the page it guards. The fix is to SUPPRESS or DEFER the pulse while
+    // `story-playing`, in `tick_ping_pulse`. Not doable here: this component
+    // cannot see playback state, and adding a property to see it would break the
+    // 223-member parity with the C6 root.
     property <float> p: root.lit ? 1.0 : 0.0;
-    animate p { duration: 1100ms; easing: ease-out; }
 
     // Ring centre. cy110 is the value that lands the outer ring's FULL travel
     // exactly inside the panel (110 ± 110 = y0..220) — see the header on why the

@@ -27,6 +27,17 @@ import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
 // where the C6 showed four — and a shorter card is a cheaper scroll, since the
 // dirty region is what the fps number was about.
 //
+// ⚠️ It is kept because there is nothing to paginate INTO, not because scrolling
+// is cheap here. It is the most expensive interaction in this tree and the only
+// one whose cost is unbounded by design. **Flag for measurement before it is
+// load-bearing** — if it does not hold up on glass, the fallback is a Rust-owned
+// page index over the model (which turns an unknown-length list into a known
+// page count) rather than a smaller card.
+//
+// 🟥 The LIST->DETAIL transition is a HARD CUT, not the C6's cross-fade. See the
+// note at the layer itself: a full-screen fade is ~3 frames of a 16 fps wipe on
+// this panel.
+//
 // THE DETAIL VIEW IS WHERE THE HEIGHT WENT
 // -----------------------------------------------------------------------------
 // The C6 detail is a 274 px vertical stack against a 200 px band: name, an 84 px
@@ -140,15 +151,24 @@ export component ClimateOverlay {
     }
 
     // ==================== LIST view ====================
-    // Present when ready+non-empty; fades/slides under the detail on selection.
-    // Card taps disabled while the detail is up, so no ghost flashes beneath it.
+    // Present when ready+non-empty; CUT to invisible under the detail on
+    // selection. Card taps disabled while the detail is up, so no ghost flashes
+    // beneath it.
     if root.conn-state == 0 && root.cards.length > 0: Flickable {
-        x: root.selected-index < 0 ? Geom.content-x : 0;
+        // 🟥 NO CROSSFADE. The C6 slides and fades this layer against the detail
+        // over 200 ms — a FULL-SCREEN dirty region per frame, which this panel's
+        // SPI link cannot serve: a full 320x240 RGB565 repaint is 61.4 ms at
+        // 20 MHz (37.2 ms even at the 33 MHz ceiling), so a 200 ms cross-fade is
+        // ~3 frames of a 16 fps wipe with nothing left for rendering.
+        //
+        // So `x` is now FIXED and the opacity flip is a HARD CUT. Same
+        // conclusion the launcher's paging reached from fps measurements, reached
+        // here from the serial bit rate.
+        x: Geom.content-x;
         y: Geom.content-y;
         width: Geom.content-w;
         height: Geom.content-h;
         opacity: root.selected-index < 0 ? 1.0 : 0.0;
-        animate x, opacity { duration: 200ms; easing: ease-out; }
         viewport-height: root.cards.length * 68px;
         VerticalLayout {
             spacing: 8px;
@@ -209,9 +229,9 @@ export component ClimateOverlay {
     // crucially the always-on title + chevron, declared above these layers, stay
     // visible on top instead of being occluded.
     if root.cards.length > 0: Rectangle {
+        // Hard cut, for the reason on the LIST layer above. `x` fixed at 0.
         opacity: root.selected-index >= 0 ? 1.0 : 0.0;
-        x: root.selected-index >= 0 ? 0 : 12px;
-        animate x, opacity { duration: 200ms; easing: ease-out; }
+        x: 0;
 
         // --- left column: what the room IS ---
         Text {

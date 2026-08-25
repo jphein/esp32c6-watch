@@ -218,6 +218,59 @@ target, and so nobody re-derives it. Two cautions if it is picked up:
 If full-res lands, every cell size in §2 becomes less cramped and 2 of the 6 games
 (snake, world_snake) would be worth re-picking.
 
+⚠️ **But full-res does not make anything FASTER — it makes it slower.** A full-res store is
+the same number of pixels to stream out of, and 4× the bytes to fill. It buys sharpness, not
+frame rate; §3b is the constraint that decides how the games feel.
+
+---
+
+## 3b. 🟥 THE DISPLAY LINK CAPS EVERY GAME'S FRAME RATE, BEFORE RENDER TIME
+
+This landed after §2 was written and it is the most important thing in this document,
+because it bounds all six games from outside their own code.
+
+A full 320×240 RGB565 flush over this panel's SPI link is **61.4 ms at the vendor's
+20 MHz** (37.2 ms even at the 33 MHz hard ceiling). So:
+
+> **A game that flushes a full frame cannot exceed ~16 fps, with ZERO time left for
+> render or game logic.**
+
+`flappy.rs`'s own header says *"throttled 30fps"*. That throttle is now unreachable — the
+link will not carry 30 full frames a second at any legal clock. It is not a tuning number
+any more, it is a ceiling to be lowered to match reality (~15 fps, leaving headroom) rather
+than a target to be missed silently.
+
+**This splits the six games into two classes, and the split is not about cell size:**
+
+| class | games | why | consequence |
+|---|---|---|---|
+| **grid, mostly static** | snake · 2048 · tetris · maze | only changed CELLS need redrawing between frames — the board is otherwise identical | can flush **dirty rects** and run far above 16 fps |
+| **full-field scrollers** | flappy · world_snake | the whole field translates every frame, so every pixel is dirty by construction | hard-capped at **~16 fps**; no layout number changes this |
+
+⏳ **Flagged, not solved:** whether the four grid games actually flush dirty rects today is
+a `Framebuffer`/runner question I cannot answer from the geometry — `flush` may well push
+the whole store regardless of what changed. If it does, all six are capped at 16 fps and the
+grid games are paying for a partial-update path they do not use. **That is worth checking
+before any cell size above is judged**, because "the game feels sluggish" would then have
+nothing to do with the numbers in §2.
+
+Two consequences for the constants themselves:
+
+* **`PIPE_SPEED` is a per-FRAME delta, not a per-second one.** At 2.0 px/frame it crosses
+  320 px in 160 frames — which is 5.3 s at 30 fps but **10.7 s at 16 fps**. So the value
+  proposed in §2 makes the game *half as fast* as intended, not the same speed. The same
+  applies to `GRAVITY` and `JUMP_VEL`: they are per-frame accumulations, so a halved frame
+  rate halves the bird's apparent acceleration too. **Tune all three together, on glass,
+  against the real frame rate — not against the C6's.**
+* **`world_snake`'s viewport choice interacts with this.** Option B's smaller cells mean
+  more cells changing per step, but the field scrolls anyway, so its cost was already
+  full-frame. Option B is therefore free on this axis — the viewport decision stays a
+  gameplay call.
+
+⚠️ And do not reach for PSRAM here. The wall is the **display link**, not memory. A
+framebuffer in PSRAM would still have to be streamed out over the same SPI bus at the same
+61.4 ms per full frame.
+
 ---
 
 ## 4. Acceptance per game
@@ -228,7 +281,11 @@ If full-res lands, every cell size in §2 becomes less cramped and 2 of the 6 ga
    formula is the one to verify, since it replaces a hand-set margin.
 3. **HUD not overlapped by the field** — every `OFFSET_Y` / `BOARD_Y` / `VIEW_Y` above is a
    HUD budget, and the HUD is drawn by code this document does not touch.
-4. **flappy: playable.** Not "renders" — playable. `GRAVITY`/`JUMP_VEL` are derived, and
-   derived physics is a hypothesis.
-5. 🔶 **maze: expect a stationary ball** (no IMU). That is the correct behaviour for this
+4. **flappy: playable.** Not "renders" — playable. `GRAVITY`/`JUMP_VEL`/`PIPE_SPEED` are
+   derived, derived physics is a hypothesis, and §3b means they are derived against a frame
+   rate that is itself now a different number. Measure the achieved fps FIRST, then tune the
+   three together against it.
+5. **Measure the achieved frame rate per game** and record it. It is the number that decides
+   whether §2's cell sizes are the problem or a red herring.
+6. 🔶 **maze: expect a stationary ball** (no IMU). That is the correct behaviour for this
    hardware, not a regression to chase.
