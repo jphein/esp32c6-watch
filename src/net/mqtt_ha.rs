@@ -96,7 +96,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// `[MQTT] failed: tcp read` was reporting. Matches `mqtt_climate`'s value.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> {
+async fn burst(
+    stack: Stack<'static>,
+    // Only read by the PMU-gated battery publish below; a board with no PMU
+    // still calls this for uptime + the OTA announce window.
+    #[cfg_attr(not(feature = "has-pmu"), allow(unused_variables))] batt_pct: u8,
+) -> Result<(), &'static str> {
     let (ip, port) = parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?;
 
     let mut rx_buf = [0u8; 256];
@@ -144,11 +149,35 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
     }
 
     // Discovery config (retained) + state topics (QoS 0).
-    publish(&mut socket, DISCOVERY_TOPIC, DISCOVERY_PAYLOAD.as_bytes(), true).await?;
+    //
+    // ⚠️ #cyd-c5: the discovery block and the battery state are PMU-gated, and
+    // the reason is a collision rather than tidiness. `DISCOVERY_PAYLOAD` is a
+    // `concat!` const carrying a FIXED device identity —
+    // `"identifiers":["smolwatch042"]`, `"model":"ESP32-C6-Touch-AMOLED-2.06"`.
+    // "smolwatch042" is the C6's OWN unprovisioned-id sentinel, so a second
+    // board publishing this retained topic does not create a second HA device;
+    // it OVERWRITES the C6's, under a model string that is not even its
+    // hardware. Retained, so it outlives the publisher.
+    //
+    // A board with no PMU has no battery reading to publish anyway (the value
+    // would be the 0 initialiser — the same C1/C2 cascade closed elsewhere), so
+    // gating on `has-pmu` removes the collision and the fabricated reading in
+    // one predicate, and does so WITHOUT touching the C6's identity.
+    //
+    // 🔧 The real fix — derive the identifier from the node id and build the
+    // payload at runtime — is deliberately NOT done here: changing the C6's
+    // identifier orphans its EXISTING Home Assistant device registration, which
+    // is a migration with a user-visible consequence, not a refactor. Filed for
+    // the watch session. Uptime stays ungated: it is device-scoped telemetry,
+    // not part of the shared device block.
+    #[cfg(feature = "has-pmu")]
+    {
+        publish(&mut socket, DISCOVERY_TOPIC, DISCOVERY_PAYLOAD.as_bytes(), true).await?;
 
-    let mut num = [0u8; 20];
-    let batt = fmt_u64(batt_pct as u64, &mut num);
-    publish(&mut socket, BATTERY_TOPIC, batt, false).await?;
+        let mut num = [0u8; 20];
+        let batt = fmt_u64(batt_pct as u64, &mut num);
+        publish(&mut socket, BATTERY_TOPIC, batt, false).await?;
+    }
 
     let mut num = [0u8; 20];
     let uptime = fmt_u64(Instant::now().as_secs(), &mut num);
