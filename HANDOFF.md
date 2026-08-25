@@ -12,7 +12,7 @@ JP's standing goal: **the watch as a full smol target, all features + parity, on
 1. ~~mesh-OTA (#86)~~ **LANDED same day** (293c117) — remaining: live verify vs a serving gateway + the persisted anti-rollback floor (config byte). #64 also complete in code. WorldSnake was ALREADY mesh_snake (audit corrected).
 2. **On-device verification batch** (needs mythic tethered): BLE reclaim heap bracket + 5x50 soak; #90 announce live test; eldritch-lantern factory-table migration (flash-full + provision — see the factory-partition memory).
 3. **Story E2E**: blocked ONLY on JP's AP fix (#89 — the 'admin' SSID L2-isolates on one AP; he took it).
-4. #36 epic remainder: etx → ledger/crdt → mesh_snake → cfgsched/cast → bard (audit + order on the issue).
+4. ~~#36 epic remainder~~ **The pure-services vendoring is COMPLETE** (same night): flood/wire/etx/cfgsched in mesh-flood, ledger L1-L4 in mesh-ledger, the OTA leaf in ota-proto — all host-tested, per-arch-safe. mesh_snake already existed (WorldSnake). App-tier remainder only: cast (needs scene capture — design work) + bard (own epic). mesh-OTA is ON ALL THREE boards (per-arch ed25519, 2e847ac).
 
 ## Live constraints (unchanged unless noted)
 - .cargo/config.toml gitignored (credentials) — never commit; fambuild supplies it to worktrees; preflight fails loudly without it.
