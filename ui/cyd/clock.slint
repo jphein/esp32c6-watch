@@ -1,0 +1,274 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydChip } from "controls_cyd.slint";
+
+// ============================================================================
+// CLOCK PAGE — 320x240 landscape. THE BOOT PAGE.
+// ============================================================================
+//
+// WHY THIS PAGE WAS BUILT FIRST
+// -----------------------------------------------------------------------------
+// It is the default page at power-on, so it is the only page reachable with NO
+// working touch — which matters on a board whose touch is an uncalibrated
+// resistive XPT2046 sharing an SPI bus with the display. It exercises the whole
+// stack (panel driver -> Slint -> Theme -> chrome -> this layout) with the
+// fewest dependencies, and it is the page that answers "is the watch alive".
+//
+// THE RE-COMPOSITION
+// -----------------------------------------------------------------------------
+// The C6 clock is a single centred column 502 px tall: date pill (y56), digits
+// (y138), seconds (y282), minute bar (y348), steps (y376), chips (y402), with
+// the Familiar tucked into the left margin at y250. Stacked, it needs ~446 px.
+// This panel has 240, and 34 of those belong to the chrome band this page hosts.
+//
+// So the column splits into two. The C6 layout was already halfway there — its
+// Familiar nook is a LEFT SIDEBAR in all but name — and landscape simply
+// finishes the thought:
+//
+//   x 8..190             x 200..268        x 276..320
+//   ┌────────────────────┬─────────────────┬──────────┐
+//   │ 12:34   (66px)     │  05  (40px)     │  page    │  y 34..110
+//   │ SAT 24 AUG         ├─────────────────┤  rail    │  y 118..144
+//   │ ▓▓▓▓▓▓░░░░ minute  │   Familiar      │  (shell) │  y 152..160
+//   │ 8,214 STEPS · 21°  │   nook          │          │  y 164..180
+//   ├────────────────────┴─────────────────┴──────────┤
+//   │  160 MHz   │   GYRO   │   APPS                  │  y 186..230
+//   └─────────────────────────────────────────────────┘
+//
+// THE HERO IS 66px, NOT 108 AND NOT 84
+// -----------------------------------------------------------------------------
+// 108 px is 45 % of this panel's height for the digits alone. Dropping to 84
+// (the next existing glyph atlas) still renders "12:34" at ~230 px wide, which
+// leaves 90 px for everything to its right — not enough for the seconds AND the
+// Familiar. 66 px renders at ~162 px and buys a genuine second column. It is an
+// existing size: 66 is in the atlas, 72 is not, and every distinct font-size
+// embeds a whole pre-rendered glyph set (~100 KB at this tier). Picking 72
+// because it "balances better" would cost real ROM.
+//
+// The AOD hero stays at 84 — it has the whole panel to itself (see shell.slint).
+//
+// PARALLAX
+// -----------------------------------------------------------------------------
+// `par-x` / `par-y` are kept with the same graded divisors the C6 used (hero
+// full, seconds half, date quarter) so the depth effect survives the
+// re-composition. They are 0 until the polish stage feeds them.
+// ============================================================================
+
+export component ClockPage {
+    in property <string> time-text;
+    in property <string> seconds-text;
+    in property <string> date-text;
+    in property <float> minute-progress;
+    in property <int> steps;
+    in property <string> weather-text; // "" when no data
+    in property <string> cpu-text;     // e.g. "160 MHz"
+    in property <bool> gyro-on;
+    // parallax offsets (stage-4 polish feeds these; 0 until then)
+    in property <length> par-x: 0px;
+    in property <length> par-y: 0px;
+    // --- Mesh Familiar nook (fed by ShellUi::set_fam) ---
+    in property <bool> fam-known;
+    in property <bool> fam-holding;
+    in property <int> fam-mood;    // 0 idle 1 happy 2 hungry 3 sleeping
+    in property <int> fam-hunger;  // 0 full 1 peckish 2 hungry
+    in property <int> fam-stage;   // 0 egg 1 hatchling 2 juvenile 3 adult
+    callback cpu-tap();
+    callback gyro-tap();
+    callback apps-tap();
+
+    // --- Time hero -----------------------------------------------------------
+    // LEFT-ANCHORED, not centred. Centring would read the Text's own intrinsic
+    // width, and this is the element that changes most often on the whole
+    // watch — once a minute, at the largest glyph size in the scene. Anchoring
+    // it at a fixed x also means the digits do not shuffle sideways when the
+    // hour rolls from 9:59 to 10:00, which on a 1 Hz repaint budget reads as a
+    // glitch rather than a transition.
+    Text {
+        x: 10px + root.par-x;
+        y: 34px + root.par-y;
+        text: root.time-text;
+        color: Theme.ink;
+        font-size: Geom.t-hero;
+        font-weight: 700;
+    }
+
+    // Seconds — the accent beat, top of the middle column.
+    Text {
+        x: 200px + root.par-x / 2;
+        y: 56px + root.par-y / 2;
+        text: root.seconds-text;
+        color: Theme.accent;
+        font-size: Geom.t-big;
+        font-weight: 600;
+    }
+
+    // --- Date ----------------------------------------------------------------
+    // The C6 wraps this in a 42 px pill whose width tracks the label
+    // (`width: date.width + 44px`). The pill is dropped here: it cost 42 px of a
+    // 240 px panel plus a rounded rect and a border, to decorate a string that
+    // is already the only thing on its line. The 20 px face is unchanged (20,
+    // NOT 19 — glyph-set consolidation, v0.9.0 ROM squeeze).
+    Text {
+        x: 12px + root.par-x / 4;
+        y: 118px + root.par-y / 4;
+        text: root.date-text;
+        color: Theme.soft;
+        font-size: 20px;
+        letter-spacing: 2px;
+    }
+
+    // --- Minute progress -----------------------------------------------------
+    // 300 -> 180 px wide, 10 -> 8 px tall, and it now ends at x190 so the
+    // middle column is clear. The animated inner fill is the one `animate` on
+    // this page: it is a width tween on a solid rect inside a 180x8 band, so
+    // its dirty region is 1,440 px — the partial renderer handles that at
+    // full rate, which is not true of anything text-shaped.
+    track := Rectangle {
+        x: 10px;
+        y: 152px;
+        width: 180px; height: 8px; border-radius: 4px;
+        background: Theme.track;
+        Rectangle {
+            x: 0; y: 0;
+            width: max(8px, track.width * root.minute-progress);
+            height: parent.height;
+            border-radius: 4px;
+            background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
+            animate width { duration: 350ms; easing: ease-out; }
+        }
+    }
+
+    // Steps + weather line. 18 -> 13 px: at 180 px of column width the C6's
+    // 18 px face truncates "8,214 STEPS · 21°C" mid-word.
+    Text {
+        x: 12px;
+        y: 164px;
+        text: root.weather-text == ""
+            ? "\{root.steps} STEPS"
+            : "\{root.steps} STEPS  \u{00b7}  \{root.weather-text}";
+        color: Theme.dim;
+        font-size: Geom.t-label;
+        letter-spacing: 2px;
+    }
+
+    // --- Interactive chips row: CPU · GYRO · APPS ----------------------------
+    // 44 px tall — the touch floor, unchanged from the C6 (which grew them from
+    // 36 for exactly this reason). Three 84 px chips at x 8 / 100 / 192 span
+    // x8..276, ending where the page rail's hit box begins; they clear it in y
+    // regardless (rail is y76..164, this row is y186..230).
+    //
+    // ABSOLUTE, not a HorizontalLayout. The C6 row uses one; a layout manager
+    // sizes children from their INTRINSIC dimensions, which for a Text is the
+    // 16 B-per-read dependency-node allocation that two recent commits exist
+    // purely to remove. Three fixed-width chips do not need measuring.
+    //
+    // GYRO keeps its persistent active surface (`Theme.track`) via the
+    // rest-background override — selected is not the same state as pressed.
+    // ⚠️ On this board there is no IMU, so GYRO has nothing to stream. The chip
+    // stays because `gyro-tap` is in the API and the toggle is harmless; it
+    // simply never lights.
+    CydChip {
+        x: 8px; y: 186px; width: 84px;
+        text: root.cpu-text;
+        clicked => { root.cpu-tap(); }
+    }
+    CydChip {
+        x: 100px; y: 186px; width: 84px;
+        text: "GYRO";
+        tint: root.gyro-on ? Theme.accent : Theme.soft;
+        rest: root.gyro-on ? Theme.track : Theme.panel;
+        clicked => { root.gyro-tap(); }
+    }
+    CydChip {
+        x: 192px; y: 186px; width: 84px;
+        text: "APPS";
+        tint: Theme.accent;
+        clicked => { root.apps-tap(); }
+    }
+
+    // --- Mesh Familiar nook --------------------------------------------------
+    // Middle column, under the seconds. A compact status cluster (not sprite
+    // art): body colour = mood token, body size = growth stage, a 3-step hunger
+    // bar; "away" hollow dot when known-but-not-holding.
+    //
+    // 60x94 -> 68x68. The portrait nook was TALL because it had a left margin to
+    // fill; here it is a square tile in a 68 px-wide column. The body's stage
+    // growth is unchanged (22 + stage*6, so 22..40 px) and still fits with the
+    // hunger bar below it, which is what decides the height.
+    //
+    // `if`-gated, not `visible:`-gated, deliberately — matching the C6. This is
+    // a whole cluster that is absent for most users rather than a chrome element
+    // that toggles, so paying the generated-component cost only when a Familiar
+    // exists is the right side of that trade.
+    if root.fam-known: Rectangle {
+        x: 200px;
+        y: 110px;
+        width: 68px;
+        height: 68px;
+        border-radius: 14px;
+        background: root.fam-holding ? Theme.accent-bg : Theme.panel;
+        border-width: 1px;
+        border-color: root.fam-holding ? Theme.accent : Theme.line;
+
+        // Creature body: grows with stage when holding; hollow dot when away.
+        body := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 10px;
+            width: root.fam-holding ? (22px + root.fam-stage * 6px) : 18px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: !root.fam-holding ? Theme.track  // away — muted disc
+                : root.fam-mood == 1 ? Theme.warm      // happy — gold
+                : root.fam-mood == 2 ? #e08a3a         // hungry — orange (vivid on every scheme)
+                : root.fam-mood == 3 ? Theme.accent2   // sleeping — blue
+                : Theme.accent;                        // idle — teal
+            border-width: root.fam-holding ? 0px : 2px;
+            border-color: Theme.line;
+
+            // Awake eyes: two dark dots.
+            if root.fam-holding && root.fam-mood != 3: Rectangle {
+                x: parent.width * 0.28 - 2.5px;
+                y: parent.height * 0.40;
+                width: 5px; height: 5px; border-radius: 2.5px;
+                background: Theme.on-accent;
+            }
+            if root.fam-holding && root.fam-mood != 3: Rectangle {
+                x: parent.width * 0.72 - 2.5px;
+                y: parent.height * 0.40;
+                width: 5px; height: 5px; border-radius: 2.5px;
+                background: Theme.on-accent;
+            }
+            // Sleeping: a little "z".
+            if root.fam-holding && root.fam-mood == 3: Text {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "z";
+                color: Theme.on-accent;
+                font-size: 16px;
+                font-weight: 700;
+            }
+        }
+
+        // Hunger bar (holder only): discrete full / two-thirds / one-third.
+        if root.fam-holding: Rectangle {
+            x: 8px;
+            y: parent.height - 14px;
+            width: parent.width - 16px;
+            height: 5px;
+            border-radius: 2.5px;
+            background: Theme.track;
+            Rectangle {
+                x: 0;
+                y: 0;
+                height: 100%;
+                border-radius: 2.5px;
+                width: parent.width * (root.fam-hunger == 0 ? 1.0
+                    : root.fam-hunger == 1 ? 0.66 : 0.33);
+                background: root.fam-hunger == 0 ? Theme.accent
+                    : root.fam-hunger == 1 ? Theme.warm : Theme.warn;
+            }
+        }
+    }
+}
