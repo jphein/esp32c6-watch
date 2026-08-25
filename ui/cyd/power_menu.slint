@@ -112,6 +112,7 @@ export component PowerMenu {
     Text {
         x: (parent.width - self.width) / 2;
         y: 44px;
+        // BOARD-FACT: assumes no PMU. Verify per board.
         text: "MAINS POWER \u{00b7} NO CELL";
         color: Theme.soft;
         font-size: Geom.t-body;
@@ -185,6 +186,9 @@ export component PowerMenu {
     Text {
         x: (parent.width - self.width) / 2;
         y: 164px;
+        // BOARD-FACT: the touch-IRQ wake is confirmed on the C5. If a sibling
+        // board wakes differently, this caption is a promise it cannot keep —
+        // and it is the one caption a user reads in order to UNDO something.
         text: "screen and radios off \u{00b7} tap the glass to wake";
         color: Theme.dim;
         font-size: Geom.t-caption;

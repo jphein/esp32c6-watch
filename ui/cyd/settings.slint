@@ -334,6 +334,8 @@ export component SettingsHub {
             Text {
                 x: 0; y: 64px;
                 width: parent.width; wrap: word-wrap;
+                // BOARD-FACT: see power.slint — the S3 likely HAS PWM, which
+                // changes the control and not just the words.
                 text: "plain GPIO, no PWM \u{2014} tap the screen to relight";
                 color: Theme.faint; font-size: Geom.t-caption;
             }
@@ -504,6 +506,7 @@ export component SettingsHub {
                 Text {
                     x: 0; y: 76px; width: parent.width;
                     horizontal-alignment: center; wrap: word-wrap;
+                    // BOARD-FACT: `has-boot-key` is a C5 stand-in literal.
                     text: "no POWER key, and BOOT is unconfirmed on this board";
                     color: Theme.dim; font-size: Geom.t-body;
                 }

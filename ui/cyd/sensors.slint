@@ -45,10 +45,24 @@ import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
 // deliberate, because a reader who swiped here looking for sensors should not
 // have to swipe again to learn why there are none.
 //
-// The five values are LITERALS, not properties. They are facts about the
-// silicon, so they are stated where they are true rather than plumbed through
-// Rust — and a literal is constant-folded, so the rows cost bindings, not
-// bindings plus a push path.
+// 🟥 THE FIVE VALUES ARE LITERALS, AND THAT REASONING HAS SINCE BROKEN.
+// -----------------------------------------------------------------------------
+// The original argument was: they are facts about the silicon, so state them
+// where they are true rather than plumbing them through Rust — and a literal is
+// constant-folded, so the rows cost bindings rather than bindings plus a push
+// path. Both halves of that were correct when this tree served ONE board.
+//
+// It serves two now. The S3-CYD compiles this same scene, so "where they are
+// true" is no longer where they are written: every value below answers for the
+// C5 on a page the S3 also renders. `DIE TEMP: none` is the sharpest case — that
+// part has a temperature sensor, so on the S3 this page does not merely name the
+// wrong chip, it denies a capability the board has.
+//
+// The premise moved and the decision did not, which is the failure mode worth
+// naming: nothing re-examines a choice when its condition changes, least of all
+// when the change arrives from somewhere else entirely. The condition is written
+// down now, next to the decision, and the fix is a per-board property set —
+// PROPOSED-board-ui-consts.md §1d.
 // ============================================================================
 
 export component SensorsPage {
@@ -63,6 +77,8 @@ export component SensorsPage {
 
     CydPageTitle { title: "BOARD"; }
 
+    // BOARD-FACT: these five values and the caption are C5-only literals in a
+    // scene the S3-CYD also compiles. See geom.slint's BOARD FACTS index.
     CydStatRow { x: Geom.content-x; y: Geom.content-y +   6px; height: 30px;
                  label: "CHIP";     value: "ESP32-C5"; }
     CydStatRow { x: Geom.content-x; y: Geom.content-y +  38px; height: 30px;
@@ -75,6 +91,9 @@ export component SensorsPage {
     CydStatRow { x: Geom.content-x; y: Geom.content-y + 102px; height: 30px;
                  label: "IMU";      value: "none"; value-color: Theme.faint; }
     CydStatRow { x: Geom.content-x; y: Geom.content-y + 134px; height: 30px;
+                 // BOARD-FACT: the S3 HAS a temperature sensor where the C5 has
+                 // no TSENS — so on that board this row asserts the wrong
+                 // CAPABILITY, not just the wrong part name.
                  label: "DIE TEMP"; value: "none"; value-color: Theme.faint; }
 
     Text {

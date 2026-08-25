@@ -118,6 +118,57 @@
 // ============================================================================
 //
 // ============================================================================
+// 🟥 BOARD FACTS HARDCODED IN A SHARED SCENE — 12 SITES, GREP `BOARD-FACT:`
+// ============================================================================
+// **This tree is now the scene root for TWO boards.** The S3-CYD links all of
+// `ui/cyd/` as its real scene, not just as a reference — same 320x240 landscape
+// panel, different silicon. So "this board" in any string below means whichever
+// board is compiling, and twelve strings currently answer for only one of them.
+//
+// 🟥 THE WORST ONE IS A BUG THIS PORT INTRODUCED WHILE FIXING ITS TWIN.
+// `system.slint`'s `chip-text` defaulted to `"ESP32-C6 - 410x502"` on the C6 — a
+// component default Rust never overrides, so it would have rendered the C6's name
+// verbatim on a C5. That was called out in this port as *"both halves wrong,
+// stated with total confidence"*, and replaced with `"ESP32-C5 - 320x240"`.
+//
+// Which is now wrong on the S3, for EXACTLY the same reason. The fix reintroduced
+// the bug one board over — because the fix was a better literal, and the defect
+// was never the literal's value. It was that a shared scene names a board at all.
+//
+// So the rule, learned twice: **a scene compiled for more than one board must not
+// state a fact about silicon in a literal.** Those facts belong in `board::*` and
+// arrive as properties. Until they do, every site is marked inline with
+// `BOARD-FACT:` and listed here.
+//
+//   sensors.slint    CHIP / PSRAM / FLASH values, IMU + DIE TEMP "none", and the
+//                    "the C5 has no TSENS" caption.        ← 6 sites, all C5-only
+//                    ⚠️ DIE TEMP is the one most likely wrong on the S3: that
+//                    part HAS a temperature sensor, where the C5 has no TSENS at
+//                    all. So this row does not just name the wrong board, it
+//                    asserts the wrong capability.
+//   system.slint     `chip-text` default.                          ← see above
+//   power.slint      "MAINS POWERED - no cell", "no PWM".
+//   power_menu.slint "MAINS POWER - NO CELL", "tap the glass to wake".
+//   settings.slint   "plain GPIO, no PWM", "BOOT is unconfirmed".
+//   voice.slint      "no ES7210 - no codec - no I2S".
+//
+// ⚠️ ALSO PER-BOARD, though not a string: **the paint budget below is the C5's SPI
+// arithmetic** (61.4 ms at 20 MHz). A board that clocks its panel differently has
+// a different number, and the RULES that follow from it — no full-screen motion,
+// one contiguous band — would still hold but with different slack. Re-derive per
+// board before treating 117 rows as this tree's constant rather than the C5's.
+//
+// 🟢 What is genuinely SHARED and needs no per-board seam: everything geometric.
+// Both boards are 320x240 rectangular glass, so every inset, band, column, grid
+// and hit-rect in this file is a fact about the PANEL, not the part. That is the
+// parameterisation working — composition shared, `board::*` per-board.
+//
+// The property set proposed to close this is in PROPOSED-board-ui-consts.md §1d:
+// 3 strings + 2 bools, added to BOTH roots in one commit so parity holds at
+// 173 + 55.
+// ============================================================================
+//
+// ============================================================================
 // 🟥 DIVERGENCES FROM ui/slint/ — DELIBERATE. DO NOT "SYNC WITH C6".
 // ============================================================================
 // A future sweep that diffs `ui/cyd/*` against its `ui/slint/*` counterpart will

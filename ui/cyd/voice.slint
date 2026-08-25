@@ -65,6 +65,8 @@ export component VoicePage {
     Text {
         x: Geom.content-x; y: 124px; width: Geom.content-w;
         horizontal-alignment: center;
+        // BOARD-FACT: names the C5-CYD's absent parts. Some S3 CYDs carry an
+        // amp and codec, in which case this whole page is the wrong page.
         text: "no ES7210 \u{00b7} no codec \u{00b7} no I2S";
         color: Theme.dim;
         font-size: Geom.t-body;

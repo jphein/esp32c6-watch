@@ -55,6 +55,10 @@ import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
 // ============================================================================
 
 export component SystemPage {
+    // BOARD-FACT: 🟥 and the second time this line has been wrong. It said
+    // "ESP32-C6 - 410x502" before this port and now says the C5 — a component
+    // default Rust never overrides, in a scene two boards compile. The defect
+    // was never the value. See geom.slint's BOARD FACTS index.
     in property <string> chip-text: "ESP32-C5 \u{00b7} 320x240";
     in property <string> fw-text;      // "v0.12.1 · d8f228e" (version + git hash)
     in property <string> build-text;   // "White-Hot Wright" (realm-sigil forge name)

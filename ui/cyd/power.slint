@@ -176,6 +176,7 @@ export component PowerPage {
         y: 154px;
         width: Geom.content-w;
         horizontal-alignment: center;
+        // BOARD-FACT: assumes no PMU. True on the C5; verify per board.
         text: "MAINS POWERED \u{00b7} no cell, no current measurement";
         color: Theme.faint;
         font-size: Geom.t-caption;
@@ -202,6 +203,10 @@ export component PowerPage {
     Text {
         x: Geom.content-x;
         y: 222px;
+        // BOARD-FACT: 🟥 the S3 has LEDC, so "no PWM" is likely FALSE there —
+        // and this is not just a caption, the CONTROL above it is a toggle
+        // because of it. `CydBacklightToggle` should take a `dimmable` bool
+        // and present as a slider when true (proposal §1d).
         text: "no PWM \u{2014} tap the screen to relight";
         color: Theme.faint; font-size: Geom.t-caption; letter-spacing: 1px;
     }

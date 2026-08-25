@@ -134,6 +134,72 @@ rationale rather than a preference.
 
 ---
 
+## 1d. 🟥 THE SCENE NOW SERVES TWO BOARDS — 12 hardcoded board facts, and a
+## property set to retire them
+
+The S3-CYD links all of `ui/cyd/` as its real scene root. Same 320×240 landscape
+panel, different silicon. **Everything geometric in this tree is fine** — insets, bands,
+columns, grids, hit-rects are all facts about the PANEL, and both boards have the same
+panel. That is the parameterisation working exactly as intended.
+
+What is *not* fine is twelve strings that answer for the C5. Grep `BOARD-FACT:` — each site
+is marked inline and indexed at the top of `geom.slint`.
+
+### The one that proves the rule
+
+`system.slint`'s `chip-text` defaulted to `"ESP32-C6 · 410x502"` before this port — a
+component default Rust never overrides, so it would have rendered the C6's name verbatim on
+a C5. This port called that out as *"both halves wrong, stated with total confidence"* and
+replaced it with `"ESP32-C5 · 320x240"`.
+
+**Which is now wrong on the S3, for exactly the same reason.** The fix reintroduced the bug
+one board over — because the fix was a better literal, and the defect was never the literal's
+value. It was that a shared scene names a board at all.
+
+⚠️ The sharpest live case is `sensors.slint`'s **`DIE TEMP: none`**. The ESP32-S3 *has* a
+temperature sensor where the C5 has no `TSENS` at all — so on that board the row does not
+name the wrong part, it **denies a capability the board has**. A page built to be honest
+becomes the page that lies.
+
+### Proposed: 3 strings + 2 bools, both roots, one commit
+
+Following the codebase's own idiom (Rust formats, Slint displays). Added to **both**
+`ui/cyd/shell.slint` and `ui/slint/shell.slint` so parity holds — **173 properties + 55
+callbacks**, equal on both sides.
+
+| property | example (C5) | example (S3) | retires |
+|---|---|---|---|
+| `board-chip: string` | `"ESP32-C5"` | `"ESP32-S3"` | sensors CHIP, and `chip-text`'s default |
+| `board-mem: string` | `"8 MB PSRAM · 16 MB flash"` | per board | sensors PSRAM + FLASH |
+| `board-caps: string` | `"no IMU · no die-temp"` | `"no IMU · die-temp"` | sensors IMU + DIE TEMP + the caption |
+| `backlight-dimmable: bool` | `false` | likely `true` (LEDC) | the "no PWM" captions — **and the control** |
+| `has-boot-key: bool` | unconfirmed | likely `true` | settings BUTTONS gating (replaces the local literal) |
+
+Source them from `board::*` and the capability features (`has-imu`, `has-audio`, `has-pmu`),
+which is where they already live — `board::LCD_*` is the precedent, and the manifest's own
+rule already says to *"predicate on a declared capability, never on a chip name."*
+
+🟥 **`backlight-dimmable` is the one that changes a CONTROL, not a caption.** `ui/cyd/power.slint`
+and the Settings DISPLAY page render a TOGGLE because the C5 has no backlight PWM. The S3 has
+LEDC, so on that board the toggle is throwing away real hardware. This is exactly the
+"slider that degrades to toggle presentation when `!is_dimmable`" shape that was suggested
+when the toggle was first specified — and it was the right call to defer it then, because the
+tree served one board. It is the right call to build it now, because the tree serves two.
+`CydBacklightToggle` is already the single shared component, so it is one file.
+
+The two PMU captions (`"MAINS POWER · NO CELL"`) and `voice.slint`'s parts list are lower
+priority — both are *probably* true on an S3 CYD, but "probably" is what this section exists
+to stop. They can ride `has-pmu` / `has-audio` with no new properties at all, since a page
+that is unreachable on a board does not need to describe it.
+
+### Until it lands
+
+Every site is marked `BOARD-FACT:` inline with what specifically is wrong on a sibling board.
+That is not a fix, it is a tripwire — but it means the S3 owner finds all twelve with one
+grep instead of finding them on glass, one at a time, as bug reports.
+
+---
+
 ## 2. Pending — one per unlanded page
 
 | constant | C6 value | fate | owned by wave |
