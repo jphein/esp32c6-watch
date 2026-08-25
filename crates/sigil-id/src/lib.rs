@@ -251,8 +251,17 @@ pub fn sigil_for_mac(mac: [u8; 6]) -> Sigil {
 /// unrelated id-seeded roster name. Parity with the derivation is host-tested
 /// (`fleet_node_sigils`), so a row can never silently drift from its MAC.
 pub const FLEET_NODES: &[(u8, &str)] = &[
-    (122, "eldritch-lantern"), // 98:A3:16:A7:2F:E4
-    (236, "mythic-throne"),    // 98:A3:16:A5:A7:F8
+    (122, "eldritch-lantern"), // 98:A3:16:A7:2F:E4 (id DERIVED from MAC)
+    (236, "mythic-throne"),    // 98:A3:16:A5:A7:F8 (id DERIVED from MAC)
+    // NM-CYD-C5 (smol convergence target). ⚠️ id 176 is smol's ALLOCATION,
+    // provisioned via the config-id override (config id != 42 beats the fold) —
+    // the MAC fold derives 121, and both facts are host-tested below so neither
+    // can silently drift. The SIGIL is still MAC-derived like every device.
+    (176, "arcane-beacon"),    // 3C:DC:75:99:8D:18 (id ALLOCATED, not derived)
+    // ESP32-S3 CYD (emberburrito's board, smol target). Same allocated-id
+    // contract as the C5: smol allocated 162, the fold derives 150, sigil is
+    // MAC-derived. Both host-tested below.
+    (162, "eldritch-insignia"), // 14:C1:9F:D1:C8:10 (id ALLOCATED, not derived)
 ];
 
 /// The known fleet's sigil for a mesh node id ([`FLEET_NODES`]); `None` for
@@ -383,6 +392,20 @@ mod tests {
             assert_eq!(node_id_from_mac(mac), id);
             assert_eq!(sigil_for_mac(mac).as_str(), sigil);
             assert_eq!(sigil_for_node(id), Some(sigil));
+        }
+        // The CYD-C5's row has a DIFFERENT contract and its own assertions: the
+        // sigil is MAC-derived like everyone's, but the node id is smol's
+        // ALLOCATION (config-provisioned), NOT the fold. Both halves are pinned:
+        // if the fold ever changes, the 121 assertion catches it; if someone
+        // "fixes" the table to the derived id, the 176 assertion catches that.
+        for (mac, alloc_id, fold_id, sigil) in [
+            ([0x3Cu8, 0xDC, 0x75, 0x99, 0x8D, 0x18], 176u8, 121u8, "arcane-beacon"),
+            ([0x14u8, 0xC1, 0x9F, 0xD1, 0xC8, 0x10], 162u8, 150u8, "eldritch-insignia"),
+        ] {
+            assert_eq!(sigil_for_mac(mac).as_str(), sigil);
+            assert_eq!(node_id_from_mac(mac), fold_id, "the fold's answer (NOT the roster id)");
+            assert_eq!(sigil_for_node(alloc_id), Some(sigil));
+            assert_eq!(sigil_for_node(fold_id), None, "the derived id is deliberately absent");
         }
         // Off-fleet ids resolve to None (callers fall back to the MAC path).
         assert_eq!(sigil_for_node(42), None);
