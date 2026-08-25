@@ -57,10 +57,42 @@ the swipe threshold so a **cancelled hold can still classify as the edge-swipe**
 |---|---|---|---|
 | `SLIDER_BAND` | `330..=430` | ⏳ entirely off-panel; moves with the power page's brightness slider | power |
 | `HUB_SLIDER_BAND` | `170..=240` | ⏳ clips exactly at the bottom edge; moves with the Settings DISPLAY slider. ⚠️ `settings.slint:360-363`'s comment says `180..220` while the code says `170..240` — **they already disagree, and whoever moves it must reconcile both** | settings |
-| `SWITCHER_CARD_TOP` / `_H` / `_PITCH` | `110 / 84 / 96` | ⏳ 4 stacked 84 px cards need ~380 px of 240; the landscape answer is a horizontal strip, which changes the slot-inverse math | switcher |
-| `SWITCHER_CARDS` | `4` | **`3`** (`Geom.max-cards`) | switcher |
-| `SHADE_CARD_TOP` / `_H` / `_PITCH` | `76 / 84 / 92` | ⏳ same | shade |
-| `SHADE_CARDS` | `4` | **`3`** (`Geom.max-cards`) | shade |
+
+### Switcher and shade — DECIDED, and the stacks stayed VERTICAL on purpose
+
+The spec's landscape answer for both was a horizontal card strip. It is the
+better-looking answer and it is the wrong one, for a reason that only shows up on
+the Rust side.
+
+`switcher_slot()` / `shade_slot()` invert a swipe's `start_y` back to a slot index
+by arithmetic. Going horizontal does not RETUNE those functions, it REPLACES them
+— a new inverse over `start_x`, new constants, in the two functions whose failure
+mode is the nastiest in the port: **they return a wrong index rather than `None`**,
+so a kill-swipe kills the wrong session and a dismiss-swipe dismisses the wrong
+notification, with nothing to observe.
+
+Three cards fit the 200 px content band vertically with room to spare. So the
+change is **three constants in a function whose shape is already proven**, instead
+of a new function whose bugs are silent. Reviewability beats elegance on a
+two-sided constant.
+
+| constant | C6 | **CYD** | derivation |
+|---|---|---|---|
+| `SWITCHER_CARD_TOP` | `110` | **`40`** | first card sits 6 px under the 34 px title strip |
+| `SWITCHER_CARD_H` | `84` | **`52`** | floored by the 46x46 `AppIcon`, which cannot shrink — its 17 glyphs are hand-placed rects. Holds icon y3..49 + name y6..24 + PAUSED y30..44 |
+| `SWITCHER_CARD_PITCH` | `96` | **`58`** | 52 + 6 gap. `40 + 3*58 = 214`, last card ends y208 |
+| `SWITCHER_CARDS` | `4` | **`3`** | `Geom.max-cards` |
+| `SHADE_CARD_TOP` | `76` | **`38`** | |
+| `SHADE_CARD_H` | `84` | **`60`** | needs one more line than a switcher card (title + age + body) |
+| `SHADE_CARD_PITCH` | `92` | **`66`** | 60 + 6 gap. `38 + 3*66 = 236`, last card ends y230 |
+| `SHADE_CARDS` | `4` | **`3`** | `Geom.max-cards` |
+
+🟢 **The shade reduction is also a heap win on the page that needs one most.** With
+4 cards it is **264 items / 207 glyphs** — the largest single scene in the whole
+watch. Scene-item counts do not shrink with the panel (items are per-element, not
+per-pixel) and `PrepareScene`'s Vecs grow by DOUBLING, so the rungs that fail at
+54-66 kB free sit exactly where they did on the C6. 3 cards with a one-line body
+is fewer items on the one scene that was already at the top of the ladder.
 | `STORY_PAUSE_RECT` | `(22,198,378,438)` | ⏳ currently `(0,0,0,0)` on the C5, which **gates story playback off** — so nobody can ship a mis-mapped story page by accident. Duplicated in `main.rs`'s inline hit-test, whose own comment warns the geometry *"must match story.slint's READ-page tiles exactly"* | story |
 | `VISIBLE_CHAPTERS` | `5` | **`3`** (`Geom.max-chapters`) — ⚠️ it is also the **pager stride**, so NEWER/OLDER paging behaviour changes with it | story |
 

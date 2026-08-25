@@ -1,0 +1,142 @@
+import { Theme, Palette } from "../slint/theme.slint";
+import { OverlaySwallow } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// THEME PICKER — four LIVE mini watch-faces, 148x96 each.
+// ============================================================================
+//
+// THE TILE IS NOT A SWATCH, WHICH IS WHY SHRINKING IT IS A REDESIGN
+// -----------------------------------------------------------------------------
+// Each tile paints a miniature watchface in that scheme's OWN colours
+// (`Theme.palettes[idx].*`), so every tile shows its true look regardless of
+// which scheme is active. That is the whole value of the page — a colour chip
+// cannot tell you that Paper's `soft` reads on Paper's `bg`.
+//
+// So the tile has a content budget, not just a size. The C6 tile is 168x150 and
+// samples SIX tokens: bg, ink (time), soft (date), dim (steps), accent (dot +
+// gradient), panel/line/ink (footer strip). Two 150 px tiles per row need 300 px
+// of a 200 px content band, so something had to go.
+//
+// 2x2 of 148x96 fits the band EXACTLY (148+8+148 = 304; 96+8+96 = 200, y34..234)
+// and preserves five of the six samples. **The `dim` steps line is what was
+// dropped**, and it was chosen because it is the only sample whose token appears
+// in another sample's neighbourhood — `soft` (date) sits directly above it in the
+// same type ramp, so a scheme with unreadable `dim` is already visible as a
+// scheme with muddy `soft`. Losing `accent` or `panel` would have been losing
+// information the page cannot get back.
+//
+// The remaining five sit in a tile whose proportions are actually MORE honest
+// than the C6's: 148x96 is 1.54:1 against this panel's 1.33:1, where the C6 tile
+// was 1.12:1 against a 0.82:1 panel. The mini-face now looks like a landscape
+// watch, which is what it is a picture of.
+//
+// THE POWER CAPTION IS DELETED, NOT REWRITTEN
+// -----------------------------------------------------------------------------
+// The C6 footer reads *"Dark schemes save power on AMOLED"*. On this board that
+// is FALSE: the ST7789 is a backlit LCD, the backlight draws the same current
+// whatever the pixels say, and a true-black scheme saves exactly nothing.
+//
+// It is deleted rather than corrected because the corrected version — "every
+// scheme costs the same here" — is a true statement nobody needs, and there is
+// no 20 px band left in a 240 px panel to spend on trivia. A caption has to earn
+// its height. This one earned it by being actionable advice; without the AMOLED
+// it is neither.
+// ============================================================================
+
+// One scheme swatch: a LIVE mini watch-face in that scheme's own colours. The
+// active tile carries an accent ring + check.
+component SchemeTile {
+    in property <int> idx;
+    in property <string> name;
+    callback pick(int);
+
+    // This tile's palette (its own colours), and whether it is the active scheme.
+    property <Palette> q: Theme.palettes[root.idx];
+    property <bool> active: Theme.scheme == root.idx;
+
+    width: 148px;
+    height: 96px;
+
+    Rectangle {
+        width: 100%; height: 100%;
+        border-radius: 14px;
+        background: q.bg;
+        // Pressed feedback: the ring lights in the TILE'S OWN accent on
+        // finger-down (one-frame swap) — then the instant whole-watch theme
+        // switch on release is the big confirmation.
+        border-width: root.active || ta.pressed ? 2px : 1px;
+        border-color: ta.pressed ? q.accent
+            : (root.active ? Theme.accent : Theme.line);
+        clip: true;
+
+        // accent dot (top-right)
+        Rectangle {
+            x: parent.width - self.width - 12px;
+            y: 10px;
+            width: 14px; height: 14px; border-radius: 7px;
+            background: q.accent;
+        }
+        // sample time / date — the type ramp, in this scheme's ink and soft.
+        Text { x: 12px; y: 6px;  text: "10:42"; color: q.ink; font-size: 30px; font-weight: 700; }
+        Text { x: 12px; y: 44px; text: "TUE 21 JUL"; color: q.soft; font-size: Geom.t-label; letter-spacing: 1px; }
+        // accent gradient bar (the minute-progress / brand cue)
+        Rectangle {
+            x: 12px; y: 62px;
+            width: 80px; height: 6px; border-radius: 3px;
+            background: @linear-gradient(90deg, q.accent2 0%, q.accent 100%);
+        }
+
+        // name footer strip (drawn in this scheme's panel/ink/line)
+        Rectangle {
+            x: 0; y: parent.height - 24px;
+            width: parent.width; height: 24px;
+            background: q.panel;
+            Rectangle { x: 0; y: 0; width: parent.width; height: 1px; background: q.line; }
+            Text {
+                x: 10px; y: 0;
+                height: parent.height;
+                vertical-alignment: center;
+                text: root.name; color: q.ink;
+                font-size: Geom.t-label; font-weight: 600; letter-spacing: 1px;
+            }
+            // `if`-gated, matching the C6: the check exists on exactly one of the
+            // four tiles at a time, so three of the four never instantiate it.
+            if root.active: Text {
+                x: parent.width - self.width - 10px;
+                y: 0;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "\u{2713}"; color: Theme.accent; font-size: 16px; font-weight: 700;
+            }
+        }
+
+        ta := TouchArea { clicked => { root.pick(root.idx); } }
+    }
+}
+
+export component ThemeOverlay {
+    callback close();
+    callback changed(int); // new scheme index → Rust persists to flash
+
+    // Opaque backdrop in the ACTIVE scheme, so opening the picker already shows
+    // the current theme's ground behind the tiles.
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "THEME"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    // 2x2 grid filling the content band exactly. Tapping a tile sets
+    // `Theme.scheme` immediately (instant whole-watch preview) AND emits
+    // `changed(idx)` so Rust persists the choice to flash.
+    SchemeTile { x: Geom.content-x; y: Geom.content-y;        idx: 0; name: "MIDNIGHT";
+        pick(i) => { Theme.scheme = i; root.changed(i); } }
+    SchemeTile { x: Geom.col2-x;    y: Geom.content-y;        idx: 1; name: "PAPER";
+        pick(i) => { Theme.scheme = i; root.changed(i); } }
+    SchemeTile { x: Geom.content-x; y: Geom.content-y + 104px; idx: 2; name: "AMBER";
+        pick(i) => { Theme.scheme = i; root.changed(i); } }
+    SchemeTile { x: Geom.col2-x;    y: Geom.content-y + 104px; idx: 3; name: "VIOLET";
+        pick(i) => { Theme.scheme = i; root.changed(i); } }
+}

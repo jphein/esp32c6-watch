@@ -1,0 +1,155 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PressTile } from "../slint/controls.slint";
+import { LauncherTile, AppIcon } from "../slint/launcher.slint";
+import { Geom } from "geom.slint";
+import { CydEyebrow, CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// APP SWITCHER (#31) — three cards, and the stack DELIBERATELY stays vertical.
+// ============================================================================
+//
+// WHY NOT THE HORIZONTAL STRIP THE SPEC RECOMMENDED
+// -----------------------------------------------------------------------------
+// The layout spec's landscape answer for this page was a horizontal card strip.
+// It is the better-looking answer and it is the wrong one, for a reason that
+// only shows up on the Rust side.
+//
+// `slint_shell::switcher_slot()` maps a swipe's `start_y` back to a slot index
+// by arithmetic over `SWITCHER_CARD_TOP / _H / _PITCH`. Going horizontal does
+// not RETUNE that function, it REPLACES it — a new inverse over `start_x`, with
+// a new set of constants, in a function whose failure mode is the nastiest in
+// the whole port: the slot inverse returns a **wrong index rather than `None`**
+// at the wrong geometry. A kill-swipe then kills the wrong session, and there is
+// no error to observe.
+//
+// Three 52 px cards at a 58 px pitch fit the 200 px content band with room to
+// spare (40 + 3*52 + 2*6 = 208, ending at y208). So the vertical stack survives
+// on this panel — which means the Rust change is THREE CONSTANTS in a function
+// whose shape is already proven, instead of a new function whose bugs are
+// silent. Reviewability beats elegance on a two-sided constant.
+//
+//   SWITCHER_CARD_TOP    110 -> 40
+//   SWITCHER_CARD_H       84 -> 52
+//   SWITCHER_CARD_PITCH   96 -> 58
+//   SWITCHER_CARDS         4 -> 3   (Geom.max-cards)
+//
+// ⚠️ These must land in the SAME COMMIT as this file. See
+// PROPOSED-board-ui-consts.md.
+//
+// Interactions, unchanged, routed in `slint_shell::handle_touch`:
+//   tap a card         → resume (fb apps re-alloc the fb, KEEP their state)
+//   swipe UP on a card → kill (state dropped; next open runs setup())
+//   swipe Right/Down / chevron → close
+//
+// ROM note, carried over because it still applies: an `if` here generates a
+// dynamically-instantiated inner component (~3-6 KB each). The overlay is
+// already behind `if switcher-open` in shell.slint, so slots gate with
+// `visible:` and the footer is one ternary string.
+//
+// EYEBROW AND TITLE SHARE ONE STRIP
+// -----------------------------------------------------------------------------
+// The C6 stacks them (eyebrow y36, title y56) for 54 px. Here the eyebrow is
+// left-anchored past the chevron and the title stays centred in the same 24 px
+// strip — the launcher does the same, so the two overlays that a bottom-edge
+// gesture raises are consistent with each other.
+// ============================================================================
+
+export component SwitcherOverlay {
+    // Fixed slots, padded with present:false (launcher-grid idiom).
+    in property <[LauncherTile]> tiles: [];
+    // Suspended-session count (may exceed the visible slots).
+    in property <int> count: 0;
+    callback resume(int); // registry idx → same launch path as a tile tap
+    callback close();
+
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydBackChevron { clicked => { root.close(); } }
+    CydEyebrow {
+        x: 52px;
+        y: 12px;
+        text: "SWITCHER";
+        tint: Theme.faint;
+    }
+    CydPageTitle { title: "SESSIONS"; }
+
+    // Session cards — fixed slots, y = 40 + i*58, h 52.
+    //
+    // 52 px is the tightest a card can be and still hold the 46x46 AppIcon plus
+    // two text lines: icon y3..49, name y6..24, PAUSED y30..44. The icon is what
+    // sets the floor — its seventeen glyphs are hand-placed rectangles at a fixed
+    // size, so it cannot be shrunk without redrawing all of them.
+    for i in 3: PressTile {
+        visible: root.tiles[i].present;
+        x: Geom.content-x;
+        y: 40px + i * 58px;
+        width: Geom.content-w;
+        height: 52px;
+        ignite: root.tiles[i].accent;
+        clicked => { root.resume(root.tiles[i].idx); }
+        AppIcon {
+            x: 4px;
+            y: 3px;
+            id: root.tiles[i].icon-id;
+            tint: root.tiles[i].accent;
+        }
+        Text {
+            x: 60px;
+            y: 6px;
+            width: parent.width - 76px;
+            overflow: elide;
+            text: root.tiles[i].name;
+            color: Theme.ink;
+            font-size: Geom.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 60px;
+            y: 28px;
+            text: "PAUSED";
+            color: Theme.faint;
+            font-size: Geom.t-caption;
+            letter-spacing: 2px;
+        }
+    }
+
+    // Empty state: honest about what earns a card. `visible:`-gated per the ROM
+    // note; centred in the card void with fixed-width boxes.
+    Text {
+        visible: root.count == 0;
+        x: Geom.content-x;
+        y: 100px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "Nothing suspended";
+        color: Theme.dim;
+        font-size: Geom.t-body;
+    }
+    Text {
+        visible: root.count == 0;
+        x: Geom.content-x;
+        y: 128px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "leave a game with the side button";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+    }
+
+    // Footer: overflow honesty or the gesture legend. ONE Text — the string is
+    // the only thing that changes ("" when empty), which is the whole point of
+    // the ternary idiom. Bottom-anchored off `root.height`.
+    Text {
+        x: Geom.content-x;
+        y: root.height - Geom.safe-bottom - 18px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: root.count > Geom.max-cards
+            ? "+\{root.count - Geom.max-cards} more"
+            : (root.count > 0 ? "TAP RESUME \u{00b7} SWIPE UP KILL" : "");
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}
