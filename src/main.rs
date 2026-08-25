@@ -1066,7 +1066,12 @@ async fn main(_spawner: Spawner) -> ! {
     // shutdown otherwise — power + pop discipline (#23).
     let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
 
-    // === I2C bus (AXP2101 + FT3168 + PCF85063 + QMI8658) ===
+    // === I2C bus ===
+    // C6: AXP2101 + FT3168 + PCF85063 + QMI8658 on SDA8/SCL7 at 400 kHz.
+    // S3 CYD: ONLY the FT6336U touch, on SDA16/SCL15 at 100 kHz (the board
+    // facts' ESPHome-proven rate). C5: compiles the C6 pin arm — its I2C
+    // talks to nothing (fake-bus story, morpheus's lane owns the real one).
+    #[cfg(not(feature = "board-esp32s3-cyd"))]
     let i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(board::I2C_FREQ_HZ / 1000)),
@@ -1074,6 +1079,14 @@ async fn main(_spawner: Spawner) -> ! {
     .expect("I2C failed")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO7);
+    #[cfg(feature = "board-esp32s3-cyd")]
+    let i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_khz(board::I2C_FREQ_HZ / 1000)),
+    )
+    .expect("I2C failed")
+    .with_sda(peripherals.GPIO16)
+    .with_scl(peripherals.GPIO15);
     let i2c_ref = RefCell::new(i2c);
 
     // === Power (read-mostly: rails left as the bootloader configured them) ===
@@ -1180,7 +1193,7 @@ async fn main(_spawner: Spawner) -> ! {
     }
 
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
-    #[cfg(feature = "has-cap-touch")]
+    #[cfg(all(feature = "has-cap-touch", not(feature = "board-esp32s3-cyd")))]
     let (mut touch_int, mut touch) = {
         let mut touch_rst =
             Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
@@ -1192,6 +1205,18 @@ async fn main(_spawner: Spawner) -> ! {
         delay.delay_millis(10);
         touch_rst.set_high();
         delay.delay_millis(50);
+        (touch_int, Ft3168Touch::new(RefCellDevice::new(&i2c_ref)))
+    };
+    // S3 CYD (FT6336U): INT on GPIO17; the touch RESET line (GPIO18) is
+    // NEVER configured — tested-beats-derived board fact (configuring it
+    // breaks the part; hardware brings it out of reset). Same driver: the
+    // FocalTech register map and 0x38 address are shared with the FT3168.
+    #[cfg(all(feature = "has-cap-touch", feature = "board-esp32s3-cyd"))]
+    let (mut touch_int, mut touch) = {
+        let touch_int = Input::new(
+            peripherals.GPIO17,
+            InputConfig::default().with_pull(Pull::Up),
+        );
         (touch_int, Ft3168Touch::new(RefCellDevice::new(&i2c_ref)))
     };
     // No cap-touch on this board (the CYD's XPT2046 lands with its own driver

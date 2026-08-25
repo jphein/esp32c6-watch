@@ -102,3 +102,12 @@ pub const HAS_BOOT_KEY: bool = true;
 // I2C (FT6336U); nothing selects the SPI touch lane and touch_cs is None.
 pub const SPI_DISPLAY_HZ: u32 = 40_000_000;
 pub const SPI_TOUCH_HZ: u32 = 2_500_000;
+
+// Touch coordinate transform (peripherals/touch.rs applies these after the
+// raw FocalTech read; identity on boards whose touch matches the panel).
+/// board_es3c28p.rs TOUCH_SWAP_XY/INVERT_* — tested-beats-derived values
+/// from the board class; the four-corner calibration on THIS unit may
+/// refine them (s3-cyd bench step).
+pub const TOUCH_SWAP_XY: bool = true;
+pub const TOUCH_INVERT_X: bool = false;
+pub const TOUCH_INVERT_Y: bool = true;

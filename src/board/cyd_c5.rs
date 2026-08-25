@@ -111,3 +111,11 @@ pub const HAS_BOOT_KEY: bool = false;
 // 2.5 MHz on the same bus with per-select retuning.
 pub const SPI_DISPLAY_HZ: u32 = 20_000_000;
 pub const SPI_TOUCH_HZ: u32 = 2_500_000;
+
+// Touch coordinate transform (peripherals/touch.rs applies these after the
+// raw FocalTech read; identity on boards whose touch matches the panel).
+/// UNUSED until morpheus's XPT2046 driver merges (NullTouch today); his
+/// driver carries its own measured calibration transform.
+pub const TOUCH_SWAP_XY: bool = false;
+pub const TOUCH_INVERT_X: bool = false;
+pub const TOUCH_INVERT_Y: bool = false;

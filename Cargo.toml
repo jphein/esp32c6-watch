@@ -70,6 +70,9 @@ board-esp32s3-cyd = [
     "esp-hal/esp32s3", "esp-rtos/esp32s3", "esp-radio/esp32s3",
     "esp-storage/esp32s3", "esp-bootloader-esp-idf/esp32s3",
     "esp-println/esp32s3", "esp-backtrace/esp32s3",
+    # FT6336U: same FocalTech register map + 0x38 address the C6 driver
+    # speaks (board-class-verified); the coordinate transform is board::*.
+    "has-cap-touch",
 ]
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.

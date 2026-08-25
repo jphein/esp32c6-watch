@@ -1,5 +1,6 @@
-// FT3168 Touch Controller driver
-// Reference: Arduino_FT3x68.h - I2C address 0x38
+// FocalTech capacitive touch driver — FT3168 (C6 watch) and FT6336U (S3 CYD)
+// speak the same register map at the same 0x38 address; the struct keeps its
+// original FT3168 name. Reference: Arduino_FT3x68.h.
 
 use embedded_hal::i2c::I2c;
 
@@ -104,8 +105,23 @@ impl<I: I2c> Ft3168Touch<I> {
         let y_h = self.read_reg(REG_Y1_H)? as u16;
         let y_l = self.read_reg(REG_Y1_L)? as u16;
 
-        let x = ((x_h & 0x0F) << 8) | x_l;
-        let y = ((y_h & 0x0F) << 8) | y_l;
+        let mut x = ((x_h & 0x0F) << 8) | x_l;
+        let mut y = ((y_h & 0x0F) << 8) | y_l;
+
+        // Board transform (identity on the C6): FocalTech parts report in the
+        // PANEL-NATIVE frame, which is not always the frame the scene draws
+        // in — the S3 CYD drives a 240x320-native panel in 320x240 landscape,
+        // so raw axes swap and the (post-swap) vertical inverts. The consts
+        // are board facts (tested-beats-derived; see each board module).
+        if crate::board::TOUCH_SWAP_XY {
+            core::mem::swap(&mut x, &mut y);
+        }
+        if crate::board::TOUCH_INVERT_X {
+            x = (crate::board::LCD_WIDTH - 1).saturating_sub(x);
+        }
+        if crate::board::TOUCH_INVERT_Y {
+            y = (crate::board::LCD_HEIGHT - 1).saturating_sub(y);
+        }
 
         Ok(Some(TouchPoint {
             x,

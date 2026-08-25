@@ -68,3 +68,10 @@ pub const MEM_SUMMARY: &str = "no PSRAM \u{00b7} 16 MB flash";
 pub const BACKLIGHT_DIMMABLE: bool = true;
 /// BOOT is a first-class input (#59 button map).
 pub const HAS_BOOT_KEY: bool = true;
+
+// Touch coordinate transform (peripherals/touch.rs applies these after the
+// raw FocalTech read; identity on boards whose touch matches the panel).
+/// the FT3168 reports panel-native portrait coordinates directly.
+pub const TOUCH_SWAP_XY: bool = false;
+pub const TOUCH_INVERT_X: bool = false;
+pub const TOUCH_INVERT_Y: bool = false;
