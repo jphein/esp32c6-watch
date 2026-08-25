@@ -408,6 +408,8 @@ export component WatchShell inherits Window {
     callback notif-clear();
 
     in-out property <float> brightness: 0.8;
+    // Rust-pushed backlight on-state (CydBacklightToggle isel workaround).
+    in property <bool> backlight-on: true;
 
     // ==================== takeover gate (#75) ====================
     // Carried over verbatim from the C6 root, and it matters MORE here, not
@@ -526,6 +528,7 @@ export component WatchShell inherits Window {
             left-hours: root.left-hours;
             lp-core-text: root.lp-core-text;
             brightness <=> root.brightness;
+            backlight-on: root.backlight-on;
             brightness-changed(f) => { root.brightness-changed(f); }
             reboot-tap => { root.reboot-tap(); }
         }
@@ -931,6 +934,7 @@ export component WatchShell inherits Window {
         touch-sound: root.touch-sound-on;
         gain-db: root.mic-gain-db;
         brightness <=> root.brightness;
+        backlight-on: root.backlight-on;
         ble-on: root.ble-on;
         mesh-on: root.mesh-enabled;
         wifi-intent: root.wifi-intent;

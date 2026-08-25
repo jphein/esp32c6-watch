@@ -348,7 +348,15 @@ export component CydBacklightToggle {
     in-out property <float> value: 1.0;
     in property <string> label: "BACKLIGHT";
     callback changed(float);
-    property <bool> on: root.value > 0.5;
+    // PUSHED FROM RUST, deliberately NOT derived from `value` here: any
+    // float arithmetic in this component's property bindings crashes the
+    // Xtensa LLVM isel (PCREL_WRAPPER float constpool — bisected 2026-08-25,
+    // tools/build-s3.sh has the full ladder; `value > 0.5` and an
+    // int-mediated rewrite both crash, float-free bindings link). Rust
+    // computes the same predicate in set_brightness_from_raw and pushes it
+    // through root `backlight-on`. Costs one frame of latency between a tap
+    // and the label flipping; buys the S3 the entire landscape scene.
+    in property <bool> on;
     height: 44px;
 
     ta := TouchArea {

@@ -258,6 +258,8 @@ export component SettingsHub {
 
     // --- DISPLAY ---
     in-out property <float> brightness;
+    // See CydBacklightToggle: the on-state is Rust-pushed (isel workaround).
+    in property <bool> backlight-on;
     callback brightness-changed(float);
 
     // --- RADIOS (persisted state in, existing tap semantics out) ---
@@ -324,6 +326,7 @@ export component SettingsHub {
             CydBacklightToggle {
                 x: 0; y: 14px; width: parent.width;
                 label: "BACKLIGHT";
+                on: root.backlight-on;
                 value <=> root.brightness;
                 changed(f) => { root.brightness-changed(f); }
             }

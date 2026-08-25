@@ -47,9 +47,9 @@ if [ -f .cargo/config.toml ]; then
     rsync -az .cargo/config.toml familiar:fambuild/esp32c6-watch/.cargo/config.toml >&2
 fi
 
+# The ui/cyd scene builds since the CydBacklightToggle workaround (the
+# Rust-pushed on-state) landed — the LINK-ONLY C6-scene fallback is retired.
 ssh familiar "cd ~/fambuild/esp32c6-watch \
-  && mv ui/cyd/shell.slint ui/cyd/shell.slint.HELD \
-  && trap 'mv ui/cyd/shell.slint.HELD ui/cyd/shell.slint' EXIT \
   && export PATH=\$HOME/.cargo/bin:\$PATH && source ~/export-esp.sh \
   && export RUSTFLAGS='' CARGO_PROFILE_RELEASE_OPT_LEVEL=2 WATCH_BUILD_HASH='$HASH' \
   && cargo +esp build --release --no-default-features --features board-esp32s3-cyd \

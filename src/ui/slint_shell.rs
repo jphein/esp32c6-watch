@@ -1170,8 +1170,14 @@ impl ShellUi {
 
     pub fn set_brightness_from_raw(&self, raw: u8) {
         let Some(ui) = self.ui.as_ref() else { return; };
-        ui.set_brightness((raw.saturating_sub(BRIGHTNESS_MIN)) as f32
-            / (0xFF - BRIGHTNESS_MIN) as f32);
+        let v = (raw.saturating_sub(BRIGHTNESS_MIN)) as f32
+            / (0xFF - BRIGHTNESS_MIN) as f32;
+        ui.set_brightness(v);
+        // The CYD's backlight toggle shows this bool instead of deriving it
+        // in the scene: any float arithmetic in that component's bindings
+        // crashes the Xtensa isel (tools/build-s3.sh, bisected 2026-08-25).
+        // Same predicate the scene used; dormant on the C6 root.
+        ui.set_backlight_on(v > 0.5);
     }
 
     pub fn set_aod(&self, on: bool) {

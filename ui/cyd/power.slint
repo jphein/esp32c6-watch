@@ -141,6 +141,8 @@ export component PowerPage {
     in property <int> left-hours: 999;
     in property <string> lp-core-text: "--";
     in-out property <float> brightness;
+    // See CydBacklightToggle: the on-state is Rust-pushed (isel workaround).
+    in property <bool> backlight-on;
     callback brightness-changed(float);
     callback reboot-tap();
 
@@ -189,6 +191,7 @@ export component PowerPage {
         y: 178px;
         width: 210px;
         label: "BACKLIGHT";
+        on: root.backlight-on;
         value <=> root.brightness;
         changed(f) => { root.brightness-changed(f); }
     }
