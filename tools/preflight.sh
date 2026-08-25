@@ -42,6 +42,23 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 2
 
+# .cargo/config.toml is GITIGNORED (it holds WiFi/MQTT credentials), so every
+# `git worktree add` checkout silently lacks it — and without it cargo builds
+# for the HOST, which fails as 9 misleading esp-sync link errors AND silently
+# adds ~21 host-only dependencies to Cargo.lock (a worktree agent nearly
+# committed that poisoned lockfile as part of a "fix", 2026-08-25). Fail
+# loudly here instead of letting either happen. fambuild is exempt only from
+# the target half — the [env] credentials still come from this file — so the
+# guard applies to both builders.
+if [[ ! -f .cargo/config.toml ]]; then
+  echo "preflight: no .cargo/config.toml in this checkout — it is gitignored and" >&2
+  echo "does NOT follow git worktrees/clones. Without it cargo targets the HOST" >&2
+  echo "(bogus esp-sync errors + host-only Cargo.lock poisoning). Copy it from" >&2
+  echo "the main checkout (~/Projects/esp32c6-watch/.cargo/config.toml) or run" >&2
+  echo "from the main checkout. NEVER commit it (credentials)." >&2
+  exit 2
+fi
+
 BUILDER=cargo
 SKIP_TESTS=0
 TESTS_ONLY=0
