@@ -47,9 +47,49 @@ OTA_URL="$(cfg_get OTA_URL)"
 BROKER_HOST="${MQTT_BROKER%%:*}"
 BROKER_PORT="${MQTT_BROKER##*:}"
 
-OTA_DEST="ubox0:/home/jp/watch-ota/watch.bin"
+# --- board table (#cyd-c5) ---------------------------------------------------
+# Every value below was a HARDCODED C6 assumption before a second board existed.
+# They are grouped here so adding a third board is one block, not a grep.
+#
+# ANNOUNCE_VIA: the host the retained publish is issued FROM. The C6's VLAN-11
+# broker leg needs the ubox0 hop — publishing from katana (VLAN-6) connects and
+# then stalls mid-handshake ("Keepalive exceeded"), an asymmetric-routing quirk.
+# The CYD's VLAN-8 leg does NOT need it (verified: a direct publish from katana
+# to that leg runs fine). Empty = publish locally. Addresses come from
+# .cargo/config.toml at runtime, never from this committed file.
+BOARD="waveshare-c6"
 
-# --- args: --announce-only, --clear, --target <sigil> ------------------------
+board_setup() {
+    case "$BOARD" in
+        waveshare-c6)
+            BUILD_FLAGS=""
+            ESP_CHIP="esp32c6"
+            OTA_DEST="ubox0:/home/jp/watch-ota/watch.bin"
+            ANNOUNCE_VIA="ubox0"
+            ;;
+        cyd-c5)
+            BUILD_FLAGS="--no-default-features --features board-cyd-c5"
+            ESP_CHIP="esp32c5"
+            # Distinct filename on purpose: the C3 fleet and the watch fleet
+            # share this rangeserver, and a collision here is a cross-fleet
+            # brick, not a mix-up.
+            OTA_DEST="disks:~/smol-ota/ota/watch-cyd-c5.bin"
+            ANNOUNCE_VIA=""
+            ;;
+        *) echo "ota_push: unknown --board '$BOARD' (waveshare-c6 | cyd-c5)" >&2; exit 2 ;;
+    esac
+}
+
+# Publish helper — routes through ANNOUNCE_VIA when the leg needs a hop.
+announce_pub() {
+    if [ -n "$ANNOUNCE_VIA" ]; then
+        ssh "$ANNOUNCE_VIA" "$1"
+    else
+        eval "$1"
+    fi
+}
+
+# --- args: --announce-only, --clear, --target <sigil>, --board <name> --------
 ANNOUNCE_ONLY=0
 CLEAR=0
 TARGET=""
@@ -61,6 +101,10 @@ while [ $# -gt 0 ]; do
             [ -n "$FEATURES" ] || { echo "ota_push: --features needs a value" >&2; exit 2; }
             shift ;;
         --clear) CLEAR=1 ;;
+        --board)
+            BOARD="${2:-}"
+            [ -n "$BOARD" ] || { echo "ota_push: --board needs a name (waveshare-c6 | cyd-c5)" >&2; exit 2; }
+            shift ;;
         --target)
             TARGET="${2:-}"
             [ -n "$TARGET" ] || { echo "ota_push: --target needs a sigil (e.g. eldritch-lantern)" >&2; exit 2; }
@@ -69,6 +113,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+board_setup
+echo "ota_push: board=$BOARD chip=$ESP_CHIP dest=$OTA_DEST"
 
 # Fleet topic by default; per-watch topic (watch/<sigil>/ota, both watches'
 # firmware subscribes its own alongside the fleet topic) when targeted. The
@@ -84,7 +131,7 @@ if [ "$CLEAR" = 1 ]; then
     # Empty retained publish deletes the retained announce; the firmware's
     # handle_announce treats an empty payload as a retained-clear, not an
     # announce. (Same ubox0 publish path as below — see that comment.)
-    ssh ubox0 "mosquitto_pub -h '$BROKER_HOST' -p '$BROKER_PORT' \
+    announce_pub "mosquitto_pub -h '$BROKER_HOST' -p '$BROKER_PORT' \
         ${MQTT_USER:+-u '$MQTT_USER'} ${MQTT_PASS:+-P '$MQTT_PASS'} \
         -r -n -t '$ANNOUNCE_TOPIC'"
     echo "ota_push: retained announce CLEARED on $ANNOUNCE_TOPIC"
@@ -118,12 +165,12 @@ else
     # Story app away mid-use.
     if [ -n "$FEATURES" ]; then
         echo "ota_push: building WITH --features $FEATURES"
-        (cd "$ROOT" && fambuild build --release --bin esp32c6-watch --features "$FEATURES")
+        (cd "$ROOT" && fambuild build --release --bin esp32c6-watch $BUILD_FLAGS --features "$FEATURES")
     else
         echo "ota_push: building with DEFAULT features (no --features given)"
         echo "ota_push: NOTE if the target watch runs an opt-in feature (story/tts),"
         echo "ota_push:      this push will REMOVE it. Pass --features to keep it."
-        (cd "$ROOT" && fambuild build --release --bin esp32c6-watch)
+        (cd "$ROOT" && fambuild build --release --bin esp32c6-watch $BUILD_FLAGS)
     fi
 
     # 3. ELF -> app image. fambuild keeps target/ on familiar, so fetch the ELF.
@@ -134,7 +181,7 @@ else
     scp -q "familiar:$ELF_REMOTE" "$TMP/esp32c6-watch.elf"
     # espflash may be absent from a non-login shell's PATH; fall back to cargo bin.
     ESPFLASH="$(command -v espflash || echo "$HOME/.cargo/bin/espflash")"
-    "$ESPFLASH" save-image --chip esp32c6 --flash-size 16mb --partition-table "$ROOT/partitions.csv" "$TMP/esp32c6-watch.elf" "$TMP/watch.bin"
+    "$ESPFLASH" save-image --chip "$ESP_CHIP" --flash-size 16mb --partition-table "$ROOT/partitions.csv" "$TMP/esp32c6-watch.elf" "$TMP/watch.bin"
     # Slot-fit gate: the A/B app slots are 4,128,768 B; refuse early with a
     # clear message instead of espflash's mid-flow error (and keep margin).
     BIN_SIZE=$(stat -c%s "$TMP/watch.bin")
@@ -182,7 +229,7 @@ fi
 #    publishing from katana (VLAN-6) connects but stalls mid-handshake
 #    ("Keepalive exceeded") — an asymmetric-routing quirk on the katana→VLAN-11
 #    path. ubox0 already hosts the image, so the announce rides the same ssh.
-ssh ubox0 "mosquitto_pub -h '$BROKER_HOST' -p '$BROKER_PORT' \
+announce_pub "mosquitto_pub -h '$BROKER_HOST' -p '$BROKER_PORT' \
     ${MQTT_USER:+-u '$MQTT_USER'} ${MQTT_PASS:+-P '$MQTT_PASS'} \
     -r -t '$ANNOUNCE_TOPIC' -m 'OTA|$EPOCH|$OTA_URL'"
 echo "ota_push: retained announce published: OTA|$EPOCH|$OTA_URL"
