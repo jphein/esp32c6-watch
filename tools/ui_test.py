@@ -276,6 +276,8 @@ class Watch:
             k, v = f.split("=", 1)
             if k == "app":
                 out[k] = v
+            elif k == "ip":
+                out[k] = v  # dotted quad or "none" — never an int
             elif k == "story":
                 # page/rows/loading/playing (firmware >= 2026-08-25); keep the
                 # raw string too so old scripts that never knew it stay happy.

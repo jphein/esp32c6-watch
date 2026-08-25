@@ -78,12 +78,28 @@ const FALLBACK_IP: Ipv4Address = Ipv4Address::new(10, 0, 6, 129);
 /// and irrelevant against a 60-second PCM window, and it means the address is not
 /// frozen into the firmware image.
 pub async fn resolve(stack: Stack<'static>) -> Ipv4Address {
-    match stack.dns_query(DAEMON_HOST, DnsQueryType::A).await {
-        Ok(addrs) => match addrs.first() {
+    // BOUNDED (2026-08-25, the #75 wedge candidate that finally reproduced):
+    // `dns_query` on a HALF-UP interface — associated, lease flapping mid-roam
+    // — can await indefinitely, and this function runs in the MAIN LOOP. An
+    // unbounded await here IS the frozen-watch symptom: UI dead, [LOOP]
+    // heartbeat stopped, touch queuing into nothing. Reproduced
+    // deterministically on mythic-throne: open Story during a roam flap and
+    // the [STORY-TICK] trace stops at this line, forever. Every OTHER await
+    // in this module already had a deadline (CONNECT_TIMEOUT / HEAD_TIMEOUT /
+    // BODY_READ_TIMEOUT); the resolver was the one naked one. 5 s, then the
+    // fallback IP — the fetch then fails fast on its own socket timeout and
+    // the UI stays alive.
+    match with_timeout(
+        Duration::from_secs(5),
+        stack.dns_query(DAEMON_HOST, DnsQueryType::A),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => match addrs.first() {
             Some(embassy_net::IpAddress::Ipv4(v4)) => *v4,
             _ => FALLBACK_IP,
         },
-        Err(_) => FALLBACK_IP,
+        _ => FALLBACK_IP,
     }
 }
 

@@ -135,6 +135,10 @@ pub struct UiState {
     /// playing) — the automator cannot see the glass, and a chapter tap that
     /// does nothing needs these to say whether the LIST ever had rows.
     pub story: (i32, usize, bool, bool),
+    /// IPv4, if the stack holds one. `wifi=1 ip=none` is the
+    /// associated-but-no-lease state (#89) that the bare `wifi` flag — and
+    /// the '[WIFI] connected' log line — cannot distinguish.
+    pub ip: Option<[u8; 4]>,
 }
 
 impl UiState {
@@ -148,6 +152,7 @@ impl UiState {
             mesh_peers: 0,
             modal: 0,
             story: (0, 0, false, false),
+            ip: None,
         }
     }
 }
@@ -414,7 +419,7 @@ fn handle_line(bytes: &[u8]) {
         "state" => {
             let s = critical_section::with(|cs| *UI_STATE.borrow(cs).borrow());
             println!(
-                "[DBGCON] state app={:?} page={} launcher={} screen={} wifi={} ble={} mesh={} modal={} story={}/{}/{}/{}",
+                "[DBGCON] state app={:?} page={} launcher={} screen={} wifi={} ble={} mesh={} modal={} story={}/{}/{}/{} ip={}",
                 s.app,
                 s.page,
                 (s.app == AppState::Launcher) as u8,
@@ -426,7 +431,21 @@ fn handle_line(bytes: &[u8]) {
                 s.story.0,
                 s.story.1,
                 s.story.2 as u8,
-                s.story.3 as u8
+                s.story.3 as u8,
+                {
+                    // no_std, no alloc here: heapless + the fmt::Write already
+                    // imported at the top of this file.
+                    let mut ip: heapless::String<15> = heapless::String::new();
+                    match s.ip {
+                        Some([a, b, c, d]) => {
+                            let _ = write!(ip, "{a}.{b}.{c}.{d}");
+                        }
+                        None => {
+                            let _ = write!(ip, "none");
+                        }
+                    }
+                    ip
+                }
             );
         }
         "perf" => report_perf(),

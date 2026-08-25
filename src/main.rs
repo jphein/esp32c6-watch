@@ -4985,6 +4985,24 @@ async fn main(_spawner: Spawner) -> ! {
                 if app_state == AppState::Story {
                     use crate::net::{story_api, story_play};
                     use story_proto::model as smodel;
+                    // Tick-trace (2026-08-25): nav callbacks fired and set their
+                    // cells, yet pages never changed — prove whether this block
+                    // runs at all, at what cadence, and what the gates read.
+                    #[cfg(feature = "debug-console")]
+                    {
+                        static STORY_TICK: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        let n = STORY_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n % 8 == 0 {
+                            esp_println::println!(
+                                "[STORY-TICK] n={} ready={} need_list={} nav_cell={:?}",
+                                n,
+                                net.phase.ready(),
+                                story_need_list,
+                                shell.req.story_nav.get(),
+                            );
+                        }
+                    }
 
                     // ---- UI requests (cheap; no awaits) --------------------
                     if let Some(p) = shell.req.story_nav.take() {
@@ -6512,6 +6530,10 @@ async fn main(_spawner: Spawner) -> ! {
             mesh_peers: last_mesh_peers,
             modal: shell.modal_kind(),
             story: shell.story_dbg(),
+            ip: match net.phase {
+                crate::net::net_task::WifiPhase::Up { ip } => ip,
+                _ => None,
+            },
         });
 
         // Track the arm we ran so the shell arm can detect a return from an app
