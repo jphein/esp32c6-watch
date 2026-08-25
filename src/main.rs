@@ -886,6 +886,29 @@ const CFG_SETTLE_MS: u64 = 2_500;
 /// setting can never be silently lost to an audio path that stays busy.
 const CFG_MAX_DEFER_S: u64 = 30;
 
+/// Deferred BLE bring-up (#reclaim): init the controller + spawn the trouble
+/// host the FIRST time BLE intent appears (persisted ble_on at boot, or the
+/// watchface toggle). Idempotent via the BT Option — a second call is a no-op.
+/// Costs ~24-29.5 KB of heap ONLY when the user actually wants BLE.
+fn ble_bring_up(
+    bt_slot: &mut Option<esp_hal::peripherals::BT<'static>>,
+    spawner: &Spawner,
+) {
+    let Some(bt) = bt_slot.take() else {
+        return; // already up
+    };
+    let mark_ble = heap_mark();
+    let ble_connector =
+        BleConnector::new(bt, Default::default()).expect("BLE init failed");
+    log_heap("post-ble");
+    heap_span("BleConnector::new", &mark_ble);
+    let ble_controller: peripherals::ble::WatchController =
+        trouble_host::prelude::ExternalController::new(ble_connector);
+    spawner.spawn(
+        peripherals::ble::ble_host_task(ble_controller).expect("ble_host_task token"),
+    );
+}
+
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -1602,19 +1625,20 @@ async fn main(_spawner: Spawner) -> ! {
     // was never bracketed by anything and had to be inferred from config
     // constants. It is also unconditional: the watch pays it even though the
     // radios are logged as OFF at boot.
-    let mark_ble = heap_mark();
-    let ble_connector =
-        BleConnector::new(peripherals.BT, Default::default()).expect("BLE init failed");
-    log_heap("post-ble");
-    heap_span("BleConnector::new", &mark_ble);
-    // trouble-host GATT server: wrap the HCI transport and hand it to the
-    // host task. The task parks until the watchface BLE button fires.
-    let ble_controller: peripherals::ble::WatchController =
-        trouble_host::prelude::ExternalController::new(ble_connector);
-    _spawner.spawn(
-        peripherals::ble::ble_host_task(ble_controller).expect("ble_host_task token"),
-    );
-    println!("[RADIO] stack ready (WiFi OFF, BLE advertising OFF)");
+    // BLE is NOT initialized here anymore (the ~24-29.5 KB reclaim, found by
+    // the C5's heap forensics but paid on every board): BleConnector::new used
+    // to run HERE — thirteen lines BEFORE watch_cfg loads — so it structurally
+    // could not consult ble_on, and a watch with the radio persisted OFF still
+    // carried NimBLE's msys pools, the controller task stack, and the ACL/HCI
+    // rings for its whole uptime. The connector + host task now come up in
+    // ble_bring_up(), called from the two places intent actually appears: the
+    // config restore below (ble_on persisted true) and the watchface toggle.
+    // A side benefit: with BLE off the controller does not EXIST, so the
+    // v0.8.7 sleep-with-active-controller hazard is structurally gone rather
+    // than guarded. BT is parked in an Option until then — take() makes
+    // double-init unrepresentable.
+    let mut bt_slot = Some(peripherals.BT);
+    println!("[RADIO] stack ready (WiFi OFF, BLE not initialized)");
 
     // Credentials: flash config wins; compile-time env is the fallback seed.
     let mut watch_cfg = config_offset
@@ -2017,6 +2041,7 @@ async fn main(_spawner: Spawner) -> ! {
     // reboots and OTAs. The parked trouble host starts within ~250 ms.
     let mut ble_on = watch_cfg.ble_on;
     if ble_on {
+        ble_bring_up(&mut bt_slot, &_spawner);
         crate::peripherals::ble::BLE_START_REQUEST
             .store(true, core::sync::atomic::Ordering::Relaxed);
         power_stats.ble_on = true;
@@ -3867,6 +3892,8 @@ async fn main(_spawner: Spawner) -> ! {
             if !ble_on {
                 ble_on = true;
                 persist_intent = true;
+                // First-ever ON: the controller may not exist yet (lazy init).
+                ble_bring_up(&mut bt_slot, &_spawner);
                 crate::peripherals::ble::BLE_START_REQUEST
                     .store(true, core::sync::atomic::Ordering::Relaxed);
                 println!(
