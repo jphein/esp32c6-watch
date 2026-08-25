@@ -74,34 +74,31 @@ export component SensorsPage {
     in property <string> imu-temp-text;
     in property <string> die-temp-text;
     in property <int> steps;
+    in property <string> board-chip;
+    in property <string> board-mem;
+    in property <string> board-caps;
 
     CydPageTitle { title: "BOARD"; }
 
-    // BOARD-FACT: these five values and the caption are C5-only literals in a
-    // scene the S3-CYD also compiles. See geom.slint's BOARD FACTS index.
+    // Board identity from Rust (§1d): the same properties on both roots, fed
+    // from board::* consts and the capability cfg gates — this page can no
+    // longer disagree with the build it is part of. (Its previous literals
+    // said "DIE TEMP: none" on a board with a TSENS.)
     CydStatRow { x: Geom.content-x; y: Geom.content-y +   6px; height: 30px;
-                 label: "CHIP";     value: "ESP32-C5"; }
+                 label: "CHIP";     value: root.board-chip; }
     CydStatRow { x: Geom.content-x; y: Geom.content-y +  38px; height: 30px;
-                 label: "PSRAM";    value: "8 MB"; }
+                 label: "MEMORY";   value: root.board-mem; }
     CydStatRow { x: Geom.content-x; y: Geom.content-y +  70px; height: 30px;
-                 label: "FLASH";    value: "16 MB"; }
-    // The two absences, in the same shape as the presences — so the page reads
-    // as one inventory rather than as facts plus an apology. `faint` rather than
-    // `warn`: missing hardware is not an error state.
-    CydStatRow { x: Geom.content-x; y: Geom.content-y + 102px; height: 30px;
-                 label: "IMU";      value: "none"; value-color: Theme.faint; }
-    CydStatRow { x: Geom.content-x; y: Geom.content-y + 134px; height: 30px;
-                 // BOARD-FACT: the S3 HAS a temperature sensor where the C5 has
-                 // no TSENS — so on that board this row asserts the wrong
-                 // CAPABILITY, not just the wrong part name.
-                 label: "DIE TEMP"; value: "none"; value-color: Theme.faint; }
+                 // `faint` rather than `warn`: an absence named here is not an
+                 // error state, and a presence is not a boast.
+                 label: "SENSORS";  value: root.board-caps; value-color: Theme.faint; }
 
     Text {
         x: Geom.content-x;
         y: Geom.content-y + 172px;
         width: Geom.content-w;
         horizontal-alignment: center;
-        text: "no QMI8658 \u{00b7} the C5 has no TSENS";
+        text: root.board-caps;
         color: Theme.faint;
         font-size: Geom.t-caption;
         letter-spacing: 1px;

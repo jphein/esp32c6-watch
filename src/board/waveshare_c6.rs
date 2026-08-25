@@ -57,3 +57,14 @@ pub mod ui {
     /// Visible shade cards (the ring holds up to 8; overlay shows "+N").
     pub const SHADE_CARDS: usize = 4;
 }
+
+// === Board identity for the UI (Luna's §1d — BOARD-FACT retirement) ===
+// Rust formats, Slint displays: these feed the root properties board-chip /
+// board-mem / backlight-dimmable / has-boot-key so no shared scene ever
+// hardcodes a board fact again (the chip-text line was wrong TWICE that way).
+pub const CHIP_NAME: &str = "ESP32-C6";
+pub const MEM_SUMMARY: &str = "no PSRAM \u{00b7} 16 MB flash";
+/// AMOLED brightness via the CO5300 command set — smoothly dimmable.
+pub const BACKLIGHT_DIMMABLE: bool = true;
+/// BOOT is a first-class input (#59 button map).
+pub const HAS_BOOT_KEY: bool = true;

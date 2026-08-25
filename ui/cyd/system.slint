@@ -55,11 +55,13 @@ import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
 // ============================================================================
 
 export component SystemPage {
-    // BOARD-FACT: 🟥 and the second time this line has been wrong. It said
-    // "ESP32-C6 - 410x502" before this port and now says the C5 — a component
-    // default Rust never overrides, in a scene two boards compile. The defect
-    // was never the value. See geom.slint's BOARD FACTS index.
-    in property <string> chip-text: "ESP32-C5 \u{00b7} 320x240";
+    // §1d: the chip half comes from Rust (board::CHIP_NAME); the panel half
+    // is a literal because BOTH boards drive this same 320x240 glass — a
+    // panel fact, which is exactly what this shared scene is allowed to know.
+    // (This line was a full literal twice, and wrong for a different board
+    // each time. The defect was never the value.)
+    in property <string> board-chip;
+    property <string> chip-text: root.board-chip + " \u{00b7} 320x240";
     in property <string> fw-text;      // "v0.12.1 · d8f228e" (version + git hash)
     in property <string> build-text;   // "White-Hot Wright" (realm-sigil forge name)
     in property <string> sigil-text;   // per-device sigil (#34)

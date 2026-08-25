@@ -1,7 +1,7 @@
 import { Theme, WifiNet } from "../slint/theme.slint";
 import { OverlaySwallow, IconButton, PressTile, PillButton } from "../slint/controls.slint";
 import { Geom } from "geom.slint";
-import { CydEyebrow, CydPageTitle, CydBackChevron, CydStatRow, CydBacklightToggle } from "controls_cyd.slint";
+import { CydEyebrow, CydPageTitle, CydBackChevron, CydStatRow, CydBacklightToggle, CydBacklightSlider } from "controls_cyd.slint";
 import { KeyboardPane } from "keyboard.slint";
 
 // ============================================================================
@@ -231,9 +231,10 @@ export component SettingsHub {
     // FIVE, not the C6's six — SOUND is dropped (see the header). Must match
     // `SETTINGS_PAGE_COUNT` in slint_shell.rs, proposed 6 -> 5.
     property <[string]> titles: ["DISPLAY", "RADIOS", "NETWORK", "SYSTEM", "BUTTONS"];
-    // Stand-in for a board constant. `false` = do not advertise a key whose
-    // existence is unconfirmed. See the header.
-    property <bool> has-boot-key: false;
+    // §1d: board::HAS_BOOT_KEY, pushed from Rust through the root — the
+    // stand-in literal is retired (the C5's value stays false, PROVISIONAL,
+    // at the board module where a measured press can flip it).
+    in property <bool> has-boot-key;
     // NETWORK sub-view (RUST-OWNED): 0 hub pages · 1 picker · 2 keyboard.
     in property <int> net-view: 0;
 
@@ -260,6 +261,7 @@ export component SettingsHub {
     in-out property <float> brightness;
     // See CydBacklightToggle: the on-state is Rust-pushed (isel workaround).
     in property <bool> backlight-on;
+    in property <bool> backlight-dimmable;
     callback brightness-changed(float);
 
     // --- RADIOS (persisted state in, existing tap semantics out) ---
@@ -323,7 +325,16 @@ export component SettingsHub {
             // Toggle, not a slider — see the header. Same component the power
             // page uses, so the two surfaces cannot disagree about what the
             // backlight control IS on this board.
-            CydBacklightToggle {
+            // §1d control split: the slider is the real control on dimmable
+            // boards; the toggle (and its relight caption) is the honest one
+            // on binary-GPIO boards.
+            if root.backlight-dimmable: CydBacklightSlider {
+                x: 0; y: 14px; width: parent.width;
+                label: "BACKLIGHT";
+                value <=> root.brightness;
+                changed(f) => { root.brightness-changed(f); }
+            }
+            if !root.backlight-dimmable: CydBacklightToggle {
                 x: 0; y: 14px; width: parent.width;
                 label: "BACKLIGHT";
                 on: root.backlight-on;
@@ -331,11 +342,9 @@ export component SettingsHub {
                 changed(f) => { root.brightness-changed(f); }
             }
             // The recovery, stated before the tap rather than discovered after it.
-            Text {
+            if !root.backlight-dimmable: Text {
                 x: 0; y: 64px;
                 width: parent.width; wrap: word-wrap;
-                // BOARD-FACT: see power.slint — the S3 likely HAS PWM, which
-                // changes the control and not just the words.
                 text: "plain GPIO, no PWM \u{2014} tap the screen to relight";
                 color: Theme.faint; font-size: Geom.t-caption;
             }
@@ -506,8 +515,7 @@ export component SettingsHub {
                 Text {
                     x: 0; y: 76px; width: parent.width;
                     horizontal-alignment: center; wrap: word-wrap;
-                    // BOARD-FACT: `has-boot-key` is a C5 stand-in literal.
-                    text: "no POWER key, and BOOT is unconfirmed on this board";
+                    text: "no POWER key or BOOT key on this board";
                     color: Theme.dim; font-size: Geom.t-body;
                 }
                 Text {

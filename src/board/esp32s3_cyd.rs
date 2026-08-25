@@ -76,3 +76,22 @@ pub mod ui {
     pub const SHADE_CARD_PITCH: u16 = 66;
     pub const SHADE_CARDS: usize = 3;
 }
+
+// === Board identity for the UI (Luna's §1d — BOARD-FACT retirement) ===
+// Rust formats, Slint displays: these feed the root properties board-chip /
+// board-mem / backlight-dimmable / has-boot-key so no shared scene ever
+// hardcodes a board fact again (the chip-text line was wrong TWICE that way).
+pub const CHIP_NAME: &str = "ESP32-S3";
+pub const MEM_SUMMARY: &str = "8 MB PSRAM \u{00b7} 16 MB flash";
+/// LEDC exists on this chip (board_es3c28p.rs: PIN_LCD_BACKLIGHT 45, active high).
+/// The watch's LEDC driver is NOT written yet — this is the hardware fact; the
+/// driver catching up is tracked bring-up work.
+pub const BACKLIGHT_DIMMABLE: bool = true;
+/// GPIO0 BOOT is the entire button budget (BOARD.md).
+pub const HAS_BOOT_KEY: bool = true;
+
+// ⚠️ PAINT BUDGET IS NOT INHERITED: ui/cyd/geom.slint's 117-row band and the
+// rules built on it are the C5's SPI arithmetic (61.4 ms full frame at 20 MHz).
+// This board clocks its panel at 40 MHz (SPI_DISPLAY_HZ in board_es3c28p.rs),
+// so the number is different — measure it during bring-up before treating any
+// row constant as this board's fact (measured, never inherited).

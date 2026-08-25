@@ -2519,6 +2519,16 @@ fn build_scene(
     // Per-device sigil (#34): a device constant (efuse MAC), stamped here like
     // fw-text so it survives suspend/resume scene rebuilds with no stored state.
     ui.set_sigil_text(SharedString::from(crate::net::sigil::get().sigil.as_str()));
+    // Board identity (Luna's §1d): Rust formats, Slint displays. Sourced from
+    // board::* consts and the capability features — the manifest's own rule
+    // ("predicate on a declared capability, never on a chip name") applied to
+    // the scene, after system.slint's chip line shipped wrong for two boards
+    // in a row by being a literal.
+    ui.set_board_chip(SharedString::from(crate::board::CHIP_NAME));
+    ui.set_board_mem(SharedString::from(crate::board::MEM_SUMMARY));
+    ui.set_board_caps(SharedString::from(board_caps().as_str()));
+    ui.set_backlight_dimmable(crate::board::BACKLIGHT_DIMMABLE);
+    ui.set_has_boot_key(crate::board::HAS_BOOT_KEY);
     ui.show().expect("show failed");
     ui
 }
@@ -2573,6 +2583,22 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
         }
     }
     (tiles, titles)
+}
+
+/// The capability summary the BOARD page shows ("IMU \u{00b7} no die-temp"
+/// style) — composed from the SAME cfg gates that compile the drivers, so the
+/// honesty page cannot disagree with the build (sensors.slint's "DIE TEMP:
+/// none" literal denied a sensor the S3 actually has — Luna's §1d).
+fn board_caps() -> heapless::String<48> {
+    let mut s: heapless::String<48> = heapless::String::new();
+    let _ = s.push_str(if cfg!(feature = "has-imu") { "IMU" } else { "no IMU" });
+    let _ = s.push_str(" \u{00b7} ");
+    let _ = s.push_str(if cfg!(feature = "has-die-temp") {
+        "die-temp"
+    } else {
+        "no die-temp"
+    });
+    s
 }
 
 /// 0xRRGGBB -> Slint opaque color.

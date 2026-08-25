@@ -93,3 +93,15 @@ pub mod ui {
 // If the relight path cannot restore radios, the caption changes BEFORE this
 // firmware ships, not after. Whoever lands douse owns keeping that sentence
 // true.
+
+// === Board identity for the UI (Luna's §1d — BOARD-FACT retirement) ===
+// Rust formats, Slint displays: these feed the root properties board-chip /
+// board-mem / backlight-dimmable / has-boot-key so no shared scene ever
+// hardcodes a board fact again (the chip-text line was wrong TWICE that way).
+pub const CHIP_NAME: &str = "ESP32-C5";
+pub const MEM_SUMMARY: &str = "8 MB PSRAM \u{00b7} 16 MB flash";
+/// no LEDC in this HAL generation (see the backlight note above) — binary GPIO only.
+pub const BACKLIGHT_DIMMABLE: bool = false;
+/// PROVISIONAL: boot straps are 26/27/28 and no key is confirmed wired; the
+/// board may be touch-only. Flip only with a measured press on glass.
+pub const HAS_BOOT_KEY: bool = false;

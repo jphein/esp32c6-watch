@@ -1,5 +1,5 @@
 import { Theme } from "../slint/theme.slint";
-import { IconButton, PressTile } from "../slint/controls.slint";
+import { IconButton, PressTile, SliderControl } from "../slint/controls.slint";
 import { Geom } from "geom.slint";
 
 // ============================================================================
@@ -405,5 +405,38 @@ export component CydBacklightToggle {
             background: root.on ? Theme.on-accent
                 : (ta.pressed ? Theme.ink : Theme.soft);
         }
+    }
+}
+
+// --- Backlight slider (dimmable boards) --------------------------------------
+// The §1d control split: a board WITH backlight PWM (`backlight-dimmable`,
+// pushed from Rust) gets a real slider; the toggle above stays the honest
+// control for binary-GPIO boards. A SIBLING component rather than a mode
+// inside CydBacklightToggle, deliberately: that component's bindings must
+// stay FLOAT-FREE (Xtensa isel crash — tools/build-s3.sh has the bisection),
+// and a slider is nothing but float bindings. SliderControl carries its
+// floats in its OWN component, which links on all three arms (volume.slint
+// is the proof). Instantiation sites choose with `if root.backlight-dimmable`.
+export component CydBacklightSlider {
+    in-out property <float> value: 1.0;
+    in property <string> label: "BACKLIGHT";
+    callback changed(float);
+    height: 44px;
+
+    Text {
+        x: 0; y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: Theme.dim;
+        font-size: Geom.t-caption;
+        letter-spacing: 2px;
+    }
+    SliderControl {
+        x: parent.width - 130px;
+        y: (parent.height - self.height) / 2;
+        width: 130px;
+        value <=> root.value;
+        changed(f) => { root.changed(f); }
     }
 }

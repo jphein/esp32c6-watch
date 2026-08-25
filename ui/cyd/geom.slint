@@ -137,20 +137,30 @@
 //
 // So the rule, learned twice: **a scene compiled for more than one board must not
 // state a fact about silicon in a literal.** Those facts belong in `board::*` and
-// arrive as properties. Until they do, every site is marked inline with
-// `BOARD-FACT:` and listed here.
+// arrive as properties.
 //
-//   sensors.slint    CHIP / PSRAM / FLASH values, IMU + DIE TEMP "none", and the
-//                    "the C5 has no TSENS" caption.        ← 6 sites, all C5-only
-//                    ⚠️ DIE TEMP is the one most likely wrong on the S3: that
-//                    part HAS a temperature sensor, where the C5 has no TSENS at
-//                    all. So this row does not just name the wrong board, it
-//                    asserts the wrong capability.
-//   system.slint     `chip-text` default.                          ← see above
-//   power.slint      "MAINS POWERED - no cell", "no PWM".
-//   power_menu.slint "MAINS POWER - NO CELL", "tap the glass to wake".
-//   settings.slint   "plain GPIO, no PWM", "BOOT is unconfirmed".
-//   voice.slint      "no ES7210 - no codec - no I2S".
+// §1d LANDED — the property set (board-chip / board-mem / board-caps /
+// backlight-dimmable / has-boot-key, both roots, Rust-pushed) retired the
+// sharp sites:
+//
+//   sensors.slint    ✅ RETIRED — CHIP/MEMORY/SENSORS rows + caption now read
+//                    the properties; the page can no longer disagree with the
+//                    build (its DIE TEMP literal denied the S3's real sensor).
+//   system.slint     ✅ RETIRED — chip half from board-chip; the 320x240 half
+//                    stays literal because it is a PANEL fact both boards share.
+//   settings.slint   ✅ RETIRED — has-boot-key piped from board::HAS_BOOT_KEY;
+//                    the backlight control splits on backlight-dimmable
+//                    (slider on PWM boards, toggle + relight caption on binary).
+//   power.slint      ✅ backlight split as above. ⚠️ "MAINS POWERED - no cell"
+//                    still literal (rides has-pmu later; probably true on both
+//                    CYDs, and "probably" is what this index exists to stop).
+//   power_menu.slint ⚠️ still literal — "MAINS POWER - NO CELL", "tap the
+//                    glass to wake" (the caption is a CONTRACT on the C5 —
+//                    see cyd_c5.rs's douse block; verify the S3 wake path
+//                    before sharing it).
+//   voice.slint      ⚠️ still literal — "no ES7210 - no codec - no I2S";
+//                    unreachable without has-audio, so it can ride that
+//                    capability when an S3 audio pass happens.
 //
 // ⚠️ ALSO PER-BOARD, though not a string: **the paint budget below is the C5's SPI
 // arithmetic** (61.4 ms at 20 MHz). A board that clocks its panel differently has

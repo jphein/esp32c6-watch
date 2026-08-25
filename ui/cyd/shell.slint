@@ -410,6 +410,13 @@ export component WatchShell inherits Window {
     in-out property <float> brightness: 0.8;
     // Rust-pushed backlight on-state (CydBacklightToggle isel workaround).
     in property <bool> backlight-on: true;
+    // Board identity (Luna's §1d): Rust formats these from board::*/capability
+    // features at scene create; no shared scene hardcodes a board fact again.
+    in property <string> board-chip;
+    in property <string> board-mem;
+    in property <string> board-caps;
+    in property <bool> backlight-dimmable;
+    in property <bool> has-boot-key;
 
     // ==================== takeover gate (#75) ====================
     // Carried over verbatim from the C6 root, and it matters MORE here, not
@@ -496,6 +503,9 @@ export component WatchShell inherits Window {
         SensorsPage {
             x: (1 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
+            board-chip: root.board-chip;
+            board-mem: root.board-mem;
+            board-caps: root.board-caps;
             accel-text: root.accel-text;
             gyro-text: root.gyro-text;
             imu-temp-text: root.imu-temp-text;
@@ -506,6 +516,7 @@ export component WatchShell inherits Window {
         SystemPage {
             x: (2 - root.current-page) * pages.width;
             width: pages.width; height: pages.height;
+            board-chip: root.board-chip;
             fw-text: root.fw-text;
             sigil-text: root.sigil-text;
             build-text: root.build-text;
@@ -529,6 +540,7 @@ export component WatchShell inherits Window {
             lp-core-text: root.lp-core-text;
             brightness <=> root.brightness;
             backlight-on: root.backlight-on;
+            backlight-dimmable: root.backlight-dimmable;
             brightness-changed(f) => { root.brightness-changed(f); }
             reboot-tap => { root.reboot-tap(); }
         }
@@ -935,6 +947,8 @@ export component WatchShell inherits Window {
         gain-db: root.mic-gain-db;
         brightness <=> root.brightness;
         backlight-on: root.backlight-on;
+        backlight-dimmable: root.backlight-dimmable;
+        has-boot-key: root.has-boot-key;
         ble-on: root.ble-on;
         mesh-on: root.mesh-enabled;
         wifi-intent: root.wifi-intent;
