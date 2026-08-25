@@ -103,3 +103,8 @@ pub mod ui {
     /// mine — flagged them as contradicting; they do not.)
     pub const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = 170..=240;
 }
+
+/// Short board name for the boot banner — the first line of every console
+/// capture, and therefore the label every log gets filed under.
+/// Waveshare ESP32-C6-Touch-AMOLED-2.06 (CO5300 410x502).
+pub const BANNER: &str = "C6 AMOLED";

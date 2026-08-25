@@ -435,3 +435,8 @@ pub mod ui {
 // If the relight path cannot restore radios, the caption changes BEFORE this
 // firmware ships, not after. Whoever lands douse owns keeping that sentence
 // true.
+
+/// Short board name for the boot banner — the first line of every console
+/// capture, and therefore the label every log gets filed under.
+/// RockBase NM-CYD-C5 (ST7789 320x240 landscape + XPT2046).
+pub const BANNER: &str = "C5 CYD";

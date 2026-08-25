@@ -1075,7 +1075,10 @@ async fn main(_spawner: Spawner) -> ! {
         );
     }
 
-    println!("=== smol watch v2 (C6 AMOLED, Embassy) ===");
+    // Board-owned: the banner is the FIRST line of every boot log, so a stale
+    // one mislabels every capture filed against it. It read "C6 AMOLED" on the
+    // CYD until #cyd-c5.
+    println!("=== smol watch v2 ({}, Embassy) ===", board::BANNER);
     let delay = Delay::new();
 
     // Speaker amp enable (GPIO6). CRITICAL: keep LOW before the ES8311 is
