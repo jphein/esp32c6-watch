@@ -54,19 +54,25 @@
 //   * Font sizes only from the existing glyph budget.
 //   * 44 px minimum touch targets (resistive XPT2046, finger-driven).
 //
-// PORT STATUS — which pages are landscape-native yet
+// PORT STATUS — COMPLETE
 // -----------------------------------------------------------------------------
-// Pages still imported from `../slint/` are the C6 410x502 layouts and WILL
-// render cropped on this panel. They are imported rather than stubbed so the
-// API stays whole and the build stays green at every commit, exactly as
-// `build.rs`'s own fallback reasons. The list below is the work queue; when it
-// is empty this comment goes away.
+// Every scene this root reaches is landscape-native. The only files still
+// imported from `../slint/` are the ones with NO absolute geometry, imported on
+// purpose so there is exactly one copy of each:
 //
-//   PORTED : shell chrome · clock · power_menu · volume · launcher · sensors
-//            system · mesh · wled · hunt · switcher · shade · theme_overlay
-//            energy · climate · lights · ping · power · voice · soundlevel
-//            keyboard · settings
-//   PENDING: story
+//   theme.slint     the `Theme` global (palette, type scale, spacing, radii) and
+//                   the PeerRow / WifiNet structs. ONE `global Theme` in the
+//                   graph, so Rust's `set_scheme` is untouched.
+//   controls.slint  seven token-driven recipes with no geometry of their own —
+//                   PressTile, IconButton, Stepper, PillButton, Seg,
+//                   SliderControl, OverlaySwallow. Re-authoring them would fork
+//                   the touch-feedback contract that exists to live in one place.
+//   launcher.slint  `LauncherTile` (Rust constructs it) and `AppIcon` — 17
+//                   hand-drawn 46x46 vector glyphs shared with the app switcher.
+//
+// `ui/slint/scan.slint` is deliberately absent: it is the 802.15.4 Radio Scan
+// page and this root never reached it on either board. Its structs live in
+// theme.slint.
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
@@ -94,9 +100,9 @@ import { PowerPage } from "power.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel, SpecBand } from "soundlevel.slint";
 import { SettingsHub } from "settings.slint";
+import { StoryPage, StoryChapter, StorySlot } from "story.slint";
 
 // --- PENDING: still the C6 portrait layouts (render cropped) ----------------
-import { StoryPage, StoryChapter, StorySlot } from "../slint/story.slint";
 
 // Re-export so the generated Rust module keeps exposing these types —
 // slint_shell.rs constructs PeerRow / LauncherTile / ClimateCard / SpecBand /
