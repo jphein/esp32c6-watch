@@ -241,6 +241,10 @@ pub struct SingleLineFlusher<'a, 'd> {
     display: &'a mut board::BoardDisplay<'d>,
     buf: &'a mut [Rgb565Pixel],
     scratch: &'a mut [u16],
+    /// The open span-run: `(x0, w, next_line)` — the window currently accepting
+    /// pixels, and the line number that would CONTINUE it. `None` = no stream
+    /// open. See the type docs for why this batches windows and not pixels.
+    run: Option<(u16, u16, usize)>,
 }
 
 impl<'a, 'd> SingleLineFlusher<'a, 'd> {
@@ -260,13 +264,40 @@ impl<'a, 'd> SingleLineFlusher<'a, 'd> {
             display,
             buf,
             scratch,
+            run: None,
         }
     }
 
-    /// Present so the two flushers are drop-in interchangeable at the call site.
-    /// Nothing can be left pending here — every line is flushed as it arrives,
-    /// which is precisely the property that removes the failure class.
-    pub fn flush_pending(&mut self) {}
+    /// Close the open span-run, if any.
+    ///
+    /// ⚠️ This is no longer the no-op it was when every line closed its own
+    /// window. A run deliberately outlives `process_line`, so the LAST run of a
+    /// frame has nobody to close it — `flush_pending` is that nobody, and
+    /// `slint_shell::render` already calls it after `render_by_line`.
+    fn close_run(&mut self) {
+        if self.run.take().is_some() {
+            self.display.end_pixels();
+        }
+    }
+
+    /// End-of-frame. Closes the final span-run.
+    pub fn flush_pending(&mut self) {
+        self.close_run();
+    }
+}
+
+impl Drop for SingleLineFlusher<'_, '_> {
+    /// Closing a span-run now depends on someone calling `flush_pending`, which
+    /// is a discipline the old one-window-per-line version did not need. Rather
+    /// than document that, make it unrepresentable: dropping the flusher closes
+    /// the stream.
+    ///
+    /// `SharedSpiBus::deselect_all` would also rescue a leaked stream, but that
+    /// is defence in depth — "survivable" and "correct" are different claims,
+    /// and this is the one that makes the run's lifetime match the flusher's.
+    fn drop(&mut self) {
+        self.close_run();
+    }
 }
 
 impl slint::platform::software_renderer::LineBufferProvider
@@ -292,22 +323,49 @@ impl slint::platform::software_renderer::LineBufferProvider
         for i in 0..w {
             self.scratch[i] = self.buf[x0 + i].0;
         }
-        // The contract surface, exactly: window → open → push → CLOSE. Byte
-        // order is the driver's problem from here (`push_pixels` takes logical
-        // u16 pixels).
+
+        // ★ SPAN-RUN BATCHING. Consecutive lines sharing an x-span stream into
+        // ONE window instead of one window each — the body of any rectangle is
+        // exactly that shape, so a full repaint collapses from ~240 CASET/RASET/
+        // RAMWR sequences to a handful.
         //
-        // ⚠️ `end_pixels` is NOT optional, though vesper's original transcribed
-        // this loop without it — she copied the contract at 6e1aee7, before
-        // c9fcc16 added the close. On this board's SHARED bus an unclosed RAMWR
-        // stream is two silent failures: the next command lands in GRAM as
-        // pixels, and the next touch read asserts touch CS while LCD CS is still
-        // low, i.e. two devices driving one MISO line. `SharedSpiBus` also
-        // deselects defensively, which makes an omission survivable — a
-        // different claim from correct.
-        self.display.set_addr_window(x0 as u16, line as u16, w as u16, 1);
-        self.display.begin_pixels();
+        // This batches WINDOWS, not pixels: no line is buffered, `render_fn`
+        // still writes one line and it is pushed immediately. That distinction
+        // is what keeps it clear of the "batching would invent a framebuffer"
+        // objection — the memory the renderer owns between calls is untouched.
+        //
+        // ⚠️ THE CONSTRAINT THAT SHAPES THIS: a window's height is committed at
+        // CASET/RASET time, and streaming past it WRAPS the ST7789's GRAM
+        // pointer back to the window origin, overwriting what was just drawn.
+        // So a run cannot be extended after opening. It instead declares the
+        // largest extent it could need — to the bottom of the panel — and
+        // simply under-fills it, which is legal: the GRAM pointer just stops.
+        let continues = matches!(
+            self.run,
+            Some((rx, rw, next)) if rx as usize == x0 && rw as usize == w && next == line
+        );
+        if !continues {
+            // Span changed, lines not consecutive, or nothing open: close the
+            // previous run and start one here. Worst case — alternating spans,
+            // which the renderer can emit when the dirty region has several
+            // rects on one line — this degrades to exactly the old
+            // one-window-per-line behaviour, never worse.
+            self.close_run();
+            // `HEIGHT - line` would UNDERFLOW in release if `line` ever went
+            // out of range — the `debug_assert!` above is compiled out by
+            // [profile.release], the same trap the flusher/board const-assert
+            // exists for. A saturating floor of 1 keeps a bad line number to a
+            // one-row window instead of a 65535-row one.
+            let h = HEIGHT.saturating_sub(line).max(1) as u16;
+            self.display.set_addr_window(x0 as u16, line as u16, w as u16, h);
+            self.display.begin_pixels();
+        }
+        // `push_pixels` must not re-issue a preamble between calls — the
+        // contract requires that, and `SharedSpiBus` honours it (RAMWR once,
+        // RAMWR_CONT thereafter), which is what makes a multi-line run land
+        // contiguously.
         self.display.push_pixels(&self.scratch[..w]);
-        self.display.end_pixels();
+        self.run = Some((x0 as u16, w as u16, line + 1));
     }
 }
 
