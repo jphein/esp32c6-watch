@@ -67,6 +67,20 @@ pub const RTC_I2C_ADDR: u8 = 0x51;
 /// the C5 arm's story playback is gated off until they do.
 pub mod ui {
     pub const STORY_PAUSE_RECT: (u16, u16, u16, u16) = (0, 0, 0, 0);
+
+    /// Switcher card stack (#31) — MUST match `ui/cyd/switcher.slint`
+    /// (landscape 320x240; geometry from that file's port header, landed at
+    /// 42dd687). Slot i spans y `TOP + i*PITCH .. + H`.
+    pub const SWITCHER_CARD_TOP: u16 = 40;
+    pub const SWITCHER_CARD_H: u16 = 52;
+    pub const SWITCHER_CARD_PITCH: u16 = 58;
+    pub const SWITCHER_CARDS: usize = 3;
+
+    /// Shade card stack (#32) — MUST match `ui/cyd/shade.slint`.
+    pub const SHADE_CARD_TOP: u16 = 38;
+    pub const SHADE_CARD_H: u16 = 60;
+    pub const SHADE_CARD_PITCH: u16 = 66;
+    pub const SHADE_CARDS: usize = 3;
 }
 
 // === Soft-douse contract (BINDING — set by the shipped power-menu caption) ===

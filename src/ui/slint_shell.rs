@@ -88,24 +88,20 @@ const HOLD_MS: u64 = 500;
 /// still classify as the edge-swipe.
 const HOLD_SLOP_PX: u16 = 24;
 
-/// Switcher card geometry (#31) — MUST match `ui/slint/switcher.slint`:
-/// slot i spans y `CARD_TOP + i*CARD_PITCH .. + CARD_H`. A kill-swipe (Up
-/// starting on a card) maps back to its slot with [`switcher_slot`].
-const SWITCHER_CARD_TOP: u16 = 110;
-const SWITCHER_CARD_H: u16 = 84;
-const SWITCHER_CARD_PITCH: u16 = 96;
-/// Visible card slots (the suspension list may be longer; overlay shows "+N").
-const SWITCHER_CARDS: usize = 4;
-
-/// Shade card geometry (#32) — MUST match `ui/slint/shade.slint`: slot i
-/// spans y `CARD_TOP + i*CARD_PITCH .. + CARD_H`. A dismiss-swipe (Left
-/// starting on a card) maps back to its slot — which IS the ring index,
-/// newest = 0 — with [`shade_slot`].
-const SHADE_CARD_TOP: u16 = 76;
-const SHADE_CARD_H: u16 = 84;
-const SHADE_CARD_PITCH: u16 = 92;
-/// Visible shade cards (the ring holds up to 8; overlay shows "+N").
-const SHADE_CARDS: usize = 4;
+/// Switcher (#31) + shade (#32) card geometry — BOARD-OWNED (`board::ui`),
+/// because each board's overlay scene draws its own card stack: slot i spans
+/// y `CARD_TOP + i*CARD_PITCH .. + CARD_H`, and [`switcher_slot`] /
+/// [`shade_slot`] invert a swipe's start_y back to the slot by pure
+/// arithmetic. The consts MUST match the board's own scene file
+/// (`ui/slint/{switcher,shade}.slint` on the C6, `ui/cyd/...` on the CYD) —
+/// a mismatch maps a swipe to a WRONG slot with no error, so scene geometry
+/// and `board::ui` change in the SAME commit or not at all. The reachable
+/// half of that failure is converted to a visible no-op at the call sites:
+/// both slot lookups are bounded by the LIVE model before a request fires.
+use crate::board::ui::{
+    SHADE_CARDS, SHADE_CARD_H, SHADE_CARD_PITCH, SHADE_CARD_TOP, SWITCHER_CARDS,
+    SWITCHER_CARD_H, SWITCHER_CARD_PITCH, SWITCHER_CARD_TOP,
+};
 
 /// Settings-hub section pages (ui/slint/settings.slint `titles` order).
 pub const SETTINGS_PAGE_COUNT: i32 = 6;
@@ -780,8 +776,16 @@ impl ShellUi {
                 match direction {
                     SwipeDirection::Right | SwipeDirection::Up => ui.set_shade_open(false),
                     SwipeDirection::Left => {
+                        // Geometry says a card COULD be at this slot; the live
+                        // model says whether one IS. Past the live count the
+                        // swipe does nothing VISIBLY (mirrors the switcher's
+                        // rows.get bound) instead of shipping a phantom ring
+                        // index — the shape const-vs-scene drift fails in.
                         if let Some(slot) = shade_slot(swipe_start_y) {
-                            self.req.notif_dismiss.set(Some(slot as i32));
+                            use slint::Model;
+                            if slot < self.shade_model.row_count() {
+                                self.req.notif_dismiss.set(Some(slot as i32));
+                            }
                         }
                     }
                     _ => {}

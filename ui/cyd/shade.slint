@@ -1,0 +1,228 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, IconButton, PillButton } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydEyebrow, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// NOTIFICATION SHADE (#32) — three cards, and the CLEAR ALL pill moved up top.
+// ============================================================================
+//
+// THE BIGGEST SCENE IN THE UI, WHICH IS THE REASON THREE CARDS IS A WIN
+// -----------------------------------------------------------------------------
+// Measured on the C6: this overlay with 4 cards is **264 items / 207 glyphs** —
+// the largest single scene in the whole watch, and what took it off the 512-item
+// rung was gating the covered watchface off underneath it. Scene-item counts do
+// NOT shrink with the panel (items are per-element, not per-pixel), and
+// `PrepareScene`'s Vecs grow by DOUBLING, so the rungs that fail at 54-66 kB
+// free sit exactly where they did.
+//
+// So going 4 cards -> 3 and 2 body lines -> 1 is not only a geometry necessity,
+// it is a heap win on the page that needs one most. Fewer, denser landscape
+// cards is the right answer twice over.
+//
+// ⚠️ TWO-SIDED, AND THE FAILURE IS SILENT. `slint_shell::shade_slot()` inverts a
+// dismiss-swipe's `start_y` back to a slot index — which IS the ring index,
+// newest = 0 — by arithmetic, and at the wrong geometry it returns a WRONG INDEX
+// rather than `None`. A dismiss-swipe then dismisses the wrong notification with
+// nothing to observe. Like the switcher, the stack stays VERTICAL so the Rust
+// change is three constants in a proven function rather than a new inverse:
+//
+//   SHADE_CARD_TOP    76 -> 38
+//   SHADE_CARD_H      84 -> 60
+//   SHADE_CARD_PITCH  92 -> 66
+//   SHADE_CARDS        4 -> 3   (Geom.max-cards)
+//
+// Must land in the SAME COMMIT as this file. See PROPOSED-board-ui-consts.md.
+//
+// WHY CLEAR ALL IS IN THE TOP STRIP NOW
+// -----------------------------------------------------------------------------
+// Three 60 px cards at a 66 px pitch run y38..230, which is the whole content
+// band — there is no footer left. The C6 puts CLEAR ALL at y446 under the cards.
+//
+// Cutting to two cards to make room would be the wrong trade: a shade exists to
+// show notifications, and CLEAR ALL is the least-used control on it. So the pill
+// moves into the 24 px title strip, right-anchored, using the `hit-pad` idiom —
+// a 26 px visual with its TouchArea padded down to the 44 px floor. That is what
+// `hit-pad-bottom` was added to `PillButton` for: *"let a visually-compact button
+// meet the 44px floor without moving neighbours."*
+//
+// The strip then reads chevron · eyebrow · [CLEAR ALL], with no centred title —
+// which matches the C6, where this overlay has an eyebrow and no `PageTitle`.
+//
+// The overflow count folds into the eyebrow string ("NOTIFICATIONS · +5") rather
+// than getting its own Text. Same ROM idiom the C6 footer already uses, and it
+// puts the count where the label it qualifies is.
+//
+// ROM note, still live: every `if` here would generate a dynamically-instantiated
+// inner component (~3-6 KB of code each, measured against the OTA slot). The
+// overlay is already behind `if shade-open` in shell.slint, so inside it
+// everything gates with `visible:` and ternary strings.
+// ============================================================================
+
+// One notification card's display data (ages pre-formatted by Rust). Declared
+// here rather than imported: `ui/slint/shade.slint` is not in this root's import
+// graph, so there is exactly one `NotifCard` and no collision.
+export struct NotifCard {
+    source: int,   // glyph tint id — matches notify::Source
+    title: string,
+    body: string,
+    age: string,
+    present: bool,
+}
+
+// Source glyph: ONE drawn bell (no bitmap, no font — the embedded font has no
+// emoji), tinted per source, so the COLOUR carries the meaning. A single shape
+// instead of per-source variants keeps the generated code flat. Unchanged from
+// the C6 at 28x28: it already fits, and redrawing four rectangles to save two
+// pixels would risk the only icon on the page for nothing.
+component NotifGlyph {
+    in property <int> id;
+    // System · Battery · Ota · Wifi · Ha — all Theme tokens, scheme-aware.
+    property <[color]> tints: [Theme.soft, Theme.warn, Theme.accent2, Theme.accent, Theme.warm];
+    property <color> tint: tints[clamp(root.id, 0, 4)];
+    width: 28px;
+    height: 28px;
+
+    Rectangle { x: 7px; y: 4px; width: 14px; height: 15px; border-radius: 7px; background: root.tint; }
+    Rectangle { x: 7px; y: 13px; width: 14px; height: 6px; background: root.tint; }
+    Rectangle { x: 4px; y: 19px; width: 20px; height: 3px; border-radius: 1.5px; background: root.tint; }
+    Rectangle { x: 12px; y: 23px; width: 4px; height: 4px; border-radius: 2px; background: root.tint.with-alpha(0.7); }
+}
+
+export component ShadeOverlay {
+    // Fixed card slots, padded with present:false (launcher-grid idiom).
+    in property <[NotifCard]> cards: [];
+    // Total held in the ring (may exceed the visible slots).
+    in property <int> total: 0;
+    callback dismiss(int); // card slot (== ring index, newest = 0)
+    callback clear-all();
+    callback close();
+
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydBackChevron { clicked => { root.close(); } }
+    CydEyebrow {
+        x: 52px;
+        y: 12px;
+        text: root.total > Geom.max-cards
+            ? "NOTIFICATIONS \u{00b7} +\{root.total - Geom.max-cards}"
+            : "NOTIFICATIONS";
+        tint: Theme.faint;
+    }
+
+    // CLEAR ALL — 26 px visual, 44 px hit via the pad. Right-anchored in the
+    // strip, clear of the eyebrow (which ends ~x160 at its longest).
+    PillButton {
+        visible: root.total > 0;
+        x: 224px;
+        y: 4px;
+        width: 88px;
+        height: 26px;
+        hit-pad-bottom: 18px;
+        text: "CLEAR ALL";
+        text-size: Geom.t-caption;
+        tracking: 1px;
+        clicked => { root.clear-all(); }
+    }
+
+    // Notification cards — fixed slots, y = 38 + i*66, h 60.
+    //
+    // The card's internal composition changed shape, not just size. The C6 gives
+    // the body a 38 px two-line box and puts the age under the title on its own
+    // line. At 60 px tall that is one line too many, so:
+    //
+    //   y  6..24   [glyph] title (200 px, elide) ......... age .... [X]
+    //   y 32..48           body  (200 px, elide, ONE line)
+    //
+    // The age moves UP onto the title line, where there is horizontal slack, and
+    // the body takes the full remaining width on its own line. That keeps the
+    // most-scanned element (title) and the most-perishable (age) on the same
+    // line, which is how a notification is actually read.
+    for i in 3: Rectangle {
+        visible: root.cards[i].present;
+        x: Geom.content-x;
+        y: 38px + i * 66px;
+        width: Geom.content-w;
+        height: 60px;
+        border-radius: Theme.r-card;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.line;
+
+        NotifGlyph {
+            x: 12px;
+            y: 16px;
+            id: root.cards[i].source;
+        }
+        Text {
+            x: 50px;
+            y: 6px;
+            width: 150px;
+            overflow: elide;
+            text: root.cards[i].title;
+            color: Theme.ink;
+            font-size: Geom.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: parent.width - self.width - 52px;
+            y: 6px;
+            height: 18px;
+            vertical-alignment: center;
+            text: root.cards[i].age;
+            color: Theme.faint;
+            font-size: Geom.t-caption;
+        }
+        Text {
+            x: 50px;
+            y: 32px;
+            width: 200px;
+            overflow: elide;
+            text: root.cards[i].body;
+            color: Theme.soft;
+            font-size: Geom.t-label;
+        }
+        // Dismiss X — 44 px target with the Recipe B halo. Full card height
+        // minus 8, so the halo reads as part of the card rather than a chip on it.
+        x-btn := IconButton {
+            x: parent.width - self.width - 4px;
+            y: 8px;
+            width: 44px;
+            height: 44px;
+            clicked => { root.dismiss(i); }
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "x";
+                color: x-btn.pressed ? Theme.accent : Theme.dim;
+                font-size: 18px;
+                font-weight: 600;
+            }
+        }
+    }
+
+    // Empty state (`visible:`, ROM note above), centred in the card void.
+    Text {
+        visible: root.total == 0;
+        x: Geom.content-x;
+        y: 100px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "All clear";
+        color: Theme.dim;
+        font-size: Geom.t-body;
+    }
+    Text {
+        visible: root.total == 0;
+        x: Geom.content-x;
+        y: 128px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "alerts and HA messages land here";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+    }
+}

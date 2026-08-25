@@ -85,7 +85,7 @@
 //   * Font sizes only from the existing glyph budget.
 //   * 44 px minimum touch targets (resistive XPT2046, finger-driven).
 //
-// PORT STATUS — 20 of 22 IN THIS BRANCH (switcher + shade held, see below)
+// PORT STATUS — 22 of 22 IN THIS BRANCH
 // -----------------------------------------------------------------------------
 // Every scene this root reaches is landscape-native EXCEPT the two held back at
 // the bottom of this note. The other files imported from `../slint/` are the ones
@@ -105,38 +105,21 @@
 // page and this root never reached it on either board. Its structs live in
 // theme.slint.
 //
-// 🟥 TWO EXCEPTIONS, HELD BACK DELIBERATELY: switcher + shade
+// switcher + shade: LANDED with their Rust halves (one commit, by design)
 // -----------------------------------------------------------------------------
-// `SwitcherOverlay` and `ShadeOverlay` still come from `../slint/` and WILL
-// render cropped. Their landscape versions are written and reviewed — they are
-// at commit **42dd687** — and they are being held out of this branch on the
-// watch session's instruction, because they must not land ahead of their Rust
-// halves.
-//
-// Why, in one sentence: `slint_shell::switcher_slot()` / `shade_slot()` invert a
-// swipe's `start_y` to a slot index by pure arithmetic with **no validation**
-// (`slint_shell.rs:770`), so at mismatched geometry they return a **WRONG INDEX
-// rather than `None`** — a kill-swipe kills the wrong session, a dismiss-swipe
-// dismisses the wrong notification, and there is no error to observe. Landing
-// the `.slint` first would create exactly that window.
-//
-// The plan (watch session): ONE commit carrying this branch's card geometry,
-// their Rust halves, AND a defensive bounds-check that returns `None` on
-// mismatch so any future drift fails VISIBLY instead of silently.
-//
-// To restore both files into a working tree:
-//     git checkout 42dd687 -- ui/cyd/switcher.slint ui/cyd/shade.slint
-// then re-point the two imports above at "switcher.slint" / "shade.slint".
-//
-// The geometry that commit needs:
-//     SWITCHER_CARD_TOP 40 · _H 52 · _PITCH 58 · SWITCHER_CARDS 3
-//     SHADE_CARD_TOP    38 · _H 60 · _PITCH 66 · SHADE_CARDS    3
+// Both were held at 42dd687 until `slint_shell::switcher_slot()` /
+// `shade_slot()` stopped being pure unvalidated arithmetic — at mismatched
+// geometry they returned a WRONG INDEX rather than `None` (a kill-swipe kills
+// the wrong session, silently). The landing commit moved the card geometry to
+// `board::ui` (per-board consts, sourced from these files' port headers) and
+// bounded both slot lookups by the LIVE model at the call sites, so drift now
+// fails as a visible no-op. The standing rule survives: card geometry changes
+// land in the scene file AND `src/board/*.rs`'s `ui` mod in the SAME commit.
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
-// ⚠️ HELD BACK ON PURPOSE — NOT AN OVERSIGHT. See the note below.
-import { SwitcherOverlay } from "../slint/switcher.slint";
-import { ShadeOverlay, NotifCard } from "../slint/shade.slint";
+import { SwitcherOverlay } from "switcher.slint";
+import { ShadeOverlay, NotifCard } from "shade.slint";
 import { Geom } from "geom.slint";
 import { RadioChip, StatusChip } from "controls_cyd.slint";
 

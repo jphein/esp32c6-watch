@@ -41,4 +41,19 @@ pub const RTC_I2C_ADDR: u8 = 0x51;
 pub mod ui {
     /// story READ page, PAUSE tile: x0, x1, y0, y1 (inclusive band).
     pub const STORY_PAUSE_RECT: (u16, u16, u16, u16) = (22, 198, 378, 438);
+
+    /// Switcher card stack (#31) — MUST match `ui/slint/switcher.slint`
+    /// (slot i spans y `TOP + i*PITCH .. + H`).
+    pub const SWITCHER_CARD_TOP: u16 = 110;
+    pub const SWITCHER_CARD_H: u16 = 84;
+    pub const SWITCHER_CARD_PITCH: u16 = 96;
+    /// Visible card slots (the suspension list may be longer; overlay shows "+N").
+    pub const SWITCHER_CARDS: usize = 4;
+
+    /// Shade card stack (#32) — MUST match `ui/slint/shade.slint`.
+    pub const SHADE_CARD_TOP: u16 = 76;
+    pub const SHADE_CARD_H: u16 = 84;
+    pub const SHADE_CARD_PITCH: u16 = 92;
+    /// Visible shade cards (the ring holds up to 8; overlay shows "+N").
+    pub const SHADE_CARDS: usize = 4;
 }
