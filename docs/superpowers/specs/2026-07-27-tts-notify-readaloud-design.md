@@ -215,8 +215,9 @@ shipped firmware features depended on it. A host rebuild would have taken the wa
 
 Now vendored at **`tools/watch-bridge/`** (approved by the orchestrator): the patched bridge, a
 `deploy.sh` that backs up → deploys → restarts → health-checks with **automatic rollback**, and a
-README. Both hosts' copies were verified byte-identical (`md5` match) before vendoring, so there is
-no fork to reconcile.
+README. Both hosts' copies were verified byte-identical (`md5` match) **as measured 2026-07-27, at
+vendoring time** — a statement about that moment, not an ongoing property (see the warning below
+for what reading it as ongoing cost).
 
 > **⚠️ 2026-08-14 — read the paragraph above narrowly; it was true and still misled.**
 > "Both hosts' copies are byte-identical" was a claim about **host ↔ host**. It says nothing about
