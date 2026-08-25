@@ -62,10 +62,11 @@
 // `build.rs`'s own fallback reasons. The list below is the work queue; when it
 // is empty this comment goes away.
 //
-//   PORTED : shell chrome · clock · power_menu · volume
-//   PENDING: sensors · system · power · mesh · launcher · switcher · shade
-//            keyboard · scan · settings · wled · hunt · energy · climate
-//            lights · ping · voice · story · soundlevel · theme_overlay
+//   PORTED : shell chrome · clock · power_menu · volume · launcher · sensors
+//            system · mesh · wled · hunt
+//   PENDING: power · switcher · shade · keyboard · scan · settings · energy
+//            climate · lights · ping · voice · story · soundlevel
+//            theme_overlay
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
@@ -76,15 +77,15 @@ import { RadioChip, StatusChip } from "controls_cyd.slint";
 import { ClockPage } from "clock.slint";
 import { PowerMenu } from "power_menu.slint";
 import { VolumeOverlay } from "volume.slint";
+import { LauncherOverlay, LauncherTile } from "launcher.slint";
+import { SensorsPage } from "sensors.slint";
+import { SystemPage } from "system.slint";
+import { MeshPage } from "mesh.slint";
+import { WledRemote } from "wled.slint";
+import { HuntPage } from "hunt.slint";
 
 // --- PENDING: still the C6 portrait layouts (render cropped) ----------------
-import { SensorsPage } from "../slint/sensors.slint";
-import { SystemPage } from "../slint/system.slint";
 import { PowerPage } from "../slint/power.slint";
-import { MeshPage } from "../slint/mesh.slint";
-import { LauncherOverlay, LauncherTile } from "../slint/launcher.slint";
-import { WledRemote } from "../slint/wled.slint";
-import { HuntPage } from "../slint/hunt.slint";
 import { EnergyPage } from "../slint/energy.slint";
 import { ClimateOverlay, ClimateCard } from "../slint/climate.slint";
 import { LightsOverlay } from "../slint/lights.slint";

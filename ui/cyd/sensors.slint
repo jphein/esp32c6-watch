@@ -1,0 +1,92 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle } from "controls_cyd.slint";
+
+// ============================================================================
+// SENSORS PAGE — an honest empty page, and the reasoning is the point.
+// ============================================================================
+//
+// THE HARDWARE
+// -----------------------------------------------------------------------------
+// The C6 page is five rows and every one of them is dead on this board:
+//
+//   ACCEL / GYRO / STEPS   the QMI8658 IMU does not exist here
+//   IMU TEMP               same chip, same absence
+//   DIE TEMP               was the graceful fallback when the IMU is quiet —
+//                          but the ESP32-C5 has no `TSENS` peripheral either, so
+//                          the fallback dies with the thing it was covering
+//
+// That last line is why this is the strongest drop candidate in the whole port:
+// most pages lose a feature, this one loses every reading it has AND the reading
+// it fell back to. JP dropped it, 2026-08-24.
+//
+// WHY THE PAGE STILL EXISTS
+// -----------------------------------------------------------------------------
+// Because "dropped" and "deleted" are not the same thing here, and the seam is
+// Rust-side. `current-page` is Rust-owned: `PAGE_SENSORS = 1`, `PAGE_COUNT = 5`,
+// with `PAGE_SYSTEM`/`PAGE_POWER`/`PAGE_MESH` numbered after it. Removing this
+// slot is a RENUMBERING of constants this workstream does not own, plus a
+// 5-tick rail becoming 4 — not a layout edit. And the mission asks for the
+// five-page carousel.
+//
+// So the slot stays and the page tells the truth. ⏳ Flagged for JP: if he would
+// rather repurpose page 1 for something this board actually HAS, that is a cheap
+// change at this leaf.
+//
+// WHY NOT FIVE ROWS OF "--"
+// -----------------------------------------------------------------------------
+// Because a row that can only ever say one thing is not a row, it is a rumour.
+// Five of them reads as "the sensors are broken" — a bug report waiting to be
+// filed — where this page says "there are no sensors", which is a fact about the
+// board. Same judgement as dropping the battery pill from the chrome.
+//
+// The composition is the tree's own empty-state idiom, borrowed from
+// `mesh.slint`: a faint headline over a dim explanatory line, centred in the
+// void. Centred with fixed-width boxes and `horizontal-alignment`, not with
+// `(parent.width - self.width) / 2` — static text, but the cheap form is free
+// and identical, so new centring is written the cheap way by default.
+// ============================================================================
+
+export component SensorsPage {
+    // All four are declared because slint_shell.rs writes them every 100 ms
+    // while this page shows; none is rendered. Removing a property breaks the
+    // build, and the Rust-side tick is the driver workstream's to gate.
+    in property <string> accel-text;
+    in property <string> gyro-text;
+    in property <string> imu-temp-text;
+    in property <string> die-temp-text;
+    in property <int> steps;
+
+    CydPageTitle { title: "SENSORS"; }
+
+    Text {
+        x: Geom.content-x;
+        y: 88px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "NO SENSORS ON THIS BOARD";
+        color: Theme.faint;
+        font-size: 18px;
+        letter-spacing: 3px;
+    }
+    Text {
+        x: Geom.content-x;
+        y: 124px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "no IMU \u{00b7} no die-temp sensor";
+        color: Theme.dim;
+        font-size: Geom.t-body;
+        letter-spacing: 2px;
+    }
+    Text {
+        x: Geom.content-x;
+        y: 150px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "the QMI8658 and TSENS are both absent";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}
