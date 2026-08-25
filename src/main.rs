@@ -1183,6 +1183,33 @@ async fn main(_spawner: Spawner) -> ! {
     display.init();
     println!("[DISPLAY] OK");
 
+    // Touch calibration self-test — asserted about itself, on the boot log,
+    // before anyone touches the glass.
+    //
+    // The axis settlement rests on ONE anchored datum: a known physical
+    // top-right press reading raw(3272, 459), observed with finger and dot in
+    // the same view at the same moment. Rather than record that in a comment and
+    // hope a later edit respects it, the firmware re-derives it every boot. If
+    // this line is wrong the build is wrong, and no amount of tapping will fix
+    // it — which is the failure this replaces, because a mis-signed calibration
+    // presents as "touch feels wrong" rather than as an error.
+    //
+    // Costs nothing on the bus: `map` is pure arithmetic over the constants.
+    #[cfg(feature = "board-cyd-c5")]
+    {
+        use crate::drivers::xpt2046::{RawSample, Xpt2046};
+        let probe = Xpt2046::new(board::TOUCH_CAL, display.rotation());
+        let anchor = RawSample { x: 3272, y: 459, z: 1000 };
+        let m = probe.map(&anchor);
+        let ok = m.x == 300 && m.y == 29;
+        println!(
+            "[TOUCH-CAL] anchor raw(3272,459) -> map({},{}) expect(300,29) {}",
+            m.x,
+            m.y,
+            if ok { "PASS" } else { "FAIL — calibration constants changed" }
+        );
+    }
+
     // Slint shell owns the whole watchface + launcher UI now. Construct it once
     // (registers the Slint platform + shows the window). brightness is synced to
     // the real boot value once watch_cfg is loaded (below).
