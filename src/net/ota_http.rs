@@ -168,13 +168,45 @@ pub fn handle_announce(payload: &[u8]) {
         println!("[OTA] announce rejected (build {build} <= running {})", BUILD_EPOCH);
         return;
     }
+    let refused = LAST_REFUSED_BUILD.lock(|cell| *cell.borrow());
+    if build == refused {
+        println!(
+            "[OTA] announce rejected (build {build} was refused by a pre-write check; \
+             clear or replace the retained announce)"
+        );
+        return;
+    }
     println!("[OTA] announce accepted (build {build} > running {})", BUILD_EPOCH);
+    CURRENT_BUILD.lock(|cell| *cell.borrow_mut() = build);
     PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().replace(Announce { build, url }));
 }
 
 /// Take the pending accepted announce, if any (clears it). Polled by main.rs.
 pub fn take_announce() -> Option<Announce> {
     PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().take())
+}
+
+/// The build id of the announce currently being acted on (set on accept), and
+/// the most recent build whose image was REFUSED by a deterministic pre-write
+/// check (wrong chip / bad magic / oversized). A retained announce re-arrives
+/// on every announce window; without this memory a refused build re-queues an
+/// endless download-refuse loop — observed live on the CYD-C5 (2026-08-25),
+/// where each round also cost a multi-MB fetch. No 64-bit atomics on
+/// riscv32imac, hence the critical-section cells (PENDING_ANNOUNCE's pattern).
+static CURRENT_BUILD: BlockingMutex<CriticalSectionRawMutex, RefCell<u64>> =
+    BlockingMutex::new(RefCell::new(0));
+static LAST_REFUSED_BUILD: BlockingMutex<CriticalSectionRawMutex, RefCell<u64>> =
+    BlockingMutex::new(RefCell::new(0));
+
+/// net_task calls this when a download ends in a `refused:` error — the
+/// verdict is about the IMAGE BYTES, so retrying the same build is pointless
+/// and the announce that named it must stop re-queuing it.
+pub fn mark_current_build_refused() {
+    let b = CURRENT_BUILD.lock(|cell| *cell.borrow());
+    if b != 0 {
+        LAST_REFUSED_BUILD.lock(|cell| *cell.borrow_mut() = b);
+        println!("[OTA] build {b} marked refused - its announce will be ignored");
+    }
 }
 
 /// Download the firmware image into the inactive OTA slot and stage it for
@@ -275,105 +307,131 @@ async fn run(
     let mut rx_buf = vec![0u8; 4096];
     let mut tx_buf = vec![0u8; 512];
     let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
-    match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => return Err("connect refused/reset"),
-        Err(_) => return Err("connect timeout (10s connect, server down?)"),
-    }
 
-    let request = format!(
-        "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
-    let mut sent = 0;
-    while sent < request.len() {
-        let n = match with_timeout(STALL_TIMEOUT, socket.write(&request.as_bytes()[sent..])).await
-        {
-            Ok(r) => r.map_err(|_| "request send failed")?,
-            Err(_) => return Err("stalled sending request (10s)"),
-        };
-        sent += n;
-    }
+    // EVERY exit of the network phase funnels through the single abort() below
+    // (#refusal-path, 2026-08-25): the old shape returned straight out of this
+    // function from a dozen error sites with the socket still open — observed
+    // live on the CYD-C5 as a zero-window deadlock the server could not shake
+    // (send-queue frozen at the same byte count twice, the client re-wedging
+    // from the SAME source port on retry) with the heap bleeding under it.
+    // `break 'net` replaces `return`/`?` inside the phase; nothing else may
+    // leave it. abort() (RST) rather than close(): a refused 3.4 MB body must
+    // never be politely drained.
+    let flashed = 'net: {
+        match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => break 'net Err("connect refused/reset"),
+            Err(_) => break 'net Err("connect timeout (10s connect, server down?)"),
+        }
 
-    // --- Response headers ------------------------------------------------------
-    let mut header = [0u8; 1024];
-    let mut header_len = 0;
-    let body_start = loop {
-        if header_len == header.len() {
-            return Err("response headers too large");
+        let request = format!(
+            "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        );
+        let mut sent = 0;
+        while sent < request.len() {
+            let n = match with_timeout(STALL_TIMEOUT, socket.write(&request.as_bytes()[sent..]))
+                .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break 'net Err("request send failed"),
+                Err(_) => break 'net Err("stalled sending request (10s)"),
+            };
+            sent += n;
         }
-        let n = match with_timeout(STALL_TIMEOUT, socket.read(&mut header[header_len..])).await {
-            Ok(r) => r.map_err(|_| "connection reset in headers")?,
-            Err(_) => return Err("stalled in headers (10s, no data)"),
+
+        // --- Response headers --------------------------------------------------
+        let mut header = [0u8; 1024];
+        let mut header_len = 0;
+        let body_start = loop {
+            if header_len == header.len() {
+                break 'net Err("response headers too large");
+            }
+            let n = match with_timeout(STALL_TIMEOUT, socket.read(&mut header[header_len..]))
+                .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break 'net Err("connection reset in headers"),
+                Err(_) => break 'net Err("stalled in headers (10s, no data)"),
+            };
+            if n == 0 {
+                break 'net Err("connection closed in headers");
+            }
+            header_len += n;
+            if let Some(pos) = find(&header[..header_len], b"\r\n\r\n") {
+                break pos + 4;
+            }
         };
-        if n == 0 {
-            return Err("connection closed in headers");
+        let content_len = match parse_headers(&header[..body_start]) {
+            Ok(v) => v,
+            Err(e) => break 'net Err(e),
+        };
+        if content_len == 0 {
+            // "refused:" marks a DETERMINISTIC verdict about the image itself —
+            // net_task gives up immediately (no retries: the same bytes would
+            // come back) and remembers the build so the retained announce
+            // cannot re-queue an endless download-refuse loop.
+            break 'net Err("refused: empty image");
         }
-        header_len += n;
-        if let Some(pos) = find(&header[..header_len], b"\r\n\r\n") {
-            break pos + 4;
+        if content_len > slot_size {
+            break 'net Err("refused: image larger than ota slot");
+        }
+        println!("[OTA] image size {content_len} bytes");
+        progress(0, content_len as u32);
+
+        // --- Stream the body into the inactive slot ---------------------------
+        let mut chunk = vec![0u8; CHUNK];
+        let leftover = &header[body_start..header_len];
+        chunk[..leftover.len()].copy_from_slice(leftover);
+        let mut chunk_len = leftover.len().min(content_len as usize);
+        let mut received = chunk_len as u64;
+        let mut flashed: u32 = 0;
+        let mut next_log = LOG_STEP;
+
+        loop {
+            if chunk_len == CHUNK || (received == content_len && chunk_len > 0) {
+                if flashed == 0 && chunk[0] != ESP_IMAGE_MAGIC {
+                    break 'net Err("refused: not an esp app image (bad magic)");
+                }
+                {
+                    // One 4 KB sector per lock: a concurrent config save waits at
+                    // most one program cycle, never the whole download.
+                    let mut f = flash.lock().await;
+                    let mut region = target_entry.as_embedded_storage(&mut *f);
+                    if region.write(flashed, &chunk[..chunk_len]).is_err() {
+                        break 'net Err("flash write failed");
+                    }
+                }
+                flashed += chunk_len as u32;
+                chunk_len = 0;
+                progress(flashed, content_len as u32);
+                if flashed >= next_log {
+                    println!("[OTA] {flashed} / {content_len} bytes");
+                    next_log += LOG_STEP;
+                }
+            }
+            if received == content_len {
+                break 'net Ok(flashed);
+            }
+            let want = (CHUNK - chunk_len).min((content_len - received) as usize);
+            let n = match with_timeout(
+                STALL_TIMEOUT,
+                socket.read(&mut chunk[chunk_len..chunk_len + want]),
+            )
+            .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break 'net Err("connection reset mid-body"),
+                Err(_) => break 'net Err("stalled (20s, no data)"),
+            };
+            if n == 0 {
+                break 'net Err("connection closed mid-body");
+            }
+            chunk_len += n;
+            received += n as u64;
         }
     };
-    let content_len = parse_headers(&header[..body_start])?;
-    if content_len == 0 {
-        return Err("empty image");
-    }
-    if content_len > slot_size {
-        return Err("image larger than ota slot");
-    }
-    println!("[OTA] image size {content_len} bytes");
-    progress(0, content_len as u32);
-
-    // --- Stream the body into the inactive slot -------------------------------
-    let mut chunk = vec![0u8; CHUNK];
-    let leftover = &header[body_start..header_len];
-    chunk[..leftover.len()].copy_from_slice(leftover);
-    let mut chunk_len = leftover.len().min(content_len as usize);
-    let mut received = chunk_len as u64;
-    let mut flashed: u32 = 0;
-    let mut next_log = LOG_STEP;
-
-    loop {
-        if chunk_len == CHUNK || (received == content_len && chunk_len > 0) {
-            if flashed == 0 && chunk[0] != ESP_IMAGE_MAGIC {
-                return Err("not an esp app image (bad magic)");
-            }
-            {
-                // One 4 KB sector per lock: a concurrent config save waits at
-                // most one program cycle, never the whole download.
-                let mut f = flash.lock().await;
-                let mut region = target_entry.as_embedded_storage(&mut *f);
-                region
-                    .write(flashed, &chunk[..chunk_len])
-                    .map_err(|_| "flash write failed")?;
-            }
-            flashed += chunk_len as u32;
-            chunk_len = 0;
-            progress(flashed, content_len as u32);
-            if flashed >= next_log {
-                println!("[OTA] {flashed} / {content_len} bytes");
-                next_log += LOG_STEP;
-            }
-        }
-        if received == content_len {
-            break;
-        }
-        let want = (CHUNK - chunk_len).min((content_len - received) as usize);
-        let n = match with_timeout(
-            STALL_TIMEOUT,
-            socket.read(&mut chunk[chunk_len..chunk_len + want]),
-        )
-        .await
-        {
-            Ok(r) => r.map_err(|_| "connection reset mid-body")?,
-            Err(_) => return Err("stalled (20s, no data)"),
-        };
-        if n == 0 {
-            return Err("connection closed mid-body");
-        }
-        chunk_len += n;
-        received += n as u64;
-    }
     socket.abort();
+    let flashed = flashed?;
     println!("[OTA] download complete ({flashed} bytes flashed)");
 
     // --- Image fully written: flip otadata to the new slot --------------------
