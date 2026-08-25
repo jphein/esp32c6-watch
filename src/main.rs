@@ -1789,6 +1789,11 @@ async fn main(_spawner: Spawner) -> ! {
     // the amp/codec borrows) to pick it up.
     #[cfg(feature = "story")]
     let mut story_play_req: Option<u16> = None;
+    // A pick that arrives while the roamer is still associating must WAIT, not
+    // vanish (the bug: `else if net.phase.ready()` had no else — the request
+    // was taken and dropped with zero feedback). This stamps the first retry
+    // so the wait is bounded rather than a stuck spinner.
+    let mut story_play_wait: Option<Instant> = None;
     // `?since=` paging cursor for the chapter list.
     #[cfg(feature = "story")]
     let mut story_since: u16 = 0;
@@ -2844,6 +2849,17 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
         }
+
+        // Truth for the console's `state` command, published BEFORE any
+        // `continue` can skip it (2026-08-25): the old publish site lives in
+        // the shell arm, so on screen-off ticks — and in any state that never
+        // reaches the shell arm — `state` served values frozen at the last
+        // awake tick. Debugging trusted a lying instrument for hours: it said
+        // app=Story/screen=3 while the loop was somewhere else entirely. The
+        // full snapshot (page, radios) still publishes in the shell arm; this
+        // early write keeps the two LOAD-BEARING fields honest everywhere.
+        #[cfg(feature = "debug-console")]
+        debug_console::publish_app_screen(app_state, screen_state);
 
         // === Synthetic input injection (debug-console) ===
         // Drain ONE queued command and merge it into the SAME variables the real
@@ -5005,7 +5021,24 @@ async fn main(_spawner: Spawner) -> ! {
                         let total = row.as_ref().and_then(|r| r.total_bytes).unwrap_or(0);
                         if total == 0 {
                             shell.set_story_loading(false, "chapter has no audio");
+                        } else if !net.phase.ready() {
+                            // WiFi mid-associate (Hold::Story is up — raised on
+                            // open): requeue and show the spinner instead of
+                            // silently eating the tap. Bounded: past 15 s the
+                            // pick fails VISIBLY, matching the list's own
+                            // "WiFi not ready" honesty.
+                            let t0 = *story_play_wait.get_or_insert(now);
+                            if (now - t0).as_secs() >= 15 {
+                                story_play_wait = None;
+                                shell.set_story_loading(false, "WiFi not ready");
+                            } else {
+                                story_play_req = Some(chapter);
+                                shell.set_story_loading(true, "");
+                            }
+                            shell.request_redraw();
                         } else if net.phase.ready() {
+                            story_play_wait = None;
+                            shell.set_story_loading(false, "");
                             #[cfg(feature = "debug-console")]
                             debug_console::arm_exempt();
 
@@ -6384,6 +6417,7 @@ async fn main(_spawner: Spawner) -> ! {
             ble: ble_on,
             mesh_peers: last_mesh_peers,
             modal: shell.modal_kind(),
+            story: shell.story_dbg(),
         });
 
         // Track the arm we ran so the shell arm can detect a return from an app
