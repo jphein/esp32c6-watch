@@ -1,9 +1,26 @@
-# HANDOFF — 2026-07-29 (late), esp32c6-watch
+# HANDOFF — 2026-08-24 (late), esp32c6-watch
 
-**Active goal (Stop hook):** get Endless LitRPG story stably running on a watch.
-**Status: DONE for this pass.** Story loads, plays, volume works mid-chapter, and the
-CHARACTER-page reboot found today is fixed and verified 6/6 on hardware. Equipment data
-is safe to ship from the daemon. Nothing is blocking.
+**Active goal (JP, 2026-08-24): get the esp32c6 watch to be a FULL TARGET of smol,
+with all features usable.** The convergence itself — smol#347 — not just parity.
+
+**Phase 1 is live on `feat/cyd-c5-target`** (6 commits): the board/capability seam
+(`board-*` features supply the chip + `has-*` capabilities, OpenWrt-style, matching
+smol budget.rs by construction), the driver contract (`src/drivers/panel.rs`), and a
+LINKING C5 arm (stack region 74,480 B — in the C6's bootable band). The C6 default is
+byte-verified unchanged throughout. Parallel lanes tonight: luna's 320x240 layout set
+(`feat/cyd-c5-layout`), morpheus wiring vesper's ST7789/XPT2046 drivers
+(`feat/cyd-c5-gating`), first C5 boot attempt behind the cyd session's flash guard.
+
+**Convergence acceptance test (proposed): the C6's own preflight matrix passing from
+inside smol's tree** — "all features usable" means story, voice, mesh, OTA and games
+survive the move, and this repo's gates (texture ceiling, WSIGIL-vs-tree, never-ship,
+measured stack floors) need homes in smol's CI or the move sheds a year of checks.
+
+Key facts for the move, all measured: C6 ChipBudget row is on smol#347 (comment
+5405759216); fleet naming carries three id contracts (derived 122/236, allocated
+176/162) dual-contract-tested in `crates/sigil-id`; the C5 heap placeholder is 96 KB
+pending the radio-up-soak floor recipe; `--gc-sections` IS passed by the C5 link (and
+presumably always was) — the WSIGIL preflight gate is what actually guards the marker.
 
 ---
 
