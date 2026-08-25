@@ -616,6 +616,12 @@ impl ShellUi {
             let event = if self.touch_down {
                 WindowEvent::PointerMoved { position: pos }
             } else {
+                // Console-gated press-edge evidence (2026-08-25): injected taps
+                // produced zero Slint clicks anywhere while launch/swipe/state
+                // worked, and nothing could say whether the frames ever reached
+                // this function. This line splits the search space in half.
+                #[cfg(feature = "debug-console")]
+                esp_println::println!("[TOUCH] press {} {}", tp.x, tp.y);
                 // Press edge: arm the bottom-edge HOLD detector (#31).
                 self.hold_armed_at = Some(embassy_time::Instant::now());
                 self.hold_start = (tp.x, tp.y);
@@ -624,6 +630,14 @@ impl ShellUi {
             };
             self.touch_down = true;
             self.last_pos = pos;
+            // Evidence line 2 (2026-08-25): the press reached here (line 1
+            // proved that) — this observes whether Slint ACCEPTED the event.
+            // The Result was silently discarded for a year.
+            #[cfg(feature = "debug-console")]
+            if let Err(e) = self.window.window().try_dispatch_event(event) {
+                esp_println::println!("[TOUCH] dispatch REFUSED: {e:?}");
+            }
+            #[cfg(not(feature = "debug-console"))]
             let _ = self.window.window().try_dispatch_event(event);
             // Bottom-edge HOLD (#31): drift past the slop disarms (that's a
             // swipe forming); a still press inside the edge zone that outlives
@@ -689,6 +703,11 @@ impl ShellUi {
             } else {
                 self.last_pos
             };
+            #[cfg(feature = "debug-console")]
+            esp_println::println!(
+                "[TOUCH] release at {},{} (directional={})",
+                release_pos.x, release_pos.y, directional
+            );
             let _ = self.window.window().try_dispatch_event(WindowEvent::PointerReleased {
                 position: release_pos,
                 button: PointerEventButton::Left,
@@ -1470,8 +1489,44 @@ impl ShellUi {
         self.ui.as_ref().map_or(0, |ui| ui.get_story_page())
     }
 
+    /// Debug-console introspection: (page, visible chapter rows, loading,
+    /// playing). Exists because the UI automator cannot see the glass — a
+    /// chapter tap that does nothing is indistinguishable from a daemon that
+    /// never answered without these four facts (found 2026-08-25 when the
+    /// story E2E could not say WHICH of the two it was).
+    pub fn story_dbg(&self) -> (i32, usize, bool, bool) {
+        use slint::Model;
+        // Field 2 is a BITMASK of "why is the list not tappable":
+        //   1 = overlay flag down · 2 = loading · 4 = error-text non-empty.
+        // Each bit hides the chapter list in ui/slint/story.slint's `if`
+        // conditions; a tap on an invisible row is a tap on nothing.
+        let (page, mask) = self.ui.as_ref().map_or((0, 1), |ui| {
+            let mut m = 0u8;
+            if !ui.get_story_open() {
+                m |= 1;
+            }
+            if ui.get_story_loading() {
+                m |= 2;
+            }
+            if !ui.get_story_error().is_empty() {
+                m |= 4;
+            }
+            (ui.get_story_page(), m)
+        });
+        (
+            page,
+            self.story_chapters.row_count(),
+            mask != 0,
+            self.story_playing,
+        )
+    }
+
     pub fn set_story_loading(&self, loading: bool, error: &str) {
         let Some(ui) = self.ui.as_ref() else { return; };
+        #[cfg(feature = "debug-console")]
+        if !error.is_empty() {
+            esp_println::println!("[STORY-DBG] error set: {error:?} (list hidden while non-empty)");
+        }
         ui.set_story_loading(loading);
         ui.set_story_error(SharedString::from(error));
     }
@@ -1507,6 +1562,17 @@ impl ShellUi {
             })
             .collect();
         let shown = items.len();
+        // Console-gated row evidence (2026-08-25): rows visibly rendered while
+        // every row-tap fell dead, and nothing could say whether `playable`
+        // survived the trip from the daemon through the parser to the model.
+        #[cfg(feature = "debug-console")]
+        esp_println::println!(
+            "[STORY-DBG] pushed {} rows, playable {}, first num={} playable={}",
+            shown,
+            items.iter().filter(|c| c.playable).count(),
+            items.first().map_or(-1, |c| c.number),
+            items.first().is_some_and(|c| c.playable),
+        );
         self.story_chapters.set_vec(items);
         // "+N more" counts BOTH what the parse cap dropped and what this page did
         // not show, so the number is honest about the whole remainder.
@@ -2210,11 +2276,22 @@ fn build_scene(
     // the amp/codec/socket borrows.
     {
         let r = req.clone();
-        ui.on_story_nav(move |p| r.story_nav.set(Some(p)));
+        ui.on_story_nav(move |p| {
+            #[cfg(feature = "debug-console")]
+            esp_println::println!("[STORY-DBG] nav({p}) fired");
+            r.story_nav.set(Some(p));
+        });
     }
     {
         let r = req.clone();
-        ui.on_story_pick(move |n| r.story_pick.set(Some(n)));
+        ui.on_story_pick(move |n| {
+            // Callback-boundary evidence (2026-08-25): a delivered click that
+            // produces nothing is ambiguous between "Slint never fired the
+            // callback" and "the drain lost the request" — this line splits it.
+            #[cfg(feature = "debug-console")]
+            esp_println::println!("[STORY-DBG] pick({n}) fired");
+            r.story_pick.set(Some(n));
+        });
     }
     {
         let r = req.clone();

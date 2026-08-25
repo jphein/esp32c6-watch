@@ -274,7 +274,18 @@ class Watch:
             if "=" not in f:
                 continue
             k, v = f.split("=", 1)
-            out[k] = v if k == "app" else int(v)
+            if k == "app":
+                out[k] = v
+            elif k == "story":
+                # page/rows/loading/playing (firmware >= 2026-08-25); keep the
+                # raw string too so old scripts that never knew it stay happy.
+                parts = v.split("/")
+                if len(parts) == 4:
+                    out["story_page"], out["story_rows"] = int(parts[0]), int(parts[1])
+                    out["story_loading"], out["story_playing"] = int(parts[2]), int(parts[3])
+                out[k] = v
+            else:
+                out[k] = int(v)
         return out
 
     def perf(self) -> dict:

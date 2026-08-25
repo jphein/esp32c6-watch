@@ -467,4 +467,38 @@ fn main() {
     ui.set_launcher_open(true);
     probe("chrome visible:false (launcher open)", &ui);
     ui.set_launcher_open(false);
+
+    // 8. STORY LIST INPUT PROBE (2026-08-25) — on hardware, story TAB taps
+    //    click while chapter-ROW taps (and the pager) never fire `pick`, with
+    //    rows pushed, playable, error clear, loading false. Reproduce natively:
+    //    same scene, same events, full introspection.
+    let picked = Rc::new(Cell::new(-1i32));
+    let navd = Rc::new(Cell::new(-1i32));
+    { let p = picked.clone(); ui.on_story_pick(move |n| p.set(n)); }
+    { let nv = navd.clone(); ui.on_story_nav(move |p| nv.set(p)); }
+    ui.set_story_open(true);
+    ui.set_story_page(0);
+    ui.set_story_loading(false);
+    ui.set_story_error("".into());
+    ui.set_story_chapters(slint::ModelRc::from(Rc::new(slint::VecModel::from(mk_chapters(5)))));
+    frame("story-input-probe(list)", &mut sink); // layout pass before hit tests
+    let mut click = |label: &str, x: f32, y: f32| {
+        picked.set(-1);
+        navd.set(-1);
+        let pos = slint::LogicalPosition::new(x, y);
+        window.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left });
+        window.dispatch_event(WindowEvent::PointerMoved { position: pos });
+        window.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Left });
+        window.dispatch_event(WindowEvent::PointerExited);
+        eprintln!(
+            "LUNAMETER story-probe {label} @({x},{y}): pick={} nav={}",
+            picked.get(), navd.get()
+        );
+    };
+    click("tab STATS", 251.0, 113.0);
+    ui.set_story_page(0); // back to list in case nav fired
+    click("row0", 205.0, 169.0);
+    click("row1", 205.0, 224.0);
+    click("row2 low", 205.0, 280.0);
+    ui.set_story_open(false);
 }

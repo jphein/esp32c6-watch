@@ -131,6 +131,10 @@ pub struct UiState {
     /// 2 shade. Modals ride app_state == Watchface, so `app` alone can't
     /// tell the automator whether one is open (or got closed by a leak).
     pub modal: u8,
+    /// Story overlay introspection (page, visible chapter rows, loading,
+    /// playing) — the automator cannot see the glass, and a chapter tap that
+    /// does nothing needs these to say whether the LIST ever had rows.
+    pub story: (i32, usize, bool, bool),
 }
 
 impl UiState {
@@ -143,6 +147,7 @@ impl UiState {
             ble: false,
             mesh_peers: 0,
             modal: 0,
+            story: (0, 0, false, false),
         }
     }
 }
@@ -160,6 +165,18 @@ static HEAP_MARK: Mutex<RefCell<Option<crate::heap_hooks::Snapshot>>> =
 /// Publish the current UI state (main loop, once per tick).
 pub fn publish_state(s: UiState) {
     critical_section::with(|cs| *UI_STATE.borrow(cs).borrow_mut() = s);
+}
+
+/// Early-tick publish of the two fields that must NEVER go stale (see the
+/// main-loop call site): `app` and `screen`. Runs before any `continue`, so
+/// `state` tells the truth about where the loop actually is even on
+/// screen-off ticks and in arms that never reach the full publish.
+pub fn publish_app_screen(app: AppState, screen: u8) {
+    critical_section::with(|cs| {
+        let mut st = UI_STATE.borrow(cs).borrow_mut();
+        st.app = app;
+        st.screen_state = screen;
+    });
 }
 
 // ============================================================================
@@ -312,13 +329,26 @@ fn handle_line(bytes: &[u8]) {
                         start_y: y,
                         tap: false,
                     };
+                    // A REAL finger yields several point frames per contact, so
+                    // Slint always sees Pressed -> Moved(s) -> Released. The
+                    // original two-frame tap produced the one sequence real
+                    // hardware never sends (Pressed with no Moved), and Slint
+                    // fired no `clicked` for it — 2026-08-25, proven by the
+                    // [TOUCH] evidence lines. The hold frame makes the synthetic
+                    // gesture indistinguishable from the slowest real tap.
+                    let hold = Inject::Touch {
+                        point: Some(TouchPoint { x, y, fingers: 1 }),
+                        swipe: None,
+                        start_y: y,
+                        tap: false,
+                    };
                     let release = Inject::Touch {
                         point: None,
                         swipe: Some(SwipeDirection::Tap),
                         start_y: y,
                         tap: true,
                     };
-                    if queue(press) && queue(release) {
+                    if queue(press) && queue(hold) && queue(release) {
                         println!("[DBGCON] ok tap {} {}", x, y);
                     } else {
                         println!("[DBGCON] err queue-full");
@@ -384,7 +414,7 @@ fn handle_line(bytes: &[u8]) {
         "state" => {
             let s = critical_section::with(|cs| *UI_STATE.borrow(cs).borrow());
             println!(
-                "[DBGCON] state app={:?} page={} launcher={} screen={} wifi={} ble={} mesh={} modal={}",
+                "[DBGCON] state app={:?} page={} launcher={} screen={} wifi={} ble={} mesh={} modal={} story={}/{}/{}/{}",
                 s.app,
                 s.page,
                 (s.app == AppState::Launcher) as u8,
@@ -392,7 +422,11 @@ fn handle_line(bytes: &[u8]) {
                 s.wifi as u8,
                 s.ble as u8,
                 s.mesh_peers,
-                s.modal
+                s.modal,
+                s.story.0,
+                s.story.1,
+                s.story.2 as u8,
+                s.story.3 as u8
             );
         }
         "perf" => report_perf(),
