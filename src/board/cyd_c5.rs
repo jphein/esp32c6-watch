@@ -41,8 +41,30 @@ pub const BACKLIGHT_GPIO: u8 = 25;
 pub const WS2812_GPIO: u8 = 27;
 
 // === Flash / PSRAM ===
-// 16 MB flash, 8 MB PSRAM (the C6 watch has 4 MB flash, NO PSRAM). The watch's
-// 6 MB A/B OTA slots fit; partitions-cyd-c5.csv is the variant to flash with.
-// PSRAM changes the entire heap story — the C6's reclaimed-pool scarcity and
-// its 256-SceneTexture ceiling are C6 MEASUREMENTS and must not be inherited
+// 16 MB flash, 8 MB PSRAM. The C6 watch is ALSO 16 MB flash (partitions.csv's
+// last partition ends at 0xC20000 — an earlier draft of this comment said 4 MB,
+// which was the C6's ROM-REGION ceiling before widen_rom_region, not its flash
+// size). So the OTA layout ports UNCHANGED: same partitions.csv, same 6 MB A/B
+// slots, no board variant needed. What does NOT port is the C6's heap story —
+// PSRAM changes it entirely, and the reclaimed-pool scarcity and the
+// 256-SceneTexture ceiling are C6 MEASUREMENTS that must not be inherited
 // (the same measured-never-inherited rule as the stack floor).
+
+// === Constants with LIVE call sites in main.rs (compile-time requirement) ===
+// The CYD has no I2C peripherals in use — touch is SPI, there is no PMU, IMU or
+// RTC chip. These exist because main.rs's bring-up references them
+// unconditionally until the capability-gating pass lands; the first-boot plan
+// (mapper §5) satisfies the I2C drivers with a fake-bus shim, so these values
+// configure a bus that talks to NOTHING. They must never be read as hardware
+// facts about this board.
+pub const I2C_FREQ_HZ: u32 = 400_000;
+pub const TP_I2C_ADDR: u8 = 0x38;
+pub const IMU_I2C_ADDR: u8 = 0x6B;
+pub const RTC_I2C_ADDR: u8 = 0x51;
+
+/// UI hit-geometry for the CYD layout set (`ui/cyd/`, 320x240 landscape).
+/// PLACEHOLDER values pending the layout work — they mirror nothing yet, and
+/// the C5 arm's story playback is gated off until they do.
+pub mod ui {
+    pub const STORY_PAUSE_RECT: (u16, u16, u16, u16) = (0, 0, 0, 0);
+}

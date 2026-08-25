@@ -251,19 +251,36 @@ impl DrawTarget for Co5300Display<'_> {
 
         self.bus.begin_pixels();
         let w = area.size.width as usize;
-        let mut row_buf = [0u16; 128]; // max width we support per row
+        // Row staging. ⚠️ This impl currently has NO callers — every app draws
+        // into `Framebuffer` (its own, correct, fill_contiguous) and the shell
+        // renders by line. It is fixed rather than deleted because dead code
+        // that reads as load-bearing is how it gets called someday: the old
+        // version had `[u16; 128]` with a `col < 128` guard, which silently
+        // TRUNCATED any row wider than 128 px on a 410 px panel — and its only
+        // protection against the embedded-graphics over-yield hazard (iterators
+        // may legally yield MORE than w*h colors; streaming past the window
+        // wraps GRAM to origin and overwrites the fill) was that same
+        // truncation, by accident. Found by the CYD driver session hitting the
+        // identical class in their ST7789 driver. Now: full-width staging, and
+        // the row counter bounds total output to the window's own pixel count.
+        let mut row_buf = [0u16; 410];
         let mut col = 0usize;
+        let mut rows_sent = 0u32;
 
         for color in colors.into_iter() {
-            if col < 128 {
+            if rows_sent >= area.size.height {
+                break; // over-yield: the window is full, stop consuming
+            }
+            if col < w && col < row_buf.len() {
                 row_buf[col] = RawU16::from(color).into_inner();
             }
             col += 1;
 
             // End of row
             if col >= w {
-                let slice = &row_buf[..w.min(128)];
+                let slice = &row_buf[..w.min(row_buf.len())];
                 self.bus.stream_pixels(slice);
+                rows_sent += 1;
                 if needs_row_dup {
                     // Duplicate the row for minimum 2-line requirement
                     self.bus.stream_pixels(slice);
@@ -273,7 +290,7 @@ impl DrawTarget for Co5300Display<'_> {
         }
         // Flush remaining partial row
         if col > 0 {
-            let slice = &row_buf[..col.min(128)];
+            let slice = &row_buf[..col.min(w).min(row_buf.len())];
             self.bus.stream_pixels(slice);
             if needs_row_dup {
                 self.bus.stream_pixels(slice);

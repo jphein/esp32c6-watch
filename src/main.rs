@@ -5093,8 +5093,12 @@ async fn main(_spawner: Spawner) -> ! {
                             // drains the DMA ring and stutters the audio.
                             let mut stop_on_tap = || match touch.read() {
                                 Ok(Some(p)) => {
-                                    let in_row = p.y >= 378 && p.y <= 438;
-                                    if in_row && p.x >= 22 && p.x <= 198 {
+                                    // Geometry from the BOARD's ui module, which mirrors
+                                    // this board's .slint tile — never inline numbers,
+                                    // which diverge silently when a layout moves.
+                                    let (x0, x1, y0, y1) = board::ui::STORY_PAUSE_RECT;
+                                    let in_row = p.y >= y0 && p.y <= y1;
+                                    if in_row && p.x >= x0 && p.x <= x1 {
                                         story_play::pause();
                                         false // not a stop — the pause latch takes the exit
                                     } else {

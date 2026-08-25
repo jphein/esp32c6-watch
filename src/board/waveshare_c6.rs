@@ -28,3 +28,17 @@ pub const RTC_I2C_ADDR: u8 = 0x51;
 // The old "DAC in=21/ADC out=23" was SWAPPED — reading GPIO23 for the mic got the
 // playback line, hence exact-zero capture.)
 // speaker amp enable=GPIO6 (keep LOW unless playing audio).
+
+/// UI hit-geometry for THIS board's layout set (`ui/slint/`, 410x502 portrait).
+///
+/// These exist because Slint's event dispatch is dead while `play_chapter`
+/// parks the main loop — the mid-playback touch path hit-tests raw panel
+/// coordinates in Rust (main.rs), and hardcoding them there is how the numbers
+/// silently diverge from the .slint the moment a layout moves. Every rect here
+/// MUST mirror its `ui/slint/story.slint` tile exactly; the layout set and this
+/// module change together or not at all. The CYD board carries its own values
+/// for its own layout.
+pub mod ui {
+    /// story READ page, PAUSE tile: x0, x1, y0, y1 (inclusive band).
+    pub const STORY_PAUSE_RECT: (u16, u16, u16, u16) = (22, 198, 378, 438);
+}

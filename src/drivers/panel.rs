@@ -67,10 +67,19 @@ pub trait PanelDriver {
     fn set_addr_window(&mut self, x: u16, y: u16, w: u16, h: u16);
     /// Begin one raw pixel stream into the current window...
     fn begin_pixels(&mut self);
-    /// ...and push RGB565 big-endian bytes into it. Callers may push a window's
+    /// ...and push LOGICAL RGB565 pixels into it. Callers may push a window's
     /// pixels across several calls; the driver must not re-issue the command
     /// preamble between them.
-    fn push_pixels(&mut self, data: &[u8]);
+    ///
+    /// `&[u16]`, not `&[u8]`, and the byte order is the DRIVER'S problem — this
+    /// was an explicit decision (2026-08-24): both live flushers hold u16 pixel
+    /// buffers and the byteswap currently lives in qspi_bus. Panel byte order is
+    /// a per-panel electrical fact (the CO5300 wants big-endian over QSPI; the
+    /// CYD's ST7789 is BGR with its own order), so pushing the swap into each
+    /// driver keeps callers panel-agnostic and keeps the swap next to the thing
+    /// that requires it. A &[u8] contract would have forced every caller to know
+    /// every panel's byte order, which is the seam leaking.
+    fn push_pixels(&mut self, pixels: &[u16]);
     /// Whole-panel solid fill (boot clear, game teardown).
     fn fill_screen(&mut self, color: Rgb565);
 }
