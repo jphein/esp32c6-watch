@@ -1,0 +1,19 @@
+[package]
+name = "bard-core"
+version = "0.1.0"
+edition = "2021"
+
+# Pure no_std inference — the SBRD int8 transformer + tokenizer + persona +
+# textflow. The 277 KB model blob ships in model/ (flash-resident on device,
+# include_bytes! in the host tests).
+[features]
+# The vendored modules gate their "live-service" items (validate_prompt,
+# DeliveryErr, the V-downlink parse, LastOffer) on espnow/hostsim in smol.
+# This crate is always the host-sim shape (pure library), so `full` — on by
+# default — turns them on; the golden tests need them.
+default = ["full"]
+full = []
+
+[dependencies]
+# no_std float math (sqrtf/expf/fabsf in the transformer) — smol's same dep.
+libm = { version = "0.2", default-features = false }
