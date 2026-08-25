@@ -62,6 +62,14 @@ board-cyd-c5 = [
     "esp-storage/esp32c5", "esp-bootloader-esp-idf/esp32c5",
     "esp-println/esp32c5", "esp-backtrace/esp32c5",
     "has-5ghz-wifi",
+    # DIAGNOSTIC, carried deliberately (image 8). Not a capability — a live
+    # investigation. Listed HERE rather than passed as `--features` because
+    # tools/ota_push.sh documents that forgetting `--features` silently REMOVES
+    # an opt-in feature from the next push; an investigation that evaporates on
+    # the first routine OTA cannot answer the question it was cut for. Delete
+    # this line (and the block at the end of drivers/xpt2046.rs) when the swipe
+    # question is answered.
+    "touch-telemetry",
 ]
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.
@@ -95,6 +103,19 @@ has-ble = []
 # onto a 5 GHz leg leaves the mesh and lands where the C3/C6 fleet cannot follow.
 # See `set_sta_config` in src/net/net_task.rs.
 has-5ghz-wifi = []
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTICS. Not capabilities — capabilities describe a board and are
+# permanent; these describe an open QUESTION and are meant to be deleted.
+# ---------------------------------------------------------------------------
+# Per-gesture touch accounting on the XPT2046, one line per lift ([TOUCH-DBG]).
+# Open question: most of JP's CYD swipes register as taps. Suspect is sampling
+# starvation (a 61.4 ms full-frame paint swallowing a fast swipe), NOT the
+# pressure gate — so this must NOT be read as licence to tune
+# TOUCH_PRESSURE_THRESHOLD or SWIPE_MIN_*. It rides along with the span-run
+# flusher (83c8491) precisely so the fix can be CONFIRMED from ordinary use
+# instead of argued about. Costs nothing when off (ZST + empty methods).
+touch-telemetry = []
 
 debug-console = ["dep:embedded-io-async"]
 # `tts` (read notifications aloud) is now ON BY DEFAULT — see `default` above.
@@ -334,3 +355,14 @@ codegen-units = 1       # LLVM can perform better optimizations using a single t
 debug = 2               # prefer slower builds but better debugging experience
 lto = 'fat'
 opt-level = 's'
+# DEFERRED, deliberately not done in image 8: a `[profile.diagnostic]` inheriting
+# release with `debug-assertions = true`, to catch overflow/slicing faults on the
+# bench instead of as a silent wrong pixel.
+#
+# The condition it is waiting on — write it down, because nothing re-examines a
+# deferral once its premise moves: after BLE gating the C5 sits on a 112 KB pool
+# with a measured stack-floor margin of +14,632 B. debug-assertions changes both
+# code size and stack depth, so turning it on INVALIDATES that margin and every
+# soak number taken against it. Restructuring profiles mid-image would mean the
+# image under test is not the image that was measured. Do it as its own change,
+# with its own floor measurement — not as a rider.

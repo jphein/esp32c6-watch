@@ -224,6 +224,10 @@ pub struct Xpt2046<'d> {
     /// transposed.
     rotation: Rotation,
     threshold: u16,
+    /// DIAGNOSTIC (feature `touch-telemetry`). A zero-sized no-op when the
+    /// feature is off, so every call site below stays cfg-free — see
+    /// [`TouchTelemetry`].
+    tel: TouchTelemetry,
     // Swipe tracking — same state the watch's Ft3168Touch carries.
     tracking: bool,
     releasing: u8,
@@ -240,6 +244,7 @@ impl<'d> Xpt2046<'d> {
             irq: None,
             rotation,
             threshold: board::TOUCH_PRESSURE_THRESHOLD,
+            tel: TouchTelemetry::new(),
             tracking: false,
             releasing: 0,
             start_x: 0,
@@ -362,12 +367,17 @@ impl<'d> Xpt2046<'d> {
         // z2 is also 0. Check it explicitly rather than relying on the
         // threshold to catch it.
         if z1 == 0 {
+            self.tel.note_open();
             return None;
         }
         let z = (z1 as u32 + 4095 - z2 as u32).min(u16::MAX as u32) as u16;
         if z < self.threshold {
+            // The truncation signal: a below-gate read WHILE tracking is what
+            // ends a gesture early and turns a swipe into a tap.
+            self.tel.note_reject(z);
             return None;
         }
+        self.tel.note_accept(z);
 
         Some(RawSample {
             x: Self::median(bus, CMD_READ_X),
@@ -550,6 +560,14 @@ impl<'d> Xpt2046<'d> {
                     SwipeDirection::Up
                 };
 
+                // DIAGNOSTIC: one line per gesture, on lift. dx/dy are the arc
+                // the classifier actually saw. Compare `dom` against
+                // SWIPE_MIN_X/Y: a Tap with a large `rej` count and a
+                // `rej_zmax` close to `thr` is a TRUNCATED swipe, not a tap the
+                // user meant. Compiles to nothing without `touch-telemetry`.
+                self.tel
+                    .report(direction, self.threshold, dx, dy, abs_dx.max(abs_dy));
+
                 (
                     None,
                     Some(SwipeEvent {
@@ -563,4 +581,117 @@ impl<'d> Xpt2046<'d> {
             }
         }
     }
+}
+
+// ===========================================================================
+// Touch telemetry (feature `touch-telemetry`) — DIAGNOSTIC, not a product
+// ===========================================================================
+// WHY THIS EXISTS: on the CYD, most of JP's swipes register as taps. The
+// leading hypothesis is SAMPLING STARVATION, not a mis-set pressure gate — a
+// 61.4 ms full-frame paint can swallow a fast swipe whole, leaving the
+// classifier too few samples to see an arc. The span-run flusher (83c8491) is
+// the suspected fix, so this instrumentation has to survive INTO the image that
+// carries the flusher; otherwise the fix lands and nothing can confirm it from
+// ordinary use.
+//
+// It deliberately does NOT tune anything. `TOUCH_PRESSURE_THRESHOLD` (400) and
+// `SWIPE_MIN_*` are untouched: this port's rule is measured-never-inherited, and
+// a blind nudge to either would destroy the evidence this exists to collect.
+//
+// SHAPE: per-GESTURE accounting, one println on lift — not per poll. At 62 Hz a
+// per-sample log would itself perturb the timing it is measuring, which is
+// exactly the quantity under test.
+//
+// The feature-off arm is a zero-sized type with empty method bodies, so the call
+// sites in `raw_sample`/`classify` need no `#[cfg]` and cannot drift apart. When
+// the swipe question is ANSWERED, delete this block, its feature, and the four
+// `self.tel` calls — the compiler will name every one of them.
+
+/// Per-gesture touch accounting. Diagnostic build only.
+#[cfg(feature = "touch-telemetry")]
+struct TouchTelemetry {
+    /// Reads that passed the pressure gate and became samples.
+    samples: u32,
+    /// Reads REJECTED by the gate — the truncation signal when tracking.
+    rejects: u32,
+    /// Reads where the bridge was open (z1 == 0): genuinely no contact.
+    open: u32,
+    zmin: u16,
+    zmax: u16,
+    /// Highest pressure that still lost to the gate. Close to `thr` means the
+    /// gate is the thing ending gestures early.
+    rej_zmax: u16,
+}
+
+#[cfg(feature = "touch-telemetry")]
+impl TouchTelemetry {
+    const fn new() -> Self {
+        Self {
+            samples: 0,
+            rejects: 0,
+            open: 0,
+            zmin: u16::MAX,
+            zmax: 0,
+            rej_zmax: 0,
+        }
+    }
+
+    fn note_open(&mut self) {
+        self.open += 1;
+    }
+
+    fn note_reject(&mut self, z: u16) {
+        self.rejects += 1;
+        if z > self.rej_zmax {
+            self.rej_zmax = z;
+        }
+    }
+
+    fn note_accept(&mut self, z: u16) {
+        self.samples += 1;
+        if z < self.zmin {
+            self.zmin = z;
+        }
+        if z > self.zmax {
+            self.zmax = z;
+        }
+    }
+
+    fn report(&mut self, direction: SwipeDirection, thr: u16, dx: i32, dy: i32, dom: u32) {
+        esp_println::println!(
+            "[TOUCH-DBG] {:?} n={} rej={} open={} z={}..{} rej_zmax={} thr={} dx={} dy={} dom={}",
+            direction,
+            self.samples,
+            self.rejects,
+            self.open,
+            if self.zmin == u16::MAX { 0 } else { self.zmin },
+            self.zmax,
+            self.rej_zmax,
+            thr,
+            dx,
+            dy,
+            dom,
+        );
+        *self = Self::new();
+    }
+}
+
+/// Zero-sized stand-in when `touch-telemetry` is off. Every method is empty, so
+/// the instrumented call sites compile away entirely.
+#[cfg(not(feature = "touch-telemetry"))]
+struct TouchTelemetry;
+
+#[cfg(not(feature = "touch-telemetry"))]
+impl TouchTelemetry {
+    const fn new() -> Self {
+        Self
+    }
+    #[inline(always)]
+    fn note_open(&mut self) {}
+    #[inline(always)]
+    fn note_reject(&mut self, _z: u16) {}
+    #[inline(always)]
+    fn note_accept(&mut self, _z: u16) {}
+    #[inline(always)]
+    fn report(&mut self, _d: SwipeDirection, _thr: u16, _dx: i32, _dy: i32, _dom: u32) {}
 }
