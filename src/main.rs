@@ -1254,6 +1254,10 @@ async fn main(_spawner: Spawner) -> ! {
     // esp-hal RTC (rtc_cntl / LPWR peripheral) — drives HP-core light sleep for
     // AOD (#29). The wall clock stays on the external PCF85063 above, which is
     // unaffected by light sleep; this only powers the sleep/wake handshake.
+    // Only the light-sleep path uses this. On a board without that capability it
+    // would claim the LPWR peripheral to do nothing with it, so it is gated with
+    // its single consumer rather than left as a silent reservation.
+    #[cfg(feature = "has-light-sleep")]
     let mut rtc_lp = Rtc::new(peripherals.LPWR);
 
     // #43: fix the RC_FAST calibration esp-hal runs at every sleep entry
@@ -4188,6 +4192,16 @@ async fn main(_spawner: Spawner) -> ! {
                     shell.set_radios(wifi_connected, ble_on, last_mesh_peers);
                     prev_radios = (wifi_connected, ble_on, last_mesh_peers);
                     shell.set_fam(&prev_fam);
+                    // C2 (#cyd-c5): UNCONDITIONAL, unlike the polling sites —
+                    // a fresh scene is all defaults, so this re-push runs even
+                    // when the battery was never read. On a board with no PMU
+                    // `batt_pct` is still its 0 initialiser, and `set_battery`
+                    // clamps with `pct.min(100) as i32`, so -1 cannot be passed
+                    // through it: the pill would read "0 %" rather than blank.
+                    // Skipping the publish leaves `battery-percent` at
+                    // shell.slint's own -1 default, which renders "--" — an
+                    // honest blank instead of a plausible lie.
+                    #[cfg(feature = "has-pmu")]
                     shell.set_battery(batt_pct, batt_mv, charging);
                     shell.set_brightness_from_raw(brightness);
                     shell.set_gyro(gyro_enabled);
@@ -4280,7 +4294,15 @@ async fn main(_spawner: Spawner) -> ! {
                     if let Some(btn) = wled_button(act) {
                         if net.radio_started && esp_now_peer_added {
                             wled_seq = wled_seq.wrapping_add(1);
-                            let frame = wled_wizmote::encode_wizmote(btn, wled_seq, batt_pct);
+                            // C4 (#cyd-c5): the WiZmote frame carries a battery byte.
+                    // With no PMU `batt_pct` is 0, and this frame leaves the
+                    // board's footprint on OTHER PEOPLE'S hardware — a WLED
+                    // device would show a dead remote. `None` is the honest
+                    // reading of "this remote has no battery to report".
+                    #[cfg(feature = "has-pmu")]
+                    let frame = wled_wizmote::encode_wizmote(btn, wled_seq, batt_pct);
+                    #[cfg(not(feature = "has-pmu"))]
+                    let frame = wled_wizmote::encode_wizmote(btn, wled_seq, 0xFF);
                             crate::net::smol_mesh::send_bounded(
                                 &mut esp_now,
                                 &esp_radio::esp_now::BROADCAST_ADDRESS,
@@ -6376,6 +6398,9 @@ async fn main(_spawner: Spawner) -> ! {
                                 shell.resume_scene();
                                 prev_page = -1;
                                 prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
+                                // C2: the second unconditional re-push — same
+                                // reasoning as the game-exit path above.
+                                #[cfg(feature = "has-pmu")]
                                 shell.set_battery(batt_pct, batt_mv, charging);
                                 if let Some(dt) = last_dt.as_ref() {
                                     let _ = shell.set_time(dt);

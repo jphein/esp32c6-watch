@@ -142,7 +142,22 @@ pub async fn ble_host_task(controller: WatchController) {
     let gatt_fut = async {
         loop {
             // Keep the readable attribute fresh even while unconnected.
+            //
+            // C3 (#cyd-c5): gated because on a board with no PMU NOTHING ever
+            // writes `BATTERY_PERCENT` — both stores in main.rs sit inside
+            // `if let Ok(..)` arms that a failing I2C bus never enters — so this
+            // would publish the atomic's 0 initialiser as a real reading, and
+            // then NOTIFY it to any phone that connects.
+            //
+            // ⚠️ Residual, stated because gating this does not fully close it:
+            // the Battery Service is still in the GATT table, so a client can
+            // READ its default. 0x2A19 is spec'd 0..=100 with no "unknown"
+            // sentinel, so the honest fix is to drop the service from the table
+            // on boards without `has-pmu` — a table-shape change, not a
+            // one-liner. Latent for now: this board boots radios-off.
+            #[cfg(feature = "has-pmu")]
             let pct = BATTERY_PERCENT.load(Ordering::Relaxed);
+            #[cfg(feature = "has-pmu")]
             let _ = server.set(&server.battery_service.level, &pct);
 
             match advertise(&mut peripheral, &server).await {
@@ -219,6 +234,13 @@ async fn gatt_events<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
 async fn notify_battery<P: PacketPool>(server: &Server<'_>, conn: &GattConnection<'_, '_, P>) {
     let level = server.battery_service.level;
     let mut last = 0xFFu8; // force one initial notification
+    // C3: never notify a fabricated level — see the read site above.
+    #[cfg(not(feature = "has-pmu"))]
+    {
+        let _ = (level, last);
+        return;
+    }
+    #[allow(unreachable_code)]
     loop {
         let pct = BATTERY_PERCENT.load(Ordering::Relaxed);
         if pct != last {
