@@ -53,6 +53,13 @@ const PKEY_LONG_BIT: u8 = 1 << 2; // ponlp — XPOWERS_AXP2101_PKEY_LONG_IRQ = _
 const PKEY_SHORT_BIT: u8 = 1 << 3; // ponsp — XPOWERS_AXP2101_PKEY_SHORT_IRQ = _BV(11)
 
 /// A latched PWRON key event, drained by [`Axp2101Power::poll_power_key`].
+///
+/// Kept whole on a board without `has-pmu` rather than gated away: this file is
+/// a faithful AXP2101 driver, and the CYD's problem is that it has no AXP2101 —
+/// not that the chip's key semantics changed. The CONSUMERS are gated (see the
+/// `next_pkey` block in main.rs); this just stops the honest dead-code warning
+/// that gating them leaves behind. Same shape as `net/mqtt_ha.rs:103`.
+#[cfg_attr(not(feature = "has-pmu"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PowerKey {
     /// Pressed + released before the IRQLEVEL time (1.5s).

@@ -103,7 +103,11 @@ use crate::peripherals::es7210::Es7210;
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::mic_capture;
-use crate::peripherals::power::{Axp2101Power, PowerKey};
+use crate::peripherals::power::Axp2101Power;
+// Capability-scoped (see the import block at the top): `PowerKey` names values
+// that only a latched AXP2101 IRQ can produce.
+#[cfg(feature = "has-pmu")]
+use crate::peripherals::power::PowerKey;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
 use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
 #[cfg(feature = "has-cap-touch")]
@@ -2006,6 +2010,15 @@ async fn main(_spawner: Spawner) -> ! {
     // latency at IRQ(1.5s) + 0.25s + a render — comfortably inside the 4s
     // hardware cutoff. Re-armed after each AOD light-sleep wake (the embassy
     // clock pauses in sleep, so a plain `now + 250ms` would starve there).
+    //
+    // `has-pmu` (#cyd-c5): the power key is a LATCHED AXP2101 IRQ BIT — there is
+    // no GPIO and no INT line for it. On a PMU-less board there is no register to
+    // read, so the poll is not "degraded", it is meaningless: every 250 ms it
+    // asked the fake bus and printed `[PKEY] I2C poll failed`, four lines a
+    // second forever. d512b3d gated PMU *discovery* and missed this loop, which
+    // is the more visible half. Gated with its state so no `unused` warning is
+    // left behind to be ignored.
+    #[cfg(feature = "has-pmu")]
     let mut next_pkey = Instant::now();
     // Long-press seen -> the Slint arm raises the menu (deferred one dispatch
     // so a game can be exited + the scene resumed first, same tick).
@@ -2635,7 +2648,10 @@ async fn main(_spawner: Spawner) -> ! {
             // so `next_pkey` set to a pre-sleep `+250ms` may never elapse.
             // Backdate it to the pre-sleep stamp — the poll below then runs
             // on every 700ms AOD wake, keeping the power key live in AOD.
-            next_pkey = t0;
+            #[cfg(feature = "has-pmu")]
+            {
+                next_pkey = t0;
+            }
 
             // Wrist-raise: read one accel sample and test the tilt-to-wake
             // gesture. Accel is alive during AOD (power_down keeps it at 62.5Hz),
@@ -3045,6 +3061,10 @@ async fn main(_spawner: Spawner) -> ! {
         // hard poweroff) and any wake (tap/raise/BOOT) re-arms the key within
         // 250ms. Making PWRON itself a wake source needs the PMIC INT line,
         // which isn't routed — documented follow-up in #48.
+        //
+        // `has-pmu` (#cyd-c5): no PMU means no latched PWRON bit to read. See
+        // the `next_pkey` declaration for why this is a gate and not a fallback.
+        #[cfg(feature = "has-pmu")]
         if now >= next_pkey {
             next_pkey = now + Duration::from_millis(250);
             // While the menu is up, keep its VBUS caption honest at this same
@@ -5485,10 +5505,19 @@ async fn main(_spawner: Spawner) -> ! {
                             let requeue = &mut requeued;
                             let mut vol_during_play = || -> Option<(u8, bool)> {
                                 let mut act: Option<ButtonAction> = None;
+                                // `has-pmu`: the SECOND power-key poll in this
+                                // file. It is compiled out on the CYD today only
+                                // because it lives under `has-audio` — which the
+                                // C5 also lacks. That is luck, not a predicate:
+                                // land audio on a PMU-less board and the
+                                // `[PKEY] I2C poll failed` spam returns from
+                                // here. Gate it on the capability it actually
+                                // needs.
+                                #[cfg(feature = "has-pmu")]
                                 if let Ok(Some(key)) = power.poll_power_key() {
                                     act = Some(match key {
-                                        crate::peripherals::power::PowerKey::Long => pwron_long,
-                                        crate::peripherals::power::PowerKey::Short => pwron_short,
+                                        PowerKey::Long => pwron_long,
+                                        PowerKey::Short => pwron_short,
                                     });
                                 }
                                 // Consume the latch set by `poll_button_edge`.
