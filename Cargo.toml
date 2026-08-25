@@ -74,15 +74,15 @@ board-esp32s3-cyd = [
     # FT6336U: same FocalTech register map + 0x38 address the C6 driver
     # speaks (board-class-verified); the coordinate transform is board::*.
     "has-cap-touch",
+    # mesh-ota rides ed25519-dalek on xtensa (ota-proto's per-arch dep) —
+    # ed25519-compact crashes this backend; see ota-proto/Cargo.toml.
+    "mesh-ota",
 ]
 # MESH SERVICES (#36). mesh-ota (#86): peer-sourced firmware over ESP-NOW.
-# A SERVICE feature, not a capability — boards carry it when their toolchain
-# can build it. ⚠️ OFF on the S3 arm: ed25519-compact's scalar ladder forms a
-# ~1 MB function under fat LTO that the Xtensa backend refuses at EVERY
-# opt-level ("Unable to properly handle scavenged register for indirect
-# jump" at 2, the scavenger family at s/z) — esp-rs/rust#282's siblings. A
-# documented degradation per the parity ruling: the S3 updates by bench
-# flash until the toolchain matures or the verify moves off that crate.
+# A SERVICE feature, not a capability. ON for all three boards: the S3 arm
+# rides ed25519-dalek (ota-proto's per-arch dep) because ed25519-compact
+# crashes the Xtensa backend at every opt level — see ota-proto/Cargo.toml
+# for the whole story.
 mesh-ota = ["dep:ota-proto", "dep:sha2"]
 
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.

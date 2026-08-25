@@ -6,8 +6,18 @@ description = "Pure no_std mesh-OTA protocol core: OTAM/OTAD/OTAN frame parse/en
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-ed25519-compact = { version = "2", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+
+# PER-ARCH ed25519 (2026-08-25): ed25519-compact's scalar ladder forms a ~1 MB
+# function under fat LTO that the XTENSA backend refuses at every opt level
+# (the esp-rs/rust#282 sibling family) while staying small on riscv at the
+# firmware's per-package opt="z". ed25519-dalek compiles clean on xtensa
+# (probed at opt=2 fat LTO). Same wire, same fail-closed shim below — only
+# the curve implementation differs per arch.
+[target.'cfg(not(target_arch = "xtensa"))'.dependencies]
+ed25519-compact = { version = "2", default-features = false }
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+ed25519-dalek = { version = "2", default-features = false }
 
 # Host tests: full ed25519-compact (Seed/KeyPair) to sign a message deterministically
 # and verify it through our key-overridable verify path — no private key needed.

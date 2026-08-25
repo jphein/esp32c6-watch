@@ -291,6 +291,12 @@ pub const OTA_SIGNING_PUBKEY: [u8; 32] = [
 
 /// Ed25519-verify `signed_msg` against a caller-supplied 32-byte public key.
 /// Returns FALSE on ANY error (bad key/sig encoding, or a failed check) — fail-closed.
+/// Per-arch backends (see Cargo.toml's note): the SEMANTICS are identical —
+/// RFC 8032 verify, fail-closed on any malformed input. dalek's verify_strict
+/// additionally rejects small-order/mixed-order keys, a strictly SMALLER
+/// accept set; the fleet's real signing key is a proper prime-order point, so
+/// every legitimately-signed manifest passes both backends.
+#[cfg(not(target_arch = "xtensa"))]
 pub fn verify_signature_with(pubkey: &[u8; 32], signed_msg: &[u8], sig: &[u8; 64]) -> bool {
     let Ok(pk) = ed25519_compact::PublicKey::from_slice(pubkey) else {
         return false;
@@ -299,6 +305,14 @@ pub fn verify_signature_with(pubkey: &[u8; 32], signed_msg: &[u8], sig: &[u8; 64
         return false;
     };
     pk.verify(signed_msg, &s).is_ok()
+}
+#[cfg(target_arch = "xtensa")]
+pub fn verify_signature_with(pubkey: &[u8; 32], signed_msg: &[u8], sig: &[u8; 64]) -> bool {
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey) else {
+        return false;
+    };
+    let s = ed25519_dalek::Signature::from_bytes(sig);
+    vk.verify_strict(signed_msg, &s).is_ok()
 }
 
 /// Ed25519-verify against [`OTA_SIGNING_PUBKEY`]. Fail-closed. Call at the integrity
