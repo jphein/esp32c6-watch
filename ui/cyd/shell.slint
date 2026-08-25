@@ -64,8 +64,8 @@
 //
 //   PORTED : shell chrome · clock · power_menu · volume · launcher · sensors
 //            system · mesh · wled · hunt · switcher · shade · theme_overlay
-//   PENDING: power · keyboard · scan · settings · energy · climate · lights
-//            ping · voice · story · soundlevel
+//            energy · climate · lights · ping
+//   PENDING: power · keyboard · scan · settings · voice · story · soundlevel
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
@@ -85,13 +85,13 @@ import { HuntPage } from "hunt.slint";
 import { SwitcherOverlay } from "switcher.slint";
 import { ShadeOverlay, NotifCard } from "shade.slint";
 import { ThemeOverlay } from "theme_overlay.slint";
+import { EnergyPage } from "energy.slint";
+import { ClimateOverlay, ClimateCard } from "climate.slint";
+import { LightsOverlay } from "lights.slint";
+import { PingOverlay, PingPulse } from "ping.slint";
 
 // --- PENDING: still the C6 portrait layouts (render cropped) ----------------
 import { PowerPage } from "../slint/power.slint";
-import { EnergyPage } from "../slint/energy.slint";
-import { ClimateOverlay, ClimateCard } from "../slint/climate.slint";
-import { LightsOverlay } from "../slint/lights.slint";
-import { PingOverlay, PingPulse } from "../slint/ping.slint";
 import { VoicePage } from "../slint/voice.slint";
 import { StoryPage, StoryChapter, StorySlot } from "../slint/story.slint";
 import { SoundLevel, SpecBand } from "../slint/soundlevel.slint";

@@ -117,6 +117,23 @@ export global Geom {
     out property <length> t-label: 13px;   // field labels
     out property <length> t-caption: 12px; // hints, eyebrows
 
+    // --- the shared hero circle (lights + ping) -----------------------------
+    // `lights.slint` and `ping.slint` use ONE hero geometry BY DESIGN — ping's
+    // own comment calls it *"lights.slint's proven placement"*. On the C6 that
+    // agreement is a COMMENT and two independent sets of literals, which is
+    // exactly how two pages drift apart. Here it is a token, so they cannot.
+    //
+    // 200 -> 130 px, and the centre moves off the panel's midline: the hero sits
+    // LEFT and the status column sits right of it, which is the whole landscape
+    // re-composition for both pages. cx 84 is the tightest the circle can sit
+    // and still fit its widest ring (`hero-d + 36` = 166 -> x1..167) on-panel.
+    out property <length> hero-d: 130px;
+    out property <length> hero-cx: 84px;
+    out property <length> hero-cy: 132px;
+    // The status column right of the hero: x176..312.
+    out property <length> hero-col-x: 176px;
+    out property <length> hero-col-w: 136px;
+
     // --- touch --------------------------------------------------------------
     // Resistive XPT2046, finger-driven, uncalibrated on day one. 44 px is a
     // floor, not a target. Where a control must LOOK smaller than 44 px, pad

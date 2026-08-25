@@ -1,0 +1,186 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// HOME ENERGY — battery hero left, solar/grid stack right.
+// ============================================================================
+//
+// Shows YOUR HOUSE's battery / solar / grid, not the watch's own cell. (On this
+// board that distinction stops being subtle: the watch has no cell at all, so
+// this is the only battery on the page.)
+//
+// THE WORST PAGE IN THE TREE BY ONE MEASURE, AND EASY BY ANOTHER
+// -----------------------------------------------------------------------------
+// The layout spec counted THIRTEEN `y:` values past 240 here and ZERO layout
+// managers — every element hand-placed against nothing, including a sun drawn as
+// five rectangles positioned relative to no anchor. That reads as the hardest
+// page in the set.
+//
+// It is one of the easier ones, because the content is THREE INDEPENDENT FACTS
+// (house battery, solar, grid) that the C6 stacked only because it had 502 px to
+// stack in. Independent facts side-by-side is the landscape re-composition in its
+// purest form: no information is reordered, nothing is dropped, and the hero
+// keeps its full 66 px face.
+//
+//   x 8..156                        x 164..312
+//   HOME BATTERY                    (sun) SOLAR
+//   87%            (66 px)          12.3 kW        (30 px)
+//   [======gauge======]             GRID          IMPORT
+//   CHARGING                        4.2 kW        (30 px)
+//   ................ home · via Home Assistant ................
+//
+// THE SUN GLYPH GETS AN ANCHOR IT NEVER HAD
+// -----------------------------------------------------------------------------
+// The C6 sun is a disc at (40,300) with four rays at hardcoded absolute
+// coordinates — five rectangles agreeing about a centre that is written nowhere.
+// Move one and the sun quietly loses a ray. Here every ray is expressed as an
+// offset from the DISC's own box, so the glyph has one origin and moves as one
+// thing. Same five rectangles, half the ways to break it.
+// ============================================================================
+
+export component EnergyPage {
+    in property <int> battery-pct: 0;
+    in property <int> solar-w: 0;
+    in property <int> grid-w: 0;
+    in property <bool> charging: false;
+    in property <int> conn-state: 0;   // 0 ready · 1 connecting · 2 unreachable
+    callback close();
+
+    // Battery % colour: no-data (-1 sentinel) neutral dim, charging teal, low
+    // red, else soft. The <0 guard keeps the "--" placeholder from reading as a
+    // critical-low (red) reading.
+    property <color> batt-color: root.battery-pct < 0 ? Theme.dim
+        : (root.charging ? Theme.accent
+        : (root.battery-pct < 20 ? Theme.warn : Theme.soft));
+    // Grid direction (± deadband): import = buying (warn), export = selling (accent).
+    property <bool> importing: root.grid-w > 50;
+    property <bool> exporting: root.grid-w < -50;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "ENERGY"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    // ==================== connection states ====================
+    if root.conn-state == 1: Text {
+        x: Geom.content-x; y: 108px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "connecting\u{2026}"; color: Theme.dim; font-size: 20px; letter-spacing: 1px;
+    }
+    if root.conn-state == 2: Text {
+        x: Geom.content-x; y: 108px; width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "HA unreachable"; color: Theme.warn; font-size: 20px; font-weight: 600;
+    }
+
+    // ==================== live readout ====================
+    if root.conn-state == 0: Rectangle {
+        width: 100%; height: 100%;
+
+        // ---------------- LEFT: home battery hero ----------------
+        Text {
+            x: Geom.content-x; y: 38px;
+            text: "HOME BATTERY"; color: Theme.dim;
+            font-size: Geom.t-caption; letter-spacing: 3px;
+        }
+        // 66 px kept, not reduced: "100%" measures ~144 px in the 148 px column,
+        // so the hero survives the port intact. LEFT-anchored rather than
+        // centred — the number changes and the column edge is the reference the
+        // eyebrow above it already uses.
+        Text {
+            x: Geom.content-x; y: 54px;
+            // Guard the -1 "no data yet" sentinel (main.rs map_or(-1)) so a
+            // ready-but-stateless frame shows "--", never a red "-1%".
+            text: root.battery-pct < 0 ? "--" : "\{root.battery-pct}%";
+            color: root.batt-color; font-size: Geom.t-hero; font-weight: 700;
+        }
+        // Gauge. 300x24 -> 148x18; the fill is a pure fraction of the parent, so
+        // it needed no arithmetic change.
+        Rectangle {
+            x: Geom.content-x; y: 138px;
+            width: Geom.col-w; height: 18px; border-radius: 9px;
+            background: Theme.track;
+            Rectangle {
+                x: 0; y: 0; height: 100%;
+                width: max(8px, parent.width * clamp(root.battery-pct, 0, 100) / 100.0);
+                border-radius: 9px;
+                background: root.batt-color;
+            }
+        }
+        Text {
+            x: Geom.content-x; y: 162px;
+            text: root.charging ? "CHARGING" : "DISCHARGING";
+            color: root.charging ? Theme.accent : Theme.warm;
+            font-size: Geom.t-label; letter-spacing: 2px;
+        }
+
+        // ---------------- RIGHT: solar ----------------
+        // The sun: ONE disc that owns its rays. Every ray is placed off the
+        // disc's box, so the glyph has a single origin — unlike the C6's five
+        // rectangles agreeing about a centre written nowhere.
+        sun := Rectangle {
+            x: Geom.col2-x + 8px; y: 40px;
+            width: 18px; height: 18px; border-radius: 9px;
+            background: Theme.warm;
+            Rectangle { x: (parent.width - 4px) / 2; y: -8px;
+                        width: 4px; height: 6px; border-radius: 2px; background: Theme.warm; }
+            Rectangle { x: (parent.width - 4px) / 2; y: parent.height + 2px;
+                        width: 4px; height: 6px; border-radius: 2px; background: Theme.warm; }
+            Rectangle { x: -8px; y: (parent.height - 4px) / 2;
+                        width: 6px; height: 4px; border-radius: 2px; background: Theme.warm; }
+            Rectangle { x: parent.width + 2px; y: (parent.height - 4px) / 2;
+                        width: 6px; height: 4px; border-radius: 2px; background: Theme.warm; }
+        }
+        Text {
+            x: Geom.col2-x + 40px; y: 40px;
+            height: 18px; vertical-alignment: center;
+            text: "SOLAR"; color: Theme.dim;
+            font-size: Geom.t-label; letter-spacing: 2px;
+        }
+        Text {
+            x: Geom.col2-x; y: 62px;
+            // Slint `/` is float division; round to one decimal (kW).
+            text: "\{round(root.solar-w / 100) / 10} kW";
+            color: Theme.warm; font-size: 30px; font-weight: 700;
+        }
+
+        // ---------------- RIGHT: grid ----------------
+        Text {
+            x: Geom.col2-x; y: 116px;
+            height: 18px; vertical-alignment: center;
+            text: "GRID"; color: Theme.dim;
+            font-size: Geom.t-label; letter-spacing: 2px;
+        }
+        // Direction badge, right-anchored on the GRID label's line — landscape's
+        // horizontal slack is what lets the direction sit BESIDE its label
+        // instead of under the value, which is where the C6 had to put it.
+        Text {
+            x: root.width - self.width - Geom.content-x; y: 116px;
+            height: 18px; vertical-alignment: center;
+            text: root.importing ? "IMPORT" : (root.exporting ? "EXPORT" : "IDLE");
+            color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.dim);
+            font-size: Geom.t-caption; letter-spacing: 2px;
+        }
+        Text {
+            x: Geom.col2-x; y: 138px;
+            text: "\{round(abs(root.grid-w) / 100) / 10} kW";
+            color: root.importing ? Theme.warn : (root.exporting ? Theme.accent : Theme.soft);
+            font-size: 30px; font-weight: 700;
+        }
+
+        // Provenance caption, bottom-anchored. This one earns its height: it is
+        // the only thing on the page that says these numbers are the HOUSE's and
+        // arrive over MQTT, which is exactly the confusion the page invites.
+        Text {
+            x: Geom.content-x;
+            y: root.height - Geom.safe-bottom - 18px;
+            width: Geom.content-w;
+            horizontal-alignment: center;
+            text: "home \u{00b7} via Home Assistant";
+            color: Theme.faint; font-size: Geom.t-caption; letter-spacing: 1px;
+        }
+    }
+}
