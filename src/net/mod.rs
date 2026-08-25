@@ -21,6 +21,8 @@ pub mod names;
 // `net_task::snapshot` + NET_WAKE.
 pub mod net_task;
 pub mod ota_http;
+#[cfg(feature = "mesh-ota")]
+pub mod ota_mesh;
 // Per-device SIGIL IDENTITY from the efuse MAC (#34): name, node id,
 // per-watch OTA topic. `mac` is a logs/debug field until a consumer lands.
 #[allow(dead_code)]

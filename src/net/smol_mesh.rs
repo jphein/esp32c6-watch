@@ -789,7 +789,7 @@ impl SmolMesh {
         n
     }
 
-    fn ensure_unicast_peer(esp_now: &mut EspNow<'_>, mac: [u8; 6]) {
+    pub(crate) fn ensure_unicast_peer(esp_now: &mut EspNow<'_>, mac: [u8; 6]) {
         if esp_now.peer_exists(&mac) {
             return;
         }

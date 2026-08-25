@@ -49,12 +49,13 @@ board-waveshare-c6 = [
     "esp-storage/esp32c6", "esp-bootloader-esp-idf/esp32c6",
     "esp-println/esp32c6", "esp-backtrace/esp32c6",
     "has-pmu", "has-imu", "has-audio", "has-cap-touch",
-    "has-die-temp", "has-light-sleep",
+    "has-die-temp", "has-light-sleep", "mesh-ota",
 ]
 board-cyd-c5 = [
     "esp-hal/esp32c5", "esp-rtos/esp32c5", "esp-radio/esp32c5",
     "esp-storage/esp32c5", "esp-bootloader-esp-idf/esp32c5",
     "esp-println/esp32c5", "esp-backtrace/esp32c5",
+    "mesh-ota",
 ]
 # ES3C28P "Hosyond 2.8in" ESP32-S3 CYD — smol node 162 (eldritch-insignia).
 # Xtensa: builds ONLY with the espup toolchain (+esp) against
@@ -74,6 +75,16 @@ board-esp32s3-cyd = [
     # speaks (board-class-verified); the coordinate transform is board::*.
     "has-cap-touch",
 ]
+# MESH SERVICES (#36). mesh-ota (#86): peer-sourced firmware over ESP-NOW.
+# A SERVICE feature, not a capability — boards carry it when their toolchain
+# can build it. ⚠️ OFF on the S3 arm: ed25519-compact's scalar ladder forms a
+# ~1 MB function under fat LTO that the Xtensa backend refuses at EVERY
+# opt-level ("Unable to properly handle scavenged register for indirect
+# jump" at 2, the scavenger family at s/z) — esp-rs/rust#282's siblings. A
+# documented degradation per the parity ruling: the S3 updates by bench
+# flash until the toolchain matures or the verify moves off that crate.
+mesh-ota = ["dep:ota-proto", "dep:sha2"]
+
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.
 has-pmu = []
@@ -278,6 +289,9 @@ hunt = { path = "crates/hunt" }
 # MUST stay byte-identical with smol's copy or the fleet partitions silently.
 mesh-elect = { path = "crates/mesh-elect" }
 mesh-flood = { path = "crates/mesh-flood" }
+ota-proto = { path = "crates/ota-proto", optional = true }
+# mesh-OTA readback verify (ota_mesh.rs); same pin as ota-proto's.
+sha2 = { version = "0.10", default-features = false, optional = true }
 # #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —
 # replaces src/net/climate_model_stub.rs.
 climate-model = { path = "crates/climate-model" }
@@ -327,6 +341,18 @@ i-slint-renderer-software = { path = "crates/i-slint-renderer-software" }
 # The default debug profile is too slow and too big for resource-constrained devices.
 # Always build with some optimizations enabled.
 opt-level = "s"
+
+# ed25519-compact's `double_scalarmult_vartime` inlines/unrolls under
+# opt="s"/1/2 + fat LTO into a single ~1 MB function (measured HERE
+# 2026-08-25: 1,014,412 B — ROM free fell 1.63 MB -> 246 KB the moment
+# ota-proto joined the firmware graph; opt=1 measured the same). smol hit the
+# identical pathology and this is their proven override: opt="z" keeps the
+# ladder rolled. ⚠️ PER-ARCH: "z" CRASHES the Xtensa backend (the scavenger
+# family, esp-rs/rust#282's siblings) — tools/build-s3.sh patches this line
+# to 2 on its REMOTE scratch copy (the S3's 16 MB part absorbs the unroll).
+# If opt-level ever changes, RE-MEASURE the symbol — never inherit comments.
+[profile.release.package.ed25519-compact]
+opt-level = "z"
 
 [profile.release]
 codegen-units = 1       # LLVM can perform better optimizations using a single thread

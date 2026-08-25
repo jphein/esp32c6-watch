@@ -2054,6 +2054,10 @@ async fn main(_spawner: Spawner) -> ! {
     let mut settings_connect_pending = false;
     // SMOLv1 mesh: explicit flash-config node id, or the MAC-derived sigil id
     // when config still holds the 42 "unset" sentinel (#34, arbitrated above).
+    // #86: the mesh-OTA leaf driver (one concurrent session; the window
+    // buffer is heap-per-session — see net/ota_mesh.rs's #65 note).
+    #[cfg(feature = "mesh-ota")]
+    let mut mesh_ota = crate::net::ota_mesh::MeshOta::new();
     let mut mesh = SmolMesh::new(node_id);
     // Mesh Familiar (fleet #57): always-on holder/arbitration state machine,
     // ticked alongside mesh.tick. The creature renders on the watchface.
@@ -3595,6 +3599,17 @@ async fn main(_spawner: Spawner) -> ! {
                     mesh.relay_emit(&mut esp_now, tele.as_bytes(), now_ms).await;
                 }
                 mesh.relay_retransmit(&mut esp_now, now_ms).await;
+                // #86: the mesh-OTA pump (NAK cadence, deadlines, finalize
+                // acks) — cheap no-op while no session runs.
+                #[cfg(feature = "mesh-ota")]
+                {
+                    let mut nak = [0u8; 64];
+                    if let Some(n) = mesh_ota.tick(node_id, now_ms, &mut nak) {
+                        let gw = mesh_ota.session.gateway_mac();
+                        crate::net::smol_mesh::SmolMesh::ensure_unicast_peer(&mut esp_now, gw);
+                        crate::net::smol_mesh::send_bounded(&mut esp_now, &gw, &nak[..n]).await;
+                    }
+                }
                 while let Some(rx) = esp_now.receive() {
                     // SNK frames route to World Snake when it's active; they
                     // also fall through to mesh.handle_rx (peer proof of life).
@@ -3606,6 +3621,29 @@ async fn main(_spawner: Spawner) -> ! {
                     // Per-frame receive RSSI (dBm) — Marauder's Watch EWMA.
                     let rssi =
                         rx.info.rx_control.rssi.clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+                    // #86 mesh-OTA: OTAM/OTAD frames drive the leaf session;
+                    // a returned OTAN goes back UNICAST to the session's
+                    // gateway. OTA frames still fall through to handle_rx
+                    // below for peer proof-of-life like any SMOLv1 frame.
+                    #[cfg(feature = "mesh-ota")]
+                    if let Some(f) = ota_proto::parse_ota_frame(rx.data()) {
+                        let mut nak = [0u8; 64];
+                        if let Some(n) = mesh_ota.on_frame(
+                            f,
+                            rx.info.src_address,
+                            node_id,
+                            now_ms,
+                            flash,
+                            &mut nak,
+                        ) {
+                            let gw = mesh_ota.session.gateway_mac();
+                            crate::net::smol_mesh::SmolMesh::ensure_unicast_peer(
+                                &mut esp_now, gw,
+                            );
+                            crate::net::smol_mesh::send_bounded(&mut esp_now, &gw, &nak[..n])
+                                .await;
+                        }
+                    }
                     let event = mesh.handle_rx(
                         &mut esp_now,
                         rx.info.src_address,

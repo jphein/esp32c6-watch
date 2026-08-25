@@ -75,3 +75,10 @@ pub const HAS_BOOT_KEY: bool = true;
 pub const TOUCH_SWAP_XY: bool = false;
 pub const TOUCH_INVERT_X: bool = false;
 pub const TOUCH_INVERT_Y: bool = false;
+
+/// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
+/// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
+/// the first flash write — the wrong arm's image passes the 0xE9 magic check.
+/// MEASURED by morpheus from real espflash images (his 1e41596); matches
+/// esp-idf's chip-id enum (ESP32-C6 = 13).
+pub const ESP_IMAGE_CHIP_ID: u16 = 0x000D;

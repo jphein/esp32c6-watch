@@ -111,3 +111,12 @@ pub const SPI_TOUCH_HZ: u32 = 2_500_000;
 pub const TOUCH_SWAP_XY: bool = true;
 pub const TOUCH_INVERT_X: bool = false;
 pub const TOUCH_INVERT_Y: bool = true;
+
+/// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
+/// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
+/// the first flash write — the wrong arm's image passes the 0xE9 magic check.
+/// esp-idf chip-id enum (ESP32-S3 = 9) — the C6/C5 values were MEASURED
+/// and align exactly with that enum, so this is enum-derived with high
+/// confidence; confirm against a real S3 image at the bench (xxd bytes
+/// 12..14 of espflash save-image output) before trusting a refusal.
+pub const ESP_IMAGE_CHIP_ID: u16 = 0x0009;

@@ -20,6 +20,8 @@
 
 #![no_std]
 
+pub mod leaf;
+
 use sha2::{Digest, Sha256};
 
 // ---- wire constants -------------------------------------------------------

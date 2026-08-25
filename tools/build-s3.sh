@@ -49,7 +49,14 @@ fi
 
 # The ui/cyd scene builds since the CydBacklightToggle workaround (the
 # Rust-pushed on-state) landed — the LINK-ONLY C6-scene fallback is retired.
+# ed25519-compact per-arch opt (see Cargo.toml's override note): "z" keeps the
+# scalar ladder rolled on riscv but CRASHES the Xtensa scavenger; 2 unrolls
+# (~1 MB) which the S3's 16 MB part absorbs. Cargo profiles cannot be
+# per-target, so this build patches its REMOTE SCRATCH copy — rsync --delete
+# above re-baselines the file every run, so the patch is deterministic and
+# never touches the repo.
 ssh familiar "cd ~/fambuild/esp32c6-watch \
+  && sed -i '/profile.release.package.ed25519-compact/,+1 s/opt-level = \"z\"/opt-level = 2/' Cargo.toml \
   && export PATH=\$HOME/.cargo/bin:\$PATH && source ~/export-esp.sh \
   && export RUSTFLAGS='' CARGO_PROFILE_RELEASE_OPT_LEVEL=2 WATCH_BUILD_HASH='$HASH' \
   && cargo +esp build --release --no-default-features --features board-esp32s3-cyd \
