@@ -61,6 +61,7 @@ board-cyd-c5 = [
     "esp-hal/esp32c5", "esp-rtos/esp32c5", "esp-radio/esp32c5",
     "esp-storage/esp32c5", "esp-bootloader-esp-idf/esp32c5",
     "esp-println/esp32c5", "esp-backtrace/esp32c5",
+    "has-5ghz-wifi",
 ]
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.
@@ -88,6 +89,12 @@ has-light-sleep = []
 # on a radio that boots off. Turn this on for the CYD once radio init moves after
 # config load and can be made lazy.
 has-ble = []
+# Dual-band radio (2.4 + 5 GHz). The C5 has it; the C6 does not. It exists to be
+# PINNED OFF: esp-radio's `BandMode` defaults to `Auto` on 5 GHz-capable silicon,
+# and the smol mesh is ESP-NOW on a 2.4 GHz channel — so a station that wanders
+# onto a 5 GHz leg leaves the mesh and lands where the C3/C6 fleet cannot follow.
+# See `set_sta_config` in src/net/net_task.rs.
+has-5ghz-wifi = []
 
 debug-console = ["dep:embedded-io-async"]
 # `tts` (read notifications aloud) is now ON BY DEFAULT — see `default` above.

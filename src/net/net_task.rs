@@ -969,6 +969,40 @@ fn set_sta_config(
     }
     match controller.set_config(&esp_radio::wifi::Config::Station(cfg)) {
         Ok(()) => {
+            // ⚠️ PIN THE BAND TO 2.4 GHz on dual-band silicon (#cyd-c5).
+            //
+            // `BandMode` derives `Default` with the default chosen by CHIP:
+            // `#[cfg_attr(wifi_has_5g, default)] Auto` (esp-radio 0.18
+            // wifi/mod.rs:312-333). `wifi_has_5g` is set for the esp32c5 and NOT
+            // for the esp32c6 (esp-metadata-generated 0.4.0
+            // `_build_script_utils.rs`, lines 1940/2188, inside the C5 block at
+            // 1696..2298). So the C6 has always defaulted to 2.4-only and this
+            // code never needed the call — while the C5 silently defaults to
+            // BOTH bands.
+            //
+            // On a dual-band SSID that is not a preference, it is a fleet
+            // partition: the mesh is ESP-NOW on a 2.4 GHz channel, so a station
+            // that associates on a 5 GHz leg (a) leaves the mesh channel
+            // entirely and (b) lands where the C3/C6 fleet cannot follow it.
+            // The failure looks like "WiFi works, mesh doesn't", which is a long
+            // way from the cause.
+            //
+            // Placed HERE, not once at boot, for two reasons: the API requires
+            // the controller to be configured and started first ("Wi-Fi needs to
+            // be started in order to set the band mode"), and `set_config` IS
+            // the PHY start on esp-radio 0.18 — so re-pinning on every start and
+            // every creds change means a band reset cannot outlive one config
+            // application. Scans inherit it: they run only once `radio_started`
+            // is up, i.e. strictly after this line.
+            //
+            // Capability, not chip name, per the board-feature model: a board
+            // whose radio can reach 5 GHz needs the pin.
+            #[cfg(feature = "has-5ghz-wifi")]
+            if let Err(e) = controller.set_band_mode(esp_radio::wifi::BandMode::_2_4G) {
+                // Loud: an unpinned dual-band station is a mesh partition
+                // waiting to happen, and it would otherwise be invisible.
+                println!("[NET] set_band_mode(2.4G) FAILED: {e:?} — mesh may partition");
+            }
             let _ = controller.set_power_saving(esp_radio::wifi::PowerSaveMode::Minimum);
             true
         }
