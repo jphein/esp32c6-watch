@@ -37,7 +37,7 @@ extern crate alloc;
 // Reuse the existing firmware modules without touching src/main.rs.
 // (Crate-root file: `#[path]` is relative to src/bin/, and inside inline
 // modules the inline module name is appended to the base directory.)
-#[path = "../board.rs"]
+#[path = "../board/mod.rs"]
 #[allow(dead_code)]
 mod board;
 
