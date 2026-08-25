@@ -16,5 +16,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod etx;
 pub mod flood;
 pub mod wire;

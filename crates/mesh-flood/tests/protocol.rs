@@ -97,3 +97,20 @@ fn hmac_sha256_rfc4231_case2() {
     ];
     assert_eq!(tag, expected);
 }
+
+#[test]
+fn etx_cost_tracks_delivery_not_strength() {
+    use mesh_flood::etx::LinkQuality;
+    let mut good = LinkQuality::default();
+    let mut flaky = LinkQuality::default();
+    for i in 0..64 {
+        good.tick(true);
+        flaky.tick(i % 3 != 0); // ~2/3 delivery
+    }
+    assert!(
+        good.cost() < flaky.cost(),
+        "a reliable link costs less than a flaky one ({} vs {})",
+        good.cost(),
+        flaky.cost()
+    );
+}
