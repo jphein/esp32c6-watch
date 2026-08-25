@@ -79,7 +79,30 @@ pub trait PanelDriver {
     /// driver keeps callers panel-agnostic and keeps the swap next to the thing
     /// that requires it. A &[u8] contract would have forced every caller to know
     /// every panel's byte order, which is the seam leaking.
+    ///
+    /// Data point for any future revisit (measured on the CYD, 2026-08-24): on
+    /// the ST7789 a &[u8] path is CHEAPER — no byteswap, straight into DMA. The
+    /// u16 ruling stands because caller panel-agnosticism outranks one panel's
+    /// copy, but if a profile ever shows the swap on a hot path, that is the
+    /// trade to reopen — with numbers, per house rules.
     fn push_pixels(&mut self, pixels: &[u16]);
+    /// Close the pixel stream opened by [`Self::begin_pixels`]. REQUIRED, not
+    /// defaulted, and the omission was a found bug in this contract's first
+    /// draft: the underlying C6 bus always had `end_pixels` (it raises CS), but
+    /// the trait didn't carry it — so a conforming caller could open a stream
+    /// and never close it. On a dedicated bus that leaks a transaction; on the
+    /// CYD's SHARED bus it is two silent failures: the next command gets
+    /// clocked into the still-open RAMWR stream and lands in GRAM as pixels,
+    /// and a following touch read asserts touch CS while LCD CS is still low —
+    /// two devices driving one MISO line. Every begin/push sequence ends here,
+    /// and a shared-bus driver's device-select should ALSO raise all chip
+    /// selects first (defence in depth — the CYD driver does both).
+    ///
+    /// Better still, make the misuse unrepresentable when wiring TouchDriver:
+    /// the CYD's `DisplayBoundTouch` construction turns "don't poll touch
+    /// inside a pixel transaction" into a borrow-checker error instead of a
+    /// comment. Prefer that shape over discipline.
+    fn end_pixels(&mut self);
     /// Whole-panel solid fill (boot clear, game teardown).
     fn fill_screen(&mut self, color: Rgb565);
 }
