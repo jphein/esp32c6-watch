@@ -343,6 +343,10 @@ struct RelayTx {
     total_len: usize,
     last_ms: u64,
     buf: [u8; RELAY_MAX_MSG],
+    /// This emit is a single-hop PROBE from a latched leaf (recovery check).
+    probe: bool,
+    /// Wrap each fragment in a UP2 envelope at this hop (1 = plain RELAY).
+    hop: u8,
 }
 
 impl RelayTx {
@@ -356,6 +360,8 @@ impl RelayTx {
             total_len: 0,
             last_ms: 0,
             buf: [0; RELAY_MAX_MSG],
+            probe: false,
+            hop: 1,
         }
     }
 }
@@ -379,6 +385,12 @@ pub struct SmolMesh {
     pub fwd_count: u32,
     pub dedup_drops: u32,
     pub ttl_drops: u32,
+    /// #64 completion: the single-hop⇄multi-hop escalation for the watch's
+    /// OWN uplinks. Latches after ESCALATE_STREAK fully-unacked relay
+    /// messages; latched emits wrap every fragment in a UP2 envelope (each
+    /// frame gets a DISTINCT envelope msgid — the relays' dedup key is
+    /// (origin, env_msgid), so sibling fragments must not share one).
+    latch: mesh_flood::flood::HopLatch,
     // --- RELAY leaf uplink state (mode.rs Relay, leaf side only) ---
     next_msgid: u16,
     relay_tx: RelayTx,
@@ -619,6 +631,7 @@ impl SmolMesh {
             fwd_count: 0,
             dedup_drops: 0,
             ttl_drops: 0,
+            latch: mesh_flood::flood::HopLatch::new(),
             next_msgid: 0,
             relay_tx: RelayTx::new(),
             last_relay_emit_ms: 0,
@@ -1022,12 +1035,30 @@ impl SmolMesh {
             &self.relay_tx.buf[off..end],
             &mut fb,
         );
+        if self.relay_tx.hop > 1 {
+            // Escalated (#64): the flood carries this fragment. Each frame
+            // gets its own envelope msgid — the relays dedup on
+            // (origin, env_msgid), so sibling fragments sharing one would be
+            // dropped as dups at the first relay.
+            let env_msgid = self.next_msgid;
+            self.next_msgid = self.next_msgid.wrapping_add(1);
+            let mut env = [0u8; 250];
+            let en = mesh_flood::wire::encode_up2(
+                self.id,
+                env_msgid,
+                self.relay_tx.hop,
+                &fb[..len],
+                &mut env,
+            );
+            send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &env[..en]).await;
+            return;
+        }
         send_bounded(esp_now, &esp_radio::esp_now::BROADCAST_ADDRESS, &fb[..len]).await;
     }
 
     /// Leaf uplink: fragment `telemetry` into RELAY frames and broadcast them
     /// all, staging the message for bounded retransmit (mode.rs `relay_emit`
-    /// + `stage_tx`, single-hop only). A fresh emit supersedes the previous.
+    /// + `stage_tx`; escalated messages ride UP2 envelopes per #64).
     pub async fn relay_emit(&mut self, esp_now: &mut EspNow<'_>, telemetry: &[u8], now_ms: u64) {
         let len = telemetry.len().min(RELAY_MAX_MSG);
         self.last_relay_emit_ms = now_ms;
@@ -1043,6 +1074,19 @@ impl SmolMesh {
         self.relay_tx.total_len = len;
         self.relay_tx.tries = 1;
         self.relay_tx.last_ms = now_ms;
+        // #64: a latched leaf floods its uplink; every PROBE_EVERY-th emit is
+        // a deliberate single-hop probe so a leaf that moved back into range
+        // un-latches (smol's recovery hysteresis, verbatim semantics).
+        let downlink_up = self.link_state(now_ms) != LinkState::Idle;
+        let is_probe = self.latch.should_probe(downlink_up);
+        self.relay_tx.probe = is_probe;
+        self.relay_tx.hop = self.latch.origin_hop(is_probe);
+        if self.relay_tx.hop > 1 {
+            println!(
+                "[MESH] relay msgid {} ESCALATED (h{})",
+                self.relay_tx.msgid, self.relay_tx.hop
+            );
+        }
         self.relay_tx.buf[..len].copy_from_slice(&telemetry[..len]);
         for frag in 0..count {
             self.relay_send_frag(esp_now, frag).await;
@@ -1066,6 +1110,18 @@ impl SmolMesh {
         }
         if self.relay_tx.tries >= RELAY_MAX_TRIES {
             self.relay_tx.active = false; // give up — telemetry is loss-tolerant
+            // #64: an exhausted probe means the direct path is still dead
+            // (stay latched, streak resets); an exhausted NORMAL message
+            // walks toward escalation unless some fragment got through.
+            if self.relay_tx.probe {
+                self.latch.on_probe_miss();
+            } else {
+                let was = self.latch.latched();
+                self.latch.on_relay_exhausted(self.relay_tx.acked != 0);
+                if !was && self.latch.latched() {
+                    println!("[MESH] uplink LATCHED multi-hop (3 unacked messages)");
+                }
+            }
             return;
         }
         if now_ms.saturating_sub(self.relay_tx.last_ms) < RELAY_RETX_MS {
@@ -1222,6 +1278,18 @@ impl SmolMesh {
             if let Some((msgid, bitmap)) = parse_relayack_rest(rest) {
                 if self.relay_tx.active && self.relay_tx.msgid == msgid {
                     self.relay_tx.acked |= bitmap;
+                    // #64: a DIRECT ack (plain RELAYACK, not the flooded ACK2)
+                    // is evidence the gateway hears us again — reset the
+                    // escalation streak and, while latched, walk the
+                    // un-latch hysteresis.
+                    if bitmap != 0 {
+                        self.latch.on_uplink_progress();
+                        let was = self.latch.latched();
+                        self.latch.on_direct_ack();
+                        if was && !self.latch.latched() {
+                            println!("[MESH] uplink UN-latched (direct path recovered)");
+                        }
+                    }
                     if self.relay_tx.acked & frag_mask(self.relay_tx.count)
                         == frag_mask(self.relay_tx.count)
                     {
@@ -1396,7 +1464,21 @@ impl SmolMesh {
         if let Some((target, msgid, bitmap, hop)) = mesh_flood::wire::parse_relayack2(data) {
             self.upsert_peer(src, None, now_ms, rssi);
             if target == self.id {
-                println!("[MESH] ack2 for us (msgid {msgid} bitmap {bitmap:#04x}) — no UP2 origination yet");
+                // The flooded ACK for OUR escalated uplink: apply the bitmap.
+                // Progress resets the streak, but a flooded ack is NOT
+                // direct-path evidence — only a plain RELAYACK un-latches.
+                if self.relay_tx.active && self.relay_tx.msgid == msgid {
+                    self.relay_tx.acked |= bitmap;
+                    if bitmap != 0 {
+                        self.latch.on_uplink_progress();
+                    }
+                    if self.relay_tx.acked & frag_mask(self.relay_tx.count)
+                        == frag_mask(self.relay_tx.count)
+                    {
+                        self.relay_tx.active = false;
+                        println!("[MESH] relay msgid {msgid} fully acked (via flood)");
+                    }
+                }
             } else if hop > 1 {
                 let mut fb = [0u8; 40];
                 let len = mesh_flood::wire::encode_relayack2(target, msgid, bitmap, hop - 1, &mut fb);
