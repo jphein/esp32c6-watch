@@ -95,3 +95,10 @@ pub const HAS_BOOT_KEY: bool = true;
 // This board clocks its panel at 40 MHz (SPI_DISPLAY_HZ in board_es3c28p.rs),
 // so the number is different — measure it during bring-up before treating any
 // row constant as this board's fact (measured, never inherited).
+
+// SPI clock for the display bus (drivers/spi_bus.rs). board_es3c28p.rs:
+// SPI_DISPLAY_HZ = 40 MHz (ESPHome-proven on the board class). SPI_TOUCH_HZ
+// exists only because the shared bus code names it — this board's touch is
+// I2C (FT6336U); nothing selects the SPI touch lane and touch_cs is None.
+pub const SPI_DISPLAY_HZ: u32 = 40_000_000;
+pub const SPI_TOUCH_HZ: u32 = 2_500_000;

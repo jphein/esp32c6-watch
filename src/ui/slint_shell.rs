@@ -13,7 +13,7 @@ use slint::platform::{PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::apps::AppState;
-use crate::drivers::co5300::Co5300Display;
+use crate::drivers::ActivePanel;
 use crate::net::names;
 // #58 climate: the real `climate-model` crate (oracle-t9 CONFIRMED-CLEAN @5c0d04c;
 // stub swapped out). Provides ClimateState / ClimateEntity / HvacMode.
@@ -2168,7 +2168,7 @@ impl ShellUi {
 
     /// Run timers/animations and repaint if the scene is dirty. No-op while the
     /// scene is suspended (a game owns the panel via the framebuffer).
-    pub fn render(&mut self, display: &mut Co5300Display) {
+    pub fn render(&mut self, display: &mut ActivePanel) {
         // `suspended` = a game owns the panel (#66). Previously this was implied
         // by `ui.is_none()`; the scene now stays alive, so check it explicitly
         // or the shell would repaint over the game's framebuffer.

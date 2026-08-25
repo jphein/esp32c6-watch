@@ -105,3 +105,9 @@ pub const BACKLIGHT_DIMMABLE: bool = false;
 /// PROVISIONAL: boot straps are 26/27/28 and no key is confirmed wired; the
 /// board may be touch-only. Flip only with a measured press on glass.
 pub const HAS_BOOT_KEY: bool = false;
+
+// SPI clocks for the shared display/touch bus (drivers/spi_bus.rs reads
+// these). MEASURED values from the CYD bring-up: ST7789 at 20 MHz, XPT2046 at
+// 2.5 MHz on the same bus with per-select retuning.
+pub const SPI_DISPLAY_HZ: u32 = 20_000_000;
+pub const SPI_TOUCH_HZ: u32 = 2_500_000;

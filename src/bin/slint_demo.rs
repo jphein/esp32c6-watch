@@ -54,6 +54,9 @@ mod board;
 mod drivers {
     pub mod co5300;
     pub mod qspi_bus;
+    // The demo bin re-declares the panel alias (its inline mod tree can't see
+    // the library's) — C6/QSPI only; the demo is a C6 tool.
+    pub type ActivePanel<'d> = co5300::Co5300Display<'d>;
 }
 
 #[path = "../peripherals"]

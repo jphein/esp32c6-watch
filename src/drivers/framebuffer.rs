@@ -16,7 +16,8 @@ use embedded_graphics_core::prelude::*;
 use embedded_graphics_core::primitives::Rectangle;
 
 use crate::board;
-use crate::drivers::co5300::{Co5300Display, DisplayError};
+use crate::drivers::co5300::DisplayError;
+use crate::drivers::ActivePanel;
 
 use alloc::vec::Vec;
 
@@ -78,7 +79,7 @@ impl Framebuffer {
     /// Flush the whole frame to the panel: expand RGB332 -> RGB565 and
     /// nearest-neighbor upscale 2x (each half-res pixel -> a 2x2 panel block).
     /// Each half-res row feeds two consecutive panel rows.
-    pub fn flush(&mut self, display: &mut Co5300Display) {
+    pub fn flush(&mut self, display: &mut ActivePanel) {
         display.set_addr_window(0, 0, WIDTH as u16, HEIGHT as u16);
         display.bus_mut().begin_pixels();
         for y in 0..HEIGHT {

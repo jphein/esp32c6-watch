@@ -44,7 +44,7 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, WindowAdapter};
 
 use crate::board;
-use crate::drivers::co5300::Co5300Display;
+use crate::drivers::ActivePanel;
 
 pub const WIDTH: usize = board::LCD_WIDTH as usize; // 410
 pub const HEIGHT: usize = board::LCD_HEIGHT as usize; // 502
@@ -92,7 +92,7 @@ pub fn init_platform() -> Rc<MinimalSoftwareWindow> {
 /// both axes by the vendored renderer's region alignment. Spans whose pairing
 /// guarantee does not hold are skipped and counted, never guessed at.
 pub struct TwoLineFlusher<'a, 'd> {
-    display: &'a mut Co5300Display<'d>,
+    display: &'a mut ActivePanel<'d>,
     /// 2 x WIDTH pixels: even line of the current pair in the first half, odd
     /// line in the second. Only rendered span columns are ever flushed.
     buf: &'a mut [Rgb565Pixel],
@@ -113,7 +113,7 @@ pub struct TwoLineFlusher<'a, 'd> {
 
 impl<'a, 'd> TwoLineFlusher<'a, 'd> {
     pub fn new(
-        display: &'a mut Co5300Display<'d>,
+        display: &'a mut ActivePanel<'d>,
         buf: &'a mut [Rgb565Pixel],
         scratch: &'a mut [u16],
     ) -> Self {

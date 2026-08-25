@@ -76,7 +76,7 @@ use crate::apps::snake::SnakeGame;
 use crate::apps::tetris::TetrisGame;
 use crate::apps::world_snake::WorldSnakeApp;
 use crate::apps::{App, AppInput, AppResult, AppState, Sfx};
-use crate::drivers::co5300::Co5300Display;
+use crate::drivers::ActivePanel;
 use crate::net::familiar::FamUi;
 use crate::net::smol_mesh::{MeshEvent, MESH_MAX_ROWS, PeerView, SmolMesh};
 use crate::net::voice_stt;
@@ -1088,17 +1088,58 @@ async fn main(_spawner: Spawner) -> ! {
     // Raw SpiDma (no SpiDmaBus wrapper): QspiBus owns a single TX DmaTxBuf and
     // drives non-blocking DMA flushes itself (see drivers/qspi_bus.rs). No RX
     // buffer is needed — the panel is write-only.
-    let spi = Spi::new(peripherals.SPI2, spi_config)
-        .expect("SPI failed")
-        .with_sck(peripherals.GPIO0)
-        .with_sio0(peripherals.GPIO1)
-        .with_sio1(peripherals.GPIO2)
-        .with_sio2(peripherals.GPIO3)
-        .with_sio3(peripherals.GPIO4)
-        .with_dma(peripherals.DMA_CH0);
-    let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
-    let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
-    let mut display = Co5300Display::new(QspiBus::new(spi, cs), reset);
+    #[cfg(any(feature = "board-waveshare-c6", feature = "board-cyd-c5"))]
+    let mut display = {
+        use crate::drivers::co5300::Co5300Display;
+        // The C5 arm still constructs the C6's QSPI driver LINK-ONLY (its
+        // glass runs morpheus's st7789 from feat/cyd-c5-gating; the merge
+        // replaces this arm). The pins below are the C6's.
+        let spi = Spi::new(peripherals.SPI2, spi_config)
+            .expect("SPI failed")
+            .with_sck(peripherals.GPIO0)
+            .with_sio0(peripherals.GPIO1)
+            .with_sio1(peripherals.GPIO2)
+            .with_sio2(peripherals.GPIO3)
+            .with_sio3(peripherals.GPIO4)
+            .with_dma(peripherals.DMA_CH0);
+        let cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+        let reset = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
+        Co5300Display::new(QspiBus::new(spi, cs), reset)
+    };
+    // The S3 CYD: ILI9341V over plain SPI + DC, morpheus's SharedSpiBus
+    // shape (his C5 block is the template — buffers must stay OFF any PSRAM
+    // allocator, DMA cannot reach PSRAM). Pins from board_es3c28p.rs via
+    // src/board/esp32s3_cyd.rs: SCK 12, MOSI 11, MISO 13, CS 10, DC 46,
+    // backlight 45. Touch is I2C on this board, so the bus's touch/sd CS
+    // lanes are None.
+    #[cfg(feature = "board-esp32s3-cyd")]
+    let mut display = {
+        use crate::drivers::ili9341::Ili9341Display;
+        use crate::drivers::spi_bus::{SharedSpiBus, STAGE_BYTES};
+        use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
+
+        let dc = Output::new(peripherals.GPIO46, Level::High, OutputConfig::default());
+        let lcd_cs = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
+        let backlight = Output::new(peripherals.GPIO45, Level::High, OutputConfig::default());
+
+        let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+            esp_hal::dma_buffers!(64, STAGE_BYTES);
+        let dma_rx = DmaRxBuf::new(rx_descriptors, rx_buffer).expect("dma rx");
+        let dma_tx = DmaTxBuf::new(tx_descriptors, tx_buffer).expect("dma tx");
+
+        let s3_spi_config = SpiConfig::default()
+            .with_frequency(Rate::from_hz(board::SPI_DISPLAY_HZ))
+            .with_mode(SpiMode::_0);
+        let spi = Spi::new(peripherals.SPI2, s3_spi_config)
+            .expect("SPI failed")
+            .with_sck(peripherals.GPIO12)
+            .with_mosi(peripherals.GPIO11)
+            .with_miso(peripherals.GPIO13)
+            .with_dma(peripherals.DMA_CH0)
+            .with_buffers(dma_rx, dma_tx);
+
+        Ili9341Display::new(SharedSpiBus::new(spi, dc, lcd_cs, None, None), backlight)
+    };
     display.init();
     println!("[DISPLAY] OK");
 
@@ -6573,7 +6614,7 @@ async fn main(_spawner: Spawner) -> ! {
 #[cfg(feature = "story")]
 struct StoryPlayUi<'a> {
     shell: &'a mut ShellUi,
-    display: &'a mut crate::drivers::co5300::Co5300Display<'static>,
+    display: &'a mut crate::drivers::ActivePanel<'static>,
     /// Finger-down poll. A `dyn` closure rather than the touch driver so this
     /// struct carries no device generics — same reason `voice_tts::speak_text`
     /// takes `&mut dyn FnMut`.
@@ -6674,7 +6715,7 @@ fn run_fb_app(
     app: &mut dyn App,
     input: &AppInput,
     fb: &mut Framebuffer,
-    display: &mut Co5300Display,
+    display: &mut ActivePanel,
     now: Instant,
     next_flush: &mut Instant,
 ) -> (bool, Option<Sfx>) {

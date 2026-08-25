@@ -119,6 +119,12 @@ def main() -> None:
     p.add_argument("--speak", default="ondemand", choices=SPEAK_MODES)
     p.add_argument("--chip", default="esp32c6",
                    help="espflash chip arg (esp32c6 | esp32c5 | esp32s3)")
+    p.add_argument("--config-offset", type=lambda s: int(s, 0), default=CONFIG_PART,
+                   help="config partition offset (default 0xc10000, the C6/C5 "
+                        "table; the S3's partitions-ota-s3.csv carves its entry "
+                        "at a different address — pass what ITS table declares). "
+                        "The firmware self-locates by data/spiffs subtype; this "
+                        "flag only aims the WRITE.")
     p.add_argument("--write", action="store_true",
                    help="actually flash both config slots (default: dry-run print)")
     a = p.parse_args()
@@ -145,7 +151,7 @@ def main() -> None:
         f.write(rec)
         tmp = f.name
     try:
-        for off in (CONFIG_PART, CONFIG_PART + BACKUP_SLOT):
+        for off in (a.config_offset, a.config_offset + BACKUP_SLOT):
             cmd = [os.path.expanduser("~/.cargo/bin/espflash"), "write-bin",
                    "--chip", a.chip, "--port", a.port, f"0x{off:x}", tmp]
             print("+", " ".join(cmd))
