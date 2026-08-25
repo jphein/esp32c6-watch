@@ -56,6 +56,21 @@ board-cyd-c5 = [
     "esp-storage/esp32c5", "esp-bootloader-esp-idf/esp32c5",
     "esp-println/esp32c5", "esp-backtrace/esp32c5",
 ]
+# ES3C28P "Hosyond 2.8in" ESP32-S3 CYD — smol node 162 (eldritch-insignia).
+# Xtensa: builds ONLY with the espup toolchain (+esp) against
+# xtensa-esp32s3-none-elf, and ONLY at opt-level 2 under fat LTO (opt s/z
+# provoke an LLVM scavenger crash — smol targets/s3-cyd/PORT-SCOPING.md §6.1).
+# Pin/panel facts live in smol targets/s3-cyd/board-staging/board_es3c28p.rs —
+# src/board/esp32s3_cyd.rs CITES it and must never fork the pin table.
+# Capabilities start EMPTY like the C5 arm did: the board has cap-touch
+# (FT6336U) and audio (ES8311), but each capability turns on only when its
+# driver seam is proven against this chip — a capability is a tested claim,
+# not an inventory line.
+board-esp32s3-cyd = [
+    "esp-hal/esp32s3", "esp-rtos/esp32s3", "esp-radio/esp32s3",
+    "esp-storage/esp32s3", "esp-bootloader-esp-idf/esp32s3",
+    "esp-println/esp32s3", "esp-backtrace/esp32s3",
+]
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.
 has-pmu = []

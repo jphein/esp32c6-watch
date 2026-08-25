@@ -19,8 +19,17 @@ mod cyd_c5;
 #[cfg(feature = "board-cyd-c5")]
 pub use cyd_c5::*;
 
+#[cfg(feature = "board-esp32s3-cyd")]
+mod esp32s3_cyd;
+#[cfg(feature = "board-esp32s3-cyd")]
+pub use esp32s3_cyd::*;
+
 // Exactly one board, checked here rather than discovered as 200 duplicate-item
-// errors. (Neither is also an error, but that one fails loudly on its own —
-// every `board::` path breaks.)
+// errors. (None enabled is also an error, but that one fails loudly on its
+// own — every `board::` path breaks.) Pairwise, so the message names the clash.
 #[cfg(all(feature = "board-waveshare-c6", feature = "board-cyd-c5"))]
-compile_error!("exactly one board-* feature: board-waveshare-c6 XOR board-cyd-c5");
+compile_error!("exactly one board-* feature: board-waveshare-c6 AND board-cyd-c5 are both on");
+#[cfg(all(feature = "board-waveshare-c6", feature = "board-esp32s3-cyd"))]
+compile_error!("exactly one board-* feature: board-waveshare-c6 AND board-esp32s3-cyd are both on");
+#[cfg(all(feature = "board-cyd-c5", feature = "board-esp32s3-cyd"))]
+compile_error!("exactly one board-* feature: board-cyd-c5 AND board-esp32s3-cyd are both on");

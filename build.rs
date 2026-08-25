@@ -25,13 +25,17 @@ fn main() {
     // needs for stack/image measurement before the layouts land. The warning is
     // the discriminator between "wrong layout by fallback" and "wrong layout by
     // bug".
-    let cyd = std::env::var("CARGO_FEATURE_BOARD_CYD_C5").is_ok();
+    // The S3 CYD is the same 320x240 landscape class, so it shares the ui/cyd
+    // scene set until a layout pass says otherwise (board_es3c28p.rs's panel
+    // facts differ driver-side — MADCTL/inversion — not scene-side).
+    let cyd = std::env::var("CARGO_FEATURE_BOARD_CYD_C5").is_ok()
+        || std::env::var("CARGO_FEATURE_BOARD_ESP32S3_CYD").is_ok();
     let cyd_root = "ui/cyd/shell.slint";
     let ui_root = if cyd && std::path::Path::new(cyd_root).exists() {
         cyd_root
     } else {
         if cyd {
-            println!("cargo:warning=board-cyd-c5: {cyd_root} not present yet — compiling the C6 scene as a LINK-ONLY fallback (renders cropped on this panel)");
+            println!("cargo:warning=cyd-class board: {cyd_root} not present yet — compiling the C6 scene as a LINK-ONLY fallback (renders cropped on this panel)");
         }
         "ui/slint/shell.slint"
     };
@@ -388,6 +392,12 @@ fn linker_be_nice() {
         std::process::exit(0);
     }
 
+    // LLD-ONLY. The RISC-V boards link with rust-lld, which understands
+    // --error-handling-script (the friendly undefined-symbol hints above). The
+    // S3's xtensa target links through xtensa-esp32s3-elf-GCC, which rejects
+    // the flag outright ("unrecognized command-line option") and kills the
+    // link — so the S3 arm trades the nice hints for a link that happens.
+    #[cfg(not(feature = "board-esp32s3-cyd"))]
     println!(
         "cargo:rustc-link-arg=--error-handling-script={}",
         std::env::current_exe().unwrap().display()
