@@ -56,7 +56,8 @@ the swipe threshold so a **cancelled hold can still classify as the edge-swipe**
 | constant | C6 value | fate | owned by wave |
 |---|---|---|---|
 | `SLIDER_BAND` | `330..=430` | **`182..=230`** — the CYD power page's slider sits at y186..226, padded for finger slop. ⚠️ At 330 the band is entirely off a 240 px panel, so TODAY every drag on that slider would ALSO flip the page | power ✅ |
-| `HUB_SLIDER_BAND` | `170..=240` | ⏳ clips exactly at the bottom edge; moves with the Settings DISPLAY slider. ⚠️ `settings.slint:360-363`'s comment says `180..220` while the code says `170..240` — **they already disagree, and whoever moves it must reconcile both** | settings |
+| `HUB_SLIDER_BAND` | `170..=240` | **`66..=114`** — the CYD hub's DISPLAY slider is at absolute y70..110. ⚠️ **Reconcile BOTH C6 values, do not retune one:** `settings.slint:360-363`'s comment says `180..220` while the code says `170..240`. And note the old upper bound (240) was the C6 panel's *edge* — on this panel 240 IS the edge, so a stale value swallows **every** horizontal swipe on the page | settings ✅ |
+| `SETTINGS_PAGE_COUNT` | `6` | **stays `6`** — page 0 (SOUND) is inert on this board but the count is Rust-owned and the tick rail reads it. Dropping to 5 is a later, separate call | settings ✅ |
 | `STORY_PAUSE_RECT` | `(22,198,378,438)` | ⏳ currently `(0,0,0,0)` on the C5, which **gates story playback off** — so nobody can ship a mis-mapped story page by accident. Duplicated in `main.rs`'s inline hit-test, whose own comment warns the geometry *"must match story.slint's READ-page tiles exactly"* | story |
 | `VISIBLE_CHAPTERS` | `5` | **`3`** (`Geom.max-chapters`) — ⚠️ it is also the **pager stride**, so NEWER/OLDER paging behaviour changes with it | story |
 

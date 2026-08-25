@@ -1,0 +1,647 @@
+import { Theme, WifiNet } from "../slint/theme.slint";
+import { OverlaySwallow, IconButton, PressTile, PillButton, Stepper, SliderControl } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydEyebrow, CydPageTitle, CydBackChevron, CydStatRow } from "controls_cyd.slint";
+import { KeyboardPane } from "keyboard.slint";
+
+// ============================================================================
+// SETTINGS HUB — six paged sections, a picker, and a keyboard.
+// ============================================================================
+//
+// PAGED, and the ruling was re-examined rather than inherited
+// -----------------------------------------------------------------------------
+// The layout spec asked whether a `Flickable` is now allowed here, since the
+// no-scroll ruling predates this port. Answer: no, and pagination is if anything
+// a better fit at 240 px than at 502. A scroll's cost is its dirty region, and
+// the shorter the viewport the more of it a scroll dirties per pixel of travel.
+// Six hard-cut pages with a tick rail is the same interaction the launcher and
+// the shell already use, so it is also one fewer idiom for a finger to learn.
+//
+// PAGE INDICATION IS THE SHELL'S RIGHT RAIL, NOT A BOTTOM DOT ROW
+// -----------------------------------------------------------------------------
+// The C6 hub draws its own 44 px dot row at y448, over the shell's. Here the
+// six ticks go on the right rail — the same place, the same shape and the same
+// tap-to-advance as `shell.slint`'s carousel rail. That is worth more than
+// consistency: it buys the content band its FULL 200 px height, where a bottom
+// dot row would have taken 44 of it, and the pages are the tightest thing in
+// this file.
+//
+// 🔶 TWO SECTIONS ARE DEAD ON THIS BOARD, AND THEY SAY SO
+// -----------------------------------------------------------------------------
+// `board-cyd-c5` declares no `has-audio` capability. That is not just "no mic":
+// there is no codec and no speaker, so **the entire SOUND page is inert** —
+// volume steps nothing, mic gain boosts nothing, and the touch tick has nothing
+// to tick with. Page 0 states that instead of offering three live-looking
+// controls over silence.
+//
+// BUTTONS is half-dead. `BOOT` is a real GPIO on this board; `PWRON` is the
+// AXP2101's power key and there is no AXP2101. So the two POWER mapping rows are
+// dropped and the page says why — leaving the two BOOT rows, which work.
+//
+// Every callback and property stays declared regardless: `shell.slint` binds all
+// of them and removing one breaks the build. A section can go quiet; the API
+// cannot.
+//
+// ⚠️ THE HUB SLIDER'S RUST GUARD BAND, AND A DISAGREEMENT TO RECONCILE
+// -----------------------------------------------------------------------------
+// `HUB_SLIDER_BAND` excludes horizontal swipes starting on the DISPLAY slider
+// from being read as page-flips or back-navigation. On the C6 the CODE says
+// `170..=240` and `settings.slint`'s own comment says `180..220` — **they already
+// disagree**, so whoever moves this must reconcile both, not just retune one.
+//
+// Here the slider sits at absolute y70..110. Proposed band: **66..=114**. Note
+// that the C6 band's upper bound (240) was the panel edge; on this panel 240 IS
+// the edge, so a stale value would swallow every horizontal swipe on the page.
+// ============================================================================
+
+// One label + caption + switch row. The WHOLE row is the finger target (Recipe A
+// surface: pressed lights the panel to accent-bg with an accent edge, hard
+// 1-frame swap). The switch is display-only chrome; the knob jumps, no animate.
+// 64 -> 52 px, and the switch 56x32 -> 48x28.
+component ToggleRow {
+    in property <string> label;
+    in property <string> caption;
+    in property <bool> on;
+    in property <bool> enabled: true;
+    callback tapped();
+    height: 52px;
+
+    pt := PressTile {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => { root.tapped(); }
+
+        Text {
+            x: 14px; y: 8px;
+            text: root.label;
+            color: Theme.ink;
+            font-size: Geom.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 14px; y: 30px;
+            width: parent.width - 90px;
+            overflow: elide;
+            text: root.caption;
+            color: Theme.dim;
+            font-size: Geom.t-caption;
+        }
+        // Switch visual (right-aligned).
+        Rectangle {
+            x: parent.width - 62px;
+            y: (parent.height - 28px) / 2;
+            width: 48px; height: 28px; border-radius: 14px;
+            background: root.on ? Theme.accent : Theme.track;
+            border-width: 1px;
+            border-color: root.on || pt.pressed ? Theme.accent : Theme.line;
+            Rectangle {
+                x: root.on ? parent.width - 25px : 3px;
+                y: 3px;
+                width: 22px; height: 22px; border-radius: 11px;
+                background: root.on ? Theme.on-accent
+                    : (pt.pressed ? Theme.ink : Theme.soft);
+            }
+        }
+    }
+}
+
+// One button-mapping row: label + current action, tap cycles to the next action
+// (Rust owns + persists the enum; a cycle is a compact picker that adds no glyph
+// sets, and the ROM budget is why). 60 -> 48 px.
+component MappingRow {
+    in property <string> label;
+    in property <string> action;
+    callback tapped();
+    height: 48px;
+
+    PressTile {
+        width: 100%; height: 100%;
+        clicked => { root.tapped(); }
+        Text {
+            x: 14px; y: 6px;
+            text: root.label;
+            color: Theme.ink;
+            font-size: Geom.t-body;
+            font-weight: 600;
+        }
+        Text {
+            x: 14px; y: 28px;
+            text: "tap to change";
+            color: Theme.dim;
+            font-size: Geom.t-caption;
+        }
+        Text {
+            x: parent.width - self.width - 14px;
+            y: 0; height: parent.height; vertical-alignment: center;
+            text: root.action;
+            color: Theme.accent;
+            font-size: Geom.t-body;
+            font-weight: 700;
+        }
+    }
+}
+
+// One scanned-network row: SSID + padlock + RSSI bars (Recipe A pressed state).
+// Both the padlock and the bars are DRAWN — the embedded font has no emoji, so
+// there is no glyph to substitute and this is not a stylistic choice.
+component NetworkRow {
+    in property <string> ssid;
+    in property <int> bars;
+    in property <bool> secured;
+    callback pick();
+    height: 46px;
+
+    PressTile {
+        width: 100%; height: 100%;
+        clicked => { root.pick(); }
+
+        Text {
+            x: 14px;
+            y: 0; height: parent.height; vertical-alignment: center;
+            width: parent.width - 110px;
+            overflow: elide;
+            text: root.ssid;
+            color: Theme.ink;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        // Drawn padlock.
+        if root.secured: Rectangle {
+            x: parent.width - 86px;
+            y: (parent.height - 17px) / 2;
+            width: 14px; height: 17px;
+            Rectangle { // shackle
+                x: 2px; y: 0; width: 10px; height: 10px;
+                border-radius: 5px; border-width: 2px; border-color: Theme.dim;
+            }
+            Rectangle { // body
+                x: 0; y: 8px; width: 14px; height: 9px;
+                border-radius: 2px; background: Theme.dim;
+            }
+        }
+        // Signal bars, ascending; lit up to `bars`.
+        Rectangle {
+            x: parent.width - 58px;
+            y: (parent.height - 20px) / 2;
+            width: 42px; height: 20px;
+            Rectangle { x: 0;    y: 12px; width: 6px; height: 8px;  border-radius: 1px;
+                background: root.bars >= 1 ? Theme.accent : Theme.line; }
+            Rectangle { x: 12px; y: 8px;  width: 6px; height: 12px; border-radius: 1px;
+                background: root.bars >= 2 ? Theme.accent : Theme.line; }
+            Rectangle { x: 24px; y: 4px;  width: 6px; height: 16px; border-radius: 1px;
+                background: root.bars >= 3 ? Theme.accent : Theme.line; }
+            Rectangle { x: 36px; y: 0;    width: 6px; height: 20px; border-radius: 1px;
+                background: root.bars >= 4 ? Theme.accent : Theme.line; }
+        }
+    }
+}
+
+export component SettingsHub {
+    // --- hub paging (Rust flips via swipe; the rail flips locally) ---
+    in-out property <int> page: 0; // 0 SOUND·1 DISPLAY·2 RADIOS·3 NETWORK·4 SYSTEM·5 BUTTONS
+    property <[string]> titles: ["SOUND", "DISPLAY", "RADIOS", "NETWORK", "SYSTEM", "BUTTONS"];
+    // NETWORK sub-view (RUST-OWNED): 0 hub pages · 1 picker · 2 keyboard.
+    in property <int> net-view: 0;
+
+    // --- SOUND (inert on this board — no has-audio; see the header) ---
+    in property <bool> touch-sound;
+    in property <int> gain-db: 0;
+    in property <int> volume-level: 11; // 0..15
+    in property <bool> volume-muted: false;
+    callback toggle-touch-sound();
+    callback gain-down();
+    callback gain-up();
+    callback vol-down();
+    callback vol-up();
+    callback vol-mute();
+
+    // --- BUTTONS: tap a row → Rust cycles + persists that slot ---
+    in property <string> boot-short-action: "Volume +";
+    in property <string> boot-long-action: "Launcher";
+    in property <string> pwron-short-action: "Volume \u{2212}";
+    in property <string> pwron-long-action: "Power menu";
+    callback button-cycle(int); // 0 boot-short · 1 boot-long · 2 pwron-short · 3 pwron-long
+
+    // --- DISPLAY ---
+    in-out property <float> brightness;
+    callback brightness-changed(float);
+
+    // --- RADIOS (persisted state in, existing tap semantics out) ---
+    in property <bool> ble-on;
+    in property <bool> mesh-on;
+    in property <bool> wifi-intent;   // persisted auto-vs-forced-off intent
+    in property <bool> wifi-live;     // live association (caption honesty)
+    callback ble-tap();
+    callback mesh-tap();
+    callback wifi-tap();
+
+    // --- NETWORK ---
+    in property <string> net-current: "";
+    in property <int> net-status: 0;  // 0 idle · 1 connecting · 2 connected · 3 failed
+    in property <bool> scanning: false;
+    in property <[WifiNet]> nets: [];
+    callback net-open();              // choose-network → Rust scans + raises view 1
+    callback net-rescan();
+    callback net-pick(int);
+    callback net-manual();            // hidden network → keyboard for the SSID
+    callback nav-back();              // sub-view chevron / right-swipe (Rust decides)
+    callback close();                 // hub chevron / right-swipe at view 0
+
+    // --- keyboard sub-view (Rust owns the text; this only displays) ---
+    in property <string> kb-title: "";
+    in property <string> kb-context: "";
+    in property <string> kb-text: "";
+    in property <bool> kb-plain: false;
+    callback kb-key(string);
+    callback kb-bksp-down();
+    callback kb-bksp-up();
+    callback kb-eye();
+    callback kb-done();
+
+    // --- SYSTEM ---
+    in property <string> sigil: "--";
+    in property <string> fw: "--";
+    in property <string> build: "--";
+    in property <int> node-id: 0;
+    in property <string> ota-status: "";
+    callback ota-tap();
+
+    // Content box for the hub pages: the full band minus the rail's 52 px.
+    property <length> cw: 260px;
+
+    // Opaque backdrop — the hub fully replaces the watchface.
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    // ======================= view 0 — the hub pages =======================
+    if root.net-view == 0: Rectangle {
+        width: 100%; height: 100%;
+
+        CydBackChevron { clicked => { root.close(); } }
+        CydEyebrow { x: 52px; y: 12px; text: "SETTINGS"; tint: Theme.faint; }
+        CydPageTitle { title: root.titles[root.page]; }
+
+        // --- page 0 · SOUND — inert on this board ---
+        // Not three dead controls behind a "sorry" caption: the controls are
+        // gone. A volume stepper that steps nothing is worse than an absent one,
+        // because a stepper implies something moved.
+        if root.page == 0: Rectangle {
+            x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
+            Text {
+                x: 0; y: 40px; width: parent.width;
+                horizontal-alignment: center;
+                text: "NO AUDIO ON THIS BOARD";
+                color: Theme.faint; font-size: 18px; letter-spacing: 3px;
+            }
+            Text {
+                x: 0; y: 76px; width: parent.width;
+                horizontal-alignment: center;
+                text: "no codec \u{00b7} no speaker \u{00b7} no mic";
+                color: Theme.dim; font-size: Geom.t-body; letter-spacing: 2px;
+            }
+            Text {
+                x: 0; y: 104px; width: parent.width;
+                horizontal-alignment: center; wrap: word-wrap;
+                text: "volume, mic gain and the touch tick all need hardware this board does not carry";
+                color: Theme.faint; font-size: Geom.t-caption; letter-spacing: 1px;
+            }
+        }
+
+        // --- page 1 · DISPLAY ---
+        if root.page == 1: Rectangle {
+            x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
+            Text {
+                x: 0; y: 10px;
+                text: "BRIGHTNESS";
+                color: Theme.dim; font-size: 16px; letter-spacing: 2px;
+            }
+            // ⚠️ Absolute y70..110. Rust's HUB_SLIDER_BAND must become 66..=114
+            // — and see the header: the C6's code and comment already disagree
+            // about the old value, so BOTH need reconciling, not just retuning.
+            SliderControl {
+                x: 0; y: 36px; width: parent.width;
+                value <=> root.brightness;
+                changed(f) => { root.brightness-changed(f); }
+            }
+            Text {
+                x: 0; y: 92px;
+                width: parent.width; wrap: word-wrap;
+                text: "auto-dims after 8s \u{00b7} AOD after 15s";
+                color: Theme.faint; font-size: Geom.t-caption;
+            }
+            // The backlight on this board is a plain GPIO, not a PWM channel —
+            // so the slider's intermediate steps depend on whether the driver
+            // wires PWM at all. Said here rather than discovered on glass.
+            Text {
+                x: 0; y: 118px;
+                width: parent.width; wrap: word-wrap;
+                text: "backlight is a plain GPIO on this board \u{2014} steps depend on the driver";
+                color: Theme.faint; font-size: Geom.t-caption;
+            }
+        }
+
+        // --- page 2 · RADIOS ---
+        if root.page == 2: Rectangle {
+            x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
+            ToggleRow {
+                x: 0; y: 4px; width: parent.width;
+                label: "Bluetooth";
+                caption: root.ble-on ? "advertising \u{00b7} off after reboot" : "off";
+                on: root.ble-on;
+                tapped => { root.ble-tap(); }
+            }
+            ToggleRow {
+                x: 0; y: 64px; width: parent.width;
+                label: "Mesh";
+                caption: "ESP-NOW fleet";
+                on: root.mesh-on;
+                tapped => { root.mesh-tap(); }
+            }
+            ToggleRow {
+                x: 0; y: 124px; width: parent.width;
+                label: "WiFi";
+                caption: root.wifi-live ? "connected"
+                    : (root.wifi-intent ? "auto \u{00b7} rises on demand" : "forced off");
+                on: root.wifi-intent;
+                tapped => { root.wifi-tap(); }
+            }
+        }
+
+        // --- page 3 · NETWORK ---
+        if root.page == 3: Rectangle {
+            x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
+            Rectangle {
+                x: 0; y: 4px; width: parent.width; height: 66px;
+                border-radius: Theme.r-card;
+                background: Theme.panel;
+                border-width: 1px; border-color: Theme.line;
+                Text {
+                    x: 14px; y: 6px;
+                    text: "NETWORK";
+                    color: Theme.dim; font-size: Geom.t-caption; letter-spacing: 2px;
+                }
+                Text {
+                    x: 14px; y: 22px;
+                    width: parent.width - 28px;
+                    overflow: elide;
+                    text: root.net-current == "" ? "not configured" : root.net-current;
+                    color: root.net-current == "" ? Theme.faint : Theme.ink;
+                    font-size: 20px; font-weight: 600;
+                }
+                Text {
+                    x: 14px; y: 48px;
+                    text: root.net-status == 1 ? "connecting\u{2026}"
+                        : root.net-status == 2 ? "connected"
+                        : root.net-status == 3 ? "connection failed"
+                        : "idle";
+                    color: root.net-status == 2 ? Theme.accent
+                        : root.net-status == 3 ? Theme.warn
+                        : root.net-status == 1 ? Theme.warm : Theme.dim;
+                    font-size: Geom.t-caption;
+                    letter-spacing: 1px;
+                }
+            }
+            PillButton {
+                x: (parent.width - 200px) / 2; y: 88px;
+                width: 200px; height: 44px;
+                text: "CHOOSE NETWORK";
+                text-size: Geom.t-body;
+                clicked => { root.net-open(); }
+            }
+            Text {
+                x: 0; y: 142px; width: parent.width;
+                horizontal-alignment: center;
+                text: "scans nearby networks";
+                color: Theme.faint; font-size: Geom.t-caption;
+            }
+        }
+
+        // --- page 4 · SYSTEM ---
+        if root.page == 4: Rectangle {
+            x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
+            CydStatRow { x: 0; y:   2px; width: parent.width; height: 28px;
+                         label: "SIGIL";    value: root.sigil; }
+            CydStatRow { x: 0; y:  32px; width: parent.width; height: 28px;
+                         label: "BUILD";    value: root.build; value-color: Theme.accent; }
+            CydStatRow { x: 0; y:  62px; width: parent.width; height: 28px;
+                         label: "FIRMWARE"; value: root.fw; }
+            CydStatRow { x: 0; y:  92px; width: parent.width; height: 28px;
+                         label: "NODE";     value: "#\{root.node-id}"; }
+
+            PillButton {
+                x: (parent.width - 220px) / 2; y: 130px;
+                width: 220px; height: 44px;
+                text: "UPDATE FIRMWARE";
+                text-size: Geom.t-body;
+                clicked => { root.ota-tap(); }
+            }
+            // OTA status (connecting / updating / staged / error). `visible:`-
+            // gated rather than `if`-gated — one Text is not worth a ~3-6 KB
+            // generated inner component.
+            Text {
+                visible: root.ota-status != "";
+                x: 0; y: 180px; width: parent.width;
+                horizontal-alignment: center;
+                text: root.ota-status;
+                color: Theme.warm;
+                font-size: Geom.t-body;
+                letter-spacing: 1px;
+            }
+        }
+
+        // --- page 5 · BUTTONS — half of it is dead ---
+        // BOOT is a real GPIO here. PWRON is the AXP2101's power key and there
+        // is no AXP2101, so its two mapping rows are dropped rather than left
+        // configurable: a binding you can change and never trigger is a trap.
+        if root.page == 5: Rectangle {
+            x: Geom.content-x; y: Geom.content-y; width: root.cw; height: Geom.content-h;
+            MappingRow {
+                x: 0; y: 4px; width: parent.width;
+                label: "BOOT \u{00b7} tap";
+                action: root.boot-short-action;
+                tapped => { root.button-cycle(0); }
+            }
+            MappingRow {
+                x: 0; y: 58px; width: parent.width;
+                label: "BOOT \u{00b7} hold";
+                action: root.boot-long-action;
+                tapped => { root.button-cycle(1); }
+            }
+            Text {
+                x: 0; y: 118px;
+                width: parent.width; wrap: word-wrap;
+                text: "no POWER key on this board \u{2014} its two mappings are hidden, not unset";
+                color: Theme.faint; font-size: Geom.t-caption;
+            }
+        }
+
+        // Page ticks — the shell's right-rail idiom, six ticks. Tap advances,
+        // swipe up/down flips (routed in slint_shell::handle_touch). 44x110 hit
+        // box, both axes over the floor; the VerticalLayout is the sanctioned
+        // exception (small, fixed-size, non-text).
+        rail := TouchArea {
+            x: parent.width - 44px;
+            y: (parent.height - 110px) / 2;
+            width: 44px;
+            height: 110px;
+            clicked => { root.page = mod(root.page + 1, 6); }
+            VerticalLayout {
+                x: 33px;
+                y: (parent.height - (6 * 6px + 5 * 8px)) / 2;
+                spacing: 8px;
+                for i in 6: Rectangle {
+                    width: 6px; height: 6px; border-radius: 3px;
+                    background: root.page == i ? Theme.accent
+                        : (rail.pressed ? Theme.soft : Theme.line);
+                }
+            }
+        }
+    }
+
+    // ======================= view 1 — network picker =======================
+    if root.net-view == 1: Rectangle {
+        width: 100%; height: 100%;
+
+        CydBackChevron { clicked => { root.nav-back(); } }
+        CydEyebrow { x: 52px; y: 12px; text: "NETWORKS"; tint: Theme.faint; }
+        // RESCAN in the title strip, right-anchored, 26 px visual padded to the
+        // 44 px floor (the `hit-pad` idiom). Safe inside the top-edge zone here:
+        // overlays own their own gestures, so the shade swipe does not reach in.
+        PillButton {
+            x: 224px; y: 4px;
+            width: 88px; height: 26px;
+            hit-pad-bottom: 18px;
+            text: "RESCAN";
+            text-size: Geom.t-caption;
+            tracking: 1px;
+            enabled: !root.scanning;
+            clicked => { root.net-rescan(); }
+        }
+
+        Text {
+            visible: root.scanning;
+            x: Geom.content-x; y: 108px; width: Geom.content-w;
+            horizontal-alignment: center;
+            text: "Scanning\u{2026}";
+            color: Theme.soft; font-size: 22px; letter-spacing: 2px;
+        }
+        Text {
+            visible: !root.scanning && root.nets.length == 0;
+            x: Geom.content-x; y: 108px; width: Geom.content-w;
+            horizontal-alignment: center;
+            text: "No networks found";
+            color: Theme.dim; font-size: 18px;
+        }
+
+        // Strongest-first rows, capped at THREE (`Geom.max-nets`, JP's default).
+        //
+        // 🟥 The cap is an OOM GUARD, not a preference. Rust enforces it in
+        // main.rs (`heapless::Vec<_, 6>` + `.take(6)`) and the C6 keeps a local
+        // `visible: i < 6` because a 7th row adds ~19 unbounded scene items per
+        // extra AP — in a busy RF environment that is an unbounded scene, which
+        // on this allocator is an OOM. Going DOWN is always safe; going up never
+        // is. 6 -> 3 is therefore free, and `manual` still hard-clamps its y so
+        // it cannot be pushed off-panel by a longer model.
+        if !root.scanning: Rectangle {
+            x: Geom.content-x; y: 36px; width: Geom.content-w; height: 198px;
+            for net[i] in root.nets: NetworkRow {
+                visible: i < Geom.max-nets;
+                x: 0; y: i * 50px; width: parent.width;
+                ssid: net.ssid;
+                bars: net.bars;
+                secured: net.secured;
+                pick => { root.net-pick(i); }
+            }
+            // Hidden-network fallback: manual SSID entry via the keyboard.
+            manual := PressTile {
+                x: 0; y: min(root.nets.length, Geom.max-nets) * 50px;
+                width: parent.width; height: 46px;
+                rest-background: Theme.bg;
+                clicked => { root.net-manual(); }
+                Text {
+                    x: 14px;
+                    y: 0; height: parent.height; vertical-alignment: center;
+                    text: "Other network\u{2026}";
+                    color: manual.pressed ? Theme.accent : Theme.soft;
+                    font-size: 16px;
+                }
+            }
+        }
+    }
+
+    // ======================= view 2 — keyboard =======================
+    // The tightest view in the tree: 152 px of keyboard leaves 88 px for a
+    // header, a field and a chevron. Three things had to give:
+    //
+    //   * NO page title. `kb-title` IS the title, so a second one was always
+    //     redundant; here it is also unaffordable.
+    //   * Title and context share ONE line — context right-anchored, so a long
+    //     SSID elides rather than pushing the title.
+    //   * The "✓ connects and saves" caption is dropped. The ✓ key is a
+    //     solid-accent CTA and the only accented key on the pane; a caption
+    //     explaining the brightest thing on screen was the cheapest 20 px here.
+    if root.net-view == 2: Rectangle {
+        width: 100%; height: 100%;
+
+        CydBackChevron { clicked => { root.nav-back(); } }
+        Text {
+            x: 52px; y: 4px;
+            height: 24px; vertical-alignment: center;
+            text: root.kb-title;
+            color: Theme.soft; font-size: Geom.t-body;
+            font-weight: 600; letter-spacing: 2px;
+        }
+        Text {
+            x: 170px; y: 4px;
+            width: 142px;
+            height: 24px; vertical-alignment: center;
+            horizontal-alignment: right;
+            overflow: elide;
+            text: root.kb-context;
+            color: Theme.dim; font-size: Geom.t-caption; letter-spacing: 1px;
+        }
+
+        // Text field: Rust pushes the (masked, tail-windowed) display string, so
+        // the caret only ever needs to sit after it.
+        field := Rectangle {
+            x: Geom.content-x; y: 32px; width: Geom.content-w; height: 44px;
+            border-radius: Theme.r-chip;
+            background: Theme.panel;
+            border-width: 1px; border-color: Theme.line;
+            ft := Text {
+                x: 14px;
+                y: 0; height: parent.height; vertical-alignment: center;
+                text: root.kb-text;
+                color: Theme.ink;
+                font-size: 20px;
+            }
+            Rectangle { // caret
+                x: 16px + ft.width;
+                y: 10px; width: 2px; height: 24px;
+                background: Theme.accent;
+            }
+            // Show-password eye (drawn; accent while revealing).
+            eye := IconButton {
+                x: parent.width - 44px; y: 0; width: 44px; height: 44px;
+                clicked => { root.kb-eye(); }
+                Rectangle {
+                    x: 11px; y: 15px; width: 22px; height: 14px;
+                    border-radius: 7px; border-width: 2px;
+                    border-color: root.kb-plain || eye.pressed ? Theme.accent : Theme.dim;
+                }
+                Rectangle {
+                    x: 19px; y: 19px; width: 6px; height: 6px; border-radius: 3px;
+                    background: root.kb-plain || eye.pressed ? Theme.accent : Theme.dim;
+                }
+            }
+        }
+
+        KeyboardPane {
+            x: 0; y: 82px; width: parent.width;
+            key(k) => { root.kb-key(k); }
+            bksp-down => { root.kb-bksp-down(); }
+            bksp-up => { root.kb-bksp-up(); }
+            done => { root.kb-done(); }
+        }
+    }
+}

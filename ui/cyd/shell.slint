@@ -65,7 +65,8 @@
 //   PORTED : shell chrome · clock · power_menu · volume · launcher · sensors
 //            system · mesh · wled · hunt · switcher · shade · theme_overlay
 //            energy · climate · lights · ping · power · voice · soundlevel
-//   PENDING: keyboard · scan · settings · story
+//            keyboard · settings
+//   PENDING: story
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
@@ -92,10 +93,10 @@ import { PingOverlay, PingPulse } from "ping.slint";
 import { PowerPage } from "power.slint";
 import { VoicePage } from "voice.slint";
 import { SoundLevel, SpecBand } from "soundlevel.slint";
+import { SettingsHub } from "settings.slint";
 
 // --- PENDING: still the C6 portrait layouts (render cropped) ----------------
 import { StoryPage, StoryChapter, StorySlot } from "../slint/story.slint";
-import { SettingsHub } from "../slint/settings.slint";
 
 // Re-export so the generated Rust module keeps exposing these types —
 // slint_shell.rs constructs PeerRow / LauncherTile / ClimateCard / SpecBand /
