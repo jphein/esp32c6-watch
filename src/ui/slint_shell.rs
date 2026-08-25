@@ -2440,9 +2440,13 @@ fn build_scene(
     ui
 }
 
-/// Slots per launcher page — a fixed 3x3 grid. MUST match the `for slot in 9`
-/// grid + geometry in `ui/slint/launcher.slint`.
-const LAUNCHER_PAGE_SLOTS: usize = 9;
+/// Slots per launcher page. Board-owned (#cyd-c5): a 3x3 grid on the C6's
+/// portrait panel, 4x2 on the CYD's landscape one.
+///
+/// ⚠️ TWO-SIDED with the `for slot in N` grid + geometry in the board's launcher
+/// scene AND with the `page * slots + slot` indexing below. Change one half only
+/// and tapping app N launches app M — silently, with nothing to observe.
+const LAUNCHER_PAGE_SLOTS: usize = board::ui::LAUNCHER_PAGE_SLOTS;
 
 /// Build the PAGED launcher model from the app registry — the single source of
 /// truth for tile metadata. One page per section (display order: Audio, Games,

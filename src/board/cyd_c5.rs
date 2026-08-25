@@ -103,6 +103,40 @@ pub const PIN_BACKLIGHT: u8 = 25;
 // they did, never what the board can do. Only the schematic and the glass do.
 pub const PIN_TOUCH_IRQ: u8 = 3;
 
+// === BOOT / wake button — ⚠️ GPIO9 IS WRONG ON THIS CHIP ===
+//
+// The C6 firmware reads its BOOT button on GPIO9. That is the C3/C6 download-boot
+// convention and it does NOT hold on the C5 — and it fails in the worst way,
+// because **GPIO9 exists on the C5, so the wrong pin compiles silently.**
+//
+// Two independent reasons it is wrong (nebula, 2026-08-25):
+//   * ESP32-C5 datasheet §3 Table 3-1 puts chip boot mode on GPIO26/27/28, not 9.
+//   * On THIS board GPIO9 is already occupied several times over —
+//     `pins_arduino.h` has `RXLED 9` and `CC1101_SS_PIN 9`; `connections.md`
+//     lists I2C SDA = 9, IR RX = 9, 433 RX = 9. Reading it yields bus traffic,
+//     not a button.
+//
+// The vendor names a different pin outright, `pins_arduino.h:115-116`:
+//     #define BTN_ACT LOW
+//     #define DEEPSLEEP_WAKEUP_PIN 0        // GPIO0, active LOW
+//
+// And GPIO0 is the defensible choice for a further reason the vendor may have
+// intended: **LP-capable pins on the C5 are GPIO0-GPIO6 only** (esp-metadata
+// `esp32c5/gpio.toml` — pins 7..28 carry no `lp` mapping at all). So GPIO0 can
+// wake from deep sleep and GPIO9/GPIO28 provably cannot, whatever else is true.
+//
+// ⚠️ NOT YET SETTLED PHYSICALLY: whether a tactile BOOT button is even fitted.
+// The schematic has five switch designators (S1-S5) but its text layer ties none
+// of them to BOOT0/IO0, and `BOOT0` also appears in the CH340C auto-download
+// circuit — so it may be that circuit ONLY. `nm-cyd-c5.ini` has every navigation
+// button define commented out with `HAS_TOUCH=1`, i.e. this board looks
+// touch-only by design. Settle it with one minute of hardware (input-pull-up on
+// GPIO0, print the level, press everything) before any wake path depends on it.
+//
+// Not defined as a constant yet on purpose: nothing on this board should claim a
+// BOOT pin until that press test says which pin, if any, is real. Douse is soft
+// (screen + radios off, tap to wake) so nothing needs it today.
+
 // === WS2812 status LED ===
 pub const WS2812_GPIO: u8 = 27;
 
@@ -342,6 +376,20 @@ pub mod ui {
     /// is kept below this, which is the C6's invariant restated for the axis
     /// that binds here.
     pub const SWIPE_MIN_Y: u32 = 24;
+
+    /// Slots per launcher page — **8**, a 4x2 landscape grid.
+    ///
+    /// ⚠️ TWO-SIDED with `Geom.launcher-slots` in `ui/cyd/launcher.slint` and
+    /// with the `page * slots + slot` indexing in `slint_shell.rs`. Change one
+    /// half only and tapping app N launches app M, silently.
+    ///
+    /// Luna's derivation, kept because the binding constraint is not the obvious
+    /// one: with Voice, Sound and Maze dropped the registry sections are
+    /// **GAMES 6 · SYSTEM 7 · AUDIO 1**, and 8 slots gives exactly 3 pages with
+    /// no section split. The section that binds is **SYSTEM at 7**, not GAMES —
+    /// so this breaks if SYSTEM grows past 8, and dropping another game will not
+    /// save it. Re-verified after Maze was dropped: still 8.
+    pub const LAUNCHER_PAGE_SLOTS: usize = 8;
 }
 
 // === Soft-douse contract (BINDING — set by the shipped power-menu caption) ===

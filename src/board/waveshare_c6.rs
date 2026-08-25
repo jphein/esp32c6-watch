@@ -82,4 +82,8 @@ pub mod ui {
     pub const SWIPE_MIN_X: u32 = 36;
     /// See [`SWIPE_MIN_X`].
     pub const SWIPE_MIN_Y: u32 = 36;
+
+    /// Slots per launcher page — a fixed 3x3 grid on this portrait panel. MUST
+    /// match the `for slot in 9` grid + geometry in `ui/slint/launcher.slint`.
+    pub const LAUNCHER_PAGE_SLOTS: usize = 9;
 }
