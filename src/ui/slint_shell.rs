@@ -391,6 +391,13 @@ pub struct ShellUi {
     /// through `ping_pulse_stage` so steady phases set no properties.
     ping_pulse_armed_at: Option<embassy_time::Instant>,
     ping_pulse_stage: u8,
+    /// Rust-side mirror of the last `set_story_playback(.., playing)` push.
+    /// Exists so the ping pulse can refuse to arm during playback WITHOUT
+    /// reading a UI property (the scene may be suspended). During playback
+    /// every paint must fit the 48 ms audio DMA ring
+    /// (`net::story_play::PAINT_BUDGET_MS`); the pulse's full-screen scrim +
+    /// blooms are >117 rows and overrun it from outside the story page.
+    story_playing: bool,
 }
 
 impl ShellUi {
@@ -463,6 +470,7 @@ impl ShellUi {
             hold_fired: false,
             ping_pulse_armed_at: None,
             ping_pulse_stage: 0,
+            story_playing: false,
         }
     }
 
@@ -1326,6 +1334,13 @@ impl ShellUi {
     /// auto-dismisses after ~4s. Re-arming while up (a rapid re-ping the loop
     /// chose to surface) restarts the choreography with the new sender.
     pub fn ping_pulse_show(&mut self, from: &str) {
+        // DROPPED (not deferred) during story playback: the scrim alone is a
+        // full-screen repaint against the 48 ms DMA ring, and a greeting
+        // surfaced minutes late is a false cue. Delivery evidence is the ACK
+        // frame, never this pulse, so nothing protocol-visible is lost.
+        if self.story_playing {
+            return;
+        }
         // The strips would shimmer under the pulse's scrim — retire them.
         self.hints_cancel();
         let Some(ui) = self.ui.as_ref() else { return; };
@@ -1364,6 +1379,14 @@ impl ShellUi {
         let Some(t0) = self.ping_pulse_armed_at else {
             return;
         };
+        // Backstop: playback started while a pulse was mid-choreography. One
+        // teardown repaint at the boundary beats repeated >117-row blooms
+        // against the DMA ring. Normally unreachable — playback starts from a
+        // tap, and the tap path already dismisses the pulse.
+        if self.story_playing {
+            self.ping_pulse_dismiss();
+            return;
+        }
         let elapsed = t0.elapsed().as_millis();
         if elapsed >= 4200 {
             self.ping_pulse_dismiss();
@@ -1504,7 +1527,7 @@ impl ShellUi {
     }
 
     pub fn set_story_playback(
-        &self,
+        &mut self,
         title: &str,
         speaker: &str,
         kind: i32,
@@ -1514,6 +1537,9 @@ impl ShellUi {
         seg_count: i32,
         playing: bool,
     ) {
+        // Recorded even when the scene is suspended, so the ping-pulse gate
+        // stays true to the audio task rather than to the last visible frame.
+        self.story_playing = playing;
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_story_play_title(SharedString::from(title));
         ui.set_story_speaker(SharedString::from(speaker));

@@ -5311,6 +5311,19 @@ async fn main(_spawner: Spawner) -> ! {
                                 Err(e) => {
                                     println!("[STORY] play failed: {e}");
                                     shell.set_story_loading(false, e);
+                                    // The pre-queue paint pushed playing=true; without
+                                    // this, the shell's story_playing mirror sticks and
+                                    // the ping pulse never arms again.
+                                    shell.set_story_playback(
+                                        title.as_str(),
+                                        "",
+                                        0,
+                                        story_pos,
+                                        duration_ms,
+                                        0,
+                                        0,
+                                        false,
+                                    );
                                 }
                             }
                             shell.request_redraw();
@@ -5397,7 +5410,11 @@ async fn main(_spawner: Spawner) -> ! {
                                 charging,
                             );
                             shell.set_power(&power_stats);
-                            next_flush = now + Duration::from_secs(1);
+                            // 2 s, the SYSTEM-page precedent: at 1 Hz the page's
+                            // stat rows coalesce into a ~114-row repaint every
+                            // second — felt under the story overlay, where the
+                            // paint competes with the 48 ms audio DMA ring.
+                            next_flush = now + Duration::from_secs(2);
                         }
                     }
                     slint_shell::PAGE_MESH => {
