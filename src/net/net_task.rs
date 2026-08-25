@@ -590,6 +590,11 @@ struct St {
     ntp_synced: bool,
     next_ntp: Instant,
     burst_since: Option<Instant>,
+    /// #90: next announce re-check while WiFi is up (far-future until the
+    /// first ready edge). The check NEVER raises the radio.
+    next_announce: Instant,
+    /// Ready-edge tracker for scheduling the first announce re-check.
+    was_ready: bool,
     consec_fails: u8,
     backoff_until: Option<Instant>,
     scan_pending: bool,
@@ -712,6 +717,8 @@ pub async fn net_task(
         ntp_synced: false,
         next_ntp: now,
         burst_since: if boot_connect { Some(now) } else { None },
+        next_announce: now + Duration::from_secs(3600 * 24 * 365),
+        was_ready: false,
         consec_fails: 0,
         backoff_until: None,
         scan_pending: false,
@@ -825,7 +832,19 @@ pub async fn net_task(
             st.connected = false;
             continue;
         }
-        if st.connected && stack.config_v4().is_some() {
+        let ready_now = st.connected && stack.config_v4().is_some();
+        if !ready_now {
+            st.was_ready = false;
+        }
+        if ready_now {
+            // #90 ready-edge: schedule the announce re-check shortly after
+            // every association-with-lease, so a retained announce published
+            // while this device was offline is consumed on the next natural
+            // WiFi window instead of waiting for a reboot.
+            if !st.was_ready {
+                st.was_ready = true;
+                st.next_announce = Instant::now() + ANNOUNCE_EDGE_DELAY;
+            }
             // OTA owns the window (old executor ran it ahead of the mesh
             // re-pin for the same reason).
             if st.ota.is_some() {
@@ -838,6 +857,21 @@ pub async fn net_task(
             // Burst hold; completion drops Burst+User either way.
             if !st.ntp_synced && Instant::now() >= st.next_ntp {
                 run_burst(stack, &mut st).await;
+                continue;
+            }
+            // #90: the announce check used to ride ONLY the boot burst
+            // (nested inside the NTP-Ok arm), so a retained announce
+            // published mid-uptime sat unconsumed until a reboot or a
+            // user-opened MQTT session — reproduced on the CYD with an
+            // 8-minute capture; nothing in this file re-asserts Hold::Burst,
+            // so the gap was fleet-wide. "NTP succeeded" and "should I check
+            // for announces" are unrelated questions the old nesting
+            // conflated; this check needs only a live stack.
+            if st.ntp_synced && Instant::now() >= st.next_announce {
+                let batt =
+                    crate::peripherals::ble::BATTERY_PERCENT.load(Ordering::Relaxed);
+                crate::net::mqtt_ha::publish_burst(stack, batt).await;
+                st.next_announce = Instant::now() + ANNOUNCE_PERIOD;
                 continue;
             }
             // #57 roam: sample the link; a sustained-weak association with a
@@ -1395,6 +1429,15 @@ async fn ntp_query(stack: Stack<'static>) -> Result<u32, ()> {
     }
 }
 
+/// #90: how long after a WiFi ready EDGE the announce re-check runs (catches a
+/// retained announce that was published while this device was offline), and
+/// how often it repeats while WiFi STAYS up. The check rides `publish_burst`
+/// (12 s outer bound), so each one also refreshes HA's battery/uptime rows.
+/// It never raises the radio: battery boards keep their power profile, and
+/// boards that hold WiFi (mains CYDs, story sessions) get a true periodic.
+const ANNOUNCE_EDGE_DELAY: Duration = Duration::from_secs(10);
+const ANNOUNCE_PERIOD: Duration = Duration::from_secs(300);
+
 /// The boot burst: NTP (posted to main for RTC + mesh authority), the HA MQTT
 /// burst, and the weather fetch — all in one WiFi window, exactly the old
 /// inline sequence. Completing it releases the Burst AND User holds (the old
@@ -1441,6 +1484,16 @@ async fn run_ota(stack: Stack<'static>, flash: &'static crate::FlashMutex, st: &
             st.ota_phase = OtaPhase::Staged;
         }
         Err(e) => {
+            // A `refused:` error is a DETERMINISTIC verdict about the image
+            // bytes (wrong chip / bad magic / oversized) — retrying downloads
+            // the same bytes to refuse them again, and with a retained
+            // announce re-arming each window that becomes an endless
+            // download-refuse loop (observed live on the CYD-C5, #90's
+            // sibling). Give up NOW and remember the refused build.
+            let terminal = e.starts_with("refused:");
+            if terminal {
+                crate::net::ota_http::mark_current_build_refused();
+            }
             let give_up = {
                 let job = st.ota.as_mut().expect("ota job present");
                 job.attempts += 1;
@@ -1448,7 +1501,7 @@ async fn run_ota(stack: Stack<'static>, flash: &'static crate::FlashMutex, st: &
                     "[OTA] attempt {}/{} failed: {e}",
                     job.attempts, OTA_MAX_ATTEMPTS
                 );
-                if job.attempts < OTA_MAX_ATTEMPTS {
+                if !terminal && job.attempts < OTA_MAX_ATTEMPTS {
                     // Re-arm: keep the Ota hold so the connect machine
                     // reconnects under the pending job (the mid-download WiFi
                     // recovery the old blocking executor couldn't do), with a
