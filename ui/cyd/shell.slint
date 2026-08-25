@@ -62,11 +62,10 @@
 // `build.rs`'s own fallback reasons. The list below is the work queue; when it
 // is empty this comment goes away.
 //
-//   PORTED : shell chrome · clock
+//   PORTED : shell chrome · clock · power_menu · volume
 //   PENDING: sensors · system · power · mesh · launcher · switcher · shade
-//            volume · power_menu · keyboard · scan · settings · wled · hunt
-//            energy · climate · lights · ping · voice · story · soundlevel
-//            theme_overlay
+//            keyboard · scan · settings · wled · hunt · energy · climate
+//            lights · ping · voice · story · soundlevel · theme_overlay
 // ============================================================================
 
 import { Theme, PeerRow, WifiNet } from "../slint/theme.slint";
@@ -75,6 +74,8 @@ import { RadioChip, StatusChip } from "controls_cyd.slint";
 
 // --- landscape-native pages -------------------------------------------------
 import { ClockPage } from "clock.slint";
+import { PowerMenu } from "power_menu.slint";
+import { VolumeOverlay } from "volume.slint";
 
 // --- PENDING: still the C6 portrait layouts (render cropped) ----------------
 import { SensorsPage } from "../slint/sensors.slint";
@@ -93,10 +94,8 @@ import { StoryPage, StoryChapter, StorySlot } from "../slint/story.slint";
 import { SoundLevel, SpecBand } from "../slint/soundlevel.slint";
 import { ThemeOverlay } from "../slint/theme_overlay.slint";
 import { SettingsHub } from "../slint/settings.slint";
-import { PowerMenu } from "../slint/power_menu.slint";
 import { SwitcherOverlay } from "../slint/switcher.slint";
 import { ShadeOverlay, NotifCard } from "../slint/shade.slint";
-import { VolumeOverlay } from "../slint/volume.slint";
 
 // Re-export so the generated Rust module keeps exposing these types —
 // slint_shell.rs constructs PeerRow / LauncherTile / ClimateCard / SpecBand /

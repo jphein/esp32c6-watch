@@ -1,0 +1,157 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PillButton } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// POWER MENU — the LANDSCAPE IDIOM PILOT.
+// ============================================================================
+//
+// Chosen as the pilot because it is the least-coupled overlay in the set: three
+// actions, no data model, no repeater, no Rust geometry. Whatever a landscape
+// page looks like gets settled here, cheaply, before sixteen more pages copy it.
+// (The clock page went first only because it is the boot page and needs no
+// working touch to reach — a different question.)
+//
+// THE IDIOM, stated once so the rest of the tree can point at it
+// -----------------------------------------------------------------------------
+//  1. Title in the 24 px top strip (`Geom.title-y`), 20 px face, centred.
+//     `CydBackChevron` self-positions at 4,4,44x44 and clears the title.
+//  2. Everything else lives in the content band: `Geom.content-y`(34) to 234,
+//     `Geom.content-x`(8) to 312. Never derive those numbers again.
+//  3. A BROKEN VERTICAL STACK BECOMES A ROW. This file is the smallest possible
+//     demonstration: the C6 stacks REBOOT (y172) and SHUT DOWN (y256) 84 px
+//     apart and runs to y432. Side by side they occupy ONE 56 px band.
+//  4. Peer actions get EQUAL WIDTH from `Geom.col-w`-style arithmetic, not from
+//     hand-tuned literals, so a strip-height or inset change moves them together.
+//  5. Bottom-anchor anything that must hug the bottom edge, off
+//     `root.height - Geom.safe-bottom - N` — the one page-level idiom in the C6
+//     tree that self-relocates on a dimension change (`story.slint:238-241`).
+//
+// WHAT CHANGED IN THE CONTENT, NOT JUST THE GEOMETRY
+// -----------------------------------------------------------------------------
+// The C6 header line reads "BATTERY 82% · CHARGING" and the honesty caption
+// ("on USB power — restarts after shutdown") is gated on `vbus-on`. On this
+// board BOTH are dead statements:
+//
+//   * There is no AXP2101, so `battery-percent` is never set and the line would
+//     read "BATTERY --" forever. A status line that can only say one thing is
+//     not a status line.
+//   * `vbus-on` is fed from the same absent PMIC, so it is permanently false and
+//     the caption could never appear — which is the worse failure, because the
+//     honesty it was carrying is still TRUE and now goes unsaid.
+//
+// So the header states the real situation and the caption is made
+// unconditional. The claim it makes is the one this board actually needs: SHUT
+// DOWN has no hardware path to cut power here.
+//
+// SHUT DOWN IS LEFT ENABLED ON PURPOSE
+// -----------------------------------------------------------------------------
+// `PillButton` has an `enabled: false` state (opacity 0.4 + dead TouchArea) and
+// disabling it would be the tidier-looking choice. It is not taken: deep sleep
+// is the plausible substitute for poweroff on this board, and repointing
+// `power-shutdown-tap`'s drain in `main.rs` is a firmware decision. A layout
+// file must not be the thing that forbids it. The caption tells the truth today;
+// deleting one line makes it right tomorrow.
+// ============================================================================
+
+export component PowerMenu {
+    in property <int> battery-percent: -1;
+    in property <bool> charging: false;
+    in property <bool> vbus-on: false;
+    callback reboot-tap();
+    callback shutdown-tap();
+    callback close();
+
+    // Opaque backdrop in the active scheme.
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    // Input swallow — declared before the content so the content stays topmost.
+    // A plain Rectangle does NOT consume clicks, so without this the chrome
+    // beneath an overlay stays hit-testable through its dead zones (#54).
+    OverlaySwallow {}
+
+    CydPageTitle { title: "POWER"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    // Status line. Not gated, not conditional, and not about a battery.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 44px;
+        text: "MAINS POWER \u{00b7} NO CELL";
+        color: Theme.soft;
+        font-size: Geom.t-body;
+        letter-spacing: 2px;
+    }
+
+    // --- the two actions, side by side ---------------------------------------
+    // 136 px each in the 304 px content band with a 24 px gutter:
+    // x 20..156 and 164..300. 56 px tall — above the 44 px floor, and tall
+    // enough that a 16 px face with tracking reads as a primary action.
+    //
+    // Face is 16 px, not the C6's 18: "SHUT DOWN" with 3 px tracking measures
+    // ~135 px at 18 px, which does not fit 136 with any margin at all. 16 exists
+    // in the glyph budget; 17 also exists but buys 4 px and nothing else.
+    PillButton {
+        x: 20px;
+        y: 74px;
+        width: 136px; height: 56px;
+        text: "REBOOT";
+        text-size: 16px;
+        tracking: 2px;
+        clicked => { root.reboot-tap(); }
+    }
+
+    // Danger variant: pressed inverts to solid warn with on-accent text —
+    // unmistakable before a power cut. One-frame swap, never an animation: at
+    // this renderer's frame budget a tween yields 0-1 intermediate frames and
+    // queues wasted full repaints.
+    PillButton {
+        x: 164px;
+        y: 74px;
+        width: 136px; height: 56px;
+        danger: true;
+        text: "SHUT DOWN";
+        text-size: 16px;
+        tracking: 2px;
+        clicked => { root.shutdown-tap(); }
+    }
+
+    // Honesty caption — UNCONDITIONAL here, see the header note.
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 142px;
+        text: "no PMU on this board \u{2014} SHUT DOWN cannot cut power";
+        color: Theme.dim;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+
+    // --- CANCEL --------------------------------------------------------------
+    // Neutral ghost row (the scan-overlay idiom): hairline border, Theme.pressed
+    // held fill. Also reachable via chevron and right-swipe, so it is the third
+    // route to the same exit rather than the only one.
+    //
+    // BOTTOM-ANCHORED off `root.height`, which is the point of the pilot: this
+    // row does not need editing if the safe inset or the panel changes.
+    cancel := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: root.height - Geom.safe-bottom - 44px;
+        width: 200px; height: 44px;
+        border-radius: 22px;
+        border-width: 1px;
+        border-color: cancel-ta.pressed ? Theme.soft : Theme.line;
+        background: cancel-ta.pressed ? Theme.pressed : transparent;
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: "CANCEL";
+            color: cancel-ta.pressed ? Theme.soft : Theme.dim;
+            font-size: 16px;
+            letter-spacing: 2px;
+        }
+        cancel-ta := TouchArea { clicked => { root.close(); } }
+    }
+}
