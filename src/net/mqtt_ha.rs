@@ -19,7 +19,7 @@ use heapless::Vec;
 /// Broker as "ip:port". Set MQTT_BROKER at build time to override.
 /// `pub(crate)` so the bidirectional climate session ([`crate::net::mqtt_climate`])
 /// reuses the same broker address.
-pub(crate) const BROKER: &str = match option_env!("MQTT_BROKER") {
+pub const BROKER: &str = match option_env!("MQTT_BROKER") {
     Some(s) => s,
     None => "192.168.1.10:1883",
 };

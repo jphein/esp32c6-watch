@@ -1736,6 +1736,15 @@ async fn main(_spawner: Spawner) -> ! {
     #[cfg(not(feature = "has-ble"))]
     println!("[BLE] stack not built on this board (has-ble off) — ~29.5 KB kept");
     println!("[RADIO] stack ready (WiFi OFF, BLE advertising OFF)");
+    // The broker address is COMPILE-TIME (`option_env!("MQTT_BROKER")`, fed from
+    // the gitignored `.cargo/config.toml`), and it is board-specific in a way
+    // nothing in the source can express: the HA VM has one leg per VLAN, and a
+    // CROSS-VLAN leg silently drops CONNACK rather than refusing — so a wrong
+    // broker is not an error, it is a timeout twelve seconds later with no clue
+    // in it. Print what was baked in, so the wrong image says so at boot rather
+    // than being diagnosed from the far end. Credentials are deliberately NOT
+    // printed; the address is the part that differs per board.
+    println!("[MQTT] broker (compiled in): {}", crate::net::mqtt_ha::BROKER);
 
     // Credentials: flash config wins; compile-time env is the fallback seed.
     let mut watch_cfg = config_offset
