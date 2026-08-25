@@ -281,9 +281,20 @@ export component StoryPage {
         border-color: root.speaker-kind == 1 ? Theme.line : Theme.accent;
         clip: true;
 
+        // The text changes EVERY SEGMENT, so its intrinsic size recomputes on every
+        // repaint of the hot band — and reading a Text's own size drags in the
+        // paragraph-layout binding chain (the centring-audit finding, measured at
+        // -268 nodes on StatRow). `worst_us` sits at 26-30 ms of a 30 ms budget with
+        // one gate trip on glass, so this path has no slack for computed centring.
+        //
+        // Vertical: full-height + vertical-alignment, proven PIXEL-IDENTICAL by the
+        // audit. Horizontal stays the intrinsic read: letter-spacing is set here,
+        // and the audit measured that trailing letter-space counts toward intrinsic
+        // width but not toward alignment — switching methods shifts glyphs ~1px.
         Text {
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            height: parent.height;
+            vertical-alignment: center;
             text: root.speaker;
             color: root.speaker-kind == 1 ? Theme.soft : Theme.accent;
             font-size: 19px;
@@ -340,8 +351,15 @@ export component StoryPage {
         color: Theme.dim;
         font-size: 15px;
     }
+    // Same hot-band rule as the chip: this text changes every segment. No
+    // letter-spacing, so alignment-based centring is safe on this one (the ~1px
+    // shift the audit measured only occurs where letter-spacing is set). The
+    // full-width rect does not enlarge the band's dirty region — the progress bar
+    // above it already spans the same width.
     if root.page == 1 && root.seg-count > 0: Text {
-        x: (parent.width - self.width) / 2;
+        x: Theme.safe-side;
+        width: root.width - 2 * Theme.safe-side;
+        horizontal-alignment: center;
         y: 300px;
         text: root.seg-index + " / " + root.seg-count;
         color: Theme.faint;
