@@ -956,8 +956,26 @@ async fn main(_spawner: Spawner) -> ! {
     // successful link has never been evidence of a runnable image). 96 KB
     // moves the freed 64 KB into the stack region: 8,960 + 65,536 = ~74.5 KB,
     // in the band the C6 boots from. Still a placeholder; still measure.
+    //
+    // 96 -> 112 KB, and this one IS measured rather than felt. Gating the BLE
+    // stack off (`has-ble`) returned 28,496 B of `.bss`, which lands straight in
+    // the stack because `_bss_end` is its floor — the gap went 74,200 -> 102,696
+    // on a real ELF. That is 31 KB above the boot assert and ~28 KB above the
+    // C6's glass-proven-good 73 KB band, i.e. genuine slack for the first time.
+    //
+    // First boot showed the main pool exhausting to ZERO during radio init
+    // (WiFi alone takes ~40 KB and left main_free at 940 B), so 16 KB of that
+    // slack goes back to the pool. Resulting stack 86,312 B: still +14.6 KB on
+    // the assert floor and +11.5 KB on the C6's proven band.
+    //
+    // ⚠️ THE COUPLING, because it is not obvious and it bites in the dangerous
+    // direction: this number is only safe WHILE `has-ble` is off on this board.
+    // Turning it on returns ~28.5 KB of `.bss`, and with the pool already 16 KB
+    // fatter the stack would land near 58 KB — below the 61 KB that panicked
+    // 5/5 on the C6. **Re-derive this value in the same commit that enables
+    // BLE here**; do not treat the two as independent knobs.
     #[cfg(not(feature = "board-waveshare-c6"))]
-        esp_alloc::heap_allocator!(size: 96 * 1024);
+        esp_alloc::heap_allocator!(size: 112 * 1024);
     // ROM-reclaimed region (dram2_seg). Second pool so nothing goes to waste; it
     // sits ABOVE the stack ceiling and is independent of _bss_end, so its size has
     // ZERO effect on the stack.
