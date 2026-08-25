@@ -33,19 +33,37 @@ export { LauncherTile }
 // dirty-region partial rendering the entire strip architecture depends on, which
 // is why no amount of tuning recovers it.
 //
-// WHY EIGHT SLOTS, ARITHMETICALLY
+// WHY EIGHT SLOTS, ARITHMETICALLY — RE-RUN AFTER MAZE WAS DROPPED
 // -----------------------------------------------------------------------------
-// Rust chunks BY SECTION — one page per section, a section larger than a page
-// splits into repeated pages. With Voice and Sound dropped (no mic on this
-// board) the registry is:
+// Rust chunks BY SECTION (`build_launcher_pages`): one page per section, a
+// section larger than a page splits into repeated pages, and each page is padded
+// to the slot count with `present:false`. With Voice, Sound and Maze all dropped
+// (no mic, no IMU) the registry is:
 //
-//   GAMES   7  (Snake, World Snake, 2048, Tetris, Flappy Bird, Maze, Hunt)
+//   GAMES   6  (Snake, World Snake, 2048, Tetris, Flappy Bird, Hunt)
 //   SYSTEM  7  (Settings, WLED, Energy, Climate, Theme, Lights, Ping)
 //   AUDIO   1  (Story)
 //
-// At 8 slots that is exactly THREE pages and no section splits. At 6 slots both
-// 7-app sections chunk and it becomes FIVE pages — worse paging for smaller
-// tiles that nobody asked for. 8 is where the data lands.
+// **Maze's removal does not change the pagination**, and it is worth saying why
+// rather than just re-asserting 8: the binding section was never GAMES, it is
+// SYSTEM at 7. Anything below 7 slots chunks SYSTEM into two pages.
+//
+//   8 slots -> 3 pages (GAMES 6/8, SYSTEM 7/8, AUDIO 1/8)
+//   7 slots -> 3 pages as well — same count, no gain
+//   6 slots -> 4 pages (SYSTEM splits)
+//
+// So 7 would page identically to 8 and buy nothing, because **the tile size is
+// set by the GRID, not by the slot count**: 4 columns is what makes a tile 70 px
+// wide, and 2 rows of 78 is what holds a 46x46 `AppIcon` plus two label lines. A
+// 4x2 grid with 7 slots is a 70 px tile with a hole in it. 8 stays correct.
+//
+// 🔶 A consequence worth flagging rather than fixing here: `build_launcher_pages`
+// emits sections in the order `[Audio, Games, System]`, and the C6 comment
+// explains why AUDIO leads — *"so Voice/Sound are reachable the instant the
+// launcher opens."* Both are now dropped, so **page 0 is a single Story tile in
+// an 8-slot grid**: the launcher opens on a nearly-empty page for a reason that
+// no longer exists. See PROPOSED-board-ui-consts.md — the fix is a one-line
+// reorder in Rust, not a layout change.
 //
 // ⚠️ TWO-SIDED CONSTANT. `Geom.launcher-slots` here and `LAUNCHER_PAGE_SLOTS`
 // in `slint_shell.rs` (plus its chunking) are halves of one number. The grid
@@ -59,14 +77,15 @@ export { LauncherTile }
 // without redrawing all of them. So the tile is as narrow as the icon allows and
 // the label gets 62 px.
 //
-// At 13 px that elides three of the longest names — "World Snake", "Flappy
-// Bird", "Maze (Tilt)" are all 11 characters, ~77 px. The C6 elided too (its own
-// comment says so at 106 px), but eliding half the games list is not the same
-// as eliding an outlier, and "no truncation mid-word" is a house rule.
+// At 13 px that elides "World Snake" and "Flappy Bird" — both 11 characters,
+// ~77 px. (It also elided "Maze (Tilt)" before Maze was dropped, which is why
+// the case for wrapping was originally three names rather than two.) The C6
+// elided too, at 106 px, by its own comment — but two of the six surviving games
+// is not an outlier, and "no truncation mid-word" is a house rule.
 //
 // So the label is 12 px and WRAPS to two lines: "World / Snake", "Flappy /
-// Bird", "Maze / (Tilt)". Every registry name fits in two lines of 62 px, and
-// the tile grew 74 -> 78 px to hold the second line. Nothing is truncated.
+// Bird". Every remaining registry name fits in two lines of 62 px, and the tile
+// grew 74 -> 78 px to hold the second line. Nothing is truncated.
 // ============================================================================
 
 // One app tile: icon over a two-line label. Carries its launch idx. PressTile

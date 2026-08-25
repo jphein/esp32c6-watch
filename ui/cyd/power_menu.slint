@@ -45,29 +45,48 @@ import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
 // unconditional — and what it says changed too, once JP ruled on the semantic.
 // See the DOUSE note below.
 //
-// SHUT DOWN BECAME "DOUSE", AND THAT IS A SEMANTIC CHANGE NOT A RENAME
+// SHUT DOWN BECAME "DOUSE", AND IT IS A SOFT DOUSE
 // -----------------------------------------------------------------------------
-// JP's ruling, 2026-08-25: on this board `power-shutdown-tap` becomes a DEEP
-// SLEEP, woken by BOOT. The Rust lands in the watch session's lane; the label and
-// the caption are this file's job, and they have to say **sleep, not off** —
-// because "SHUT DOWN" on a device that wakes on a button press is a promise the
-// hardware does not keep.
+// JP's rulings, 2026-08-25, in two steps — and the second one changed the design,
+// so both are recorded rather than just the outcome.
 //
-// So the word is DOUSE and the caption names the wake key. Three reasons that
-// word rather than "SLEEP":
+//   FIRST: `power-shutdown-tap` becomes a deep sleep on this board, woken by
+//   BOOT. "SHUT DOWN" on a device that wakes on a button press is a promise the
+//   hardware does not keep, so the word and the caption had to change with it.
+//
+//   THEN: deep sleep turned out to be VERSION-BLOCKED on the C5 — the HAL
+//   generation that has sleep breaks the radio. So the ruling became **SOFT
+//   DOUSE**: screen off, radios off, UI halted, and **TAP THE GLASS TO WAKE**.
+//
+// That second step is not a smaller version of the first, it is a different
+// affordance, and this file had one line of it wrong for an hour: the caption
+// said "press BOOT to relight". Wrong twice over — BOOT's existence on this board
+// is itself unconfirmed (see settings.slint's BUTTONS page), and the wake is a
+// TOUCH now. Sending a user hunting for a button that may not exist, to recover
+// from a state they deliberately entered, is the worst failure this menu could
+// have.
+//
+// So the wake affordance is the GLASS, and it is stated in words AND drawn,
+// because this is the one caption in the tree that a user reads in order to
+// undo something. The touch IRQ line is confirmed wake-capable, and this board
+// may be touch-only by design — so "tap to wake" is not a fallback here, it is
+// the native gesture.
+//
+// WHY "DOUSE" IS STILL THE RIGHT WORD
+// -----------------------------------------------------------------------------
 //   * "SLEEP" already means something else on this watch — the auto-dim/AOD
 //     ladder that happens by itself after 8 s and 15 s. A menu item called SLEEP
-//     beside a screen that sleeps on its own is two meanings, one word.
-//   * A douse is a thing you do TO a light, deliberately, and it stays out until
-//     you relight it. That is exactly the state: display off, radios down, RAM
-//     held, one button to come back.
-//   * It keeps the fleet's voice. This firmware names its builds with realm
-//     sigils; "DOUSE / relight with BOOT" belongs in the same register.
+//     beside a screen that sleeps on its own is two meanings on one word.
+//   * A douse is something you do TO a light, deliberately, and it stays out
+//     until you relight it. A SOFT douse fits it better than the deep sleep did:
+//     the watch is not off, it is dark and holding, one touch from lit.
+//   * It keeps the fleet's register, in firmware that names its builds with
+//     realm sigils.
 //
-// It keeps the DANGER variant even though nothing is destroyed. That is
-// deliberate: it is still the button that makes the watch stop responding, and
-// on a board with no power key it is the only one whose recovery needs a
-// deliberate act. Warn-on-press is about consequence, not about data loss.
+// It keeps the DANGER variant even though nothing is destroyed and the recovery
+// is one tap. That is deliberate: it is still the button that makes the watch
+// stop responding, and it is the only control here whose undo is a separate
+// deliberate act. Warn-on-press is about consequence, not data loss.
 // ============================================================================
 
 export component PowerMenu {
@@ -136,14 +155,37 @@ export component PowerMenu {
         clicked => { root.shutdown-tap(); }
     }
 
-    // Honesty caption — UNCONDITIONAL here (see the header note on why the C6's
-    // `vbus-on` gate could never fire on this board). It names the WAKE KEY,
-    // which is the one fact a user needs before pressing DOUSE and the one thing
-    // the button's own label cannot carry.
+    // --- the wake affordance: drawn, then said ------------------------------
+    // A tap mark: a filled core inside a ring, centred above the caption. Drawn
+    // from rectangles because the embedded font has no emoji — the same
+    // constraint every icon in this UI is built under.
+    //
+    // It earns its 20 px because of WHERE it is: this is the only caption in the
+    // tree that a user reads in order to UNDO something, and the recovery has to
+    // be legible at a glance rather than parsed. A ring-and-dot reads as "touch
+    // here" without language.
+    tap-mark := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 138px;
+        width: 20px; height: 20px;
+        border-radius: 10px;
+        border-width: 2px;
+        border-color: Theme.accent.with-alpha(0.55);
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 8px; height: 8px; border-radius: 4px;
+            background: Theme.accent;
+        }
+    }
+    // Honesty caption — UNCONDITIONAL here (see the header on why the C6's
+    // `vbus-on` gate could never fire on this board). It says what DOUSE does and
+    // how to undo it, in that order, because the second half is the one a user
+    // needs at the moment they regret the first.
     Text {
         x: (parent.width - self.width) / 2;
-        y: 142px;
-        text: "DOUSE is deep sleep \u{2014} press BOOT to relight";
+        y: 164px;
+        text: "screen and radios off \u{00b7} tap the glass to wake";
         color: Theme.dim;
         font-size: Geom.t-caption;
         letter-spacing: 1px;

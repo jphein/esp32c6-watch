@@ -17,6 +17,8 @@ why they are invisible to every search that found the rest of this port.
 four of the six already express their origin as a centring formula, so the origin
 recomputes itself once the panel constants are right.
 
+Five games, not six: **Maze is dropped** (IMU-only, JP 2026-08-25) — see §2.
+
 **`src/drivers/framebuffer.rs` needs no change at all.** It already derives `WIDTH`/`HEIGHT`
 from `board::LCD_*`, and the half-res backing store's `/2` is exact on both panels
 (410×502 → 205×251; 320×240 → 160×120). The store shrinks from ~51 KB to **19.2 KB** for
@@ -42,6 +44,33 @@ literal a bug:
 `snake.rs` has no panel literal — it has no centring formula either (`OFFSET_X: 5` is a
 raw margin), so it is the one game that needs a formula ADDED rather than a literal
 replaced.
+
+---
+
+## 1b. 🟥 DROP TILES FROM THE BUILDER, NOT FROM `REGISTRY`
+
+Three apps are dropped on this board — **Voice**, **Sound** and now **Maze**. There are two
+ways to do that and only one is safe.
+
+`REGISTRY`'s own comment is explicit: *"order == launch index, so adding anywhere else would
+silently re-point every launcher tile after it."* Removing has the mirror hazard. Maze is
+`idx 5`, so deleting its row shifts Settings 6→5, WLED 7→6, and everything after.
+
+Verified how the indices are actually produced (`build_launcher_pages`): each tile carries
+`idx` from `REGISTRY.iter().enumerate()`, and `launch_state(idx)` indexes `REGISTRY`. So the
+two stay consistent *with each other* across a removal — a freshly built launcher would work.
+The hazard is anything holding an index from BEFORE the change: a suspended-session record,
+a persisted mapping, an OTA'd device with stale state. Those resolve to the wrong app, and
+the wrong app launching is the same silent-wrong-index failure class as the switcher slot map.
+
+**So: filter in the builder.** One line in `build_launcher_pages`'s `.filter()` closure —
+skip the three by capability (`has-imu` for Maze, `has-audio` for Voice/Sound) and leave
+`REGISTRY` intact. Then no `idx` moves at all, every stored index stays valid, and the
+capability gate reads the way the manifest's own comment says gates should
+(*"predicate on a declared capability, never on a chip name"*).
+
+`Geom.launcher-slots` and the grid are unaffected either way — see §0 and the launcher's own
+header for why 8 survives the drop.
 
 ---
 
@@ -95,21 +124,21 @@ The layout spec computed 52 px cells instead. That is the *maximum* rather than 
 answer: `4*52 + 3*6 = 226`, which leaves `240 − 226 = 14 px` of HUD — not enough for the
 score line this game draws. 45 keeps a 40 px HUD, and the board is square either way.
 
-### maze — `CELL 40 → 18`
+### maze — 🔴 **DROPPED. No geometry needed.** (JP, 2026-08-25)
 
-```rust
-const CELL: i32 = 18;   // was 40
-// OX / OY formulas unchanged, panel literals -> board::LCD_*
-```
+Maze is IMU-tilt-only: `AppInput.accel` is a plain tuple, so on this board it receives
+`(0,0,0)` and the ball never moves. It compiles, runs, and does nothing.
 
-10×12 cells. Height allows 20 (`240/12`), which would make `OY` exactly 0 — full-bleed,
-with the outer wall on the bezel. 18 gives 180×216 with `OX: 70` / `OY: 12`, so the maze
-has a visible border on a panel whose edges a finger will actually touch.
+JP dropped it on exactly that argument — *"the game opens and nothing happens"* is the shape
+of report the dropped-app policy exists to prevent, and it is worse than an absent tile
+because the user cannot tell it from a bug in their own input.
 
-🔶 **Maze is IMU-tilt-only.** `AppInput.accel` is a plain tuple, so it receives `(0,0,0)`
-and the ball never moves. It **compiles and runs** — unplayable, not broken. JP's drop list
-did not name it; flagging it because "the game opens and nothing happens" is the exact
-shape of report the dropped-app policy exists to prevent.
+**So there is no `CELL` to re-pick.** For the record, had it been kept: `CELL 40 → 18`
+(height allows 20 at `240/12`, which puts `OY` at exactly 0 and the outer wall on the bezel;
+18 gives 180×216 at `OX: 70` / `OY: 12`).
+
+⚠️ **Drop it from the TILE BUILDER, not from `REGISTRY`** — see §1b. This applies to Voice
+and Sound identically.
 
 ### flappy — a scroller, so it scales by PROPORTION not by grid
 
@@ -171,9 +200,12 @@ const CELL_PX: i32 = 12;  const VIEW_COLS: u16 = 25;  const VIEW_ROWS: u16 = 16;
 const VIEW_Y: i32 = 44;   // 300x192 at VIEW_X 10, VIEW_Y 44
 ```
 
-**Recommendation: B.** 34 % of the shared world is close enough to the C3's 26 % that a CYD
-player is competing like a fleet node rather than like a watch, and this board is a *watch*
-firmware. The cost is chunkier cells — see §3, which makes that cost concrete.
+**✅ RULED: OPTION B** (JP, 2026-08-25). 57 % of the shared world, at 12 px cells.
+
+The reasoning that carried it: 34 % is close enough to the C3 fleet's 26 % that a CYD player
+would be competing like a fleet node rather than like a watch, and this is *watch* firmware.
+The cost is chunkier cells — 12 px is 6 effective pixels after the half-res store, see §3 —
+and that cost was accepted deliberately in exchange for field of view.
 
 ---
 

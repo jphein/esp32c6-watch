@@ -32,7 +32,7 @@ launcher / switcher / shade waves.
 |---|---|---|---|
 | `EDGE_BOTTOM_Y` | `427` | **`204`** | bottom 15 % of the panel — `427/502 = 85 %`, `204/240 = 85 %`. The C6 value is entirely **off** a 240 px panel, which makes bottom-edge swipe-up (launcher) and hold-to-switcher **unreachable** until it moves. |
 | `EDGE_TOP_Y` | `75` | **`44`** | top 18 %. Not the strict 15 % (36) on purpose: 44 is exactly the chrome band's hit height, so "the top 44 px is edge territory" is one number instead of two that nearly agree. The C6 pair (dots y8..72 vs edge ≤75) had the same relationship, and it works because Rust classifies swipes from the touch driver, not from Slint hit-testing — a tap on a radio chip stays a tap. |
-| `LAUNCHER_PAGE_SLOTS` | `9` | **`8`** ⏳ | landscape wants 4×2. **Two-sided with `Geom.launcher-slots` and the `page * slots + slot` indexing** — change both halves or tapping app N launches app M, silently. Confirm when the launcher wave lands. |
+| `LAUNCHER_PAGE_SLOTS` | `9` | **`8`** ✅ | 4×2. **Two-sided with `Geom.launcher-slots` and the `page * slots + slot` indexing** — change both halves or tapping app N launches app M, silently. **Re-verified after Maze was dropped: still 8** (§1c). |
 
 **Not a `board::ui` constant but coupled to the same change — `src/peripherals/touch.rs:159`:**
 
@@ -48,6 +48,89 @@ HOLD_SLOP_PX = 18  // must stay UNDER the smaller threshold, as the C6's 24 < 36
 
 The invariant to preserve is the C6 comment's, not the value: `HOLD_SLOP_PX` is kept below
 the swipe threshold so a **cancelled hold can still classify as the edge-swipe**.
+
+---
+
+## 1b. Settings hub — SOUND dropped, so the page count changes
+
+JP dropped the SOUND section (owner-confirmed no `has-audio`: no codec, no speaker, so
+volume/mic-gain/touch-tick were all inert). `ui/cyd/settings.slint` is now **five pages** —
+DISPLAY · RADIOS · NETWORK · SYSTEM · BUTTONS.
+
+| constant | C6 | **CYD** | note |
+|---|---|---|---|
+| `SETTINGS_PAGE_COUNT` | `6` | **`5`** | what the swipe handler pages against; the `titles` array and the tick rail in `settings.slint` are the other half |
+| `HUB_PAGE_DISPLAY` | `1` | **`0`** | DISPLAY is now the first page. ⚠️ Its only consumer was the `HUB_SLIDER_BAND` check, which §2b-bis retires — so this may become dead rather than needing a value. Check before setting it. |
+
+🟢 **This one fails VISIBLY, unlike the switcher/shade slot maps.** A mismatch lets Rust reach
+page 5, which renders nothing — a blank page, not a wrong action. That is why this change
+could land ahead of its Rust half and the card geometry could not. Still land them together.
+
+### The BUTTONS page needs a board constant that does not exist yet
+
+Per JP: *"treat button rows as gated on a board const, not assumed"* — **BOOT's existence on
+this board is UNCONFIRMED**, and PWRON is the absent AXP2101's key.
+
+`ui/cyd/settings.slint` therefore carries a LOCAL `property <bool> has-boot-key: false`, as a
+stand-in. It cannot read a real board value: adding an `in property` to `WatchShell` would
+break the 168+55 parity with the C6 root, since that root cannot be edited from this
+workstream.
+
+**Two ways to resolve it, and the choice is the watch session's:**
+1. **Confirm the pin and flip the literal** — a one-character edit here, no Rust involved.
+2. **Plumb it properly** — add `board::HAS_BOOT_KEY`, expose it as an `in property <bool>` on
+   **both** roots, and push it once at boot. That is the right long-term shape (it is the
+   same "predicate on a declared capability" pattern the manifest already uses) but it is a
+   parity change, so it needs both roots in one commit.
+
+Until then the page states that there are no mappable buttons and that the watch is driven by
+the glass — which is true either way, and is the more useful sentence if this board really is
+touch-only by design.
+
+---
+
+## 1c. Launcher slots, re-verified after Maze was dropped
+
+With Voice, Sound and Maze all dropped the registry sections are **GAMES 6 · SYSTEM 7 ·
+AUDIO 1**. `LAUNCHER_PAGE_SLOTS` stays **8**, and the reason is worth recording rather than
+re-asserted: the binding section was never GAMES, it is **SYSTEM at 7**.
+
+| slots | pages | note |
+|---|---|---|
+| **8** | **3** | GAMES 6/8, SYSTEM 7/8, AUDIO 1/8 |
+| 7 | 3 | same page count — no gain |
+| 6 | 4 | SYSTEM splits |
+
+7 would page identically and buy nothing, because **tile size is set by the GRID, not the
+slot count**: 4 columns is what makes a tile 70 px wide, 2 rows of 78 is what holds a 46×46
+`AppIcon` plus two label lines. A 4×2 grid with 7 slots is the same 70 px tile with a hole.
+
+### 🟥 Drop the three tiles from the BUILDER, not from `REGISTRY`
+
+`REGISTRY`'s own comment: *"order == launch index, so adding anywhere else would silently
+re-point every launcher tile after it."* Removal has the mirror hazard — Maze is `idx 5`, so
+deleting its row shifts Settings 6→5, WLED 7→6, and everything after.
+
+Verified against `build_launcher_pages`: each tile's `idx` comes from
+`REGISTRY.iter().enumerate()` and `launch_state(idx)` indexes `REGISTRY`, so the two stay
+consistent *with each other* across a removal — a freshly built launcher works. **The hazard
+is anything holding an index from before the change**: a suspended-session record, a
+persisted mapping, an OTA'd device with stale state. Those resolve to the wrong app, which is
+the same silent-wrong-index class as the switcher slot map.
+
+**So filter in the builder** — one line in `build_launcher_pages`'s `.filter()` closure,
+skipping by capability (`has-imu` for Maze, `has-audio` for Voice/Sound) with `REGISTRY`
+intact. No `idx` moves, every stored index stays valid, and it reads the way the manifest's
+own comment says gates should: *"predicate on a declared capability, never on a chip name."*
+
+### 🔶 One-line reorder worth making at the same time
+
+`build_launcher_pages` emits sections in the order `[Audio, Games, System]`, and the C6
+comment says why AUDIO leads: *"so Voice/Sound are reachable the instant the launcher opens."*
+**Both are now dropped**, so page 0 is a single Story tile in an 8-slot grid — the launcher
+opens on a nearly-empty page for a reason that no longer exists. `[Games, System, Audio]`
+opens on the six games instead. Not a layout change, and not urgent, but it is a stale
+rationale rather than a preference.
 
 ---
 
@@ -123,6 +206,31 @@ simply does not render them. `runtime_text` is the worst of the four — it is
 `full_runtime_hours(BATTERY_CAPACITY_MAH)`, the model divided by the capacity of a cell that
 is not there, and it would cheerfully report "100%: 4h · left: ~3h" for a device that runs
 until unplugged.
+
+---
+
+## 2d. Soft douse — what the UI now promises
+
+JP, 2026-08-25: deep sleep is **version-blocked** on the C5 (the HAL generation with sleep
+breaks the radio), so `power-shutdown-tap` becomes a **SOFT DOUSE** — screen off, radios off,
+UI halted, **tap the glass to wake**.
+
+`ui/cyd/power_menu.slint` states exactly that, in words and in a drawn ring-and-dot tap mark:
+*"screen and radios off · tap the glass to wake"*. **The UI is now making that promise**, so
+the Rust side has to keep it:
+
+* the wake path must be the **touch IRQ** (confirmed wake-capable), not a button — an earlier
+  revision of this caption said "press BOOT to relight", which was wrong twice over: the wake
+  is a touch, and BOOT's existence here is unconfirmed. Sending a user hunting for a button
+  that may not exist, to recover from a state they deliberately entered, is the worst failure
+  this menu could have;
+* **radios must come back with the screen.** The caption says radios go off, so the user will
+  expect them back on wake without a further action. If the relight path cannot restore them,
+  the caption needs to change *before* the firmware ships, not after.
+
+The button keeps its `danger` variant even though the recovery is one tap: it is still the
+control that makes the watch stop responding, and the only one here whose undo is a separate
+deliberate act.
 
 ---
 
