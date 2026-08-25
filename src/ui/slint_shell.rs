@@ -112,8 +112,13 @@ pub const SETTINGS_PAGE_COUNT: i32 = 6;
 /// The DISPLAY page's index — the one hosting the hub's brightness slider.
 const HUB_PAGE_DISPLAY: i32 = 1;
 /// y-band of the Settings hub's brightness slider (settings.slint DISPLAY
-/// page: slider at absolute y 180..220, padded for finger slop): swipes
-/// starting here are slider drags, not page flips / back-navigation.
+/// page: slider at absolute y 180..220). The band is that geometry PLUS
+/// deliberate finger slop — 10 px above, 20 px below (thumbs drift downward
+/// mid-drag) — so 170..=240 and "the slider is 180..220" are the same fact,
+/// not a disagreement; this sentence exists because a careful reader once
+/// flagged it as one. Board-specific: on a 240 px-tall panel this band's
+/// upper edge IS the panel edge and swallows every page swipe — the CYD gets
+/// its own values in its board::ui module, derived in its layout's notes.
 const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = 170..=240;
 
 /// Wake gesture-hint choreography, in ms after [`ShellUi::hint_wake`] arms it.
