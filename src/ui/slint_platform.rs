@@ -121,6 +121,11 @@ pub struct TwoLineFlusher<'a, 'd> {
 }
 
 impl<'a, 'd> TwoLineFlusher<'a, 'd> {
+    /// Lines this flusher stages per window. Paired with
+    /// `board::FLUSH_STRIP_LINES` by the const assert at the bottom of this
+    /// module — see there for why that pairing needs enforcing.
+    pub const LINES: usize = 2;
+
     pub fn new(
         display: &'a mut board::BoardDisplay<'d>,
         buf: &'a mut [Rgb565Pixel],
@@ -239,6 +244,9 @@ pub struct SingleLineFlusher<'a, 'd> {
 }
 
 impl<'a, 'd> SingleLineFlusher<'a, 'd> {
+    /// Lines this flusher stages per window. See [`TwoLineFlusher::LINES`].
+    pub const LINES: usize = 1;
+
     pub fn new(
         display: &'a mut board::BoardDisplay<'d>,
         buf: &'a mut [Rgb565Pixel],
@@ -357,3 +365,26 @@ impl slint::platform::software_renderer::LineBufferProvider for &mut TwoLineFlus
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The two per-board constants that must agree, made to agree at build time.
+// ---------------------------------------------------------------------------
+// `board::FLUSH_STRIP_LINES` sizes the strip buffers; `board::BoardFlusher`
+// picks the algorithm that reads them. They are selected independently, in two
+// different files, and nothing connected them.
+//
+// ⚠️ The buffer-length `debug_assert!`s in each `new()` do NOT cover this:
+// `[profile.release]` compiles them out, so the one build that ships is the one
+// build with no check. A future board pairing `TwoLineFlusher` with
+// `FLUSH_STRIP_LINES = 1` would index past a half-length `buf` on the FIRST
+// flush — a panic in the shipped image, found on glass.
+//
+// A const assert moves that to the compiler. Same spirit as `board/mod.rs`'s
+// exactly-one-board check: state the invariant where it can be enforced rather
+// than where it can be violated. (Found by vesper's conformance review of
+// c658bc1 — the seam introduced the second constant without pairing it.)
+const _: () = assert!(
+    board::FLUSH_STRIP_LINES == board::BoardFlusher::LINES,
+    "board::FLUSH_STRIP_LINES must equal the selected BoardFlusher's LINES — \
+     the strip buffers are sized by one and indexed by the other"
+);

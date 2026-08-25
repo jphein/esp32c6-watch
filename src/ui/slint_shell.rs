@@ -47,8 +47,9 @@ pub fn brightness_raw(frac: f32) -> u8 {
 }
 
 /// y-band of the brightness slider on the power page: horizontal swipes
-/// starting here are slider drags, not page switches.
-pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
+/// starting here are slider drags, not page switches. Board-owned (#cyd-c5) —
+/// the C6's band is entirely off a 240 px panel.
+pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = board::ui::SLIDER_BAND;
 
 // ==================== THE GESTURE MAP (#29 / #31 / #32) ====================
 // Single source of truth for the edge-gesture shell. Zones are judged on
@@ -103,19 +104,35 @@ use crate::board::ui::{
     SWITCHER_CARD_H, SWITCHER_CARD_PITCH, SWITCHER_CARD_TOP,
 };
 
-/// Settings-hub section pages (ui/slint/settings.slint `titles` order).
-pub const SETTINGS_PAGE_COUNT: i32 = 6;
+/// Settings-hub section pages (the board scene's `titles` order). Board-owned
+/// (#cyd-c5): the CYD drops the SOUND page.
+///
+/// A mismatch here is in the VISIBLE-failure class — too high and you can page
+/// to a blank screen — which is why it is safe to change and the slot-inverse
+/// constants below are not.
+pub const SETTINGS_PAGE_COUNT: i32 = board::ui::SETTINGS_PAGE_COUNT;
 /// The DISPLAY page's index — the one hosting the hub's brightness slider.
+///
+/// Deliberately NOT board-owned. Its only consumer is the `HUB_SLIDER_BAND`
+/// check below, and on a board whose backlight is a toggle that band is retired
+/// to a never-matching range — so the whole condition is unreachable there and
+/// this constant needs no per-board value. Giving it one would imply the DISPLAY
+/// page's index matters on the CYD, which it does not.
 const HUB_PAGE_DISPLAY: i32 = 1;
-/// y-band of the Settings hub's brightness slider (settings.slint DISPLAY
-/// page: slider at absolute y 180..220). The band is that geometry PLUS
-/// deliberate finger slop — 10 px above, 20 px below (thumbs drift downward
-/// mid-drag) — so 170..=240 and "the slider is 180..220" are the same fact,
-/// not a disagreement; this sentence exists because a careful reader once
-/// flagged it as one. Board-specific: on a 240 px-tall panel this band's
-/// upper edge IS the panel edge and swallows every page swipe — the CYD gets
-/// its own values in its board::ui module, derived in its layout's notes.
-const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = 170..=240;
+/// y-band of the Settings hub's brightness slider: swipes starting here are
+/// slider drags, not page flips / back-navigation.
+///
+/// The C6's band is the slider geometry (settings.slint DISPLAY page, absolute
+/// y 180..220) PLUS deliberate finger slop — 10 px above, 20 px below, because
+/// thumbs drift downward mid-drag. So `170..=240` and "the slider is 180..220"
+/// are the same fact rather than a disagreement; this sentence exists because a
+/// careful reader once flagged it as one.
+///
+/// Board-owned (#cyd-c5): on a 240 px-tall panel that band's upper edge IS the
+/// panel edge and would swallow every page swipe, so the CYD supplies its own —
+/// a deliberately empty range, since its backlight is a toggle with no drag to
+/// protect.
+const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = board::ui::HUB_SLIDER_BAND;
 
 /// Wake gesture-hint choreography, in ms after [`ShellUi::hint_wake`] arms it.
 /// The strips are created invisible with the wake frame (so that frame stays

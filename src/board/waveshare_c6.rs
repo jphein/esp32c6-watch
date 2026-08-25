@@ -86,4 +86,20 @@ pub mod ui {
     /// Slots per launcher page — a fixed 3x3 grid on this portrait panel. MUST
     /// match the `for slot in 9` grid + geometry in `ui/slint/launcher.slint`.
     pub const LAUNCHER_PAGE_SLOTS: usize = 9;
+
+    /// Settings-hub section pages (`ui/slint/settings.slint` `titles` order).
+    pub const SETTINGS_PAGE_COUNT: i32 = 6;
+
+    /// y-band of the power page's brightness slider — swipes starting here are
+    /// slider drags, not page switches.
+    pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 330..=430;
+
+    /// y-band of the Settings hub's DISPLAY-page brightness slider.
+    ///
+    /// This is the slider geometry (`settings.slint` DISPLAY page, absolute
+    /// y 180..220) PLUS deliberate finger slop — 10 px above, 20 px below,
+    /// because thumbs drift downward mid-drag. So `170..=240` and "the slider is
+    /// 180..220" are the same fact, not a disagreement. (An earlier note here —
+    /// mine — flagged them as contradicting; they do not.)
+    pub const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = 170..=240;
 }

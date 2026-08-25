@@ -202,14 +202,22 @@ pub struct Xpt2046<'d> {
     /// while the panel is being pressed, and a 10k pull-up holds it high
     /// otherwise.
     ///
-    /// ⚠️ **`None` by default and deliberately so.** The pin's existence comes
-    /// from the schematic, while every vendor software config declares
-    /// `CYD28_TouchR_IRQ = -1` — see [`crate::board::PIN_TOUCH_IRQ`]. If the
-    /// schematic read is wrong, gating on an unwired pin makes touch appear
-    /// completely dead, which is a far more confusing failure than the two
-    /// wasted ADC conversions it saves. Enable with
-    /// [`with_irq`](Self::with_irq) only after `smoke.rs` stage 6 shows the
-    /// level tracking contact.
+    /// ✅ The pin is **confirmed wired** (on glass 2026-08-24: LOW during every
+    /// pressed sample, HIGH idle), so the original "is it even connected"
+    /// caveat is retired — see [`with_irq`](Self::with_irq).
+    ///
+    /// ⚠️ Still `None` by default, but now for an **ownership** reason rather
+    /// than a doubt: GPIO3 is one physical wire and esp-hal's pin singleton
+    /// admits one owner. In the watch firmware integration the *firmware* keeps
+    /// it, as its `touch_int` feeding `wait_for_falling_edge` — which sleeps the
+    /// executor instead of spinning, so it is a strictly better use of the same
+    /// PENIRQ signal than this driver's poll-time fast path. That integration
+    /// therefore constructs `Xpt2046` **without** `with_irq`, and pays two ADC
+    /// conversions per idle poll for it.
+    ///
+    /// Enable it for **standalone** use (the smoke test does) or if a future
+    /// firmware hands the pin back. Both arrangements are correct; what would be
+    /// wrong is two owners.
     irq: Option<Input<'d>>,
     /// The display rotation this driver maps into. Keep in step with
     /// [`crate::drivers::st7789::St7789Display::set_rotation`] or touches land

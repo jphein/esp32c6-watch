@@ -390,6 +390,39 @@ pub mod ui {
     /// so this breaks if SYSTEM grows past 8, and dropping another game will not
     /// save it. Re-verified after Maze was dropped: still 8.
     pub const LAUNCHER_PAGE_SLOTS: usize = 8;
+
+    /// Settings-hub section pages — **5**, one fewer than the C6: the SOUND page
+    /// is dropped with the audio hardware.
+    ///
+    /// This one is in the VISIBLE-failure class, unlike the slot-inverse
+    /// constants: too high and the hub pages to a blank screen, which reports
+    /// itself. Safe to change; still worth getting right.
+    pub const SETTINGS_PAGE_COUNT: i32 = 5;
+
+    /// **Retired on this board — a deliberately never-matching range.**
+    ///
+    /// `1..=0` is empty, so `contains()` is always false and every horizontal
+    /// swipe on the power page is a page switch rather than a slider drag. That
+    /// is correct here because the CYD's backlight is a TOGGLE, not a slider —
+    /// there is no drag for the band to protect.
+    ///
+    /// ⚠️ Retiring it is not the same as leaving the C6 value. At `330..=430` the
+    /// band is entirely off a 240 px panel, so it would never match either — but
+    /// by accident, and it would silently come alive the moment anyone "fixed"
+    /// the number to something on-panel. An empty range states the intent.
+    pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = 1..=0;
+
+    /// **Retired on this board**, same reasoning as [`SLIDER_BAND`].
+    ///
+    /// ⚠️ Here the stale-value hazard is not hypothetical: the C6's upper bound
+    /// (240) was that panel's EDGE, but on this panel 240 IS the edge — so
+    /// carrying `170..=240` across would swallow **every** horizontal swipe in
+    /// the lower third of the Settings hub. An empty range cannot.
+    ///
+    /// Retiring this also makes `HUB_PAGE_DISPLAY` unreachable on this board,
+    /// which is why that constant stays file-scoped rather than gaining a CYD
+    /// value it could never be consulted for.
+    pub const HUB_SLIDER_BAND: core::ops::RangeInclusive<u16> = 1..=0;
 }
 
 // === Soft-douse contract (BINDING — set by the shipped power-menu caption) ===
