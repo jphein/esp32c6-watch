@@ -1,0 +1,248 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PillButton } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// ROOM LIGHTS (#39) — hero left, status right. ONE UNIT WITH ping.slint.
+// ============================================================================
+//
+// ⚠️ READ THIS BEFORE CHANGING ANY HERO NUMBER HERE.
+// `lights.slint` and `ping.slint` share one hero geometry BY DESIGN — ping's own
+// comment calls it *"lights.slint's proven placement"*. On the C6 that agreement
+// is a COMMENT plus two independent sets of literals, which is precisely how two
+// pages drift apart over a year. In this tree the hero lives in `Geom`
+// (`hero-d` / `hero-cx` / `hero-cy` / `hero-col-*`) so the two pages cannot
+// disagree even by accident. Change it there or not at all.
+//
+// THE RE-COMPOSITION
+// -----------------------------------------------------------------------------
+// The C6 page is a 200 px circle centred at (205, 226) with the room name, the
+// caption, a shimmer and an ON/OFF pill row stacked BELOW it — 308 px of content
+// under a hero that already ends at y326. Against a 200 px band, the stack has
+// to become a column beside the circle:
+//
+//   hero: 130 px circle at cx84, cy132        status column: x176..312
+//     [ bulb glyph + LIGHTS ON ]              Living Room        (22 px)
+//                                             3 of 5 lights on   (12 px, wraps)
+//                                             [  ON  ] [ OFF ]   (48 px pills)
+//
+// The room name drops 30 -> 22 px. That is a real loss on the page's identity
+// element and it is the cheapest one available: the alternative was shrinking the
+// hero further, and the hero is the whole interaction — "one press lights the
+// room you're in".
+//
+// THE OUTER HALO IS DELETED, AND IT PAYS FOR THE STATUS COLUMN
+// -----------------------------------------------------------------------------
+// The C6 draws TWO alpha-graded warm rings around a lit hero (`+52 px` at 10 %
+// alpha, `+24 px` at 20 %), described as *"the AMOLED glow without a gradient"*.
+//
+// The outer one goes, for two reasons that point the same way:
+//   * It is another AMOLED premise. At 10 % alpha over near-black on an RGB565
+//     backlit LCD it is roughly 3 of 31 levels — a ring you have to know is
+//     there to see.
+//   * It is what forced the hero right. `hero + 52` is the widest thing on the
+//     page, and honouring it on-panel would have pushed cx far enough right to
+//     leave no status column at all.
+//
+// The inner halo and the crisp "sent" ring both stay: those carry actual state.
+//
+// Feedback contract (design spec §3/§8), unchanged: every state change is a hard
+// 1-frame token swap — no `animate`, no time-based pulse (a spinner at 6-11 fps
+// stutters and pins the CPU). The optimistic "sent" state is a static accent
+// ring + caption, cleared by the next state frame or the loop's 5 s timeout.
+// ============================================================================
+
+export component LightsOverlay {
+    in property <string> area: "";
+    in property <int> on-count: 0;
+    in property <int> total-count: 0;
+    in property <int> status: 0;   // 0 finding · 1 ok · 2 no_presence · 3 error
+    in property <int> pending: 0;  // 0 idle · 1 sent · 2 no-reply hint
+    callback cmd(int);             // 0 toggle · 1 on · 2 off
+    callback closed();
+
+    // The room is lit (drives the warm hero + glow).
+    property <bool> lit: root.status == 1 && root.on-count > 0;
+    // Room resolution is degraded — subdue the hero, keep it actionable
+    // (HA falls back to default behaviour on `toggle`).
+    property <bool> subdued: root.status != 1;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "LIGHTS"; }
+    CydBackChevron { clicked => { root.closed(); } }
+
+    // ---------------- warm glow halo (room lit) ----------------
+    // ONE static alpha-graded warm ring — see the header on why the outer one is
+    // gone. Still no gradient: near-black gradients band badly on this renderer.
+    if root.lit: Rectangle {
+        width: Geom.hero-d + 24px; height: self.width;
+        x: Geom.hero-cx - self.width / 2; y: Geom.hero-cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: Theme.warm.with-alpha(0.20);
+    }
+
+    // ---------------- optimistic "sent" ring ----------------
+    // Command in flight: a crisp accent ring blooms around the hero (1-frame
+    // swap in, 1-frame swap out when HA's republish lands or the loop times out).
+    // Static by design. This is the widest element on the page at `hero-d + 36`,
+    // which is what fixes `hero-cx` at 84.
+    if root.pending == 1: Rectangle {
+        width: Geom.hero-d + 36px; height: self.width;
+        x: Geom.hero-cx - self.width / 2; y: Geom.hero-cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        border-color: Theme.accent;
+    }
+
+    // ---------------- hero toggle button ----------------
+    // The bulb glyph is the C6's, redrawn at 0.65 scale. Every one of its twelve
+    // rectangles was hand-placed for a 200 px circle; they are re-derived rather
+    // than re-invented, so the drawing is recognisably the same bulb.
+    button := Rectangle {
+        width: Geom.hero-d; height: Geom.hero-d;
+        x: Geom.hero-cx - self.width / 2; y: Geom.hero-cy - self.height / 2;
+        border-radius: self.width / 2;
+
+        // Pressed = FULL INVERT to solid accent (Recipe C on a circle, the
+        // boldest 1-frame delta). At rest: warm-filled while the room is lit,
+        // cool outline while dark, muted line-border while degraded.
+        background: ta.pressed ? Theme.accent
+            : (root.lit ? Theme.warm : Theme.panel);
+        border-width: 3px;
+        border-color: ta.pressed ? Theme.accent
+            : (root.lit ? Theme.warm
+            : (root.subdued ? Theme.line : Theme.accent2));
+        opacity: (root.subdued && !ta.pressed) ? 0.6 : 1.0;
+
+        // Bulb glyph ink: dark on the bright pressed/lit fills (palette
+        // contract: on-accent reads on accent AND warm in all 4 schemes).
+        property <color> g: (ta.pressed || root.lit) ? Theme.on-accent : Theme.soft;
+
+        // Globe — filled when lit/pressed, outline when dark.
+        if ta.pressed || root.lit: Rectangle {
+            x: 44px; y: 27px; width: 42px; height: 42px; border-radius: 21px;
+            background: button.g;
+            Rectangle { // filament pip, bright on the dark globe
+                x: 17px; y: 17px; width: 8px; height: 8px; border-radius: 4px;
+                background: Theme.warm;
+            }
+        }
+        if !ta.pressed && !root.lit: Rectangle {
+            x: 44px; y: 27px; width: 42px; height: 42px; border-radius: 21px;
+            border-width: 3px; border-color: button.g;
+            Rectangle { // dormant filament
+                x: 17px; y: 17px; width: 7px; height: 7px; border-radius: 3.5px;
+                background: button.g;
+            }
+        }
+        // Rays — only while the room is lit: light leaving the bulb.
+        if root.lit || ta.pressed: Rectangle {
+            x: 63px; y: 10px; width: 4px; height: 10px; border-radius: 2px;
+            background: button.g.with-alpha(0.75);
+        }
+        if root.lit || ta.pressed: Rectangle {
+            x: 25px; y: 46px; width: 10px; height: 4px; border-radius: 2px;
+            background: button.g.with-alpha(0.75);
+        }
+        if root.lit || ta.pressed: Rectangle {
+            x: 95px; y: 46px; width: 10px; height: 4px; border-radius: 2px;
+            background: button.g.with-alpha(0.75);
+        }
+        // Screw base under the globe, alpha-tapered.
+        Rectangle {
+            x: 55px; y: 74px; width: 20px; height: 4px; border-radius: 2px;
+            background: button.g.with-alpha(0.85);
+        }
+        Rectangle {
+            x: 58px; y: 81px; width: 14px; height: 3px; border-radius: 1.5px;
+            background: button.g.with-alpha(0.6);
+        }
+        Rectangle {
+            x: 60px; y: 86px; width: 9px; height: 3px; border-radius: 1.5px;
+            background: button.g.with-alpha(0.4);
+        }
+        // Action word inside the hero, under the bulb.
+        Text {
+            x: 4px; y: 99px;
+            width: parent.width - 8px;
+            horizontal-alignment: center;
+            text: root.lit ? "LIGHTS ON" : "TAP TO LIGHT";
+            color: button.g.with-alpha(0.9);
+            font-size: Geom.t-caption; font-weight: 700; letter-spacing: 1px;
+        }
+
+        ta := TouchArea { clicked => { root.cmd(0); } }
+    }
+
+    // ---------------- room name (status column) ----------------
+    // All four states share one box, so the name cannot shift between them.
+    // 30 -> 22 px; `elide` is the backstop for a long room name in 136 px.
+    Text {
+        x: Geom.hero-col-x; y: 44px;
+        width: Geom.hero-col-w;
+        horizontal-alignment: center;
+        overflow: elide;
+        text: root.status == 0 ? "Finding\u{2026}"
+            : (root.status == 2 ? "No presence"
+            : (root.status == 3 ? (root.area == "" ? "Lights" : root.area)
+            : (root.area == "" ? "\u{2014}" : root.area)));
+        color: root.status == 1 ? Theme.ink
+            : (root.status == 0 ? Theme.dim : Theme.soft);
+        font-size: 22px; font-weight: 700;
+    }
+
+    // ---------------- caption / feedback line ----------------
+    // One line, priority: sent > no-reply > per-status detail. WRAPS to two
+    // lines: the longest string ("connecting to Home Assistant", 28 chars) is
+    // ~182 px at 12 px against a 136 px column, and eliding a diagnostic to
+    // "connecting to Home Ass…" would defeat the point of having it.
+    Text {
+        x: Geom.hero-col-x; y: 76px;
+        width: Geom.hero-col-w;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+        text: root.pending == 1 ? "sending\u{2026}"
+            : (root.pending == 2 ? "no reply \u{2014} try again"
+            : (root.status == 0 ? "connecting to Home Assistant"
+            : (root.status == 2 ? "toggle uses home defaults"
+            : (root.status == 3 ? "Home Assistant error"
+            : (root.total-count == 0 ? "no lights in this room"
+            : "\{root.on-count} of \{root.total-count} lights on")))));
+        color: root.pending == 1 ? Theme.accent
+            : ((root.pending == 2 || root.status == 3) ? Theme.warn
+            : ((root.status == 1 && root.lit) ? Theme.warm
+            : (root.status == 0 ? Theme.faint : Theme.dim)));
+        font-size: Geom.t-caption; letter-spacing: 1px;
+    }
+
+    // Aurora shimmer under the "finding" line (static duo-tone, echoing the
+    // wake-hint strips; replaced by the caption's pending states above).
+    if root.status == 0 && root.pending == 0: Rectangle {
+        x: Geom.hero-col-x + (Geom.hero-col-w - 44px) / 2; y: 122px;
+        width: 44px; height: 3px; border-radius: 1.5px;
+        background: Theme.accent2.with-alpha(0.5);
+    }
+    if root.status == 0 && root.pending == 0: Rectangle {
+        x: Geom.hero-col-x + (Geom.hero-col-w - 72px) / 2; y: 128px;
+        width: 72px; height: 4px; border-radius: 2px;
+        background: Theme.accent.with-alpha(0.7);
+    }
+
+    // ---------------- explicit ON / OFF pills ----------------
+    // For when toggle is not what you want (Recipe D, shared PillButton:
+    // pressed = invert to solid accent with on-accent text). Absolute, not the
+    // C6's HorizontalLayout — two fixed-width pills need no measuring.
+    PillButton {
+        x: Geom.hero-col-x; y: 148px;
+        width: 64px; height: 48px;
+        text: "ON"; clicked => { root.cmd(1); }
+    }
+    PillButton {
+        x: Geom.hero-col-x + 72px; y: 148px;
+        width: 64px; height: 48px;
+        text: "OFF"; clicked => { root.cmd(2); }
+    }
+}

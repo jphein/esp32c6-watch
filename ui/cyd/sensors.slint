@@ -1,0 +1,90 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydStatRow } from "controls_cyd.slint";
+
+// ============================================================================
+// CAROUSEL PAGE 1 — "BOARD". The honest capability page, per JP's ruling.
+// ============================================================================
+//
+// ⚠️ NAME MISMATCH, ON PURPOSE. Rust calls this slot `PAGE_SENSORS = 1` and
+// `slint_shell.rs` pushes `accel-text` / `gyro-text` / `imu-temp-text` /
+// `die-temp-text` into it every 100 ms while it shows. The component keeps that
+// name and every one of those properties. The TITLE says "BOARD", because that
+// is what the page is now about.
+//
+// WHY THE SLOT SURVIVED
+// -----------------------------------------------------------------------------
+// The C6 page is five sensor rows and every one is dead here:
+//
+//   ACCEL / GYRO / STEPS   the QMI8658 IMU does not exist on this board
+//   IMU TEMP               same chip, same absence
+//   DIE TEMP               was the graceful fallback when the IMU is quiet —
+//                          but the ESP32-C5 has no `TSENS` peripheral either, so
+//                          the fallback dies with the thing it was covering
+//
+// That last line made it the strongest drop candidate in the port: most pages
+// lose a feature, this one loses every reading it has AND the reading it fell
+// back to.
+//
+// But `current-page` is Rust-owned — `PAGE_SENSORS = 1`, `PAGE_COUNT = 5`, with
+// `PAGE_SYSTEM`/`PAGE_POWER`/`PAGE_MESH` numbered after it. Removing the slot is
+// a renumbering of constants this workstream does not own, plus a 5-tick rail
+// becoming 4. So JP's ruling: keep the five-page carousel and make page 1 state
+// plainly what this board IS and lacks.
+//
+// WHY FACTS AND NOT FIVE ROWS OF "--"
+// -----------------------------------------------------------------------------
+// A row that can only ever say one thing is not a row, it is a rumour. Five of
+// them read as *"the sensors are broken"* — a bug report waiting to be filed —
+// where naming the silicon and then saying `none` twice is a statement about the
+// hardware that nobody can misread.
+//
+// It also makes the page genuinely useful, which the drop-everything version was
+// not: this is now the only place on the watch that says what board you are
+// holding. The SYSTEM page's `chip-text` names the chip too; the overlap is
+// deliberate, because a reader who swiped here looking for sensors should not
+// have to swipe again to learn why there are none.
+//
+// The five values are LITERALS, not properties. They are facts about the
+// silicon, so they are stated where they are true rather than plumbed through
+// Rust — and a literal is constant-folded, so the rows cost bindings, not
+// bindings plus a push path.
+// ============================================================================
+
+export component SensorsPage {
+    // All five are declared because slint_shell.rs writes them every 100 ms
+    // while this page shows; none is rendered. Removing a property breaks the
+    // build, and gating the Rust-side tick is the driver workstream's call.
+    in property <string> accel-text;
+    in property <string> gyro-text;
+    in property <string> imu-temp-text;
+    in property <string> die-temp-text;
+    in property <int> steps;
+
+    CydPageTitle { title: "BOARD"; }
+
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +   6px; height: 30px;
+                 label: "CHIP";     value: "ESP32-C5"; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  38px; height: 30px;
+                 label: "PSRAM";    value: "8 MB"; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y +  70px; height: 30px;
+                 label: "FLASH";    value: "16 MB"; }
+    // The two absences, in the same shape as the presences — so the page reads
+    // as one inventory rather than as facts plus an apology. `faint` rather than
+    // `warn`: missing hardware is not an error state.
+    CydStatRow { x: Geom.content-x; y: Geom.content-y + 102px; height: 30px;
+                 label: "IMU";      value: "none"; value-color: Theme.faint; }
+    CydStatRow { x: Geom.content-x; y: Geom.content-y + 134px; height: 30px;
+                 label: "DIE TEMP"; value: "none"; value-color: Theme.faint; }
+
+    Text {
+        x: Geom.content-x;
+        y: Geom.content-y + 172px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "no QMI8658 \u{00b7} the C5 has no TSENS";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 1px;
+    }
+}

@@ -1,0 +1,177 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PressTile } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// HUNT (#60) — RSSI warmer/colder. Content sums to less than the band.
+// ============================================================================
+//
+// One of only two leaf pages that FIT after the shared edits, with room to
+// spare: seek line + 50 px hero + bar + readout + a 44 px action is ~176 px of
+// the 200 px content band, even keeping the hero at full size. So this page is a
+// re-anchoring, not a re-composition.
+//
+// 🟥 DELIBERATE DIVERGENCE FROM ui/slint/hunt.slint — DO NOT "SYNC WITH C6"
+// -----------------------------------------------------------------------------
+// The hero centring below is NOT the C6's, and the difference will look like
+// drift to any sweep that diffs these two files. It is not. Recorded here in the
+// same way the `ui/slint` files record their own divergences, and indexed in
+// `geom.slint`'s DIVERGENCES block.
+//
+// Reviewed and APPROVED by the watch session (owner of `ui/slint/hunt.slint`) as
+// the correct call and the `a4a86a3` class exactly. Two notes from them:
+//   * flowing this back to the C6's `hunt.slint` is on the someday list, to be
+//     measured on the C6 first — it is not this workstream's path;
+//   * a convergence acceptance test is expected to enforce this idiom later,
+//     so what follows is "building to the gate before the gate exists".
+//
+// THE ONE REAL CHANGE: THE HERO STOPPED BEING A LAYOUT
+// -----------------------------------------------------------------------------
+// The C6 centres the hero word + trend arrow with a `HorizontalLayout` at
+// `alignment: center`, and its comment records WHY it had to: an earlier
+// `x: (parent.width - self.width) / 2` on the layout left everything at x0 and
+// clipped the wide words off the left edge. Correct diagnosis, and the fix works.
+//
+// But this is the hottest band on the page. Rust pushes `hero-text` and `arrow`
+// EVERY TICK while hunting, and `alignment: center` is a layout manager reading
+// its children's intrinsic widths — the exact 16 B-per-read allocation that
+// `a4a86a3` ("remove intrinsic-size reads from the per-segment repaint band")
+// and `5ca474d` exist to delete, on the exact kind of band they were deleted
+// from.
+//
+// So the hero is two FIXED-WIDTH boxes that centre their own text internally:
+//
+//   hero   x   8 .. 248   (240 px)  horizontal-alignment: center
+//   arrow  x 252 .. 296   ( 44 px)  horizontal-alignment: center
+//
+// `horizontal-alignment` inside a box of known width never exposes `self.width`
+// to the dependency graph, so a changing string re-lays-out one paragraph
+// instead of re-deriving a layout. The visual result is the same centring the C6
+// comment fought for — the pair spans x8..296 with 24 px of margin either side —
+// and the words cannot clip, because the box, not the glyphs, defines the edge.
+//
+// A note on why the arrow gets its OWN box rather than being concatenated into
+// the hero string: the arrow changes independently and far more often than the
+// word. Two boxes means an arrow flip dirties 44 px, not 240.
+// ============================================================================
+
+export component HuntPage {
+    in property <string> seek-text: "SEEK --";   // "SEEK <Noun>"
+    in property <string> hero-text: "LOST";      // WARMER/COLDER/SAME/FOUND!/LOST
+    in property <string> arrow: "";              // "↑" / "↓" / "" (Rust picks the glyph)
+    in property <float> bar-frac: 0.0;           // 0..1 from rssi::bar_px
+    in property <string> rssi-text: "";          // "-59 dBm"
+    in property <string> bucket: "";             // HERE/NEAR/ROOM/FAR/GONE
+    in property <bool> hot: false;               // proximity Here/Near -> accent bar
+    in property <bool> found: false;             // FOUND! -> celebratory accent
+    in property <bool> warmer: false;            // trend up (Rust-owned; drives color)
+    in property <bool> colder: false;            // trend down
+
+    callback next-target();
+    callback close();
+
+    // Hero/arrow colour from the Rust-owned trend flags (no string matching).
+    property <brush> hero-color: root.found ? Theme.accent
+                               : root.warmer ? Theme.warm
+                               : root.colder ? Theme.accent2
+                               : Theme.ink;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "HUNT"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    // Target being sought.
+    Text {
+        x: Geom.content-x;
+        y: 38px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: root.seek-text;
+        color: Theme.soft;
+        font-size: Geom.t-body;
+        letter-spacing: 1px;
+    }
+
+    // Hero word — fixed box, self-centred. 50 px is unchanged from the C6; the
+    // longest strings ("WARMER", "COLDER", "FOUND!") measure ~168 px in 240.
+    Text {
+        x: 8px;
+        y: 60px;
+        width: 240px;
+        horizontal-alignment: center;
+        text: root.hero-text;
+        color: root.hero-color;
+        font-size: 50px;
+        font-weight: 700;
+    }
+    // Trend arrow — its own box, so a flip dirties 44 px rather than 284.
+    Text {
+        x: 252px;
+        y: 60px;
+        width: 44px;
+        horizontal-alignment: center;
+        text: root.arrow;
+        color: root.hero-color;
+        font-size: 50px;
+        font-weight: 700;
+    }
+
+    // Proximity bar (bar_px fraction), track + fill. 26 -> 22 px tall and inset
+    // to the content band; the fill's width is a pure fraction of the parent, so
+    // it needed no arithmetic change at all.
+    track := Rectangle {
+        x: 20px;
+        y: 130px;
+        width: parent.width - 40px;
+        height: 22px;
+        border-radius: 11px;
+        background: Theme.track;
+        border-width: 1px;
+        border-color: Theme.line;
+        Rectangle {
+            x: 0; y: 0;
+            width: parent.width * clamp(root.bar-frac, 0.0, 1.0);
+            height: parent.height;
+            border-radius: 11px;
+            background: root.found ? Theme.accent
+                      : root.hot ? Theme.accent
+                      : Theme.warm;
+        }
+    }
+
+    // Readout: "<rssi>  <BUCKET>". Also a fixed box — it changes every tick.
+    Text {
+        x: Geom.content-x;
+        y: 158px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: root.rssi-text + (root.bucket != "" ? "  " + root.bucket : "");
+        color: Theme.dim;
+        font-size: Geom.t-body;
+        letter-spacing: 1px;
+    }
+
+    // NEXT TARGET (cycles the target peer). PressTile Recipe A: fill lights to
+    // accent-bg + edge ignites on finger-down, 1-frame swap.
+    next-area := PressTile {
+        x: (parent.width - self.width) / 2;
+        y: 186px;
+        width: 200px;
+        height: 44px;
+        border-radius: 22px;
+        clicked => { root.next-target(); }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: "NEXT TARGET";
+            color: Theme.soft;
+            font-size: 16px;
+            letter-spacing: 2px;
+        }
+    }
+}

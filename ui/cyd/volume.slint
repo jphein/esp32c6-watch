@@ -1,0 +1,119 @@
+import { Theme } from "../slint/theme.slint";
+import { SliderControl } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+
+// ============================================================================
+// VOLUME HUD (#59) — 280x96 card, centred.
+// ============================================================================
+//
+// The C6 card is `width: 320px` — EXACTLY the whole landscape panel, which
+// makes it the one file in the tree whose worst number is worst by coincidence.
+// Left alone it would render edge-to-edge with no card left, only a horizon.
+//
+// 280x96 centred at x20, y72 keeps 20 px of page visible on both sides and 72
+// above/below, which is what makes it read as a HUD rather than a screen. That
+// distinction is load-bearing in the shell: this overlay is deliberately NOT in
+// the `covered` gate and deliberately has NO `OverlaySwallow`, because taps
+// outside it must fall through to whatever is behind (phone-style), and the
+// watchface around it is genuinely visible.
+//
+// THE RE-COMPOSITION
+// -----------------------------------------------------------------------------
+// The C6 card is 132 px tall and stacks: glyph + readout on top, slider below.
+// At 96 px that stack does not fit — a 40 px numeral plus a 12 px eyebrow plus a
+// 40 px slider is 92 px before any gaps. So the top half becomes a ROW:
+//
+//   y 10..46   [speaker glyph] [VOLUME] .................... [11]
+//   y 50..90   [========================slider============]
+//
+// The eyebrow moves from UNDER the number to BESIDE it, which is what freed the
+// 14 px the slider needed. Reading order still lands on the number last, because
+// it is the only large element in the row.
+//
+// EVERY GLYPH HERE IS DRAWN, NOT TYPED
+// -----------------------------------------------------------------------------
+// The embedded font has no emoji, so the speaker is a driver block plus a cone
+// block plus three bars — six rectangles. That is a constraint, not a style
+// choice: there is no glyph to substitute, which is also why the bars encode
+// level by zone (>0 / >5 / >10) instead of by a numeral inside an icon.
+// ============================================================================
+
+export component VolumeOverlay {
+    in property <int> level: 11;      // 0..15 (drives the number + bars)
+    in property <bool> muted: false;
+    // Slider fraction (0..1) — Rust-driven two-way (the brightness idiom): a
+    // button press sets it so the knob jumps to the new level; a drag pushes it
+    // back up + fires `changed`. Plain in-out (NOT a derived binding) so the
+    // shared SliderControl can assign to it internally.
+    in-out property <float> frac: 0.73;
+    callback changed(float);          // slider → 0..1, Rust maps to 0..15
+
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 280px;
+        height: 96px;
+        border-radius: 18px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.line;
+
+        // --- speaker glyph (driver + cone + three sound bars) ---
+        Rectangle { // driver body
+            x: 18px; y: 18px; width: 14px; height: 20px;
+            border-radius: 3px;
+            background: root.muted ? Theme.dim : Theme.accent;
+        }
+        Rectangle { // cone — a wider block butting the driver, no Path
+            x: 28px; y: 12px; width: 12px; height: 32px;
+            border-radius: 3px;
+            background: root.muted ? Theme.dim : Theme.accent;
+        }
+        Rectangle {
+            x: 50px; y: 22px; width: 5px; height: 12px; border-radius: 2px;
+            background: !root.muted && root.level > 0 ? Theme.accent : Theme.track;
+        }
+        Rectangle {
+            x: 59px; y: 16px; width: 5px; height: 24px; border-radius: 2px;
+            background: !root.muted && root.level > 5 ? Theme.accent : Theme.track;
+        }
+        Rectangle {
+            x: 68px; y: 10px; width: 5px; height: 36px; border-radius: 2px;
+            background: !root.muted && root.level > 10 ? Theme.accent : Theme.track;
+        }
+
+        // Eyebrow, now BESIDE the number rather than under it.
+        Text {
+            x: 92px;
+            y: 10px;
+            height: 36px;
+            vertical-alignment: center;
+            text: "VOLUME";
+            color: Theme.dim;
+            font-size: Geom.t-caption;
+            letter-spacing: 3px;
+        }
+
+        // Level readout, right-anchored. `MUTED` is a WORD where the level is a
+        // NUMERAL, so it takes the smaller face and re-centres — same trick the
+        // C6 used, re-derived for the shorter row.
+        Text {
+            x: parent.width - self.width - 18px;
+            y: root.muted ? 12px : 2px;
+            text: root.muted ? "MUTED" : "\{root.level}";
+            color: root.muted ? Theme.warn : Theme.ink;
+            font-size: root.muted ? 22px : Geom.t-big;
+            font-weight: 700;
+        }
+
+        // Draggable slider along the card's bottom. Dragging emits changed() and
+        // (in Rust) also clears the mute + resets the 2 s auto-dismiss clock.
+        // 244 px of travel against the C6's 272 — the knob grows to 32 px while
+        // held, so the usable range is what matters and it is unchanged in feel.
+        SliderControl {
+            x: 18px; y: 50px; width: 244px;
+            value <=> root.frac;
+            changed(f) => { root.changed(f); }
+        }
+    }
+}

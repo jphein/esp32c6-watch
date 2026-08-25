@@ -1,0 +1,297 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+
+// ============================================================================
+// ON-SCREEN KEYBOARD — 28x35 keys. THE ONE HOUSE-RULE EXCEPTION IN THIS TREE.
+// ============================================================================
+//
+// 🟥 READ THIS BEFORE JUDGING THE KEY SIZE. It is under the 44 px touch floor,
+// deliberately, and it is the only place in `ui/cyd/` that is.
+//
+// THE FLOOR IS NOT REACHABLE HERE, AND THAT IS ARITHMETIC
+// -----------------------------------------------------------------------------
+// A QWERTY top row is ten keys. Ten 44 px keys plus nine gutters is 458 px on a
+// 320 px panel. There is no arrangement of a ten-key row that meets the floor,
+// so the choice is not "floor or no floor" — it is which compromise.
+//
+// The C6 already made this trade and wrote it down (`keyboard.slint:6-8`): 36 px
+// keys, *"slightly under the 44px touch-target floor, accepted for a keyboard
+// (the row pitch keeps vertical separation at 52px and the pressed invert makes
+// hits unambiguous)"*. The layout spec's worry was that compressing that to 240
+// px would break BOTH stated margins at once — key width AND row pitch.
+//
+// It does not, and the proportions are the reason:
+//
+//              C6 (410x502)        CYD (320x240)      proportion
+//   key width  36 px = 8.78 %      28 px = 8.75 %     IDENTICAL
+//   key height 48 px = 9.56 %      35 px = 14.6 %     1.5x MORE
+//   row pitch  52 px = 10.4 %      39 px = 16.3 %     1.6x MORE
+//
+// Horizontal density is unchanged to within a rounding error. Vertical
+// separation — the exact thing the C6's safety argument rests on — improves by
+// half again, because the keyboard sub-view has no page title, no dots and no
+// 300 px of other content to share the panel with. The C6's own reasoning
+// therefore holds MORE strongly here, not less.
+//
+// The keys are absolutely smaller (28 vs 36 px) because the panel is absolutely
+// smaller. That is a fact about the hardware, not a design failure, and it is
+// worth saying plainly rather than dressing up.
+//
+// ⏳ FLAGGED FOR JP. Three alternatives were considered and rejected:
+//
+//   (a) Cap every row at 9 keys -> 32 px keys. Costs 4 px of width and breaks
+//       the QWERTY row shape ('p' would head row 1, before 'a'). Muscle memory
+//       for a keyboard IS the row shape; 4 px does not buy that.
+//   (b) A paged key grid, 4x3 of 72x44. MEETS the floor — and needs up to three
+//       page flips to reach 'z'. Unusable for typing a password, which is the
+//       only thing this keyboard is for.
+//   (c) Back to a T9 multi-tap. That is the framebuffer control this QWERTY
+//       replaced in v0.9.0; going back is a regression, not a port.
+//
+// If JP prefers (a) or (b) on glass, both are a small edit to this one file —
+// the row arrays and one geometry block. Nothing else in the tree depends on it.
+//
+// WHAT DOES NOT CHANGE
+// -----------------------------------------------------------------------------
+// Rust owns the TEXT. Keys emit intent only (`key(string)` / `bksp-*` /
+// `done()`); the loop assembles the buffer, masks it, and pushes the display
+// string back. So this layout is INVISIBLE to Rust — there is no two-sided
+// constant here, which is the one mercy of an otherwise hard page.
+//
+// Feedback contract (design spec §3/§5): the key under the finger inverts to
+// solid accent with on-accent ink — a hard 1-frame swap, NO `animate`. Backspace
+// emits down/up edges so the loop can auto-repeat while held.
+// ============================================================================
+
+// One character key. Pressed = FULL INVERT (Recipe C's boldest 1-frame delta),
+// which is doing more work here than on the C6: with a smaller key, the invert
+// is the primary confirmation that the intended key was the one that fired.
+component Key inherits Rectangle {
+    in property <string> glyph;
+    in property <length> glyph-size: 20px;
+    callback hit(string);
+
+    border-radius: 6px;
+    background: ta.pressed ? Theme.accent : Theme.panel;
+    border-width: 1px;
+    border-color: ta.pressed ? Theme.accent : Theme.line;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.glyph;
+        color: ta.pressed ? Theme.on-accent : Theme.ink;
+        font-size: root.glyph-size;
+        font-weight: 600;
+    }
+    ta := TouchArea { clicked => { root.hit(root.glyph); } }
+}
+
+// A mode key (shift / layer switch): a label instead of a glyph payload, and a
+// persistent ACTIVE state (Recipe E: selected is not pressed) for caps lock.
+component ModeKey inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <length> label-size: 15px;
+    callback hit();
+
+    border-radius: 6px;
+    background: root.active ? Theme.accent
+        : (ta.pressed ? Theme.accent-bg : Theme.track);
+    border-width: 1px;
+    border-color: root.active || ta.pressed ? Theme.accent : Theme.line;
+
+    Text {
+        x: (parent.width - self.width) / 2;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        color: root.active ? Theme.on-accent : Theme.soft;
+        font-size: root.label-size;
+        font-weight: 700;
+    }
+    ta := TouchArea { clicked => { root.hit(); } }
+}
+
+export component KeyboardPane {
+    callback key(string);   // one character (space = " ")
+    callback bksp-down();   // finger ON backspace — Rust deletes + auto-repeats
+    callback bksp-up();     // finger off — stop the repeat
+    callback done();        // ✓ — commit the field
+
+    // 0 abc · 1 ABC (sticky shift) · 2 123 · 3 #+=. Local UI state: layer
+    // switching never round-trips to Rust.
+    property <int> layer: 0;
+
+    // 4 rows of 35 with 4 px gutters. The pane is sized from its own geometry
+    // rather than a literal, so a key-height change cannot leave a gap.
+    property <length> kh: 35px;
+    property <length> pitch: 39px;
+    property <length> kw: 28px;
+    property <length> gut: 3px;
+    height: 4 * 35px + 3 * 4px;
+
+    property <[string]> r0: root.layer == 0
+        ? ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]
+        : root.layer == 1
+        ? ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"]
+        : root.layer == 2
+        ? ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+        : ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="];
+    property <[string]> r1: root.layer == 0
+        ? ["a", "s", "d", "f", "g", "h", "j", "k", "l"]
+        : root.layer == 1
+        ? ["A", "S", "D", "F", "G", "H", "J", "K", "L"]
+        : root.layer == 2
+        ? ["-", "/", ":", ";", "(", ")", "$", "&", "@"]
+        : ["_", "\\", "|", "~", "<", ">", "$", "&", "@"];
+    // Rows 2 of the symbol layers are shared (the common password punctuation).
+    property <[string]> r2: root.layer == 0
+        ? ["z", "x", "c", "v", "b", "n", "m"]
+        : root.layer == 1
+        ? ["Z", "X", "C", "V", "B", "N", "M"]
+        : [".", ",", "?", "!", "'", "\"", ";"];
+
+    // --- row 0: 10 keys — 10*28 + 9*3 = 307, centred in 320 ---
+    Rectangle {
+        x: (parent.width - (10 * root.kw + 9 * root.gut)) / 2;
+        y: 0;
+        width: 10 * root.kw + 9 * root.gut;
+        height: root.kh;
+        for k[i] in root.r0: Key {
+            x: i * (root.kw + root.gut); y: 0;
+            width: root.kw; height: root.kh;
+            glyph: k;
+            hit(g) => { root.key(g); }
+        }
+    }
+
+    // --- row 1: 9 keys ---
+    Rectangle {
+        x: (parent.width - (9 * root.kw + 8 * root.gut)) / 2;
+        y: root.pitch;
+        width: 9 * root.kw + 8 * root.gut;
+        height: root.kh;
+        for k[i] in root.r1: Key {
+            x: i * (root.kw + root.gut); y: 0;
+            width: root.kw; height: root.kh;
+            glyph: k;
+            hit(g) => { root.key(g); }
+        }
+    }
+
+    // --- row 2: shift/symbols + 7 keys + backspace ---
+    // The two 40 px mode keys are WIDER than the letters on purpose: shift and
+    // backspace are the two keys whose mis-hit costs the most (a wrong case, or
+    // a deleted character), so they get the biggest targets available.
+    Rectangle {
+        x: (parent.width - (2 * 40px + 7 * root.kw + 8 * root.gut)) / 2;
+        y: 2 * root.pitch;
+        width: 2 * 40px + 7 * root.kw + 8 * root.gut;
+        height: root.kh;
+
+        // Shift on the letter layers (sticky: ↑ locks caps until tapped again);
+        // 123 ↔ #+= switch on the symbol layers.
+        ModeKey {
+            x: 0; y: 0; width: 40px; height: root.kh;
+            label: root.layer <= 1 ? "\u{2191}" : (root.layer == 2 ? "#+=" : "123");
+            label-size: root.layer <= 1 ? 20px : 14px;
+            active: root.layer == 1;
+            hit => {
+                root.layer = root.layer == 0 ? 1
+                    : root.layer == 1 ? 0
+                    : root.layer == 2 ? 3 : 2;
+            }
+        }
+        for k[i] in root.r2: Key {
+            x: 40px + root.gut + i * (root.kw + root.gut); y: 0;
+            width: root.kw; height: root.kh;
+            glyph: k;
+            hit(g) => { root.key(g); }
+        }
+        // Backspace: down/up edges, not clicked — Rust deletes one char on the
+        // down edge and auto-repeats while held (16 ms held-tick cadence).
+        bksp := Rectangle {
+            x: parent.width - 40px; y: 0; width: 40px; height: root.kh;
+            border-radius: 6px;
+            background: bta.pressed ? Theme.warn : Theme.track;
+            border-width: 1px;
+            border-color: bta.pressed ? Theme.warn : Theme.line;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "\u{2190}";
+                color: bta.pressed ? Theme.on-accent : Theme.soft;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            bta := TouchArea {
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        root.bksp-down();
+                    }
+                    if (ev.kind == PointerEventKind.up
+                        || ev.kind == PointerEventKind.cancel) {
+                        root.bksp-up();
+                    }
+                }
+            }
+        }
+    }
+
+    // --- row 3: layer switch + space + done ---
+    // 50 + 160 + 50 with 3 px gutters = 266. The space bar is the one key that
+    // comfortably clears the touch floor in both axes, which is right: it is the
+    // key most often hit while looking at the field rather than the keyboard.
+    Rectangle {
+        x: (parent.width - (50px + 160px + 50px + 2 * root.gut)) / 2;
+        y: 3 * root.pitch;
+        width: 50px + 160px + 50px + 2 * root.gut;
+        height: root.kh;
+
+        ModeKey {
+            x: 0; y: 0; width: 50px; height: root.kh;
+            label: root.layer <= 1 ? "?123" : "abc";
+            label-size: 15px;
+            hit => { root.layer = root.layer <= 1 ? 2 : 0; }
+        }
+        Key {
+            x: 53px; y: 0; width: 160px; height: root.kh;
+            glyph: " ";
+            hit(g) => { root.key(g); }
+            // Space bar affordance drawn over the (blank) glyph.
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height - 11px;
+                width: 52px; height: 3px; border-radius: 1.5px;
+                background: Theme.dim;
+            }
+        }
+        // Done = commit. Solid-accent CTA at rest (it IS the action); pressed is
+        // the reverse invert (accent-bg + accent glyph) — same 1-frame boldness
+        // as the character keys, unmistakably "held".
+        done-key := Rectangle {
+            x: parent.width - 50px; y: 0; width: 50px; height: root.kh;
+            border-radius: 6px;
+            background: dta.pressed ? Theme.accent-bg : Theme.accent;
+            border-width: 1px;
+            border-color: Theme.accent;
+            Text {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "\u{2713}";
+                color: dta.pressed ? Theme.accent : Theme.on-accent;
+                font-size: 22px;
+                font-weight: 700;
+            }
+            dta := TouchArea { clicked => { root.done(); } }
+        }
+    }
+}

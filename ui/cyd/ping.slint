@@ -1,0 +1,360 @@
+import { Theme } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// WATCH-TO-WATCH PING (#35) — ONE UNIT WITH lights.slint.
+// ============================================================================
+//
+// ⚠️ The hero circle is `Geom.hero-*`, shared with `lights.slint`. On the C6
+// these two pages agree by comment ("lights.slint's proven placement") plus two
+// independent sets of literals — the arrangement that guarantees drift. Change
+// the hero in `geom.slint` or not at all.
+//
+// Two components:
+//
+//   PingOverlay — one warm hero that broadcasts a SMOLv1 PING over ESP-NOW
+//   ("PING <sigil>" when the peer is known from mesh HELLOs, else "PING THE
+//   FLEET"). Pure presentation: Rust owns the seq/cooldown state machine and the
+//   radio; this only emits `send()`.
+//
+//   PingPulse — the receiver magic: a full-screen greeting that blooms over
+//   whatever is showing. Rust owns the choreography clock
+//   (`ShellUi::tick_ping_pulse`, the gesture-hint idiom): the pulse is CREATED
+//   dark with `lit:false` (so the wake frame stays cheap) and Rust flips `lit` a
+//   beat later. On the C6 an `animate` on `p` expands the rings smoothly; HERE
+//   IT DOES NOT — the tween is gone and each flip is one hard cut. See the note
+//   at `p` itself.
+//
+// 🟥 THE PULSE RINGS WERE WIDER THAN THIS PANEL
+// -----------------------------------------------------------------------------
+// The C6 outer ring reaches `90 + 290 = 380 px` — comfortable on a 410 px panel,
+// **60 px wider than this one**, and a ring is a shape whose whole legibility is
+// its curve. A circle clipped on both sides reads as two vertical bars.
+//
+// Rescaled to `70 + 150 = 220` (outer) and `40 + 110 = 150` (inner). The centre
+// also moves UP to cy110, which is the value that lands the outer ring's full
+// travel exactly inside the panel: `110 ± 110` = y0..220. The rings now grow to
+// the edges and stop, which is the effect the C6 numbers were reaching for on a
+// taller panel.
+//
+// Feedback contract (design spec §3/§8): every press is a hard 1-frame token swap
+// (Recipe C invert on the hero — no `animate` on press at 6-11 fps). On the C6
+// the PULSE was the sanctioned exception; on this panel there is no exception,
+// because a 220-row dirty region cannot be tweened over a link that needs
+// 61.4 ms for a full frame. Everything here is a hard swap.
+// ============================================================================
+
+export component PingOverlay {
+    in property <string> peer: "";
+    in property <int> state: 0;      // 0 idle · 1 sent · 2 delivered · 3 no reply
+    in property <string> result: "";
+    in property <bool> cooling: false;
+    in property <bool> mesh-on: true;
+    callback send();
+    callback closed();
+
+    // Delivered glow (drives the warm halo, the lights-lit idiom).
+    property <bool> delivered: root.state == 2;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+
+    CydPageTitle { title: "PING"; }
+    CydBackChevron { clicked => { root.closed(); } }
+
+    // ---------------- delivered halo ----------------
+    // ONE static alpha-graded warm ring. The C6's second (`+52 px` at 10 %) is
+    // dropped here for the same two reasons as in lights.slint: at 10 % alpha on
+    // a backlit RGB565 LCD it is ~3 of 31 levels, and it was the element forcing
+    // the hero far enough right to leave no status column.
+    if root.delivered: Rectangle {
+        width: Geom.hero-d + 24px; height: self.width;
+        x: Geom.hero-cx - self.width / 2; y: Geom.hero-cy - self.height / 2;
+        border-radius: self.width / 2;
+        background: Theme.warm.with-alpha(0.20);
+    }
+
+    // ---------------- optimistic "sent" ring ----------------
+    if root.state == 1: Rectangle {
+        width: Geom.hero-d + 36px; height: self.width;
+        x: Geom.hero-cx - self.width / 2; y: Geom.hero-cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        border-color: Theme.accent;
+    }
+
+    // ---------------- hero ping button ----------------
+    button := Rectangle {
+        width: Geom.hero-d; height: Geom.hero-d;
+        x: Geom.hero-cx - self.width / 2; y: Geom.hero-cy - self.height / 2;
+        border-radius: self.width / 2;
+
+        // Pressed = FULL INVERT to solid accent. At rest: warm-glow fill once
+        // delivered, panel + accent edge while armed, muted line-border with the
+        // mesh off.
+        background: ta.pressed ? Theme.accent
+            : (root.delivered ? Theme.warm : Theme.panel);
+        border-width: 3px;
+        border-color: ta.pressed ? Theme.accent
+            : (root.delivered ? Theme.warm
+            : (root.mesh-on ? Theme.accent : Theme.line));
+        opacity: root.mesh-on ? 1.0 : 0.4;
+
+        // Glyph ink: dark on the bright pressed/delivered fills (palette
+        // contract: on-accent reads on accent AND warm in all 4 schemes).
+        property <color> g: (ta.pressed || root.delivered) ? Theme.on-accent : Theme.soft;
+
+        // Sparkle-ripple glyph, redrawn at 0.65 scale: one ring, a bright core,
+        // three satellite sparks. Deliberately distinct from Hunt's concentric
+        // target and from both bulbs — off-centre sparks, filled core. The
+        // embedded font has no emoji, so every icon in this UI is rectangles.
+        Rectangle { // outer ripple ring
+            x: 42px; y: 18px; width: 47px; height: 47px; border-radius: 23.5px;
+            border-width: 2px; border-color: button.g.with-alpha(0.55);
+        }
+        Rectangle { // core
+            x: 57px; y: 34px; width: 16px; height: 16px; border-radius: 8px;
+            background: (ta.pressed || root.delivered) ? button.g : Theme.warm;
+        }
+        Rectangle { // spark NE
+            x: 88px; y: 16px; width: 6px; height: 6px; border-radius: 3px;
+            background: button.g.with-alpha(0.9);
+        }
+        Rectangle { // spark NW
+            x: 36px; y: 16px; width: 5px; height: 5px; border-radius: 2.5px;
+            background: button.g.with-alpha(0.6);
+        }
+        Rectangle { // spark SE
+            x: 92px; y: 60px; width: 4px; height: 4px; border-radius: 2px;
+            background: button.g.with-alpha(0.5);
+        }
+        // Action word inside the hero, under the glyph.
+        Text {
+            x: 4px; y: 73px;
+            width: parent.width - 8px;
+            horizontal-alignment: center;
+            text: root.delivered ? "DELIVERED" : "PING";
+            color: button.g;
+            font-size: 18px; font-weight: 700; letter-spacing: 2px;
+        }
+        Text {
+            x: 8px; y: 98px;
+            width: parent.width - 16px;
+            horizontal-alignment: center; overflow: elide;
+            text: !root.mesh-on ? "mesh is off"
+                : (root.peer == "" ? "THE FLEET" : root.peer);
+            color: button.g.with-alpha(0.9);
+            font-size: Geom.t-caption; font-weight: 600; letter-spacing: 1px;
+        }
+
+        // Send gate: mesh must be on, and neither mid-flight nor recharging — a
+        // dead-looking press that secretly queues would be dishonest.
+        ta := TouchArea {
+            enabled: root.mesh-on && !root.cooling && root.state != 1;
+            clicked => { root.send(); }
+        }
+    }
+
+    // ---------------- target line (status column) ----------------
+    // One box for both states, so the name cannot shift between them. 30 -> 22
+    // px, matching lights.slint's room name — these two pages are one unit down
+    // to their type, not just their geometry.
+    Text {
+        x: Geom.hero-col-x; y: 44px;
+        width: Geom.hero-col-w;
+        horizontal-alignment: center; overflow: elide;
+        text: !root.mesh-on ? "MESH IS OFF"
+            : (root.state == 2 ? root.result
+            : (root.peer == "" ? "THE FLEET" : root.peer));
+        color: !root.mesh-on ? Theme.soft
+            : (root.state == 2 ? Theme.warm : Theme.ink);
+        font-size: 22px; font-weight: 700;
+    }
+
+    // ---------------- caption / feedback line ----------------
+    // One line, priority: mesh hint > sent > delivered > no-reply > idle. Wraps,
+    // for the same reason lights.slint's does: "enable MESH in Settings › Radios"
+    // is 32 characters against a 136 px column, and eliding an instruction to
+    // "enable MESH in Set…" removes the instruction.
+    Text {
+        x: Geom.hero-col-x; y: 76px;
+        width: Geom.hero-col-w;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+        text: !root.mesh-on ? "enable MESH in Settings \u{203a} Radios"
+            : (root.state == 1 ? "sending\u{2026}"
+            : (root.state == 2 ? "delivered \u{2713}"
+            : (root.state == 3 ? "no reply \u{2014} maybe out of range"
+            : (root.peer == "" ? "listening for the fleet\u{2026}"
+            : "\{root.peer} is in range"))));
+        color: !root.mesh-on ? Theme.warn
+            : (root.state == 1 ? Theme.accent
+            : (root.state == 2 ? Theme.warm
+            : (root.state == 3 ? Theme.dim
+            : (root.peer == "" ? Theme.faint : Theme.dim))));
+        font-size: Geom.t-caption; letter-spacing: 1px;
+    }
+
+    // ---------------- cooldown recharge sweep ----------------
+    // Etiquette (3 s between pings): a subtle accent2 fill sweeps the track
+    // left→right while the hero recharges. `visible:`-gated + resident (the
+    // shade.slint ROM idiom); the 2.9 s width tween is a Slint property anim
+    // triggered by the `cooling` flip — Rust owns only the boolean.
+    sweep := Rectangle {
+        visible: root.cooling;
+        x: Geom.hero-col-x + (Geom.hero-col-w - 100px) / 2; y: 160px;
+        width: 100px; height: 4px; border-radius: 2px;
+        background: Theme.track;
+        property <float> p: root.cooling ? 1.0 : 0.0;
+        animate p { duration: 2900ms; easing: linear; }
+        Rectangle {
+            x: 0; y: 0;
+            width: parent.width * sweep.p; height: parent.height;
+            border-radius: 2px;
+            background: Theme.accent2.with-alpha(0.8);
+        }
+    }
+}
+
+// ============================================================================
+// The receiver magic (#35): sender-sigil greeting over a scrim, rings expanding
+// in the accent colour. Created `lit:false` (rings small + bright, nothing moving
+// on the wake frame); Rust flips `lit` on the next render ticks — each flip tweens
+// `p`, so the rings breathe out / in / out across the ~4 s window. Tap anywhere
+// dismisses early.
+//
+// This is the only component in the CYD set that is CENTRED on the panel rather
+// than composed into columns, and deliberately so: it is not a page, it is an
+// interruption. A greeting that arrives in a layout looks like a screen you
+// navigated to.
+// ============================================================================
+export component PingPulse {
+    in property <string> from: "";
+    in property <bool> lit: false;
+    callback dismissed();
+
+    // 🟥 NO TWEEN. `p` is a HARD two-state swap, not an animation.
+    //
+    // The C6 tweens this over 1100 ms and calls itself the sanctioned exception —
+    // *"a notification bloom, not press feedback"*. That exception does not
+    // survive this panel's display link. The outer ring's bounding box at full
+    // travel is 220x220: **220 of the ~117 full-width rows a 30 ms paint can
+    // afford**, on every frame of a 1100 ms tween. It is the single most
+    // expensive motion the port inherited.
+    //
+    // So `p` flips between 0 and 1 with no `animate`, which is exactly what the
+    // design spec already demands of every press in this UI: *"at 6-11 fps a
+    // tween yields 0-1 intermediate frames and queues wasted full repaints."*
+    // The bloom does not disappear — Rust's `tick_ping_pulse` already flips `lit`
+    // SEVERAL times across the ~4 s window ("breathe out / in / out"), so what
+    // was a tween becomes three or four distinct hard-cut frames. A stepped
+    // bloom, at a cost the link can actually serve.
+    //
+    // ⚠️ FLAGGED FOR THE FIRMWARE LANE, because layout cannot fix it: this pulse
+    // blooms over EVERYTHING but AOD, which includes story PLAYBACK. Even as
+    // hard cuts, a >117-row repaint during playback overruns the 48 ms audio DMA
+    // ring — the exact failure `PaintGate` exists to prevent, arriving from
+    // outside the page it guards. The fix is to SUPPRESS or DEFER the pulse while
+    // `story-playing`, in `tick_ping_pulse`. Not doable here: this component
+    // cannot see playback state, and adding a property to see it would break the
+    // 223-member parity with the C6 root.
+    property <float> p: root.lit ? 1.0 : 0.0;
+
+    // Ring centre. cy110 is the value that lands the outer ring's FULL travel
+    // exactly inside the panel (110 ± 110 = y0..220) — see the header on why the
+    // C6's 380 px ring could not survive here.
+    property <length> cx: root.width / 2;
+    property <length> cy: 110px;
+
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+
+    // ---------------- expanding rings ----------------
+    // Two staggered accent rings grow from the core and thin out as they travel
+    // (opacity falls with p) — the ping crossing the air.
+    Rectangle {
+        width: 70px + root.p * 150px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 3px;
+        border-color: Theme.accent;
+        opacity: 0.9 - root.p * 0.65;
+    }
+    Rectangle {
+        width: 40px + root.p * 110px; height: self.width;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: self.width / 2;
+        border-width: 2px;
+        border-color: Theme.accent2;
+        opacity: 0.8 - root.p * 0.55;
+    }
+    // Static core halo behind the sparkle.
+    Rectangle {
+        width: 90px; height: 90px;
+        x: root.cx - self.width / 2; y: root.cy - self.height / 2;
+        border-radius: 45px;
+        background: Theme.accent-bg;
+    }
+
+    // ---------------- drawn sparkle ----------------
+    // A four-point gold spark: two crossing capsules, a bright core, four
+    // satellite pips at falling alpha. Scaled 0.78 from the C6 so it still reads
+    // as a spark inside the smaller halo.
+    Rectangle { // vertical ray
+        x: root.cx - 3px; y: root.cy - 20px; width: 6px; height: 40px;
+        border-radius: 3px; background: Theme.warm;
+    }
+    Rectangle { // horizontal ray
+        x: root.cx - 20px; y: root.cy - 3px; width: 40px; height: 6px;
+        border-radius: 3px; background: Theme.warm;
+    }
+    Rectangle { // core
+        x: root.cx - 6px; y: root.cy - 6px; width: 12px; height: 12px;
+        border-radius: 6px; background: Theme.warm;
+    }
+    Rectangle { // pip NE
+        x: root.cx + 16px; y: root.cy - 22px; width: 7px; height: 7px;
+        border-radius: 3.5px; background: Theme.warm.with-alpha(0.7);
+    }
+    Rectangle { // pip SW
+        x: root.cx - 23px; y: root.cy + 16px; width: 7px; height: 7px;
+        border-radius: 3.5px; background: Theme.warm.with-alpha(0.7);
+    }
+    Rectangle { // pip NW
+        x: root.cx - 24px; y: root.cy - 24px; width: 5px; height: 5px;
+        border-radius: 2.5px; background: Theme.warm.with-alpha(0.45);
+    }
+    Rectangle { // pip SE
+        x: root.cx + 19px; y: root.cy + 19px; width: 5px; height: 5px;
+        border-radius: 2.5px; background: Theme.warm.with-alpha(0.45);
+    }
+
+    // ---------------- sender ----------------
+    // Below the rings, which pass THROUGH this band as they expand — that
+    // overlap is the effect, not a mistake, and it is what the C6 did too.
+    Text {
+        x: 16px; y: 158px;
+        width: parent.width - 32px;
+        horizontal-alignment: center; overflow: elide;
+        text: root.from;
+        color: Theme.ink;
+        font-size: 30px; font-weight: 700;
+    }
+    Text {
+        x: 16px; y: 196px;
+        width: parent.width - 32px;
+        horizontal-alignment: center;
+        text: "pinged you";
+        color: Theme.soft;
+        font-size: Geom.t-body; letter-spacing: 2px;
+    }
+    Text {
+        x: 16px; y: 218px;
+        width: parent.width - 32px;
+        horizontal-alignment: center;
+        text: "tap to dismiss";
+        color: Theme.faint;
+        font-size: Geom.t-caption; letter-spacing: 1px;
+    }
+
+    TouchArea { clicked => { root.dismissed(); } }
+}

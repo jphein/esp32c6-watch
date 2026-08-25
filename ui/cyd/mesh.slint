@@ -1,0 +1,149 @@
+import { Theme, PeerRow } from "../slint/theme.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle } from "controls_cyd.slint";
+
+// ============================================================================
+// MESH PAGE — the fleet roster, four peers.
+// ============================================================================
+//
+// THE THREE-COLUMN PROBLEM, AND WHY IT WAS ARITHMETIC RATHER THAN TASTE
+// -----------------------------------------------------------------------------
+// The C6 row is 350 px wide and its own comment budgets the columns precisely:
+// name bounded 14..194 (180 px, elided), RSSI right-aligned to 281 with a 14 px
+// gutter, age right-aligned to 336 with a 25 px gutter. Add it up — 180 + 73 +
+// 30 plus gutters — and the row needs about 320 px of content. On a 320 px panel
+// with any side inset at all, it does not fit. This is the one leaf page where
+// the layout spec's warning was that the *columns* cannot be made to work, not
+// that the page is too tall.
+//
+// The fix is not narrower columns, it is smaller type in the two columns that
+// are FORMATTED BY RUST and therefore have known worst cases:
+//
+//   age   "999s"      13 px  ->  ~26 px, right-anchored 10 px in   (268..292)
+//   rssi  "-100 dBm"  13 px  ->  ~56 px, right-anchored 44 px in   (204..260)
+//   name  elided at 178 px, 15 px                                  ( 12..190)
+//
+// 304 px row, 14 px gutter after the name, 8 px between rssi and age. Every
+// column keeps its worst case; nothing is truncated that was not already elided.
+//
+// FOUR PEERS, NOT SEVEN — AND THAT IS A PRODUCT CALL, NOT A LAYOUT ONE
+// -----------------------------------------------------------------------------
+// `Geom.max-peers` = 4 (JP's default, 2026-08-24). Seven 38 px rows need 284 px;
+// four 34 px rows need 148 and leave room for the self-banner. Reducing a
+// repeater's visible count is always safe on this renderer — it is going UP that
+// is unbounded — so 4 is a number to tune, not a boundary to respect.
+//
+// ⚠️ Unlike the C6 page, the row count here is enforced by `visible: i < max`
+// rather than by the model's length, because the model is Rust's and may be
+// longer. A truncation the layout imposes has to be visible IN the layout.
+//
+// ONE CAPTION REMOVED FOR BEING POSSIBLY FALSE
+// -----------------------------------------------------------------------------
+// The empty state said "listening ch6". On the C6 that is true. On this board it
+// is an open question — the whole reason the C5 is interesting to the fleet is
+// that it may run ESP-NOW on 2.4 GHz while the STA sits on 5 GHz, which would
+// break the co-channel constraint the "ch6" in that string encodes. A hardcoded
+// channel number that might be wrong is worse than no channel number, for the
+// same reason as the battery pill: a status string is trusted.
+// ============================================================================
+
+export component MeshPage {
+    in property <string> self-text;   // "#176 Adjective Noun"
+    in property <[PeerRow]> rows;
+
+    CydPageTitle { title: "MESH"; }
+
+    // Self banner. Fixed-width centring box rather than an intrinsic-width
+    // read — this string changes at boot and never again, but the cheap form is
+    // free and identical, so it is the default for new centring.
+    Text {
+        x: Geom.content-x;
+        y: 38px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: root.self-text;
+        color: Theme.accent;
+        font-size: 20px;
+        font-weight: 600;
+    }
+
+    // Roster: 4 rows of 34 with 4 px gaps, y70..218.
+    //
+    // Absolute placement inside the repeater rather than a VerticalLayout. Every
+    // row is three Texts, which is precisely the case a layout manager measures
+    // and the case the codebase spent measured effort de-measuring.
+    for peer[i] in root.rows: Rectangle {
+        visible: i < Geom.max-peers;
+        x: Geom.content-x;
+        y: 70px + i * 38px;
+        width: Geom.content-w;
+        height: Geom.row-h;
+        border-radius: 8px;
+        background: Theme.panel;
+
+        Text {
+            x: 12px;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            width: 178px;
+            overflow: elide;
+            text: peer.name; color: Theme.ink; font-size: Geom.t-body;
+        }
+        Text {
+            x: parent.width - self.width - 44px;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: peer.rssi; color: Theme.soft; font-size: Geom.t-label;
+        }
+        Text {
+            x: parent.width - self.width - 10px;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: peer.age; color: Theme.dim; font-size: Geom.t-label;
+        }
+    }
+
+    // Overflow marker: the roster may be longer than the rows shown, and a
+    // truncated list that does not say so is a lie of omission. Sits in the gap
+    // below the last row.
+    Text {
+        visible: root.rows.length > Geom.max-peers;
+        x: Geom.content-x;
+        y: 220px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "+\{root.rows.length - Geom.max-peers} more heard";
+        color: Theme.faint;
+        font-size: Geom.t-caption;
+        letter-spacing: 2px;
+    }
+
+    // Empty state, centred in the roster void. `visible:`-gated rather than
+    // `if`-gated (the C6 uses `if` here): this is two Texts, not a cluster, and
+    // an `if` costs a ~3-6 KB generated inner component to save two glyph runs.
+    Text {
+        visible: root.rows.length == 0;
+        x: Geom.content-x;
+        y: 108px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "NO FLEET HEARD";
+        color: Theme.faint;
+        font-size: 18px;
+        letter-spacing: 3px;
+    }
+    Text {
+        visible: root.rows.length == 0;
+        x: Geom.content-x;
+        y: 142px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: "listening for the fleet";
+        color: Theme.dim;
+        font-size: Geom.t-body;
+        letter-spacing: 2px;
+    }
+}

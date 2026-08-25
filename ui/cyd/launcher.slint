@@ -1,0 +1,216 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PressTile, IconButton } from "../slint/controls.slint";
+import { LauncherTile, AppIcon } from "../slint/launcher.slint";
+import { Geom } from "geom.slint";
+import { CydEyebrow, CydPageTitle } from "controls_cyd.slint";
+
+// Re-export the tile struct. It is IMPORTED, not redeclared: `slint_shell.rs`
+// constructs `LauncherTile` from the app registry, and two `export struct
+// LauncherTile` declarations reachable from one root would collide. Same reason
+// `AppIcon` is imported rather than copied — 17 hand-drawn vector glyphs at a
+// fixed 46x46 with no page-absolute geometry, shared with the app switcher so an
+// app looks identical in both surfaces. Duplicating them here would mean every
+// new app needs its icon drawn twice, and the second copy would rot.
+export { LauncherTile }
+
+// ============================================================================
+// LAUNCHER — 4x2 landscape grid, 8 slots per page.
+// ============================================================================
+//
+// THE INTERACTION IS UNCHANGED. ONLY THE GRID MOVED.
+// -----------------------------------------------------------------------------
+// This looked like the most expensive page in the port and is one of the
+// cheapest, because the hard part was already done: it PAGINATES (Rust flips
+// pages in `slint_shell::handle_touch`, one hard-cut full-frame render) and it
+// is DATA-DRIVEN (`build_launcher_pages` flattens the registry into
+// `page-count × slots` entries padded with `present:false`, and the paging
+// machinery already handles an arbitrary page count). So a 3x3 -> 4x2 change is
+// the slot constant plus the tile geometry — no new interaction code.
+//
+// And pagination is not a preference to revisit. Scrolling was tried and
+// rejected with numbers: the old Flickable dirtied the whole viewport every
+// frame, giving ~100 ms full-frame renders and a 6-10 fps scroll. It defeats the
+// dirty-region partial rendering the entire strip architecture depends on, which
+// is why no amount of tuning recovers it.
+//
+// WHY EIGHT SLOTS, ARITHMETICALLY — RE-RUN AFTER MAZE WAS DROPPED
+// -----------------------------------------------------------------------------
+// Rust chunks BY SECTION (`build_launcher_pages`): one page per section, a
+// section larger than a page splits into repeated pages, and each page is padded
+// to the slot count with `present:false`. With Voice, Sound and Maze all dropped
+// (no mic, no IMU) the registry is:
+//
+//   GAMES   6  (Snake, World Snake, 2048, Tetris, Flappy Bird, Hunt)
+//   SYSTEM  7  (Settings, WLED, Energy, Climate, Theme, Lights, Ping)
+//   AUDIO   1  (Story)
+//
+// **Maze's removal does not change the pagination**, and it is worth saying why
+// rather than just re-asserting 8: the binding section was never GAMES, it is
+// SYSTEM at 7. Anything below 7 slots chunks SYSTEM into two pages.
+//
+//   8 slots -> 3 pages (GAMES 6/8, SYSTEM 7/8, AUDIO 1/8)
+//   7 slots -> 3 pages as well — same count, no gain
+//   6 slots -> 4 pages (SYSTEM splits)
+//
+// So 7 would page identically to 8 and buy nothing, because **the tile size is
+// set by the GRID, not by the slot count**: 4 columns is what makes a tile 70 px
+// wide, and 2 rows of 78 is what holds a 46x46 `AppIcon` plus two label lines. A
+// 4x2 grid with 7 slots is a 70 px tile with a hole in it. 8 stays correct.
+//
+// 🔶 A consequence worth flagging rather than fixing here: `build_launcher_pages`
+// emits sections in the order `[Audio, Games, System]`, and the C6 comment
+// explains why AUDIO leads — *"so Voice/Sound are reachable the instant the
+// launcher opens."* Both are now dropped, so **page 0 is a single Story tile in
+// an 8-slot grid**: the launcher opens on a nearly-empty page for a reason that
+// no longer exists. See PROPOSED-board-ui-consts.md — the fix is a one-line
+// reorder in Rust, not a layout change.
+//
+// ⚠️ TWO-SIDED CONSTANT. `Geom.launcher-slots` here and `LAUNCHER_PAGE_SLOTS`
+// in `slint_shell.rs` (plus its chunking) are halves of one number. The grid
+// indexes `tiles[page * slots + slot]`, so if they disagree the launcher does
+// not error — it launches the WRONG APP. See PROPOSED-board-ui-consts.md.
+//
+// THE LABELS WRAP, AND THAT IS THE WHOLE REASON THE GRID FITS
+// -----------------------------------------------------------------------------
+// Four columns in 304 px gives a 70 px tile, and `AppIcon` is a fixed 46x46
+// whose seventeen glyphs are hand-placed rectangles — it cannot be scaled
+// without redrawing all of them. So the tile is as narrow as the icon allows and
+// the label gets 62 px.
+//
+// At 13 px that elides "World Snake" and "Flappy Bird" — both 11 characters,
+// ~77 px. (It also elided "Maze (Tilt)" before Maze was dropped, which is why
+// the case for wrapping was originally three names rather than two.) The C6
+// elided too, at 106 px, by its own comment — but two of the six surviving games
+// is not an outlier, and "no truncation mid-word" is a house rule.
+//
+// So the label is 12 px and WRAPS to two lines: "World / Snake", "Flappy /
+// Bird". Every remaining registry name fits in two lines of 62 px, and the tile
+// grew 74 -> 78 px to hold the second line. Nothing is truncated.
+// ============================================================================
+
+// One app tile: icon over a two-line label. Carries its launch idx. PressTile
+// (Recipe A) supplies the feedback — fill lights to accent-bg and the border
+// ignites in the tile's OWN accent on finger-down, a hard 1-frame swap with no
+// animation (at this renderer's frame budget a tween yields 0-1 intermediate
+// frames and queues wasted full repaints).
+component AppTile {
+    in property <string> name;
+    in property <color> accent;
+    in property <int> icon-id;
+    in property <int> idx;
+    callback launch(int);
+    PressTile {
+        ignite: root.accent;
+        clicked => { root.launch(root.idx); }
+        AppIcon {
+            x: (parent.width - self.width) / 2;
+            y: 4px;
+            id: root.icon-id;
+            tint: root.accent;
+        }
+        Text {
+            x: 4px;
+            y: 52px;
+            width: parent.width - 8px;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            text: root.name;
+            color: Theme.ink;
+            font-size: Geom.t-caption;
+            font-weight: 600;
+        }
+    }
+}
+
+export component LauncherOverlay {
+    callback launch-app(int);
+    // Flat page-major tile list from Rust (build_launcher_pages): page-count
+    // pages × 8 slots, padded with present:false.
+    in property <[LauncherTile]> tiles: [];
+    // One section title per page ("AUDIO" / "GAMES" / "SYSTEM").
+    in property <[string]> titles: [];
+    in property <int> page-count: 1;
+    // Current page. Flipped by the Rust shell on swipe up/down (handle_touch)
+    // and by the indicator dots below; two-way bound through WatchShell.
+    in-out property <int> page: 0;
+
+    // 4x2 grid. 4 cols of 70 + 3 gutters of 8 = 304 = the content band exactly.
+    // 2 rows of 78 + 1 gutter of 8 = 164, from y34 to y198, leaving the bottom
+    // 42 px for the indicator dots.
+    property <length> tile-w: 70px;
+    property <length> tile-h: 78px;
+    property <length> gutter: 8px;
+
+    // Scrim — the per-scheme token, so Paper gets its warm light scrim instead
+    // of a hardcoded Midnight-dark one. It is 95 % opaque, and the shell hides
+    // the watchface underneath while the launcher is up (#75): buying the ~5 %
+    // ghost cost the whole watchface page in the scene (92 items / 62 glyph
+    // textures / 27 rounded rects on top of the launcher's own), which is what
+    // pushed `PrepareScene`'s doubling Vecs onto the rungs that fail at
+    // 54-66 kB free. To restore the ghost, drop `launcher-open` from `covered`
+    // in shell.slint — and expect the launcher to re-cross those rungs.
+    Rectangle { width: 100%; height: 100%; background: Theme.scrim; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    // Eyebrow and section title share ONE 24 px strip. On the C6 they stacked
+    // (eyebrow y36, title y56) for 54 px of vertical; here the eyebrow is
+    // left-anchored in the strip and the title stays centred, which costs
+    // nothing and reads the same left-to-right.
+    CydEyebrow {
+        x: Geom.safe-side;
+        y: 12px;
+        text: "APPS";
+        tint: Theme.faint;
+    }
+    CydPageTitle { title: root.titles[root.page]; }
+
+    // Current page's tiles: fixed 8-slot grid, pure index math — a page flip
+    // re-binds 8 tiles and renders ONCE (hard cut, no intermediate frames).
+    for slot in 8: Rectangle {
+        x: Geom.content-x + mod(slot, 4) * (root.tile-w + root.gutter);
+        y: Geom.content-y + floor(slot / 4) * (root.tile-h + root.gutter);
+        width: root.tile-w;
+        height: root.tile-h;
+        // `visible:`-gated, not `if`-gated: identical culling (draw AND input)
+        // without the ~3-6 KB generated inner component each `if` costs. The
+        // overlay itself stays `if`-gated in shell.slint, so nothing here is
+        // resident while the launcher is shut.
+        AppTile {
+            visible: root.tiles[root.page * 8 + slot].present;
+            width: 100%; height: 100%;
+            name: root.tiles[root.page * 8 + slot].name;
+            accent: root.tiles[root.page * 8 + slot].accent;
+            icon-id: root.tiles[root.page * 8 + slot].icon-id;
+            idx: root.tiles[root.page * 8 + slot].idx;
+            launch(i) => { root.launch-app(i); }
+        }
+    }
+
+    // Page-indicator dots — the launcher's own; the shell's page rail is gated
+    // off while this overlay is up. Tap advances (wraps), swipe up/down flips.
+    // IconButton supplies the pressed accent-bg halo and the idle dots ignite
+    // while held. Bottom-anchored off `root.height` so it follows an inset
+    // change; 44 px tall for the touch floor with 8 px dots inside it.
+    //
+    // The HorizontalLayout is the sanctioned exception to the no-layout-manager
+    // rule: small, fixed-size, NON-TEXT children. Nothing measurable goes near
+    // a layout manager in this tree.
+    dots := IconButton {
+        x: (parent.width - self.width) / 2;
+        y: root.height - Geom.safe-bottom - 44px;
+        width: 160px;
+        height: 44px;
+        clicked => { root.page = mod(root.page + 1, max(root.page-count, 1)); }
+        HorizontalLayout {
+            x: (parent.width - root.page-count * 8px
+                - (root.page-count - 1) * 10px) / 2;
+            y: (parent.height - 8px) / 2;
+            spacing: 10px;
+            for i in root.page-count: Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: root.page == i ? Theme.accent
+                    : (dots.pressed ? Theme.soft : Theme.line);
+            }
+        }
+    }
+}

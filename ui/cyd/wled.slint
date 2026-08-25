@@ -1,0 +1,117 @@
+import { Theme } from "../slint/theme.slint";
+import { OverlaySwallow, PressTile } from "../slint/controls.slint";
+import { Geom } from "geom.slint";
+import { CydPageTitle, CydBackChevron } from "controls_cyd.slint";
+
+// ============================================================================
+// WLED WiZmote REMOTE — nine tiles, three rows, and landscape is a gift here.
+// ============================================================================
+//
+// This is the page the layout spec called the cheap win, and it is right for a
+// reason worth naming: the WiZmote remote is a GRID OF PEER BUTTONS. Grids do
+// not care which axis is longer, they care about total area — and 320 px of
+// width divides into four columns of 70 where 410 px divided into two of 190.
+// The C6 page needed 82 + 26 + 74 + 74 + 58 px of stacked bands plus gutters
+// (~340 px); the same nine actions fit three 50 px rows here.
+//
+// action-id → WledButton (the wiring contract, unchanged):
+//   0 On · 1 Off · 2 Preset1 · 3 Preset2 · 4 Preset3 · 5 Preset4
+//   6 BrightUp (DIM+) · 7 BrightDown (DIM-) · 8 Night
+//
+// THE GRID
+// -----------------------------------------------------------------------------
+//   y  34..84   ON (148)          | OFF (148)                     ← the pair
+//   y  92..142  P1 | P2 | P3 | P4 (70 each)                       ← presets
+//   y 150..200  DIM- (98) | DIM+ (98) | NIGHT (92)                ← levels
+//   y 210       status / hint line
+//
+// All three rows span the 304 px content band exactly. Every tile is 50 px
+// tall (above the 44 px floor) and at least 70 px wide.
+//
+// THE "PRESETS" EYEBROW BECAME PART OF THE LABELS
+// -----------------------------------------------------------------------------
+// The C6 has a 26 px "PRESETS" caption row above the four numbered tiles. At 240
+// px there is no 26 px band to spend on a caption, and dropping it would leave
+// four tiles reading `1 2 3 4` between ON/OFF and DIM — which is exactly the
+// ambiguity the caption existed to remove. So the labels absorb it: `P1`..`P4`
+// carries the same information inside space already paid for. 22 px is unchanged
+// from the C6 face and `P1` measures ~26 px in a 70 px tile.
+// ============================================================================
+
+// A big finger-tile button. PressTile (Recipe A): fill lights to accent-bg and
+// the border ignites in the tile's own accent on finger-down — a hard 1-frame
+// swap, so every WiZmote send is visibly acknowledged AT THE FINGER, before the
+// "-> ON" status line updates. That matters more than usual here: the send is a
+// fire-and-forget ESP-NOW broadcast with no acknowledgement to wait for, so the
+// press feedback is the only confirmation the UI can honestly give.
+component WledTile {
+    in property <string> label;
+    in property <color> accent;
+    in property <int> act;
+    callback fire(int);
+    PressTile {
+        width: 100%; height: 100%;
+        border-radius: 12px;
+        ignite: root.accent;
+        clicked => { root.fire(root.act); }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            text: root.label;
+            color: root.accent;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+    }
+}
+
+export component WledRemote {
+    callback emit(int);
+    callback close();
+    in property <string> status;   // main.rs sets e.g. "-> On" after a send; "" = idle
+
+    Rectangle { width: 100%; height: 100%; background: Theme.bg; }
+    OverlaySwallow {} // #54: chrome beneath must never be hit-testable
+
+    CydPageTitle { title: "WLED"; }
+    CydBackChevron { clicked => { root.close(); } }
+
+    // --- row 1: the pair ----------------------------------------------------
+    WledTile { x:   8px; y:  34px; width: 148px; height: 50px;
+               label: "ON";  accent: Theme.accent; act: 0; fire(a) => { root.emit(a); } }
+    WledTile { x: 164px; y:  34px; width: 148px; height: 50px;
+               label: "OFF"; accent: Theme.soft;   act: 1; fire(a) => { root.emit(a); } }
+
+    // --- row 2: presets -----------------------------------------------------
+    WledTile { x:   8px; y:  92px; width: 70px; height: 50px;
+               label: "P1"; accent: Theme.accent2; act: 2; fire(a) => { root.emit(a); } }
+    WledTile { x:  86px; y:  92px; width: 70px; height: 50px;
+               label: "P2"; accent: Theme.accent2; act: 3; fire(a) => { root.emit(a); } }
+    WledTile { x: 164px; y:  92px; width: 70px; height: 50px;
+               label: "P3"; accent: Theme.accent2; act: 4; fire(a) => { root.emit(a); } }
+    WledTile { x: 242px; y:  92px; width: 70px; height: 50px;
+               label: "P4"; accent: Theme.accent2; act: 5; fire(a) => { root.emit(a); } }
+
+    // --- row 3: levels ------------------------------------------------------
+    WledTile { x:   8px; y: 150px; width: 98px; height: 50px;
+               label: "DIM \u{2212}"; accent: Theme.warm; act: 7; fire(a) => { root.emit(a); } }
+    WledTile { x: 114px; y: 150px; width: 98px; height: 50px;
+               label: "DIM +";        accent: Theme.warm; act: 6; fire(a) => { root.emit(a); } }
+    WledTile { x: 220px; y: 150px; width: 92px; height: 50px;
+               label: "NIGHT";        accent: Theme.soft; act: 8; fire(a) => { root.emit(a); } }
+
+    // Feedback / hint line. Bottom-anchored so it follows the inset.
+    Text {
+        x: Geom.content-x;
+        y: root.height - Geom.safe-bottom - 22px;
+        width: Geom.content-w;
+        horizontal-alignment: center;
+        text: root.status == "" ? "WiZmote \u{00b7} linked remote" : root.status;
+        color: root.status == "" ? Theme.faint : Theme.accent;
+        font-size: Geom.t-label;
+        letter-spacing: 1px;
+    }
+}
