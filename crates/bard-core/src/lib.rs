@@ -22,3 +22,7 @@ pub mod nano_llm;
 pub mod persona;
 pub mod textflow;
 pub mod tokenizer;
+
+/// The flash-resident SBRD story model (277 KB). On device this bloats the
+/// image only when a consumer includes it; the firmware's `bard` feature does.
+pub const MODEL: &[u8] = include_bytes!("../model/stories260K-q8.bin");

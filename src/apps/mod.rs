@@ -11,6 +11,8 @@ pub mod flappy;
 pub mod maze;
 pub mod registry;
 pub mod session;
+#[cfg(feature = "bard")]
+pub mod bard;
 
 /// Input state passed to apps each frame
 pub struct AppInput {

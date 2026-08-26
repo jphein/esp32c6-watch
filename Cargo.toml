@@ -89,6 +89,11 @@ mesh-ota = ["dep:ota-proto", "dep:sha2"]
 # are byte-identical. Pixel-correctness needs a matrix on the bench; the math
 # + wire are host-tested in cast-core.
 cast = ["dep:cast-core"]
+# bard (#300): the on-device SBRD storyteller. Opt-in — the 277 KB model
+# blob + inference land in the image only with this feature. Default off, so
+# shipping C6/C5/S3 builds are byte-identical; on-device generation is
+# proven at a tether (the pure engine is host-tested, 40 golden cases).
+bard = ["dep:bard-core"]
 
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.
@@ -296,6 +301,7 @@ mesh-elect = { path = "crates/mesh-elect" }
 mesh-flood = { path = "crates/mesh-flood" }
 ota-proto = { path = "crates/ota-proto", optional = true }
 cast-core = { path = "crates/cast-core", optional = true }
+bard-core = { path = "crates/bard-core", optional = true }
 # mesh-OTA readback verify (ota_mesh.rs); same pin as ota-proto's.
 sha2 = { version = "0.10", default-features = false, optional = true }
 # #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —

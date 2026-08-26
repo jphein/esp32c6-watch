@@ -467,6 +467,27 @@ fn handle_line(bytes: &[u8]) {
             );
         }
         "perf" => report_perf(),
+        #[cfg(feature = "bard")]
+        "bard" => {
+            // bard [prompt words...] — generate a short story on-device and
+            // print it. Proves the SBRD engine fits + runs on real silicon.
+            let rest = it.clone().collect::<heapless::Vec<&str, 16>>();
+            let mut prompt: heapless::String<128> = heapless::String::new();
+            for (i, w) in rest.iter().enumerate() {
+                if i > 0 {
+                    let _ = prompt.push(' ');
+                }
+                let _ = prompt.push_str(w);
+            }
+            let p = if prompt.is_empty() {
+                "Once upon a time"
+            } else {
+                prompt.as_str()
+            };
+            // Seed varies per call so repeated invocations differ; derived
+            // from uptime is unavailable here, so a fixed-but-distinct seed.
+            crate::apps::bard::generate(p, 0xC0FFEE, 160);
+        }
         #[cfg(feature = "cast")]
         "cast" => {
             // cast <a.b.c.d> <w> <h>  |  cast off
