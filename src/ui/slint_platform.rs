@@ -326,6 +326,11 @@ impl Drop for SingleLineFlusher<'_, '_> {
 pub static RDBG_LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 #[cfg(feature = "touch-telemetry")]
 pub static RDBG_SPANS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Paints since boot. Read by the MAIN-LOOP heartbeat, which must be able to
+/// report progress even when `render()` is never called — see the heartbeat in
+/// main.rs for why the previous in-render version was blind by construction.
+#[cfg(feature = "touch-telemetry")]
+pub static RDBG_PAINTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 impl slint::platform::software_renderer::LineBufferProvider
     for &mut SingleLineFlusher<'_, '_>

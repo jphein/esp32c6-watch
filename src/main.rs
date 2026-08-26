@@ -2080,6 +2080,10 @@ async fn main(_spawner: Spawner) -> ! {
     // the poll gate. Replaces a `was_touching: bool` that only ever held the
     // previous frame's IRQ level, which made the tail exactly one poll long.
     let mut touch_tail: u8 = 0;
+    // Loop-iteration counter for the [RENDER-DBG] heartbeat. Lives out here so it
+    // ticks even when render() is skipped entirely — see the heartbeat itself.
+    #[cfg(feature = "touch-telemetry")]
+    let mut rdbg_ticks: u32 = 0;
 
     // Radio state (#53): user intent vs. radio truth lives in net_task now —
     // the boot auto-connect intent rode the spawn's `boot_connect` arg. Main
@@ -3227,6 +3231,34 @@ async fn main(_spawner: Spawner) -> ! {
             touch_tail = touch_tail.saturating_sub(1);
         }
         let touch_active = screen_state >= 2 && (int_low || touch_tail > 0);
+        // ★ LOOP-SIDE HEARTBEAT — deliberately NOT inside `render()`.
+        //
+        // The previous version lived in render() and was blind by construction:
+        // render() is not called at all while `screen_state < 2`, and in AOD it is
+        // called only on a minute change, which is itself gated on a time source
+        // this board does not have without a radio (no RTC — every I2C device is
+        // `FakeI2c`). So the counter froze at exactly the moment silence needed
+        // explaining, and 2.5 minutes of a live board produced no lines at all.
+        //
+        // Here it runs once per loop iteration unconditionally, and it prints the
+        // REASON for silence rather than leaving it to be guessed: screen_state
+        // says whether render was even eligible, paints says whether any happened.
+        // Silence in the log now means the log was lost — nothing else.
+        #[cfg(feature = "touch-telemetry")]
+        {
+            rdbg_ticks = rdbg_ticks.wrapping_add(1);
+            if rdbg_ticks % 128 == 0 {
+                println!(
+                    "[RENDER-DBG] tick x{} screen_state={} render_eligible={} paints={} page={}",
+                    rdbg_ticks,
+                    screen_state,
+                    screen_state >= 2,
+                    crate::ui::slint_platform::RDBG_PAINTS
+                        .load(core::sync::atomic::Ordering::Relaxed),
+                    shell.page(),
+                );
+            }
+        }
         if touch_active {
             // The bus argument is the CYD's shared-SPI reality made explicit:
             // borrowing the display for the call is what makes "never poll touch

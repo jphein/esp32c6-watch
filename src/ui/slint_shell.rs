@@ -465,6 +465,12 @@ pub struct ShellUi {
     /// through `ping_pulse_stage` so steady phases set no properties.
     ping_pulse_armed_at: Option<embassy_time::Instant>,
     ping_pulse_stage: u8,
+    /// DIAGNOSTIC: when the last actual paint happened, so `[RENDER-DBG]` can
+    /// report `dt` in milliseconds instead of leaving us to multiply a frame
+    /// count by a guessed per-frame cost. A field rather than a static because
+    /// `render` already has `&mut self` and one owner beats a global.
+    #[cfg(feature = "touch-telemetry")]
+    rdbg_last_paint: Option<embassy_time::Instant>,
     /// Rust-side mirror of the last `set_story_playback(.., playing)` push.
     /// Exists so the ping pulse can refuse to arm during playback WITHOUT
     /// reading a UI property (the scene may be suspended). During playback
@@ -544,6 +550,8 @@ impl ShellUi {
             hold_fired: false,
             ping_pulse_armed_at: None,
             ping_pulse_stage: 0,
+            #[cfg(feature = "touch-telemetry")]
+            rdbg_last_paint: None,
             story_playing: false,
         }
     }
@@ -838,7 +846,11 @@ impl ShellUi {
             // swipes and Right closes it (Flag idiom; main.rs owns nothing
             // here — the underlying app_state/WiFi holds are untouched).
             if ui.get_power_menu_open() {
-                shell_dbg!("[SHELL-DBG] SWALLOWED by power_menu");
+                if direction == SwipeDirection::Right {
+                    shell_dbg!("[SHELL-DBG] CLOSED power_menu by Right");
+                } else {
+                    shell_dbg!("[SHELL-DBG] SWALLOWED by power_menu");
+                }
                 if direction == SwipeDirection::Right {
                     ui.set_power_menu_open(false);
                 }
@@ -898,7 +910,15 @@ impl ShellUi {
             // swipes. Left starting ON a card dismisses it (the slot IS the
             // ring index); Up ("push it back up") or Right closes.
             if ui.get_shade_open() {
-                shell_dbg!("[SHELL-DBG] SWALLOWED by shade");
+                // CLOSED vs SWALLOWED: a Right/Up here CLOSES the shade — the gesture
+                // was consumed WITH EFFECT and did what the user wanted. Logging it
+                // as "swallowed" asserted a loss that never happened and inflated
+                // every `grep -c SWALLOWED` by one per close.
+                if matches!(direction, SwipeDirection::Right | SwipeDirection::Up) {
+                    shell_dbg!("[SHELL-DBG] CLOSED shade by {:?}", direction);
+                } else {
+                    shell_dbg!("[SHELL-DBG] SWALLOWED by shade");
+                }
                 match direction {
                     SwipeDirection::Right | SwipeDirection::Up => ui.set_shade_open(false),
                     SwipeDirection::Left => {
@@ -923,7 +943,11 @@ impl ShellUi {
             // the loop owns the session list and rebuilds the cards in place.
             // Right (the universal close) or Down ("push it back down") closes.
             if ui.get_switcher_open() {
-                shell_dbg!("[SHELL-DBG] SWALLOWED by switcher");
+                if direction == SwipeDirection::Right {
+                    shell_dbg!("[SHELL-DBG] CLOSED switcher by Right");
+                } else {
+                    shell_dbg!("[SHELL-DBG] SWALLOWED by switcher");
+                }
                 match direction {
                     SwipeDirection::Right | SwipeDirection::Down => {
                         ui.set_switcher_open(false)
@@ -946,7 +970,11 @@ impl ShellUi {
             // hard-cut full-frame render, replacing the 6-10fps Flickable
             // scroll that dirtied the whole viewport per frame.
             if ui.get_launcher_open() {
-                shell_dbg!("[SHELL-DBG] SWALLOWED by launcher");
+                if direction == SwipeDirection::Right {
+                    shell_dbg!("[SHELL-DBG] CLOSED launcher by Right");
+                } else {
+                    shell_dbg!("[SHELL-DBG] SWALLOWED by launcher (page flip or no-op)");
+                }
                 match direction {
                     SwipeDirection::Right => ui.set_launcher_open(false),
                     SwipeDirection::Up => {
@@ -997,6 +1025,10 @@ impl ShellUi {
                 {
                     self.hint_seen_up = true;
                     ui.set_hint_up(false);
+                    // OPEN-ACTION. Printed nothing before, so the event that CAUSES
+                    // every later swallow was invisible while all its consequences
+                    // were labelled.
+                    shell_dbg!("[SHELL-DBG] OPENED launcher (edge Up start_y={})", swipe_start_y);
                     ui.set_launcher_open(true)
                 }
                 // Notification shade (#32): a top-edge swipe down pulls it
@@ -1004,6 +1036,9 @@ impl ShellUi {
                 SwipeDirection::Down if swipe_start_y <= EDGE_TOP_Y => {
                     self.hint_seen_down = true;
                     ui.set_hint_down(false);
+                    // OPEN-ACTION — the 13th path, and the most important one to see:
+                    // opening the shade is what causes every subsequent swallow.
+                    shell_dbg!("[SHELL-DBG] OPENED shade (top-edge Down start_y={})", swipe_start_y);
                     self.req.open_shade.set(true);
                 }
                 _ => {}
@@ -2263,29 +2298,37 @@ impl ShellUi {
         });
         // BOUNDED ON PURPOSE. Renders are attempted every loop iteration, so an
         // unconditional line here would bury the [SHELL-DBG] stream it has to be
-        // correlated against. Print only on an ACTUAL paint — carrying how many
-        // frames were skipped since the last one — plus a rare heartbeat so that
-        // "no paints at all" is distinguishable from "the log was lost".
+        // correlated against. Print only on an ACTUAL paint.
+        //
+        // ★ `dt` IS MEASURED, NOT DERIVED. Twice now a burst's DURATION was
+        // inferred by multiplying a frame COUNT by a guessed per-frame cost, and
+        // twice the guess manufactured agreement with the wrong hypothesis: a
+        // 350 ms estimate fingered the clock animate (right answer, wrong
+        // reasoning) and a 480 ms estimate fingered six opacity blocks that turned
+        // out to be edge-guarded and constant. A guessed conversion factor can
+        // agree with any hypothesis in range. So print the milliseconds.
+        //
+        // The heartbeat that used to live here has MOVED to the main loop. It was
+        // blind by construction: `render()` is not called at all when
+        // screen_state < 2, and in AOD it is called only on a minute change which
+        // is itself gated on a time source this board does not have without a
+        // radio. So the counter froze exactly when silence needed explaining.
         #[cfg(feature = "touch-telemetry")]
-        {
+        if _drew {
             use core::sync::atomic::Ordering::Relaxed;
-            static IDLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            if _drew {
-                esp_println::println!(
-                    "[RENDER-DBG] draw=true lines={} spans={} (after {} idle frames)",
-                    crate::ui::slint_platform::RDBG_LINES.load(Relaxed),
-                    crate::ui::slint_platform::RDBG_SPANS.load(Relaxed),
-                    IDLE.swap(0, Relaxed),
-                );
-            } else {
-                let n = IDLE.fetch_add(1, Relaxed) + 1;
-                if n % 512 == 0 {
-                    esp_println::println!(
-                        "[RENDER-DBG] draw=false x{} (window never dirty since last paint)",
-                        n
-                    );
-                }
-            }
+            let now = embassy_time::Instant::now();
+            let dt_ms = self
+                .rdbg_last_paint
+                .map(|t| (now - t).as_millis())
+                .unwrap_or(0);
+            self.rdbg_last_paint = Some(now);
+            crate::ui::slint_platform::RDBG_PAINTS.fetch_add(1, Relaxed);
+            esp_println::println!(
+                "[RENDER-DBG] draw=true lines={} spans={} dt={}ms",
+                crate::ui::slint_platform::RDBG_LINES.load(Relaxed),
+                crate::ui::slint_platform::RDBG_SPANS.load(Relaxed),
+                dt_ms,
+            );
         }
     }
 }
