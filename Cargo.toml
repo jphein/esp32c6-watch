@@ -116,6 +116,21 @@ has-5ghz-wifi = []
 # flusher (83c8491) precisely so the fix can be CONFIRMED from ordinary use
 # instead of argued about. Costs nothing when off (ZST + empty methods).
 touch-telemetry = []
+# Suppress the BOOT WiFi auto-connect. EMERGENCY MEASURE for the deterministic
+# boot-crash loop (Slint dep-node alloc dies at properties.rs:63 during the
+# WiFi-connect heap squeeze, ~15-25 s after every boot). Gives a board that holds
+# uptime so the bench is usable while the region-architecture work is done
+# properly.
+#
+# ★ NOT listed in any board feature, and that is the opposite call from
+# `touch-telemetry` above — deliberately. Telemetry had to survive a forgotten
+# `--features` because an investigation that evaporates answers nothing. This one
+# must EVAPORATE by default: a radio silently staying off in a later image would
+# be a worse bug than the one it works around. Pass it explicitly or don't get it.
+#
+# Costs no OTA on the image that carries it (no radio), which is acceptable only
+# because flashing goes through the serial guard anyway.
+boot-radio-off = []
 
 debug-console = ["dep:embedded-io-async"]
 # `tts` (read notifications aloud) is now ON BY DEFAULT — see `default` above.

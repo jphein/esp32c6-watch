@@ -1860,6 +1860,36 @@ async fn main(_spawner: Spawner) -> ! {
     // scanning, the boot burst, and OTA downloads all run there; main drives
     // it over NetCmd and renders from its published snapshot. `boot_connect`
     // mirrors the old auto-connect intent (creds present and not forced-off).
+    let boot_connect = wifi_has_creds && !watch_cfg.wifi_off;
+    // ⚠️ DIAGNOSTIC (`boot-radio-off`) — EMERGENCY MEASURE, NOT A FIX.
+    //
+    // The board is in a deterministic boot-crash loop: WiFi connect squeezes the
+    // heap and a render-time Slint dep-node alloc dies at
+    // `i-slint-core/properties.rs:63` ("allocation failed"), ~15-25 s after every
+    // boot, because the persisted WiFi intent is ON. This suppresses only the
+    // BOOT auto-connect so the board holds uptime and the bench is usable; the
+    // underlying region-architecture work is its own floor-bracketed campaign.
+    //
+    // It does NOT write config — `watch_cfg` is untouched, so nothing persists
+    // and WiFi can still be enabled deliberately from Settings (which will
+    // re-trigger the crash; that is a chosen act, not every boot).
+    //
+    // ★ Deliberately NOT listed in `board-cyd-c5`, which is the OPPOSITE call
+    // from `touch-telemetry`. That one had to survive a forgotten `--features`
+    // because an investigation that evaporates answers nothing. This one must
+    // EVAPORATE by default: a radio silently staying off in a later image would
+    // be a far worse bug than the one it works around. Pass it explicitly or
+    // don't get it.
+    //
+    // Diagnostic value if it does not hold: both panics struck right after
+    // `[WIFI] connected`. If the board still dies with NO such line, then
+    // ESP-NOW/mesh alone squeezes enough to kill it — established for free.
+    #[cfg(feature = "boot-radio-off")]
+    let boot_connect = {
+        let _ = boot_connect;
+        println!("[BOOT] boot-radio-off: STA auto-connect SUPPRESSED (diagnostic image)");
+        false
+    };
     _spawner.spawn(
         crate::net::net_task::net_task(
             wifi_controller,
@@ -1867,7 +1897,7 @@ async fn main(_spawner: Spawner) -> ! {
             flash,
             watch_cfg.ssid.clone(),
             watch_cfg.pass.clone(),
-            wifi_has_creds && !watch_cfg.wifi_off,
+            boot_connect,
         )
         .expect("net_task token"),
     );
