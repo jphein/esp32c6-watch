@@ -1622,7 +1622,20 @@ async fn main(_spawner: Spawner) -> ! {
     // time under the debug-console build (see audio_out::LONG_CLIP docs).
     audio_out::register_chime(ping_chime_pcm);
 
-    // BOOT button (GPIO9 on the C6, strapping pin with pull-up).
+    // BOOT button. C6/C5: GPIO9 (strapping pin, pull-up). S3-CYD (ES3C28P):
+    // GPIO0 — its physical BOOT key and entire button budget (board::
+    // esp32s3_cyd HAS_BOOT_KEY; BOARD.md). GPIO9 on the S3 is BAT_ADC
+    // (board::BATT_ADC_GPIO=9), so binding the button there sampled the ~2 V
+    // divider node — wrong pin AND noise-prone in the middle of the logic
+    // window. cfg-gating fixes button truth AND frees GPIO9 for the battery
+    // ADC. Input::new needs the concrete pin singleton, so this is cfg-gated
+    // per board rather than driven by a u8 const.
+    #[cfg(feature = "board-esp32s3-cyd")]
+    let mut boot_button = Input::new(
+        peripherals.GPIO0,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    #[cfg(not(feature = "board-esp32s3-cyd"))]
     let mut boot_button = Input::new(
         peripherals.GPIO9,
         InputConfig::default().with_pull(Pull::Up),
