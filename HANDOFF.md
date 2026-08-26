@@ -60,3 +60,9 @@ Gated on morpheus/cyd-c5-e2 blessing image 9/10 on glass — merge is MINE to ow
 - has-pmu has a THIRD site in their lineage; confirmed my f0452a1 covers it (vol_during_play poll_power_key main.rs:5560, has-pmu gated; S3 target sets neither has-pmu nor has-audio).
 - **LATENT (found while checking):** `power.enable_mic_rail()` main.rs:1524 is a PMU call gated under **has-audio, not has-pmu** — dormant on S3 (has-audio off) but resurfaces on any PMU-less board that gains audio. `let _ =` silent (one NACK/boot, not spam). AT MERGE: move to has-pmu (or has-pmu && has-audio). Add to dedup inventory.
 - Floor re-measure is POST-MERGE only (C5 target on his branch + mesh-ota on main = combined floor doesn't exist until reconciliation). Build merged C5 arm on familiar, send number before their 0.3 scores against pre-mesh-ota +14,632B.
+
+## C6 CURRENT-WINDOW LIVENESS PROBE (2026-08-26 ~01:30, via s3-cyd-45)
+No C6 board on my USB; broker denies anon read; #89 scopes only the watch AP, homelab LAN is up (realm CLI works). s3-cyd-45's S3 (id162) is a live mesh peer — used as the observer.
+- Its live mesh window saw acks from C3 crown (ac:a7:04:ba:1f:24, id50) + one unknown 10:00:3b:ce:95:cc. Attributed via sigil-id crate (seed=mac[2..6] XOR-fold): unknown → id **172**, NOT a C6 (fleet C6 = eldritch-lantern 98:A3:16:A7:2F:E4→122, mythic-throne 98:A3:16:A5:A7:F8→236). ESP-NOW = STA/base MAC, so a C6 peer would show 98:A3:16:*. No C6 mesh ack in-window.
+- Retained MQTT diag EXISTS: smol/122 up=42.8h, smol/236 up=2.7h (mythic-throne booted tonight) — but retained ≠ now.
+- Cadence: firmware broadcasts mesh diag every 60s (main.rs:3683), gateway relays to smol/<id>/diag. **s3-cyd-45 running a 10-min flip-watch** on smol/122|236/diag. ANY new-value flip ⇒ C6 verified live-now; zero flips ⇒ record as night duty-cycle (NOT dead), don't claim verification. Awaiting its flip log.
