@@ -44,3 +44,14 @@ smol PRs: #417/#423/#427/#444/#445 ALL MERGED (445 at 02:54Z 2026-08-26 — the 
 - bard screen: spec at docs/specs/2026-08-25-bard-screen-spec.md → Luna + glass.
 
 **On a relay:** if a bench reports a bug, root-cause + fix + push + refresh-PR (the PSRAM pattern). If a verification passes, mark the issue. No polling — relays arrive via SendMessage.
+## C5 MERGE-READINESS (2026-08-26, prepped while holding)
+
+Dry-run `git merge-tree main github/feat/cyd-c5-gating` (his tip **42a4900**, 24 commits ahead) = **12 conflicting files**: Cargo.toml · board/{mod,cyd_c5,waveshare_c6}.rs · drivers/{mod,framebuffer,spi_bus}.rs · main.rs · net/{mqtt_ha,ota_http}.rs · ui/{slint_platform,slint_shell}.rs. This is a real reconciliation, NOT a fast-forward — the S3 work moved main out from under his branch.
+
+**DOUBLE-FIXES (dedup at merge, do NOT stack both):**
+- has-pmu 4Hz power-key poll: his `884c7e8` ↔ my `f0452a1` (S3).
+- BLE ~29.5KB boot cost radio-off: his `88601c4` ↔ my `ble_bring_up()` already on main ([[ble-init-before-config-load]]). Pick one impl.
+
+**Fold-in at merge:** his `5e77086` (pin C5 2.4GHz) = the has-5ghz-wifi finding; main's board-cyd-c5 lacks it. His `40f5da7` (print compiled-in broker) overlaps my per-seat MQTT VLAN-trap docs.
+
+Gated on morpheus/cyd-c5-e2 blessing image 9/10 on glass — merge is MINE to own on watch main when he pings (never self-merge smol). Heads-up sent to cyd-c5-e2. Re-measure C5 heap floor vs mesh-ota after.
