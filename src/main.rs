@@ -1022,8 +1022,22 @@ async fn main(_spawner: Spawner) -> ! {
     // the 8 MB octal PSRAM carries Slint's bulk. PSRAM is a REQUIREMENT here,
     // not an optimization. The PSRAM region is added AFTER this internal pool
     // (below, post-init) so internal-first ordering holds.
+    // GROWN from the 64 KB C5-placeholder (s3-cyd second-first-light 2026-08-26):
+    // esp-radio 0.18's scan mallocs AP records from Internal-capable memory
+    // ONLY, and in a dense RF environment (many APs x 13 ch x 2 passes) a 64 KB
+    // internal pool ran dry mid-scan -> esp_wifi_scan_get_ap_record NO_MEM ->
+    // the driver's own uncatchable unwrap (fmt.rs:240) -> rst 0x3 crash-loop.
+    // The scene now lives in PSRAM, so internal SRAM is free to be generous.
+    // SIZED AGAINST THE STACK: the main pool shares the primary DRAM region
+    // with the downward stack (pool + stack <= ~185 KB here; 160 KB left only a
+    // 21 KB gap, a guaranteed boot crash). 96 KB main + 64 KB reclaimed =
+    // 160 KB Internal for radio+boot (+32 KB over the placeholder) while
+    // leaving the stack an ~89 KB band, comfortably over the 71,680 floor. If
+    // the dense-RF scan still NO_MEMs, the reclaimed pool (dram2_seg, ABOVE the
+    // stack — free of stack cost) is the next lever, or bias the scene harder
+    // to PSRAM. Verify the gap holds the floor after any change (STACK_FLOOR).
     #[cfg(feature = "board-esp32s3-cyd")]
-        esp_alloc::heap_allocator!(size: 64 * 1024);
+        esp_alloc::heap_allocator!(size: 96 * 1024);
     // ROM-reclaimed region (dram2_seg). Second pool so nothing goes to waste; it
     // sits ABOVE the stack ceiling and is independent of _bss_end, so its size has
     // ZERO effect on the stack.
