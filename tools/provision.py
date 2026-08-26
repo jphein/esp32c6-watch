@@ -22,6 +22,25 @@ MQTT broker is NOT in this record — it is a compile-time constant
 (`option_env!("MQTT_BROKER")`, src/net/mqtt_ha.rs) from the build tree's
 gitignored .cargo/config.toml [env]. Provision that at BUILD time.
 
+⚠️ PER-SEAT DIVERGENCE TRAP (s3-cyd 2026-08-26): because the broker is
+compile-time, a single firmware image is NOT portable across VLAN seats.
+The broker must be the HA VM leg reachable from the board's OWN VLAN:
+  - C6 (leases VLAN6, 10.0.6.x, family-crossable) -> 10.0.11.110:1883
+  - C5/S3/C3 fleet (lease VLAN8 iot via jplovescl) -> 10.0.8.111:1883
+    (the VM is quad-homed; Mosquitto binds 0.0.0.0. iot->family firewall
+    allows only :8087 OTA + :21324 cast, NOT 1883 — so the VLAN11 leg is
+    UNREACHABLE from an iot-seated board; NTP passed only because UDP
+    egress is open.) The C6 value must NEVER leak into an S3/C5 recipe.
+This is a #413-packaging hazard: "download the target, get a node" cannot
+mean "and also rebuild with the right broker for your VLAN". THE REAL FIX
+is to move the broker into THIS record (a SWCFG8 field: ip4[4]+port[2],
+backward-compatible — a SWCFG7 record with no broker falls back to the
+option_env default), so ONE image self-configures per seat at provision
+time. Scoped, not yet done: it touches the shared config.rs format and
+wants an on-device round-trip verify (provision SWCFG8 -> boot -> broker
+read -> [MQTT] published) so the shipping C6's existing SWCFG7 records are
+proven to still load. Until then: bake the seat-correct broker per target.
+
 Without --write this is a dry run: prints the record hex + a decode and
 writes <out>.bin next to nothing. The flash write erases only the two 4 KB
 config sectors — OTA slots, otadata and SPIFFS-neighbours are untouched.
