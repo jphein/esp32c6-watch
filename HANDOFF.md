@@ -110,3 +110,7 @@ MERGE TRAIN → smol main (smol-d8's subtree-refresh lane, never-self-merge):
 - Touch fix (e2efaad, in watch main 4922dad) NOT yet in a smol PR; its esp32s3_cyd.rs edits OVERLAP #448 → smol-d8 should refresh subtree to watch main @4922dad cumulatively rather than stack conflicting PRs.
 - Recommend: smol-d8 drives ONE cumulative subtree refresh to 4922dad (supersedes #446-449) OR merges #448+#449 then a touch refresh. smol-d8's call.
 Follow-ups (mine, queued, no urgency): NTP re-sync deadlock (periodic re-sync decoupled from announce gate); C5 12-file merge to watch main (pending cyd-c5-e2 closure ping) w/ dedup inventory.
+
+## S3 DELIVERED TO SMOL MAIN (2026-08-26)
+smol#451 (cumulative refresh to watch 4922dad) MERGED → smol main **ad29c12** carries the full verified S3 stack (arm_ramwr GUI + FT6336U touch + deploy). Verified on main: ili9341 arm_ramwr present, esp32s3_cyd touch consts present. #448 also merged; #446/#447/#449 redundant (subsumed by #448+#451) — smol-tree authority closes them per its post-merge sequencing (NOT mine). S3 = verified AND delivered.
+Also landed watch main: IMU honesty log (ae80072). Parity features (battery ADC, audio port) queued behind s3-cyd-45's board-consts-first handoff. Remaining boards: C5 (swipes=cyd-c5-e2 lane; 12-file merge mine, pending closure ping), C6 (awake re-probe).
