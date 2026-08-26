@@ -109,6 +109,29 @@ const HOLD_MS: u64 = 500;
 // C6: 24 < 36 ✓ (unchanged behaviour). C5: 18 < 24 ✓.
 use crate::board::ui::HOLD_SLOP_PX;
 
+// ===========================================================================
+// [SHELL-DBG] — DIAGNOSTIC, gated on `touch-telemetry`
+// ===========================================================================
+// Rides the SAME feature as the driver's [TOUCH-DBG] deliberately: the whole
+// point is to read the two streams against each other line by line. One
+// investigation, one switch. A separate flag would let them drift out of sync
+// in exactly the builds where correlating them matters.
+//
+// Why the shell needs its own eye: on image 9 the driver classifies almost every
+// swipe correctly (dom 32..183) and pages still don't turn — so the loss is
+// DOWNSTREAM of classification, in `handle_touch`'s early-return chain. Each
+// branch there consumes a gesture and returns silently, which is
+// indistinguishable from "the event never arrived".
+#[cfg(feature = "touch-telemetry")]
+macro_rules! shell_dbg {
+    ($($a:tt)*) => { esp_println::println!($($a)*) };
+}
+#[cfg(not(feature = "touch-telemetry"))]
+#[allow(unused_macros)]
+macro_rules! shell_dbg {
+    ($($a:tt)*) => {};
+}
+
 /// Switcher (#31) + shade (#32) card geometry — BOARD-OWNED (`board::ui`),
 /// because each board's overlay scene draws its own card stack: slot i spans
 /// y `CARD_TOP + i*CARD_PITCH .. + CARD_H`, and [`switcher_slot`] /
@@ -642,10 +665,19 @@ impl ShellUi {
         // The game owns the input stream while it holds the framebuffer. The
         // scene is parked (still allocated) rather than dropped since #66, so
         // the parked flag — not `ui.is_none()` — is what gates touch routing.
+        // NOT in the original instrumentation list, and that is the point: a
+        // branch nobody thought to list is exactly where an invisible swallow
+        // hides. Both of these return before the swipe match is even reached.
         if self.suspended {
+            if swipe.is_some() {
+                shell_dbg!("[SHELL-DBG] {:?} SWALLOWED by suspended (game holds input)", swipe);
+            }
             return;
         }
         let Some(ui) = self.ui.as_ref() else {
+            if swipe.is_some() {
+                shell_dbg!("[SHELL-DBG] {:?} SWALLOWED by ui=None (scene not bound)", swipe);
+            }
             return;
         };
         if let Some(tp) = point {
@@ -677,6 +709,23 @@ impl ShellUi {
                     if self.hold_start.1 >= EDGE_BOTTOM_Y && shell_clean(ui) {
                         self.hold_fired = true;
                         self.req.open_switcher.set(true);
+                        // ★ PRIME SUSPECT for image 9's regression. Once this
+                        // latches, the concluding lift is swallowed below and the
+                        // swipe never reaches the page match — the driver still
+                        // logs a perfect [TOUCH-DBG] classification, so from the
+                        // driver's side nothing looks wrong.
+                        // Lowering TOUCH_PRESSURE_THRESHOLD to 100 made the light
+                        // ENTRY phase of a press visible, so `hold_armed_at` is now
+                        // armed earlier in the gesture than it was at 400 — more
+                        // dwell time before real travel accrues, i.e. more chances
+                        // to reach HOLD_MS with drift still under the slop.
+                        shell_dbg!(
+                            "[SHELL-DBG] HOLD FIRED start_y={} (>=EDGE {}) held>={}ms drift<={} -> switcher opens AND next lift is swallowed",
+                            self.hold_start.1,
+                            EDGE_BOTTOM_Y,
+                            HOLD_MS,
+                            HOLD_SLOP_PX
+                        );
                     }
                 }
             }
@@ -734,17 +783,35 @@ impl ShellUi {
 
         // A fired edge-hold consumed this whole touch (#31): the concluding
         // lift must not also classify as a tap/swipe against the switcher.
+        // ★ THE THIRD UNLISTED BRANCH — and the one a driver-side log can never
+        // see. It returns before the swipe match, so a perfectly classified
+        // gesture dies here silently.
         if self.hold_fired && point.is_none() {
+            shell_dbg!(
+                "[SHELL-DBG] {:?} SWALLOWED by hold_fired (edge-hold consumed this touch)",
+                swipe
+            );
             self.hold_fired = false;
             return;
         }
 
         if let Some(direction) = swipe {
+            // Entry line: everything below is a branch that can consume this.
+            // `start_y` matters because four branches key off it (EDGE_BOTTOM_Y,
+            // SLIDER_BAND, shade_slot, switcher_slot).
+            shell_dbg!(
+                "[SHELL-DBG] ENTER {:?} start_y={} page={} clean={}",
+                direction,
+                swipe_start_y,
+                ui.get_current_page(),
+                shell_clean(ui)
+            );
             // Ping receiver pulse (#35) first — it renders above everything
             // but AOD, so while it is up ANY swipe dismisses the greeting
             // (via the request cell: the loop owns the auto-dismiss clock).
             // The underlying screen's own gestures resume next touch.
             if ui.get_ping_pulse_open() {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by ping_pulse");
                 self.req.ping_pulse_tap.set(true);
                 return;
             }
@@ -753,6 +820,7 @@ impl ShellUi {
             // swipes and Right closes it (Flag idiom; main.rs owns nothing
             // here — the underlying app_state/WiFi holds are untouched).
             if ui.get_power_menu_open() {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by power_menu");
                 if direction == SwipeDirection::Right {
                     ui.set_power_menu_open(false);
                 }
@@ -765,6 +833,7 @@ impl ShellUi {
             // hub at view 0. Swipes starting on the DISPLAY page's brightness
             // slider are drags — excluded entirely.
             if ui.get_settings_open() {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by settings");
                 if !hub_slider_drag(ui, swipe_start_y) {
                     match direction {
                         SwipeDirection::Right => {
@@ -797,6 +866,7 @@ impl ShellUi {
             // (Taps still reach the tiles via the pointer events above.)
             for o in OVERLAYS {
                 if (o.is_open)(ui) {
+                    shell_dbg!("[SHELL-DBG] SWALLOWED by overlay {:?}", o.state);
                     if direction == SwipeDirection::Right {
                         match o.close {
                             OverlayClose::Flag => (o.set_open)(ui, false),
@@ -810,6 +880,7 @@ impl ShellUi {
             // swipes. Left starting ON a card dismisses it (the slot IS the
             // ring index); Up ("push it back up") or Right closes.
             if ui.get_shade_open() {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by shade");
                 match direction {
                     SwipeDirection::Right | SwipeDirection::Up => ui.set_shade_open(false),
                     SwipeDirection::Left => {
@@ -834,6 +905,7 @@ impl ShellUi {
             // the loop owns the session list and rebuilds the cards in place.
             // Right (the universal close) or Down ("push it back down") closes.
             if ui.get_switcher_open() {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by switcher");
                 match direction {
                     SwipeDirection::Right | SwipeDirection::Down => {
                         ui.set_switcher_open(false)
@@ -856,6 +928,7 @@ impl ShellUi {
             // hard-cut full-frame render, replacing the 6-10fps Flickable
             // scroll that dirtied the whole viewport per frame.
             if ui.get_launcher_open() {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by launcher");
                 match direction {
                     SwipeDirection::Right => ui.set_launcher_open(false),
                     SwipeDirection::Up => {
@@ -874,6 +947,7 @@ impl ShellUi {
             let on_slider =
                 ui.get_current_page() == PAGE_POWER && SLIDER_BAND.contains(&swipe_start_y);
             if on_slider {
+                shell_dbg!("[SHELL-DBG] SWALLOWED by slider-band start_y={}", swipe_start_y);
                 return;
             }
             // "Seen it" latches: a nav gesture actually used retires its hint
@@ -883,14 +957,18 @@ impl ShellUi {
                 SwipeDirection::Left => {
                     self.hint_seen_lr = true;
                     ui.set_hint_sides(false);
-                    ui.set_current_page((ui.get_current_page() + 1).rem_euclid(PAGE_COUNT))
+                    let old = ui.get_current_page();
+                    let new = (old + 1).rem_euclid(PAGE_COUNT);
+                    shell_dbg!("[SHELL-DBG] PAGED Left {} -> {}", old, new);
+                    ui.set_current_page(new)
                 }
                 SwipeDirection::Right => {
                     self.hint_seen_lr = true;
                     ui.set_hint_sides(false);
-                    ui.set_current_page(
-                        (ui.get_current_page() + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT),
-                    )
+                    let old = ui.get_current_page();
+                    let new = (old + PAGE_COUNT - 1).rem_euclid(PAGE_COUNT);
+                    shell_dbg!("[SHELL-DBG] PAGED Right {} -> {}", old, new);
+                    ui.set_current_page(new)
                 }
                 // Launcher (#29): a bottom-EDGE swipe up opens it from ANY
                 // watchface page (the standard wearable gesture); a mid-screen
