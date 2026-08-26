@@ -21,7 +21,7 @@ use climate_model;
 use crate::net::smol_mesh::PeerView;
 use crate::peripherals::rtc::DateTime;
 use crate::peripherals::touch::{SwipeDirection, TouchPoint};
-use crate::ui::slint_platform::{init_platform, TwoLineFlusher, WIDTH};
+use crate::ui::slint_platform::{init_platform, TwoLineFlusher, HEIGHT, WIDTH};
 
 slint::include_modules!(); // WatchShell, PeerRow
 
@@ -349,6 +349,11 @@ pub struct ShellUi {
     switcher_rows: heapless::Vec<i32, SWITCHER_CARDS>,
     line_buf: Vec<Rgb565Pixel>,
     scratch: Vec<u16>,
+    /// Live scene-cast state (feature `cast`): the RowMap + RGB565 cell store
+    /// + target, None when not casting. The store is heap (the OTA
+    /// window-buffer discipline — never .bss).
+    #[cfg(feature = "cast")]
+    cast: Option<CastState>,
     touch_down: bool,
     last_pos: slint::LogicalPosition,
     last_second: u8,
@@ -450,6 +455,8 @@ impl ShellUi {
             switcher_rows: heapless::Vec::new(),
             line_buf: alloc::vec![Rgb565Pixel(0); WIDTH * 2],
             scratch: alloc::vec![0u16; WIDTH * 2],
+            #[cfg(feature = "cast")]
+            cast: None,
             touch_down: false,
             last_pos: slint::LogicalPosition::new(0.0, 0.0),
             last_second: 0xFF,
@@ -2168,6 +2175,51 @@ impl ShellUi {
 
     /// Run timers/animations and repaint if the scene is dirty. No-op while the
     /// scene is suspended (a game owns the panel via the framebuffer).
+    /// Start/stop a scene cast (feature `cast`). `start` allocates the cell
+    /// store (heap, decline-on-pressure); `stop` frees it. `wled` is the
+    /// matrix's IPv4; w/h its cell grid (<= cast_core::MAX_*).
+    #[cfg(feature = "cast")]
+    pub fn cast_start(&mut self, wled: [u8; 4], w: usize, h: usize) -> bool {
+        let Some(mirror) = cast_core::Mirror::new(w, h) else {
+            return false;
+        };
+        let mut store: Vec<u16> = Vec::new();
+        if store.try_reserve_exact(mirror.cells()).is_err() {
+            return false;
+        }
+        store.resize(mirror.cells(), 0);
+        self.cast = Some(CastState {
+            rowmap: cast_core::RowMap::new(HEIGHT, h),
+            mirror,
+            store,
+            wled,
+            frame_ready: false,
+        });
+        true
+    }
+
+    #[cfg(feature = "cast")]
+    pub fn cast_stop(&mut self) {
+        self.cast = None;
+    }
+
+    #[cfg(feature = "cast")]
+    pub fn cast_active(&self) -> bool {
+        self.cast.is_some()
+    }
+
+    /// After a render, drain the freshly-sampled frame as (wled_ip, cells) for
+    /// the caller to UDP-send; None when no cast or no new frame.
+    #[cfg(feature = "cast")]
+    pub fn cast_take_frame(&mut self) -> Option<([u8; 4], &[u16])> {
+        let cs = self.cast.as_mut()?;
+        if !cs.frame_ready {
+            return None;
+        }
+        cs.frame_ready = false;
+        Some((cs.wled, &cs.store))
+    }
+
     pub fn render(&mut self, display: &mut ActivePanel) {
         // `suspended` = a game owns the panel (#66). Previously this was implied
         // by `ui.is_none()`; the scene now stays alive, so check it explicitly
@@ -2184,10 +2236,37 @@ impl ShellUi {
         self.window.draw_if_needed(|renderer| {
             let mut flusher =
                 TwoLineFlusher::new(display, &mut self.line_buf, &mut self.scratch);
+            // Cast tap (feature `cast`): hand the flusher a sink borrowing this
+            // frame's cast store; it samples cell rows as it renders.
+            #[cfg(feature = "cast")]
+            if let Some(cs) = self.cast.as_mut() {
+                for c in cs.store.iter_mut() {
+                    *c = 0;
+                }
+                flusher = flusher.with_cast(crate::ui::slint_platform::CastSink {
+                    rowmap: &cs.rowmap,
+                    mirror: cs.mirror,
+                    store: &mut cs.store,
+                });
+            }
             renderer.render_by_line(&mut flusher);
             flusher.flush_pending();
         });
+        #[cfg(feature = "cast")]
+        if let Some(cs) = self.cast.as_mut() {
+            cs.frame_ready = true;
+        }
     }
+}
+
+/// Live scene-cast state (feature `cast`).
+#[cfg(feature = "cast")]
+struct CastState {
+    rowmap: cast_core::RowMap,
+    mirror: cast_core::Mirror,
+    store: Vec<u16>,
+    wled: [u8; 4],
+    frame_ready: bool,
 }
 
 

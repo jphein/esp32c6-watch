@@ -2205,6 +2205,7 @@ dependencies = [
 name = "esp32c6-watch"
 version = "0.12.1"
 dependencies = [
+ "cast-core",
  "climate-model",
  "critical-section",
  "embassy-executor",

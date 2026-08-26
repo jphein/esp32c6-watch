@@ -78,6 +78,24 @@ pub enum Inject {
     Launch(usize),
     /// Return to the watchface (drop any framebuffer app, close overlays).
     Home,
+    /// Start (`on`) or stop a scene cast to a WLED matrix at `ip`, `w`x`h`
+    /// cells (feature `cast`).
+    #[cfg(feature = "cast")]
+    Cast { ip: [u8; 4], w: u8, h: u8, on: bool },
+}
+
+/// Parse a dotted-quad IPv4 (feature `cast`). None on any malformed field.
+#[cfg(feature = "cast")]
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut it = s.split('.');
+    let mut out = [0u8; 4];
+    for slot in out.iter_mut() {
+        *slot = it.next()?.parse::<u8>().ok()?;
+    }
+    if it.next().is_some() {
+        return None;
+    }
+    Some(out)
 }
 
 const Q_DEPTH: usize = 16;
@@ -449,6 +467,25 @@ fn handle_line(bytes: &[u8]) {
             );
         }
         "perf" => report_perf(),
+        #[cfg(feature = "cast")]
+        "cast" => {
+            // cast <a.b.c.d> <w> <h>  |  cast off
+            if it.clone().next() == Some("off") {
+                let _ = queue(Inject::Cast { ip: [0; 4], w: 0, h: 0, on: false });
+                println!("[DBGCON] ok cast off");
+            } else {
+                let ip = it.next().and_then(parse_ipv4);
+                let w = it.next().and_then(|v| v.parse::<u8>().ok());
+                let h = it.next().and_then(|v| v.parse::<u8>().ok());
+                match (ip, w, h) {
+                    (Some(ip), Some(w), Some(h)) if w > 0 && h > 0 => {
+                        let _ = queue(Inject::Cast { ip, w, h, on: true });
+                        println!("[DBGCON] ok cast {}.{}.{}.{} {}x{}", ip[0], ip[1], ip[2], ip[3], w, h);
+                    }
+                    _ => println!("[DBGCON] err usage: cast <a.b.c.d> <w> <h> | cast off"),
+                }
+            }
+        }
         "beep" => {
             // On-glass playback probe (#23): synthesize the Snake beep on the
             // stack and queue it. The amp rises via the main loop's per-tick

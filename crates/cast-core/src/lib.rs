@@ -71,6 +71,9 @@ impl RowMap {
 
 /// The NxM RGB565 accumulator. Storage is CALLER-owned (`&mut [u16]`,
 /// `w * h` long) — heap per cast session, the OTA window-buffer discipline.
+/// Copy: the geometry is two usizes, handed to the flusher sink each frame
+/// while the owner keeps its copy.
+#[derive(Clone, Copy)]
 pub struct Mirror {
     pub w: usize,
     pub h: usize,
@@ -96,13 +99,29 @@ impl Mirror {
         span_x: usize,
         span: &[u16],
     ) {
+        self.sample_span_with(store, ty, src_w, span_x, span.len(), |i| span[i]);
+    }
+
+    /// As [`sample_span`](Self::sample_span) but the span pixels come from a
+    /// closure `get(i) -> u16` over `0..span_len` — so a caller whose render
+    /// buffer is not a `&[u16]` (the watch flusher's `Rgb565Pixel`) taps it
+    /// with no intermediate copy. `span_x` is the span's first column.
+    pub fn sample_span_with<F: Fn(usize) -> u16>(
+        &self,
+        store: &mut [u16],
+        ty: usize,
+        src_w: usize,
+        span_x: usize,
+        span_len: usize,
+        get: F,
+    ) {
         if ty >= self.h || src_w == 0 {
             return;
         }
         for tx in 0..self.w {
             let sx = (tx * src_w + src_w / 2) / self.w;
-            if sx >= span_x && sx < span_x + span.len() {
-                store[ty * self.w + tx] = span[sx - span_x];
+            if sx >= span_x && sx < span_x + span_len {
+                store[ty * self.w + tx] = get(sx - span_x);
             }
         }
     }

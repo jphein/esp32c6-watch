@@ -48,3 +48,14 @@ fn rgb565_expansion_full_scale() {
     assert_eq!(rgb565_to_888(0xFFFF), (255, 255, 255));
     assert_eq!(rgb565_to_888(0x0000), (0, 0, 0));
 }
+
+#[test]
+fn sample_span_with_closure_matches_slice() {
+    let m = Mirror::new(4, 1).unwrap();
+    let span: [u16; 8] = [10, 11, 12, 13, 14, 15, 16, 17];
+    let mut a = [0u16; 4];
+    let mut b = [0u16; 4];
+    m.sample_span(&mut a, 0, 8, 0, &span);
+    m.sample_span_with(&mut b, 0, 8, 0, span.len(), |i| span[i]);
+    assert_eq!(a, b);
+}

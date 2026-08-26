@@ -91,8 +91,21 @@ pub fn init_platform() -> Rc<MinimalSoftwareWindow> {
 /// `[x0, line-1, w, 2]` — both rows freshly rendered, window even-aligned on
 /// both axes by the vendored renderer's region alignment. Spans whose pairing
 /// guarantee does not hold are skipped and counted, never guessed at.
+/// A live cast sample target handed to the flusher (feature `cast`): the
+/// caller-owned RGB565 cell store, its Mirror geometry, and the source-row
+/// map. process_line taps rendered spans into it — one RowMap lookup per
+/// line when a cast is active, ZERO code when the feature is off.
+#[cfg(feature = "cast")]
+pub struct CastSink<'a> {
+    pub rowmap: &'a cast_core::RowMap,
+    pub mirror: cast_core::Mirror,
+    pub store: &'a mut [u16],
+}
+
 pub struct TwoLineFlusher<'a, 'd> {
     display: &'a mut ActivePanel<'d>,
+    #[cfg(feature = "cast")]
+    cast: Option<CastSink<'a>>,
     /// 2 x WIDTH pixels: even line of the current pair in the first half, odd
     /// line in the second. Only rendered span columns are ever flushed.
     buf: &'a mut [Rgb565Pixel],
@@ -123,6 +136,8 @@ impl<'a, 'd> TwoLineFlusher<'a, 'd> {
         debug_assert_eq!(scratch.len(), WIDTH * 2);
         Self {
             display,
+            #[cfg(feature = "cast")]
+            cast: None,
             buf,
             scratch,
             pair_base: None,
@@ -157,6 +172,37 @@ impl<'a, 'd> TwoLineFlusher<'a, 'd> {
     /// pending (pairs always complete); a straggler means the contract broke —
     /// its pixels are left stale on the panel (bounded, visible, logged) rather
     /// than flushed as a guessed 2-row window (corruption).
+    /// Attach a live cast sink for this frame (feature `cast`). The store is
+    /// the caller's cell buffer (w*h u16); the flusher fills it as it renders.
+    #[cfg(feature = "cast")]
+    pub fn with_cast(mut self, sink: CastSink<'a>) -> Self {
+        self.cast = Some(sink);
+        self
+    }
+
+    /// Sample the just-rendered span of `line` into the cast store, if a cast
+    /// is active and this source row feeds a target cell row. One RowMap
+    /// lookup per line; the sampled columns are the cell centers only.
+    #[cfg(feature = "cast")]
+    fn cast_tap(&mut self, line: usize, range: core::ops::Range<usize>) {
+        let Some(sink) = self.cast.as_mut() else { return };
+        let Some(ty) = sink.rowmap.target_row(line) else { return };
+        // Even source lines rendered into buf[..WIDTH], odd into buf[WIDTH..].
+        let half = if line % 2 == 0 {
+            &self.buf[..WIDTH]
+        } else {
+            &self.buf[WIDTH..]
+        };
+        sink.mirror.sample_span_with(
+            sink.store,
+            ty,
+            WIDTH,
+            range.start,
+            range.len(),
+            |i| half[range.start + i].0,
+        );
+    }
+
     pub fn flush_pending(&mut self) {
         if self.pair_base.is_some() && self.flushed_n < self.staged_n {
             self.violations += (self.staged_n - self.flushed_n) as u32;
@@ -207,6 +253,8 @@ impl slint::platform::software_renderer::LineBufferProvider for &mut TwoLineFlus
                 self.flushed_n = 0;
             }
             render_fn(&mut self.buf[..WIDTH][range.clone()]);
+            #[cfg(feature = "cast")]
+            self.cast_tap(line, range.clone());
             if self.staged_n < MAX_SPANS {
                 self.staged[self.staged_n] = (range.start as u16, range.end as u16);
                 self.staged_n += 1;
@@ -218,6 +266,8 @@ impl slint::platform::software_renderer::LineBufferProvider for &mut TwoLineFlus
         } else {
             // Odd line: render, then flush the pair window for this span.
             render_fn(&mut self.buf[WIDTH..][range.clone()]);
+            #[cfg(feature = "cast")]
+            self.cast_tap(line, range.clone());
             if self.pair_base == Some(line - 1) && self.span_staged(&range) {
                 self.flush_span(line - 1, range);
                 self.flushed_n += 1;

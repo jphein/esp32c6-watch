@@ -795,6 +795,39 @@ pub type FlashMutex = embassy_sync::mutex::Mutex<
 /// Persist the config record through the shared flash mutex. Returns whether
 /// the save happened (offset known + write OK); callers own their log lines so
 /// the per-site messages stay grep-identical to the pre-mutex code.
+/// Send one cast frame's cells to a WLED matrix as DNRGB UDP packets
+/// (feature `cast`). Bounded, fire-and-forget: a dropped packet is one stale
+/// LED for one frame, not worth a retransmit. The socket is built per call —
+/// casts are a bench/demo activity, not a hot path.
+#[cfg(feature = "cast")]
+async fn cast_send(stack: embassy_net::Stack<'static>, ip: [u8; 4], cells: &[u16]) {
+    use embassy_net::udp::{PacketMetadata, UdpSocket};
+    use embassy_net::IpEndpoint;
+    let mut rx_meta = [PacketMetadata::EMPTY; 2];
+    let mut rx_buf = [0u8; 64];
+    let mut tx_meta = [PacketMetadata::EMPTY; 4];
+    let mut tx_buf = [0u8; 512];
+    let mut sock = UdpSocket::new(stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
+    if sock.bind(0).is_err() {
+        return;
+    }
+    let dst = IpEndpoint::new(
+        embassy_net::IpAddress::v4(ip[0], ip[1], ip[2], ip[3]),
+        cast_core::WLED_PORT,
+    );
+    let mut pkt = [0u8; 512];
+    let mut start = 0usize;
+    while start < cells.len() {
+        let (n, consumed) =
+            cast_core::encode_dnrgb(cells, start, cast_core::DEFAULT_TIMEOUT_S, &mut pkt);
+        if n == 0 {
+            break;
+        }
+        let _ = sock.send_to(&pkt[..n], dst).await;
+        start += consumed;
+    }
+}
+
 async fn cfg_save(
     flash: &'static FlashMutex,
     offset: Option<u32>,
@@ -3078,6 +3111,16 @@ async fn main(_spawner: Spawner) -> ! {
                         fb = None;
                         app_state = AppState::Watchface;
                     }
+                    #[cfg(feature = "cast")]
+                    debug_console::Inject::Cast { ip, w, h, on } => {
+                        if on {
+                            let ok = shell.cast_start(ip, w as usize, h as usize);
+                            println!("[CAST] start {ip:?} {w}x{h} -> {}", if ok { "ok" } else { "declined (heap/dims)" });
+                        } else {
+                            shell.cast_stop();
+                            println!("[CAST] stopped");
+                        }
+                    }
                 }
                 true
             } else {
@@ -3608,6 +3651,17 @@ async fn main(_spawner: Spawner) -> ! {
                         let gw = mesh_ota.session.gateway_mac();
                         crate::net::smol_mesh::SmolMesh::ensure_unicast_peer(&mut esp_now, gw);
                         crate::net::smol_mesh::send_bounded(&mut esp_now, &gw, &nak[..n]).await;
+                    }
+                }
+                // #36 cast pump: drain the latest sampled scene frame to the
+                // WLED matrix. Needs a live IPv4 (the cast target is on the
+                // LAN); no-op otherwise. One call site, off the render clock.
+                #[cfg(feature = "cast")]
+                if shell.cast_active() {
+                    if let crate::net::net_task::WifiPhase::Up { ip: Some(_) } = net.phase {
+                        if let Some((wled, cells)) = shell.cast_take_frame() {
+                            cast_send(stack, wled, cells).await;
+                        }
                     }
                 }
                 while let Some(rx) = esp_now.receive() {
