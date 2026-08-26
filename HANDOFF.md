@@ -30,7 +30,7 @@ JP's standing goal: **the watch as a full smol target, all features + parity, on
 
 Landed today (watch main tip 242182c): full board seam (C6/C5/S3) · Luna's ui/cyd scene · S3 ILI9341V+touch drivers · S3 PSRAM fix (the reboot-loop root cause, 8a6ad9e) · §1d board-facts · provision.py · #75 wedge fix · BLE reclaim · #90 announce · refusal-path hardening · the ENTIRE #36 services layer host-tested (mesh-flood[flood/wire/etx/cfgsched], mesh-ledger[L1-L4], ota-proto[+leaf], cast-core, bard-core[40 golden]) · multihop #64 + mesh-OTA #86 wired live on all 3 boards · cast wired (feature) · bard on-device (feature). 409 host tests, 3 arms link.
 
-smol PRs pending merge (smol-d8): #445 (S3 PSRAM refresh — bench needs it for second first-light). Earlier refreshes #417/#423/#427/#444 merged.
+smol PRs: #417/#423/#427/#444/#445 ALL MERGED (445 at 02:54Z 2026-08-26 — the PSRAM fix is in targets/c6-watch on smol main; s3-cyd unblocked for second first-light via the canonical path).
 
 **Waiting on (external, will arrive as relays):**
 - S3 SECOND first-light: s3-cyd rebuilds from #445. Watch for `[PSRAM] octal, 8192 KB` boot line.
