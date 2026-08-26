@@ -135,7 +135,7 @@ pub const BATT_ADC_DIVIDER: f32 = 2.0;
 /// CODEC's side, so DIN below is the MIC path (ES8311 ASDOUT → ESP) and DOUT
 /// is PLAYBACK (ESP → ES8311 DSDIN).
 pub const HAS_AUDIO: bool = true;
-pub const I2S_MCLK_GPIO: u8 = 4; // wired but UNUSED — see AUDIO_BCLK_DERIVED
+pub const I2S_MCLK_GPIO: u8 = 4; // DRIVEN since the option-B flip — see AUDIO_BCLK_DERIVED
 pub const I2S_BCK_GPIO: u8 = 5;
 pub const I2S_WS_GPIO: u8 = 7;
 pub const I2S_DOUT_GPIO: u8 = 8; // ESP → ES8311 DSDIN (playback)
@@ -144,9 +144,15 @@ pub const I2S_DIN_GPIO: u8 = 6; // ES8311 ASDOUT → ESP (microphone)
 /// inverted vs the C6's GPIO6). Logical-off must drive HIGH.
 pub const AMP_GPIO: u8 = 1;
 pub const AMP_ACTIVE_LOW: bool = true;
-/// Landmine L5: the codec must run BCLK-derived — MCLK is wired but the
-/// working reference (emberburrito) never drives it.
-pub const AUDIO_BCLK_DERIVED: bool = true;
+/// FLIPPED 2026-08-26 (was true): drive MCLK on GPIO4, MCLK-from-pin @16 kHz.
+/// Provenance beats the original const: emberburrito's BCLK-derived choice is
+/// by its own header NOT hardware-verified ("proves the API shapes and nothing
+/// about the sound"), while the C6 runs this SAME ES8311 register sequence
+/// MCLK-from-pin (0x3F) at 16 kHz ON GLASS today — and MCLK is physically
+/// wired here (GPIO4). Preserves the 16 kHz story/STT/SFX pipeline whole.
+/// If the S3's I2S0 MCLK fails to lock the codec on the bench, the fallback
+/// is the BCLK-derived + 44100 + resample fork (bigger, riskier — last resort).
+pub const AUDIO_BCLK_DERIVED: bool = false;
 
 /// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
 /// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
