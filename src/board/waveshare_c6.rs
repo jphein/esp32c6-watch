@@ -67,6 +67,37 @@ pub mod ui {
     /// Bottom edge-swipe band: a touch starting at y >= this is an edge gesture
     /// (swipe-up = launcher, hold = switcher). 85 % of the 502 px panel.
     pub const EDGE_BOTTOM_Y: u16 = 427;
+
+    /// Bottom edge of the lowest interactive element — the clock chips.
+    ///
+    /// ⚠️ **THIS BOARD VIOLATES THE HOLD-BAND INVARIANT BY 19 px.** See
+    /// `board::cyd_c5::EDGE_BOTTOM_Y` for the rule in full: *a band that HOLDS
+    /// may not overlap a tap target; a band that only SWIPES may.* The bottom
+    /// band holds (`HOLD_MS` arms on every press inside it, and `hold_fired`
+    /// swallows the lift that would have become the `clicked`), and the chips end
+    /// at 446 against a band starting at 427.
+    ///
+    /// The CYD had the same collision 59 px deep and it presented as "APPS does
+    /// nothing and the switcher appears". At 19 px of a 44 px target this board
+    /// should have a milder version of the same bug — possibly masked by
+    /// capacitive touch's crisper lift edges getting out before `HOLD_MS`.
+    /// `allow(dead_code)` because its only reader is the assert below, which is
+    /// commented out until #95 closes. Not the declared-but-unread disease this
+    /// whole change is about — this one is unread for a written-down reason, and
+    /// the compiler told me the instant I added it, which is precisely the
+    /// feedback the other six constants never had.
+    #[allow(dead_code)]
+    pub const LOWEST_TAP_BOTTOM_Y: u16 = 446;
+
+    // The CYD arm enforces these two as `const _: () = assert!()`. They are
+    // COMMENTED HERE BECAUSE THE FIRST ONE FAILS — 427 < 446 — and the honest
+    // move is to record the violation, not to fudge EDGE_BOTTOM_Y until a
+    // tripwire passes. Fudging the value to satisfy the assert would invert the
+    // entire point of having one.
+    //
+    // Tracked: jphein/esp32c6-watch#95. Uncomment when that closes.
+    // const _: () = assert!(EDGE_BOTTOM_Y >= LOWEST_TAP_BOTTOM_Y);
+    // const _: () = assert!(502 - EDGE_BOTTOM_Y > HOLD_SLOP_PX as u16);
     /// Top edge-swipe band: a touch starting at y <= this is an edge gesture
     /// (swipe-down = shade).
     pub const EDGE_TOP_Y: u16 = 75;

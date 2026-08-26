@@ -27,12 +27,12 @@ import { CydChip } from "controls_cyd.slint";
 //
 //   x 8..190             x 200..268        x 276..320
 //   ┌────────────────────┬─────────────────┬──────────┐
-//   │ 12:34   (66px)     │  05  (40px)     │  page    │  y 34..110
-//   │ SAT 24 AUG         ├─────────────────┤  rail    │  y 118..144
-//   │ ▓▓▓▓▓▓░░░░ minute  │   Familiar      │  (shell) │  y 152..160
-//   │ 8,214 STEPS · 21°  │   nook          │          │  y 164..180
+//   │ 12:34   (66px)     │  05  (40px)     │  page    │  y 34..113
+//   │ SAT 24 AUG         ├─────────────────┤  rail    │  y 102..126
+//   │ ▓▓▓▓▓▓░░░░ minute  │   Familiar      │  (shell) │  y 134..142
+//   │ 8,214 STEPS · 21°  │   nook          │          │  y 146..162
 //   ├────────────────────┴─────────────────┴──────────┤
-//   │  160 MHz   │   GYRO   │   APPS                  │  y 186..230
+//   │  160 MHz   │   GYRO   │   APPS                  │  y 170..214
 //   └─────────────────────────────────────────────────┘
 //
 // THE HERO IS 66px, NOT 108 AND NOT 84
@@ -110,7 +110,7 @@ export component ClockPage {
     // NOT 19 — glyph-set consolidation, v0.9.0 ROM squeeze).
     Text {
         x: 12px + root.par-x / 4;
-        y: 118px + root.par-y / 4;
+        y: 102px + root.par-y / 4;
         text: root.date-text;
         color: Theme.soft;
         font-size: 20px;
@@ -125,7 +125,7 @@ export component ClockPage {
     // full rate, which is not true of anything text-shaped.
     track := Rectangle {
         x: 10px;
-        y: 152px;
+        y: 134px;
         width: 180px; height: 8px; border-radius: 4px;
         background: Theme.track;
         Rectangle {
@@ -165,7 +165,7 @@ export component ClockPage {
     // 18 px face truncates "8,214 STEPS · 21°C" mid-word.
     Text {
         x: 12px;
-        y: 164px;
+        y: 146px;
         text: root.weather-text == ""
             ? "\{root.steps} STEPS"
             : "\{root.steps} STEPS  \u{00b7}  \{root.weather-text}";
@@ -178,7 +178,7 @@ export component ClockPage {
     // 44 px tall — the touch floor, unchanged from the C6 (which grew them from
     // 36 for exactly this reason). Three 84 px chips at x 8 / 100 / 192 span
     // x8..276, ending where the page rail's hit box begins; they clear it in y
-    // regardless (rail is y76..164, this row is y186..230).
+    // regardless (rail is y76..164, this row is y170..214).
     //
     // ABSOLUTE, not a HorizontalLayout. The C6 row uses one; a layout manager
     // sizes children from their INTRINSIC dimensions, which for a Text is the
@@ -191,19 +191,19 @@ export component ClockPage {
     // stays because `gyro-tap` is in the API and the toggle is harmless; it
     // simply never lights.
     CydChip {
-        x: 8px; y: 186px; width: 84px;
+        x: 8px; y: 170px; width: 84px;
         text: root.cpu-text;
         clicked => { root.cpu-tap(); }
     }
     CydChip {
-        x: 100px; y: 186px; width: 84px;
+        x: 100px; y: 170px; width: 84px;
         text: "GYRO";
         tint: root.gyro-on ? Theme.accent : Theme.soft;
         rest: root.gyro-on ? Theme.track : Theme.panel;
         clicked => { root.gyro-tap(); }
     }
     CydChip {
-        x: 192px; y: 186px; width: 84px;
+        x: 192px; y: 170px; width: 84px;
         text: "APPS";
         tint: Theme.accent;
         clicked => { root.apps-tap(); }
@@ -225,7 +225,7 @@ export component ClockPage {
     // exists is the right side of that trade.
     if root.fam-known: Rectangle {
         x: 200px;
-        y: 110px;
+        y: 98px;
         width: 68px;
         height: 68px;
         border-radius: 14px;

@@ -157,13 +157,13 @@ export component PowerPage {
                 name: "CPU";     value: root.cpu-cell; }
     PowerCell { x: Geom.col2-x;    y:  36px; width: Geom.col-w;
                 name: "DISPLAY"; value: root.display-cell; }
-    PowerCell { x: Geom.content-x; y:  76px; width: Geom.col-w;
+    PowerCell { x: Geom.content-x; y:  74px; width: Geom.col-w;
                 name: "WIFI";    value: root.wifi-cell; }
-    PowerCell { x: Geom.col2-x;    y:  76px; width: Geom.col-w;
+    PowerCell { x: Geom.col2-x;    y:  74px; width: Geom.col-w;
                 name: "BLE";     value: root.ble-cell; }
-    PowerCell { x: Geom.content-x; y: 116px; width: Geom.col-w;
+    PowerCell { x: Geom.content-x; y: 112px; width: Geom.col-w;
                 name: "IMU";     value: root.imu-cell; }
-    PowerCell { x: Geom.col2-x;    y: 116px; width: Geom.col-w;
+    PowerCell { x: Geom.col2-x;    y: 112px; width: Geom.col-w;
                 name: "AUDIO";   value: root.audio-cell; }
 
     // --- the honesty line, standing where TOTAL and RUNTIME used to be ------
@@ -171,7 +171,7 @@ export component PowerPage {
     // draw, so it is the spot that has to explain why there is no total.
     Text {
         x: Geom.content-x;
-        y: 154px;
+        y: 150px;
         width: Geom.content-w;
         horizontal-alignment: center;
         text: "MAINS POWERED \u{00b7} no cell, no current measurement";
@@ -186,7 +186,7 @@ export component PowerPage {
     // uses (emitting 0.0 / 1.0), so `slint_shell.rs` is untouched.
     CydBacklightToggle {
         x: Geom.content-x;
-        y: 178px;
+        y: 170px;
         width: 210px;
         label: "BACKLIGHT";
         value <=> root.brightness;
@@ -198,7 +198,7 @@ export component PowerPage {
     // after it.
     Text {
         x: Geom.content-x;
-        y: 222px;
+        y: 218px;
         text: "no PWM \u{2014} tap the screen to relight";
         color: Theme.faint; font-size: Geom.t-caption; letter-spacing: 1px;
     }
@@ -214,7 +214,7 @@ export component PowerPage {
     // 92x46 finger target.
     reboot := PillButton {
         x: 228px;
-        y: 181px;
+        y: 172px;
         width: 84px; height: 38px;
         danger: true;
         text: "REBOOT";

@@ -415,14 +415,55 @@ pub mod ui {
     pub const SHADE_CARD_H: u16 = 60;
     pub const SHADE_CARD_PITCH: u16 = 66;
     pub const SHADE_CARDS: usize = 3;
-    /// Bottom edge-swipe band — bottom 15 % of the panel, matching the C6's
-    /// proportion (`427/502 = 85 %`, `204/240 = 85 %`).
+    /// Bottom edge gesture band — `start_y >= this` is an edge gesture.
     ///
-    /// ⚠️ The C6's 427 is entirely OFF a 240 px panel, which would leave
-    /// bottom-edge swipe-up (launcher) and hold-to-switcher **unreachable** —
-    /// not degraded, unreachable. Proposed by luna (layout workstream) and
-    /// applied here pending watch-session review.
-    pub const EDGE_BOTTOM_Y: u16 = 204;
+    /// **214, not the panel-proportional 204** (luna's ruling, 2026-08-26). The
+    /// proportion was never the binding constraint; the HOLD was.
+    ///
+    /// ★ THE INVARIANT, in its reusable form: **a band that HOLDS may not overlap
+    /// a tap target; a band that only SWIPES may.**
+    ///
+    /// The chips were never fighting the edge *band*, they were fighting the edge
+    /// *hold* — the switcher's 500 ms detector arms on every press and, when it
+    /// fires, swallows the lift that would have become the click. That is why the
+    /// bug presented as "APPS does nothing and the switcher appears". The swipe
+    /// half was never in conflict, because `SWIPE_MIN_Y` = 24 px of travel
+    /// separates a swipe from a tap — and this panel already proves it at the top,
+    /// where the chrome band's hit area is 100 % inside `EDGE_TOP_Y` and taps land
+    /// fine. So "no interactive element in edge territory" is the wrong rule; it
+    /// is too strong at the top and it was silent about the bottom.
+    ///
+    /// Fixing it needed 26 px and neither pure option could pay: a 10 px band is
+    /// thinner than the panel's own declared jitter (`HOLD_SLOP_PX` = 18) on an
+    /// uncalibrated resistive digitiser whose earliest, least-accurate samples are
+    /// the ones that set `hold_start`; and lifting the chips to end at 204 leaves
+    /// the left column 1 px short of its own ink before any gaps at all. So the 26
+    /// is split — the band yields 10 (204 → **214**) and the layout yields 16.
+    ///
+    /// 214 is not arbitrary: it lands exactly on the up-hint handle the shell
+    /// already draws at 214..236, so the hit area and the affordance that teaches
+    /// it become ONE number — the same trick that produced `EDGE_TOP_Y = 44 ==
+    /// chrome-hit`.
+    pub const EDGE_BOTTOM_Y: u16 = 214;
+
+    /// Bottom edge of the LOWEST interactive element on any page — the clock
+    /// chips and the power page's toggle/reboot controls all end here.
+    ///
+    /// Exists so the invariant above is a COMPILE ERROR rather than a comment.
+    /// The comment existed in spirit and did not stop the collision: making
+    /// `EDGE_BOTTOM_Y` reachable (it had been 427, off-panel, so the chips were
+    /// safe *by accident*) cut a live hold-band through the only three controls on
+    /// the boot page, and nothing complained.
+    ///
+    /// Whoever moves a tap target lower than this must move this with it, and the
+    /// assert will say so.
+    pub const LOWEST_TAP_BOTTOM_Y: u16 = 214;
+
+    // A hold-band may not overlap a tap target. See EDGE_BOTTOM_Y.
+    const _: () = assert!(EDGE_BOTTOM_Y >= LOWEST_TAP_BOTTOM_Y);
+    // And the band must be thicker than the digitiser's own jitter, or the hold
+    // it exists to detect cannot be told from a hand that did not move.
+    const _: () = assert!(240 - EDGE_BOTTOM_Y > HOLD_SLOP_PX as u16);
     /// Top edge-swipe band — top 18 %.
     ///
     /// Deliberately not the strict 15 % (36): 44 is exactly the chrome band's
