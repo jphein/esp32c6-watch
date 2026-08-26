@@ -51,6 +51,7 @@ use embedded_hal::i2c::I2c;
 use esp_hal::gpio::Output;
 use heapless::Vec;
 
+use crate::board;
 use crate::peripherals::audio::Es8311;
 use crate::peripherals::mic_capture::STEREO_CHUNK;
 
@@ -598,13 +599,29 @@ pub fn service_amp<I: I2c>(amp: &mut Output<'static>, codec: &mut Es8311<I>) {
         // persisted master volume (#59) so every clip honors the stored level
         // (and stays silent when muted).
         let _ = codec.set_volume(MASTER_VOL_REG.load(Ordering::Relaxed));
-        amp.set_high();
+        amp_drive(amp, true);
         AMP_READY_MS.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
         AMP_READY.store(true, Ordering::Relaxed);
     } else if !want && have {
-        amp.set_low();
+        amp_drive(amp, false);
         let _ = codec.shutdown();
         AMP_READY.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Drive the speaker-amp enable GPIO respecting the board's polarity.
+///
+/// The C6's SGM's enable is active-HIGH (GPIO6); the S3-CYD's SC8002B is
+/// active-LOW (GPIO1, `board::AMP_ACTIVE_LOW`). `on ^ AMP_ACTIVE_LOW` picks the
+/// level: active-high ON = high, active-low ON = low — and the boot-time
+/// `Output::new` level in main.rs mirrors this so the amp is released before
+/// the codec is muted (white-noise discipline #23).
+#[inline]
+fn amp_drive(amp: &mut Output<'static>, on: bool) {
+    if on ^ board::AMP_ACTIVE_LOW {
+        amp.set_high();
+    } else {
+        amp.set_low();
     }
 }
 

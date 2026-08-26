@@ -1185,12 +1185,21 @@ async fn main(_spawner: Spawner) -> ! {
     println!("=== smol watch v2 (C6 AMOLED, Embassy) ===");
     let delay = Delay::new();
 
-    // Speaker amp enable (GPIO6). CRITICAL: keep LOW before the ES8311 is
-    // initialized and muted below — a floating I2S line through an enabled
-    // amp produces loud white noise. From v0.8.5 the pin is driven by
-    // audio_out::service_amp (per main-loop tick + inline after each
-    // play_pcm): HIGH only while a queued SFX clip is in flight, LOW + codec
-    // shutdown otherwise — power + pop discipline (#23).
+    // Speaker amp enable. CRITICAL: keep the amp RELEASED before the ES8311 is
+    // initialized and muted below — a floating I2S line through an enabled amp
+    // produces loud white noise. From v0.8.5 the pin is driven by
+    // audio_out::service_amp (per main-loop tick + inline after each play_pcm):
+    // enabled only while a queued clip is in flight, released + codec shutdown
+    // otherwise — power + pop discipline (#23).
+    //
+    // Polarity is a board fact: the C6 (and the C5 arm) drive an active-HIGH
+    // enable on GPIO6, so the released boot level is Level::Low; the S3-CYD's
+    // SC8002B is active-LOW on GPIO1, so its released boot level is Level::High.
+    // service_amp's `amp_drive` mirrors `board::AMP_ACTIVE_LOW` for both edges.
+    // Gating the pin here also frees GPIO6 on the S3 (it is I2S_DIN there).
+    #[cfg(feature = "board-esp32s3-cyd")]
+    let mut amp_en = Output::new(peripherals.GPIO1, Level::High, OutputConfig::default());
+    #[cfg(not(feature = "board-esp32s3-cyd"))]
     let mut amp_en = Output::new(peripherals.GPIO6, Level::Low, OutputConfig::default());
 
     // === I2C bus ===
