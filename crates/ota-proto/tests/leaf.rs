@@ -221,3 +221,85 @@ fn failed_flash_write_aborts() {
     assert_eq!(a, LeafAction::Abort);
     assert!(!s.is_active(), "good slot intact, session gone");
 }
+
+// ---- FULL SIGNED transfer (de-risks the cross-arch mesh-OTA bench) ----------
+// The tests above drive arm()->transfer (crypto bypassed) and evaluate_meta's
+// REJECTION paths. This one composes the WHOLE leaf pipeline the bench will
+// exercise: a genuinely Ed25519-signed manifest -> verify -> gate -> arm ->
+// windowed OTAD transfer -> readback-SHA finalize -> Complete. It uses a TEST
+// key (not the baked production key — that needs the private half), which is
+// exactly the variable a test should substitute; every other step is the real
+// production path. If sign/verify/gate/transfer/finalize don't compose, this
+// fails in software instead of on the multi-node bench.
+use ed25519_compact::{KeyPair, Seed};
+use ota_proto::{gate, verify_signature_with, Announce};
+
+#[test]
+fn genuinely_signed_image_transfers_and_finalizes() {
+    // A test image + its true SHA-256.
+    let image: Vec<u8> = (0..CHUNK_PAYLOAD * 3 + 40).map(|i| (i * 7 % 251) as u8).collect();
+    let sha: [u8; 32] = Sha256::digest(&image).into();
+    let mut sha_hex = String::new();
+    for b in sha {
+        sha_hex.push_str(&format!("{b:02x}"));
+    }
+    let build = 999_999u32;
+    let manifest = format!("{build}|{}|{sha_hex}", image.len());
+
+    // Sign it with a deterministic TEST keypair (fixed seed).
+    let kp = KeyPair::from_seed(Seed::from_slice(&[42u8; 32]).unwrap());
+    let sig: [u8; 64] = *kp.sk.sign(manifest.as_bytes(), None);
+    let pubkey: [u8; 32] = *kp.pk;
+
+    // --- the leaf's exact accept sequence, with the test key for verify ---
+    assert!(
+        verify_signature_with(&pubkey, manifest.as_bytes(), &sig),
+        "genuine signature verifies"
+    );
+    let ann = Announce::from_signed(manifest.as_bytes(), &sig).expect("manifest parses");
+    assert_eq!(ann.build, build);
+    assert_eq!(ann.size, image.len() as u32);
+    assert_eq!(ann.sha256, sha);
+    // anti-rollback: newer than running (1), above floor (0), fits the slot.
+    assert!(gate(ann.build, ann.size, 1, 0, 1 << 20).is_ok(), "fresh image passes the gate");
+
+    // --- arm + drive the transfer + finalize (the production machine) ---
+    let mut s = LeafSession::new();
+    s.arm(7, ann.build, ann.size, ann.sha256, GW, 1_000);
+    let mut sink = VecSink::new();
+    let actions = feed_all(&mut s, &image, &mut sink);
+    assert!(
+        matches!(actions.last(), Some(LeafAction::Nak(n)) if *n > 0),
+        "final window -> finalize-ack"
+    );
+    assert!(sink.finalized.is_some(), "readback SHA matched the signed manifest -> staged");
+    assert_eq!(sink.bytes, image, "the exact signed image landed in the slot");
+
+    // the finalize-ack window drains to Complete with the manifest build.
+    let mut out = [0u8; 64];
+    let mut now = 2_000u64;
+    let mut done = None;
+    for _ in 0..16 {
+        now += LEAF_IDLE_NAK_MS + 1;
+        if let LeafAction::Complete { build } = s.tick(ME, now, &mut out) {
+            done = Some(build);
+            break;
+        }
+    }
+    assert_eq!(done, Some(build), "Complete carries the signed manifest's build");
+    assert!(!s.is_active());
+}
+
+#[test]
+fn a_wrong_key_signature_never_accepts() {
+    // The security property the bench cannot exhaustively prove: a manifest
+    // signed by the WRONG key fails verify -> no arm, no flash. (evaluate_meta
+    // uses the baked key; here we show verify_signature_with rejects a
+    // foreign-key signature over an otherwise-valid manifest.)
+    let manifest = b"999999|1024|00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let attacker = KeyPair::from_seed(Seed::from_slice(&[1u8; 32]).unwrap());
+    let victim = KeyPair::from_seed(Seed::from_slice(&[2u8; 32]).unwrap());
+    let sig: [u8; 64] = *attacker.sk.sign(manifest, None);
+    // verified against the VICTIM's key (what the leaf would trust): rejected.
+    assert!(!verify_signature_with(&*victim.pk, manifest, &sig));
+}
