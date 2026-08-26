@@ -55,3 +55,8 @@ Dry-run `git merge-tree main github/feat/cyd-c5-gating` (his tip **42a4900**, 24
 **Fold-in at merge:** his `5e77086` (pin C5 2.4GHz) = the has-5ghz-wifi finding; main's board-cyd-c5 lacks it. His `40f5da7` (print compiled-in broker) overlaps my per-seat MQTT VLAN-trap docs.
 
 Gated on morpheus/cyd-c5-e2 blessing image 9/10 on glass — merge is MINE to own on watch main when he pings (never self-merge smol). Heads-up sent to cyd-c5-e2. Re-measure C5 heap floor vs mesh-ota after.
+
+### C5 dedup addendum (from cyd-c5-e2, 2026-08-26)
+- has-pmu has a THIRD site in their lineage; confirmed my f0452a1 covers it (vol_during_play poll_power_key main.rs:5560, has-pmu gated; S3 target sets neither has-pmu nor has-audio).
+- **LATENT (found while checking):** `power.enable_mic_rail()` main.rs:1524 is a PMU call gated under **has-audio, not has-pmu** — dormant on S3 (has-audio off) but resurfaces on any PMU-less board that gains audio. `let _ =` silent (one NACK/boot, not spam). AT MERGE: move to has-pmu (or has-pmu && has-audio). Add to dedup inventory.
+- Floor re-measure is POST-MERGE only (C5 target on his branch + mesh-ota on main = combined floor doesn't exist until reconciliation). Build merged C5 arm on familiar, send number before their 0.3 scores against pre-mesh-ota +14,632B.
