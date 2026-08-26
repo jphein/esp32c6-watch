@@ -1662,6 +1662,52 @@ async fn main(_spawner: Spawner) -> ! {
             );
         (Adc::new(peripherals.ADC1, adc_config), pin)
     };
+    // #s3-batt-presence (2026-08-26 bench finding): an EMPTY battery connector
+    // floats the divider node square into the plausible-LiPo band — pin 2048 mV
+    // read as "4096 mV / 92%" with NO cell attached, which is WORSE than the
+    // honest 0% it replaced (a dashboard shows a healthy battery on a board that
+    // dies the moment USB drops). Presence is decided by TWO ADC samples: one
+    // with the pad's internal ~45 kΩ PULLDOWN enabled, one unloaded. A floating
+    // node COLLAPSES toward 0 under the pulldown; a real cell through the 2:1
+    // divider sags but holds far above it. A DIGITAL read cannot do this: with a
+    // cell the node sits ~1.9-2.1 V, below the 3.3 V-logic V_IH (~2.475 V), so a
+    // GPIO read would call a real battery LOW too. The pin object is owned by
+    // the ADC config, so the pulldown is toggled at the register (RTC_IO
+    // TOUCH_PAD9.RDE — GPIO9 is RTC pad 9; the #43 PAC-via-regs() pattern).
+    // Yields (present, unloaded_pin_mv, loaded_pin_mv); the loaded value is
+    // printed at boot so the 250 mV threshold can be iterated against the real
+    // divider impedance on glass (floating measured ≈clamp unloaded, ≈0 loaded).
+    #[cfg(feature = "board-esp32s3-cyd")]
+    macro_rules! s3_batt_sample {
+        () => {{
+            let rtcio = esp_hal::peripherals::RTC_IO::regs();
+            rtcio.touch_pad(9).modify(|_, w| w.rde().set_bit());
+            // First loaded read doubles as RC settle; the second is trusted.
+            let mut loaded: Option<u16> = None;
+            for pass in 0..2u8 {
+                for _ in 0..10_000u16 {
+                    if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
+                        if pass == 1 {
+                            loaded = Some(v);
+                        }
+                        break;
+                    }
+                }
+            }
+            rtcio.touch_pad(9).modify(|_, w| w.rde().clear_bit());
+            let mut unloaded: Option<u16> = None;
+            for _ in 0..10_000u16 {
+                if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
+                    unloaded = Some(v);
+                    break;
+                }
+            }
+            match (loaded, unloaded) {
+                (Some(l), Some(u)) => (l >= 250, u, l),
+                _ => (false, 0u16, 0u16),
+            }
+        }};
+    }
 
     // === OTA foundation: report partition layout + boot slot ===
     let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
@@ -2041,30 +2087,33 @@ async fn main(_spawner: Spawner) -> ! {
     // value off the divider ADC. board::BATT_ADC_DIVIDER scales pin→cell mV.
     #[cfg(feature = "board-esp32s3-cyd")]
     {
-        let mut pin_mv = None;
-        for _ in 0..10_000u16 {
-            // Blocking Adc's read_oneshot is nb-style; the calibrated pin's
-            // inner error is Infallible, so any Err is WouldBlock — spin.
-            if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
-                pin_mv = Some(v);
-                break;
-            }
-        }
-        if let Some(pin_mv) = pin_mv {
+        let (present, pin_mv, loaded_mv) = s3_batt_sample!();
+        if present {
             let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
             batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
             batt_mv = cell_mv;
-            // Boot-time diag (once, not per-poll): without this line a bench
-            // with NO cell attached reads 0% — indistinguishable from the old
-            // hardcoded honest-0 — so the mV is the only value that separates
-            // "plumbing works, connector empty" from "path broken".
+            // Boot-time diag (once, not per-poll): the loaded mV is the
+            // presence evidence — print it so the threshold can be iterated
+            // against the real divider impedance on the bench.
             println!(
-                "[BATT] adc pin_mv={} cell_mv={} pct={}",
-                pin_mv, cell_mv, batt_pct
+                "[BATT] adc pin_mv={} (loaded {}) cell_mv={} pct={}",
+                pin_mv, loaded_mv, cell_mv, batt_pct
             );
             shell.set_battery(batt_pct, batt_mv, charging);
             crate::peripherals::ble::BATTERY_PERCENT
                 .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            // No cell: the floating node collapsed under the probe pulldown.
+            // Report honestly (0%, not a floating-band fiction) and say why.
+            println!(
+                "[BATT] no cell (probe collapsed: loaded {} mV, unloaded {} mV)",
+                loaded_mv, pin_mv
+            );
+            batt_pct = 0;
+            batt_mv = 0;
+            shell.set_battery(0, 0, charging);
+            crate::peripherals::ble::BATTERY_PERCENT
+                .store(0, core::sync::atomic::Ordering::Relaxed);
         }
     }
     if let Ok(dt) = rtc.get_time() {
@@ -3109,21 +3158,19 @@ async fn main(_spawner: Spawner) -> ! {
             // notify latch stays on the AXP path for now (S3 follow-up).
             #[cfg(feature = "board-esp32s3-cyd")]
             {
-                let mut pin_mv = None;
-                for _ in 0..10_000u16 {
-                    if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
-                        pin_mv = Some(v);
-                        break;
-                    }
-                }
-                if let Some(pin_mv) = pin_mv {
+                let (present, pin_mv, _loaded_mv) = s3_batt_sample!();
+                if present {
                     let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
                     batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
                     batt_mv = cell_mv;
-                    shell.set_battery(batt_pct, batt_mv, charging);
-                    crate::peripherals::ble::BATTERY_PERCENT
-                        .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+                } else {
+                    // Empty connector: honest zero, never the floating fiction.
+                    batt_pct = 0;
+                    batt_mv = 0;
                 }
+                shell.set_battery(batt_pct, batt_mv, charging);
+                crate::peripherals::ble::BATTERY_PERCENT
+                    .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
             }
             next_battery = if screen_state == 0 {
                 now + Duration::from_secs(600)
