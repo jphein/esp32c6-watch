@@ -76,6 +76,10 @@ pub const TOUCH_SWAP_XY: bool = false;
 pub const TOUCH_INVERT_X: bool = false;
 pub const TOUCH_INVERT_Y: bool = false;
 
+/// FT6336U deaf-Monitor quirk is S3-CYD-only (see esp32s3_cyd.rs); this
+/// board keeps the original FocalTech Monitor init.
+pub const TOUCH_FT6336_ACTIVE_QUIRK: bool = false;
+
 /// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
 /// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
 /// the first flash write — the wrong arm's image passes the 0xE9 magic check.
