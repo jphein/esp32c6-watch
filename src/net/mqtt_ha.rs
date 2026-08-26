@@ -12,7 +12,7 @@
 //! returns; the boot/NTP/mesh flow is never blocked for more than ~5s.
 
 use embassy_net::{tcp::TcpSocket, Ipv4Address, Stack};
-use embassy_time::{with_timeout, Duration, Instant};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_println::println;
 use heapless::Vec;
 
@@ -76,12 +76,40 @@ const ANNOUNCE_WAIT: Duration = Duration::from_millis(1500);
 /// fast, so an unreachable broker still gives up in ~2 s. This only widens the
 /// backstop for the pathological case.
 pub async fn publish_burst(stack: Stack<'static>, batt_pct: u8) {
-    match with_timeout(BURST_BUDGET, burst(stack, batt_pct)).await {
-        Ok(Ok(())) => println!("[MQTT] published"),
-        Ok(Err(reason)) => println!("[MQTT] failed: {reason}"),
-        Err(_) => println!("[MQTT] failed: timeout (12s, outer backstop)"),
+    // One retry on a TRANSIENT failure. The first connect of a boot burst can
+    // race the just-completed association settling (observed on the S3-CYD:
+    // a lone `tcp connect` fail while the C6 reaches the same broker fine),
+    // and the burst is otherwise single-shot until the next ready-edge. Only
+    // transient reasons retry; a deterministic auth/parse failure (bad creds,
+    // bad broker string) would just fail again, so it gives up immediately.
+    // The success path is unchanged — the retry only fires after a failure.
+    for attempt in 0..2 {
+        match with_timeout(BURST_BUDGET, burst(stack, batt_pct)).await {
+            Ok(Ok(())) => {
+                println!("[MQTT] published");
+                return;
+            }
+            Ok(Err(reason)) => {
+                let transient = matches!(reason, "tcp connect" | "tcp read" | "tcp write");
+                if transient && attempt == 0 {
+                    println!("[MQTT] {reason} - retrying once");
+                    Timer::after(BURST_RETRY_DELAY).await;
+                    continue;
+                }
+                println!("[MQTT] failed: {reason}");
+                return;
+            }
+            Err(_) => {
+                println!("[MQTT] failed: timeout (12s, outer backstop)");
+                return;
+            }
+        }
     }
 }
+
+/// Delay before the single burst retry — long enough for a racing association
+/// / DHCP to settle, short enough to stay inside the boot-burst window.
+const BURST_RETRY_DELAY: Duration = Duration::from_millis(750);
 
 /// Whole-burst backstop. Must stay > CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT so it
 /// never pre-empts the specific error those produce.
