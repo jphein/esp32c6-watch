@@ -437,6 +437,15 @@ pub fn landed_channel() -> Option<u8> {
     }
 }
 
+/// The mesh's elected channel (0 = none elected yet). Exposed so the MQTT path
+/// can detect being associated OFF the mesh channel — a single-radio
+/// WiFi/ESP-NOW time-slice that starves a tight TCP connect (s3-cyd 2026-08-26:
+/// the S3 lands on a ch1 AP while the mesh holds ch6; NTP/UDP tolerates the
+/// slicing, MQTT/TCP-connect at 2 s does not).
+pub fn preferred_channel() -> u8 {
+    PREFER_CH.load(Ordering::Relaxed)
+}
+
 /// The mesh's elected channel, handed down so association can PREFER it.
 /// `net_task` never elects — it only reports observations and honours the result.
 pub fn set_preferred_channel(ch: u8) {

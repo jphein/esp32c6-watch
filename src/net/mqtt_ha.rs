@@ -83,8 +83,13 @@ pub async fn publish_burst(stack: Stack<'static>, batt_pct: u8) {
     // transient reasons retry; a deterministic auth/parse failure (bad creds,
     // bad broker string) would just fail again, so it gives up immediately.
     // The success path is unchanged — the retry only fires after a failure.
+    // Off the mesh channel, the single radio time-slices STA<->ESP-NOW and a
+    // tight TCP connect starves (s3-cyd 2026-08-26). Widen the whole burst
+    // budget in that case ONLY; the common co-channel path is unchanged.
+    let off_channel = off_mesh_channel();
+    let budget = if off_channel { BURST_BUDGET_OFFCH } else { BURST_BUDGET };
     for attempt in 0..2 {
-        match with_timeout(BURST_BUDGET, burst(stack, batt_pct)).await {
+        match with_timeout(budget, burst(stack, batt_pct, off_channel)).await {
             Ok(Ok(())) => {
                 println!("[MQTT] published");
                 return;
@@ -114,6 +119,24 @@ const BURST_RETRY_DELAY: Duration = Duration::from_millis(750);
 /// Whole-burst backstop. Must stay > CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT so it
 /// never pre-empts the specific error those produce.
 const BURST_BUDGET: Duration = Duration::from_secs(12);
+/// Off-mesh-channel budget: the time-sliced connect + handshake need room.
+/// Must exceed CONNECT_TIMEOUT_OFFCH (8) + HANDSHAKE_TIMEOUT_OFFCH (8) + the
+/// publish/DISCONNECT tail. Only used when associated off the mesh channel.
+const BURST_BUDGET_OFFCH: Duration = Duration::from_secs(24);
+/// Connect / handshake bounds when associated off the mesh channel — the
+/// sliced radio delays SYN/SYN-ACK and CONNACK well past the co-channel values.
+const CONNECT_TIMEOUT_OFFCH: Duration = Duration::from_secs(8);
+const HANDSHAKE_TIMEOUT_OFFCH: Duration = Duration::from_secs(8);
+
+/// True when associated on a channel other than the mesh's elected one (both
+/// known and different). Neither known -> false (assume co-channel / no penalty).
+fn off_mesh_channel() -> bool {
+    let mesh = crate::net::net_task::preferred_channel();
+    match crate::net::net_task::landed_channel() {
+        Some(landed) if mesh != 0 && landed != mesh => true,
+        _ => false,
+    }
+}
 /// TCP-connect bound, kept tight: if the broker is down the SYN goes unanswered, and
 /// `connect` would otherwise block the single-threaded executor for the whole
 /// handshake window during the boot NTP burst.
@@ -124,7 +147,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// `[MQTT] failed: tcp read` was reporting. Matches `mqtt_climate`'s value.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> {
+async fn burst(
+    stack: Stack<'static>,
+    batt_pct: u8,
+    off_channel: bool,
+) -> Result<(), &'static str> {
+    let connect_to = if off_channel { CONNECT_TIMEOUT_OFFCH } else { CONNECT_TIMEOUT };
+    let handshake_to = if off_channel { HANDSHAKE_TIMEOUT_OFFCH } else { HANDSHAKE_TIMEOUT };
     let (ip, port) = parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?;
 
     let mut rx_buf = [0u8; 256];
@@ -146,9 +175,9 @@ async fn burst(stack: Stack<'static>, batt_pct: u8) -> Result<(), &'static str> 
     // the single-threaded executor, and give the post-connect handshake its own
     // longer window. An authenticating broker doing a credential lookup can easily
     // exceed 2 s for CONNACK while being perfectly healthy.
-    socket.set_timeout(Some(HANDSHAKE_TIMEOUT));
+    socket.set_timeout(Some(handshake_to));
 
-    match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, port))).await {
+    match with_timeout(connect_to, socket.connect((ip, port))).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => return Err("tcp connect"),
         Err(_) => return Err("tcp connect: timeout"),
