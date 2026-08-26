@@ -234,7 +234,28 @@ pub const INVERT_COLORS: bool = false;
 /// is no legal clock at which a full-screen repaint fits.** Dirty-rectangle
 /// partial repaint is therefore mandatory rather than an optimisation — which is
 /// exactly what the Slint renderer + [`crate::ui::slint_platform`]'s flusher do.
-pub const SPI_DISPLAY_HZ: u32 = 20_000_000;
+/// **26 MHz as of image 10b** (was 20). Still inside the documented 15-33 MHz
+/// band above — cycle time violated, pulse widths with margin — so this is the
+/// same risk class the vendor's 20 MHz already occupied, not a new one.
+///
+/// ⚠️ 26, NOT 33, and the reason is the DIVIDER not the datasheet. The SPI clock
+/// is an integer division of the 80 MHz source, so the achievable rates near the
+/// ceiling are:
+///
+/// ```text
+///   80/2 = 40.00 MHz   OUT OF BAND — half-cycle under the 15 ns pulse floor
+///   80/3 = 26.67 MHz   highest IN-BAND rate that exists
+///   80/4 = 20.00 MHz   the old value
+/// ```
+///
+/// There is no 33 MHz. Asking for 33 either rounds down to 26.67 (harmless but
+/// misleading in the source) or rounds up to 40 (out of spec, silently). 26 can
+/// only resolve to 26.67 or below, so it cannot overshoot.
+///
+/// Full frame 320*240*2 = 153,600 B: 20 MHz = 61.4 ms, **26.67 MHz = 46.1 ms**
+/// (1.33x). Separate commit from the repaint fixes so it reverts alone if JP sees
+/// tearing or corruption on a page turn.
+pub const SPI_DISPLAY_HZ: u32 = 26_000_000;
 
 /// Max SPI clock for *reading* ST7789 registers — 6.67 MHz (`TSCYCR >= 150 ns`).
 ///
