@@ -2054,6 +2054,14 @@ async fn main(_spawner: Spawner) -> ! {
             let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
             batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
             batt_mv = cell_mv;
+            // Boot-time diag (once, not per-poll): without this line a bench
+            // with NO cell attached reads 0% — indistinguishable from the old
+            // hardcoded honest-0 — so the mV is the only value that separates
+            // "plumbing works, connector empty" from "path broken".
+            println!(
+                "[BATT] adc pin_mv={} cell_mv={} pct={}",
+                pin_mv, cell_mv, batt_pct
+            );
             shell.set_battery(batt_pct, batt_mv, charging);
             crate::peripherals::ble::BATTERY_PERCENT
                 .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
