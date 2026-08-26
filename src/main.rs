@@ -1689,6 +1689,28 @@ async fn main(_spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
+    // Battery ADC (S3-CYD only): no PMU fuel gauge, so read the cell voltage
+    // off the GPIO9 2:1 divider (board::BATT_ADC_GPIO=9 = ADC1_CH8 on the S3,
+    // board::BATT_ADC_DIVIDER=2.0). Curve-calibrated oneshot returns the pin
+    // voltage in mV; ×divider = cell mV → power::lipo_pct. GPIO9 was freed by
+    // moving the boot button to GPIO0 above. The complex AdcPin/AdcCalCurve
+    // types are inferred, so the binding stays untyped.
+    // NOTE(build): esp-hal ADC generics written against the 1.1.2 source but
+    // NOT locally compiled (xtensa is fambuild-only) — if the AdcCalCurve
+    // turbofish or ADC1 lifetime needs a nudge, that's the spot; falling back
+    // to enable_pin() + a raw→mV scale is the escape hatch.
+    #[cfg(feature = "board-esp32s3-cyd")]
+    let (mut bat_adc, mut bat_adc_pin) = {
+        use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
+        let mut adc_config = AdcConfig::new();
+        let pin = adc_config
+            .enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1<'_>>>(
+                peripherals.GPIO9,
+                Attenuation::_11dB,
+            );
+        (Adc::new(peripherals.ADC1, adc_config), pin)
+    };
+
     // === OTA foundation: report partition layout + boot slot ===
     let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
     let mut config_offset: Option<u32> = None;
@@ -2062,6 +2084,36 @@ async fn main(_spawner: Spawner) -> ! {
         shell.set_battery(batt_pct, batt_mv, charging);
         crate::peripherals::ble::BATTERY_PERCENT
             .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+    }
+    // S3-CYD: the AXP block above NACKs (no PMU), leaving 0%; read the real
+    // value off the divider ADC. board::BATT_ADC_DIVIDER scales pin→cell mV.
+    #[cfg(feature = "board-esp32s3-cyd")]
+    {
+        let mut pin_mv = None;
+        for _ in 0..10_000u16 {
+            // Blocking Adc's read_oneshot is nb-style; the calibrated pin's
+            // inner error is Infallible, so any Err is WouldBlock — spin.
+            if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
+                pin_mv = Some(v);
+                break;
+            }
+        }
+        if let Some(pin_mv) = pin_mv {
+            let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
+            batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
+            batt_mv = cell_mv;
+            // Boot-time diag (once, not per-poll): without this line a bench
+            // with NO cell attached reads 0% — indistinguishable from the old
+            // hardcoded honest-0 — so the mV is the only value that separates
+            // "plumbing works, connector empty" from "path broken".
+            println!(
+                "[BATT] adc pin_mv={} cell_mv={} pct={}",
+                pin_mv, cell_mv, batt_pct
+            );
+            shell.set_battery(batt_pct, batt_mv, charging);
+            crate::peripherals::ble::BATTERY_PERCENT
+                .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     if let Ok(dt) = rtc.get_time() {
         let _ = shell.set_time(&dt);
@@ -3098,6 +3150,27 @@ async fn main(_spawner: Spawner) -> ! {
                     );
                 } else if low_batt_notified && (charging || batt_pct >= 20) {
                     low_batt_notified = false;
+                }
+            }
+            // S3-CYD: divider ADC read (the AXP block above NACKs — no PMU).
+            // v1 drives the battery display + BLE service; the low-battery
+            // notify latch stays on the AXP path for now (S3 follow-up).
+            #[cfg(feature = "board-esp32s3-cyd")]
+            {
+                let mut pin_mv = None;
+                for _ in 0..10_000u16 {
+                    if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
+                        pin_mv = Some(v);
+                        break;
+                    }
+                }
+                if let Some(pin_mv) = pin_mv {
+                    let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
+                    batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
+                    batt_mv = cell_mv;
+                    shell.set_battery(batt_pct, batt_mv, charging);
+                    crate::peripherals::ble::BATTERY_PERCENT
+                        .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
                 }
             }
             next_battery = if screen_state == 0 {
