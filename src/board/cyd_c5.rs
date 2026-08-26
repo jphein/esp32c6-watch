@@ -308,9 +308,40 @@ pub const TOUCH_CAL: crate::drivers::xpt2046::Calibration =
         invert_long: true,
     };
 
-/// Minimum XPT2046 pressure (`z1 + 4095 - z2`) to count as a touch. Too low and
-/// bus noise registers as taps; too high and light presses are dropped.
-pub const TOUCH_PRESSURE_THRESHOLD: u16 = 400;
+/// Minimum XPT2046 pressure (`z1 + 4095 - z2`) to count as a touch.
+///
+/// **100 — a measurement, not a preference** (vesper, driver owner, image 9).
+///
+/// ```text
+///   noise ceiling      z <= 30           (idle, many samples, spike-free)
+///   ---- 100 ----                        3.3x over noise
+///   rejected REALS     213 274 360 365 372
+///   confirmed contact  z_min 478..534    (truncated gestures)
+/// ```
+///
+/// The old 400 sat above every one of those rejected reals. It looked
+/// exonerated by the first capture — which showed rejects at z<=30 and contact
+/// at 482..2341, a wide empty band — but that capture could only contain
+/// gestures that REGISTERED. JP's controlled count settled it: ~20 swipes
+/// produced 8 lifts. Twelve gestures were entirely invisible, and a threshold
+/// too high is invisible **by construction** — it yields no samples, so it
+/// appears in no gesture record. Survivorship bias, and it hid this for an
+/// entire image cycle.
+///
+/// ★ Why the LOW end of the 100-150 range: the two failure directions are not
+/// symmetric in observability. Too low self-reports — phantom taps show up in
+/// telemetry as short-travel events with z in 30..100. Too high reports
+/// nothing at all. Prefer the error you can see. If phantoms appear, 150 is a
+/// one-line retreat *with data*; the reverse mistake costs another cycle of
+/// invisibility.
+///
+/// Note the rejected reals are all NONZERO — they cleared the `z1 == 0`
+/// bridge-open early-return and were killed by this gate, not by the floor. So
+/// brush-weight contact provably produces sub-400 z on this panel, and lowering
+/// the gate necessarily recovers it. (If a future capture shows high `open=`
+/// with low `rej=`, the remaining losses are open-bridge reads instead — a
+/// different failure, fixed in the driver's PD bits, not here.)
+pub const TOUCH_PRESSURE_THRESHOLD: u16 = 100;
 
 /// Lines the renderer stages before a flush — **1 on this board**.
 ///

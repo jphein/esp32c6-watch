@@ -59,6 +59,20 @@ const CMD_READ_Z2: u8 = 0xC0;
 /// smallest N that survives a single-sample spike (the dominant noise mode on a
 /// resistive panel sharing a bus with a 20 MHz display clock) while costing only
 /// ~10 conversions per poll.
+///
+/// ★ DECISION — STAYS AT 5 (vesper, driver owner, image 9). Dropping to 3 was
+/// the obvious starvation lever: fewer conversions per poll means more polls per
+/// gesture. It is backwards here. Lowering `TOUCH_PRESSURE_THRESHOLD` to 100
+/// admits **light** contact, and light contact means HIGH contact resistance —
+/// the noisiest input this filter will ever see. Halving the filter at exactly
+/// the moment its input gets noisier trades a real robustness margin for
+/// samples we are about to get anyway.
+///
+/// "Anyway" is the load-bearing part: the threshold drop is ITSELF partly a
+/// starvation fix. Twelve of JP's twenty gestures produced *zero* samples, and
+/// every light entry and exit phase now contributes, so `n` should rise from
+/// that alone — before the span-run flusher's share. Measure the new `n` before
+/// reaching for this knob; it may already be moot.
 const MEDIAN_N: usize = 5;
 
 /// Consecutive below-threshold reads required before declaring a lift.
