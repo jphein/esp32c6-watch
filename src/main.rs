@@ -3795,12 +3795,31 @@ async fn main(_spawner: Spawner) -> ! {
                         // the gateway re-broadcasts cached configs every ~10s,
                         // so a same-value re-arm must never wear flash.
                         Some(MeshEvent::CfgScreen { page }) => {
-                            // Switch the visible page live (ShellUi::set_page
-                            // clamps out-of-range). Takes effect immediately on
-                            // the watchface; if we're in an app it sets the page
-                            // the shell returns to. The save stays edge-triggered.
-                            shell.set_page(page as i32);
+                            // ★ THE VISIBLE-PAGE WRITE IS EDGE-TRIGGERED TOO, and
+                            // it was not. The guard four lines down existed, was
+                            // correct, and protected the wrong thing: it stopped
+                            // the re-broadcast wearing FLASH while letting it
+                            // overwrite the user's NAVIGATION. The gateway
+                            // re-broadcasts cached configs every ~10 s, so an
+                            // unconditional `set_page` here snapped the watch back
+                            // to `default_page` (PAGE_CLOCK = 0) every ten
+                            // seconds — a swipe to page 4 reverted before the user
+                            // could believe it worked.
+                            //
+                            // Gated on `default_page != page` rather than on
+                            // "differs from the page showing now", deliberately: a
+                            // genuine remote go-to-page must still work, and
+                            // comparing against the live page would make a user
+                            // who swiped away from default_page unreachable by
+                            // remote command. Comparing against the CONFIG drops
+                            // only the idempotent re-arms, which is exactly the
+                            // set that should be dropped.
+                            //
+                            // Switch takes effect immediately on the watchface; in
+                            // an app it sets the page the shell returns to.
                             if watch_cfg.default_page != page {
+                                println!("[CFG] screen page -> {page} (config changed; re-arms ignored)");
+                                shell.set_page(page as i32);
                                 watch_cfg.default_page = page;
                                 // Deferred (#75): mark dirty; the flush block writes once at a
                                 // quiet moment. An inline erase here can hang the watch.
