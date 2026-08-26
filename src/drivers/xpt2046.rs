@@ -80,7 +80,13 @@ const MEDIAN_N: usize = 5;
 /// A capacitive controller reports `fingers == 0` cleanly; a resistive bridge
 /// chatters as contact pressure drops through the threshold. Without this, a
 /// single dropout mid-drag would end the gesture and emit a spurious swipe.
-const RELEASE_DEBOUNCE: u8 = 2;
+/// **`pub` because main.rs's poll gate must not be shorter than this.** The gate
+/// stops polling once the IRQ line goes high, so if its tail is shorter than this
+/// debounce the second below-threshold read never arrives, the lift is never
+/// declared, and `tracking` wedges true forever — no gesture can complete again.
+/// That was a real freeze (see `TOUCH_POLL_TAIL` in main.rs). Two constants in
+/// two layers that must agree; they now agree by construction.
+pub const RELEASE_DEBOUNCE: u8 = 2;
 
 // The swipe minimums live on the BOARD (`board::ui::SWIPE_MIN_X` / `SWIPE_MIN_Y`),
 // not here. A file-local `SWIPE_MIN = 32` used to shadow them and was applied to

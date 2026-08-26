@@ -2076,7 +2076,10 @@ async fn main(_spawner: Spawner) -> ! {
     // done by reading the accel on each short AOD light-sleep poll (below).
     let mut raise_detector = crate::peripherals::imu::RaiseDetector::new();
     let mut next_step_poll = Instant::now();
-    let mut was_touching = false;
+    // Polls still owed after the touch IRQ goes high — see `TOUCH_POLL_TAIL` at
+    // the poll gate. Replaces a `was_touching: bool` that only ever held the
+    // previous frame's IRQ level, which made the tail exactly one poll long.
+    let mut touch_tail: u8 = 0;
 
     // Radio state (#53): user intent vs. radio truth lives in net_task now —
     // the boot auto-connect intent rode the spawn's `boot_connect` arg. Main
@@ -3184,9 +3187,46 @@ async fn main(_spawner: Spawner) -> ! {
         let mut swipe_start_y: u16 = 0;
         let mut tap_event = false;
         let mut touch_point: Option<crate::peripherals::touch::TouchPoint> = None;
+        // ★ THE POLL TAIL MUST OUTLAST THE DRIVER'S RELEASE DEBOUNCE.
+        //
+        // This used to be `(int_low || was_touching)` with `was_touching = int_low`
+        // — i.e. the previous frame's IRQ level, a tail of exactly ONE poll after
+        // the finger lifts. The CYD's resistive driver needs TWO consecutive
+        // below-threshold reads to declare a lift (xpt2046::RELEASE_DEBOUNCE),
+        // because a resistive bridge chatters where a capacitive controller
+        // reports `fingers == 0` cleanly. So:
+        //
+        //   finger up  -> poll -> None -> releasing=1, 1 < 2, NOT a lift yet
+        //   next frame -> tail exhausted -> NO POLL
+        //
+        // The second None never arrived, the lift was never declared, `tracking`
+        // wedged true, and no gesture could ever complete again. Exactly one
+        // gesture worked per screen wake. It presented as "first tap works, then
+        // freezes until the screen sleeps and wakes".
+        //
+        // It was LATENT for the whole port and image 9 exposed it: at
+        // TOUCH_PRESSURE_THRESHOLD=400 light contact chattered constantly, so
+        // mid-gesture double-dropouts declared lifts by accident all the time.
+        // Dropping the gate to 100 accepted that contact and removed the accidents
+        // that were papering over the missing lift. The threshold fix was correct
+        // and it uncovered this.
+        //
+        // Derived, not hardcoded, so the two layers cannot drift apart again. The
+        // +1 is margin: a single spurious in-range sample resets `releasing`, and
+        // a tail of exactly the debounce would then fall one short again.
+        #[cfg(feature = "board-cyd-c5")]
+        const TOUCH_POLL_TAIL: u8 = crate::drivers::xpt2046::RELEASE_DEBOUNCE + 1;
+        // The C6's FT3168 reports finger count directly, so one read sees the
+        // release. 2 keeps a margin without pretending it needs the C5's rule.
+        #[cfg(not(feature = "board-cyd-c5"))]
+        const TOUCH_POLL_TAIL: u8 = 2;
         let int_low = touch_int.is_low();
-        let touch_active = screen_state >= 2 && (int_low || was_touching);
-        was_touching = int_low;
+        if int_low {
+            touch_tail = TOUCH_POLL_TAIL;
+        } else {
+            touch_tail = touch_tail.saturating_sub(1);
+        }
+        let touch_active = screen_state >= 2 && (int_low || touch_tail > 0);
         if touch_active {
             // The bus argument is the CYD's shared-SPI reality made explicit:
             // borrowing the display for the call is what makes "never poll touch
