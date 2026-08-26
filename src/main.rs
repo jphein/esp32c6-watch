@@ -1364,8 +1364,18 @@ async fn main(_spawner: Spawner) -> ! {
         crate::peripherals::touch::NullInput,
         crate::peripherals::touch::NullTouch,
     );
-    let _ = touch.init();
-    println!("[TOUCH] OK");
+    // Report by the init result, not aspiration: touch.init() is an I2C write to
+    // the FocalTech part (FT3168 on the C6, FT6336U on the S3), so a NACK means
+    // the controller is absent or at the wrong address — the exact failure a
+    // bench needs to see, and previously swallowed by `let _ =` + an
+    // unconditional "OK" (same non-discriminating-instrument lie the IMU log had,
+    // fixed in ae80072). NullTouch (no-cap-touch boards, e.g. the C5) returns
+    // Infallible, so its Err arm is dead and it always prints OK — correct: the
+    // stub genuinely cannot fail.
+    match touch.init() {
+        Ok(()) => println!("[TOUCH] OK"),
+        Err(_) => println!("[TOUCH] init FAILED (I2C NACK — controller absent or wrong address?)"),
+    }
 
     // === RTC ===
     let mut rtc = Pcf85063aRtc::new(RefCellDevice::new(&i2c_ref));
