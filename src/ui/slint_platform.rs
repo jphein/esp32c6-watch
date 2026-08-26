@@ -300,6 +300,33 @@ impl Drop for SingleLineFlusher<'_, '_> {
     }
 }
 
+// ===========================================================================
+// [RENDER-DBG] counters — DIAGNOSTIC, gated on `touch-telemetry`
+// ===========================================================================
+// The open question these exist to settle: property writes commit (a [SHELL-DBG]
+// `PAGED 0 -> 4` is logged and the value reads back changed on the next gesture)
+// and the glass does not move. Three layers could be responsible and they need
+// completely different fixes, so guessing is expensive:
+//
+//   draw=false            -> the window was never marked dirty. Propagation.
+//   draw=true, lines=0    -> dirty FLAG set, dirty REGION empty. The region
+//                            computation lost it — prime suspect is the vendored
+//                            renderer fork's even-pixel alignment pass, written
+//                            for the CO5300's CASET/RASET constraint and running
+//                            on an ST7789 that never asked for it.
+//   draw=true, lines>0    -> pixels WERE pushed. Downstream: window, SPI, GRAM.
+//
+// `lines` counts `process_line` calls (one per span PER line); `spans` counts
+// windows actually opened (a run that could not continue). A full-frame repaint
+// on this panel should read lines=240 spans=1.
+//
+// Instrumented on the SingleLineFlusher only — the CYD is the board under
+// investigation, and `touch-telemetry` is C5-only anyway.
+#[cfg(feature = "touch-telemetry")]
+pub static RDBG_LINES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+#[cfg(feature = "touch-telemetry")]
+pub static RDBG_SPANS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 impl slint::platform::software_renderer::LineBufferProvider
     for &mut SingleLineFlusher<'_, '_>
 {
@@ -315,6 +342,8 @@ impl slint::platform::software_renderer::LineBufferProvider
             render_fn(&mut []);
             return;
         }
+        #[cfg(feature = "touch-telemetry")]
+        RDBG_LINES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         debug_assert!(line < HEIGHT && range.end <= WIDTH);
 
         render_fn(&mut self.buf[range.clone()]);
@@ -357,6 +386,8 @@ impl slint::platform::software_renderer::LineBufferProvider
             // exists for. A saturating floor of 1 keeps a bad line number to a
             // one-row window instead of a 65535-row one.
             let h = HEIGHT.saturating_sub(line).max(1) as u16;
+            #[cfg(feature = "touch-telemetry")]
+            RDBG_SPANS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             self.display.set_addr_window(x0 as u16, line as u16, w as u16, h);
             self.display.begin_pixels();
         }

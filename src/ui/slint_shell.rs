@@ -2242,12 +2242,47 @@ impl ShellUi {
         // Same clock for the ping receiver pulse (#35): breathe + auto-dismiss.
         self.tick_ping_pulse();
         slint::platform::update_timers_and_animations();
-        self.window.draw_if_needed(|renderer| {
+        #[cfg(feature = "touch-telemetry")]
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            crate::ui::slint_platform::RDBG_LINES.store(0, Relaxed);
+            crate::ui::slint_platform::RDBG_SPANS.store(0, Relaxed);
+        }
+        // `draw_if_needed` returns whether it actually painted — we discarded
+        // that for the whole port, which is precisely the fact needed to tell
+        // "never marked dirty" from "dirty but empty region".
+        let _drew = self.window.draw_if_needed(|renderer| {
             let mut flusher =
                 board::BoardFlusher::new(display, &mut self.line_buf, &mut self.scratch);
             renderer.render_by_line(&mut flusher);
             flusher.flush_pending();
         });
+        // BOUNDED ON PURPOSE. Renders are attempted every loop iteration, so an
+        // unconditional line here would bury the [SHELL-DBG] stream it has to be
+        // correlated against. Print only on an ACTUAL paint — carrying how many
+        // frames were skipped since the last one — plus a rare heartbeat so that
+        // "no paints at all" is distinguishable from "the log was lost".
+        #[cfg(feature = "touch-telemetry")]
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            static IDLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            if _drew {
+                esp_println::println!(
+                    "[RENDER-DBG] draw=true lines={} spans={} (after {} idle frames)",
+                    crate::ui::slint_platform::RDBG_LINES.load(Relaxed),
+                    crate::ui::slint_platform::RDBG_SPANS.load(Relaxed),
+                    IDLE.swap(0, Relaxed),
+                );
+            } else {
+                let n = IDLE.fetch_add(1, Relaxed) + 1;
+                if n % 512 == 0 {
+                    esp_println::println!(
+                        "[RENDER-DBG] draw=false x{} (window never dirty since last paint)",
+                        n
+                    );
+                }
+            }
+        }
     }
 }
 
