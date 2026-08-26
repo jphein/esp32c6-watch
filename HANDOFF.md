@@ -66,3 +66,10 @@ No C6 board on my USB; broker denies anon read; #89 scopes only the watch AP, ho
 - Its live mesh window saw acks from C3 crown (ac:a7:04:ba:1f:24, id50) + one unknown 10:00:3b:ce:95:cc. Attributed via sigil-id crate (seed=mac[2..6] XOR-fold): unknown → id **172**, NOT a C6 (fleet C6 = eldritch-lantern 98:A3:16:A7:2F:E4→122, mythic-throne 98:A3:16:A5:A7:F8→236). ESP-NOW = STA/base MAC, so a C6 peer would show 98:A3:16:*. No C6 mesh ack in-window.
 - Retained MQTT diag EXISTS: smol/122 up=42.8h, smol/236 up=2.7h (mythic-throne booted tonight) — but retained ≠ now.
 - Cadence: firmware broadcasts mesh diag every 60s (main.rs:3683), gateway relays to smol/<id>/diag. **s3-cyd-45 running a 10-min flip-watch** on smol/122|236/diag. ANY new-value flip ⇒ C6 verified live-now; zero flips ⇒ record as night duty-cycle (NOT dead), don't claim verification. Awaiting its flip log.
+
+### C6 observability from THIS seat — all paths closed (2026-08-26 01:35, don't re-drill)
+- USB: fleet absent (watchctl).
+- MQTT: broker (10.0.11.110/10.0.8.111:1883) TCP-open but REQUIRES AUTH — `mosquitto_sub -d` anon shows "sending CONNECT" then no CONNACK (silent drop). Raw authed client also no-CONNACK (packet/cred mismatch). Can't compare w/ authed mosquitto_sub w/o argv-exposing pw (CLAUDE.md forbids). Only s3-cyd-45 connects authed → sole observer.
+- Mesh ESP-NOW: via s3-cyd-45 peer table — only C3 crown (id50) + unknown id172 acked in-window; no 98:A3:16:* (C6) ack.
+- WiFi/realm: `realm find` C6 MACs = no match (registry only, not live assoc); no DNS for eldritch-lantern/mythic-throne; no lease/dhcp/arp command in realm; watches absent from `realm watch` WOL stream; gatekeeper ssh blocked (#89).
+- NET: C6 live-now provable ONLY via s3-cyd-45's authed MQTT flip-watch (running) or a board on USB. Retained diag (122 up=42.8h, 236 up=2.7h) shows both alive tonight but retained≠now.
