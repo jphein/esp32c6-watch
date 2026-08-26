@@ -82,3 +82,7 @@ Gateway→broker relay proven healthy end-to-end (4 nodes flipping ~24s cadence 
 - Also flipping: smol/8, smol/51 (C3 crown family).
 
 BOARD STATUS NOW: S3 verified (deploy + broker-live). C5 hardware network-verified live; on-glass+merge pending. C6 alive-tonight, asleep at probe time (no board on USB to wake+verify from this seat).
+
+## S3 GUI GARBLE — ROOT-CAUSED + FIXED (2026-08-26, JP on-glass)
+JP at bench: S3 GUI garbled = **chunks displaced/torn** (colors + signal intact, NOT noise). Root cause: `arm_ramwr()` defined in spi_bus.rs but NEVER called. SharedSpiBus latches RAMWR_CONT (0x3C) after first pixel push; a new CASET/RASET window needs the next push to restart with RAMWR (0x2C). ST7789 sibling's set_addr_window arms it; **ILI9341 set_addr_window omitted it** → every strip after the first resumed at the prior GRAM pointer = displaced. Below the flusher (pairing-counter blind); emberburrito clean because mipidsi always RAMWRs.
+**FIX 928d35d** (pushed): one line `self.bus.arm_ramwr();` after RASET in ili9341.rs set_addr_window. s3-cyd-45 building/flashing with JP at glass. Awaiting on-glass verdict. Prediction: renders clean; C5 (ST7789, already arms) should be unaffected on this axis — if C5 also displaced, separate bug.
