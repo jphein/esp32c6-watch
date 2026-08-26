@@ -73,3 +73,12 @@ No C6 board on my USB; broker denies anon read; #89 scopes only the watch AP, ho
 - Mesh ESP-NOW: via s3-cyd-45 peer table — only C3 crown (id50) + unknown id172 acked in-window; no 98:A3:16:* (C6) ack.
 - WiFi/realm: `realm find` C6 MACs = no match (registry only, not live assoc); no DNS for eldritch-lantern/mythic-throne; no lease/dhcp/arp command in realm; watches absent from `realm watch` WOL stream; gatekeeper ssh blocked (#89).
 - NET: C6 live-now provable ONLY via s3-cyd-45's authed MQTT flip-watch (running) or a board on USB. Retained diag (122 up=42.8h, 236 up=2.7h) shows both alive tonight but retained≠now.
+
+## FLIP-WATCH RESULT (s3-cyd-45, window 01:29:22 PDT, 569s live span)
+Gateway→broker relay proven healthy end-to-end (4 nodes flipping ~24s cadence over full window).
+- **C5 (arcane-beacon, id176 — smol-allocated override) = LIVE.** smol/176/diag flipped ×24 → C5 hardware alive, meshing, gateway→MQTT publishing NOW (on morpheus's bench firmware). **Current-window C5 hardware liveness ESTABLISHED (network/mesh/MQTT stack).** Remaining C5 gates are narrower: morpheus's on-glass GUI bless + the merge-to-main I own.
+- **S3 (id162) = LIVE** — smol/162/diag ×24, broker-side corroboration of the already-verified #447 fleet node.
+- **C6 both ASLEEP, not dead.** smol/122 (eldritch-lantern) & smol/236 (mythic-throne): ZERO live flips, retained byte-identical to 70min prior (122 up=154054 heap=64380; 236 up=9699 heap=51420). Channel was live (others flipping) → strong negative. mythic-throne up=2.7h = alive tonight, duty-cycled at 01:30. C6 current-live NOT captured; recent-alive confirmed.
+- Also flipping: smol/8, smol/51 (C3 crown family).
+
+BOARD STATUS NOW: S3 verified (deploy + broker-live). C5 hardware network-verified live; on-glass+merge pending. C6 alive-tonight, asleep at probe time (no board on USB to wake+verify from this seat).
