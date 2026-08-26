@@ -151,7 +151,11 @@ impl AppDescriptor {
     pub fn hardware_present(&self) -> bool {
         match self.state {
             AppState::Maze => cfg!(feature = "has-imu"), // tilt-driven
-            AppState::Voice | AppState::Sound => cfg!(feature = "has-audio"),
+            // Voice needs mic capture (has-audio-in); Sound is playback-only
+            // (has-audio-out). The S3 has out but not in yet, so Sound is present
+            // there and Voice is not — the honest per-capability split.
+            AppState::Voice => cfg!(feature = "has-audio-in"),
+            AppState::Sound => cfg!(feature = "has-audio-out"),
             _ => true,
         }
     }
