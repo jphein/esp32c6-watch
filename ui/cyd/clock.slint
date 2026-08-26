@@ -134,7 +134,30 @@ export component ClockPage {
             height: parent.height;
             border-radius: 4px;
             background: @linear-gradient(90deg, Theme.accent2 0%, Theme.accent 100%);
-            animate width { duration: 350ms; easing: ease-out; }
+            // ⚠️ NO `animate width` HERE. It was `350ms ease-out` and it cost the
+            // board its responsiveness.
+            //
+            // `minute-progress` steps once per second (set_time is 1 Hz-gated), so
+            // the bar moves 180px/60 = 3 px per tick. Slint repaints EVERY FRAME
+            // for an animation's duration, so a 350 ms ease was 350 ms of
+            // full-rate repaint out of every 1000 ms — ~35 % duty cycle, forever,
+            // on the page the board boots into, to ease three pixels.
+            //
+            // Measured with [RENDER-DBG] on image 10: page 0 ran
+            // `lines=380 spans=218` in bursts of ~11 consecutive frames (the
+            // animation) separated by idle gaps (the 650 ms remainder). 218 window
+            // opens per frame is the span-run flusher's documented WORST case —
+            // ~the pre-flusher cost, restored — and it starved touch sampling,
+            // which is what JP felt as "so slow to be unusable".
+            //
+            // The 218 comes from this bar's `border-radius` (every one of its 8
+            // lines has a different x-extent, so no run can continue) plus
+            // `seconds-text`'s glyph spans. Both change every second; the animation
+            // multiplied them by ~11.
+            //
+            // Same call the sibling already made — shell.slint:54: "`animate x` is
+            // gone from all five pages and a page change is now a HARD CUT". A 3 px
+            // step is imperceptible eased or not; the frames are not.
         }
     }
 

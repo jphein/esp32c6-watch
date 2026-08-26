@@ -1149,7 +1149,11 @@ impl ShellUi {
         ui.set_date_text(slint::format!(
             "{} {:02} {} 20{:02}", weekday, dt.day, month, dt.year
         ));
-        ui.set_minute_progress(dt.seconds as f32 / 59.0);
+        // /60 not /59: seconds run 0..=59, so dividing by 59 put the bar at 100 %
+        // for the whole of second 59 and snapped it to 0 at second 0 — one second
+        // of full bar per minute. /60 makes the last step land at 59/60 and the
+        // wrap at 0 be the only reset.
+        ui.set_minute_progress(dt.seconds as f32 / 60.0);
         true
     }
 
