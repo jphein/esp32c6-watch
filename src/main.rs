@@ -91,7 +91,10 @@ use crate::peripherals::es7210::Es7210;
 use crate::peripherals::die_temp::DieTemp;
 use crate::peripherals::imu::Qmi8658Imu;
 use crate::peripherals::mic_capture;
-use crate::peripherals::power::{Axp2101Power, PowerKey};
+use crate::peripherals::power::Axp2101Power;
+// PowerKey names are only referenced in has-pmu-gated PWRON-poll arms.
+#[cfg(feature = "has-pmu")]
+use crate::peripherals::power::PowerKey;
 use crate::peripherals::power_stats::{DisplayState, PowerStats, WifiMode};
 use crate::peripherals::rtc::{DateTime, Pcf85063aRtc};
 use crate::peripherals::touch::{Ft3168Touch, SwipeDirection};
@@ -1522,6 +1525,9 @@ async fn main(_spawner: Spawner) -> ! {
     // Charger profile (issue #16): CV 4.1V / pre 50mA / CC 400mA / term 25mA —
     // vendor parity (board .cc:48-52). Field-masked RMW of regs 0x61-0x64 only;
     // rail enables are untouched (panel brown-out caution in power.rs header).
+    // has-pmu only: boards without an AXP2101 (the S3-CYD) have no charger to
+    // configure — the RMW would just NACK the empty I2C bus and log FAILED.
+    #[cfg(feature = "has-pmu")]
     if power.configure_charger().is_ok() {
         println!("[POWER] charger configured: CV 4.1V, pre 50mA, CC 400mA, term 25mA");
     } else {
@@ -1532,6 +1538,9 @@ async fn main(_spawner: Spawner) -> ! {
     // enable the short/long latches (0x41 RMW), clear stale ones (0x49 W1C).
     // The main loop polls the latch; ladder: 1.5s hold -> power menu, 4s hold
     // -> hardware poweroff (vendor failsafe, works even with firmware hung).
+    // has-pmu only: the PWRON latch lives in the AXP2101; the S3-CYD wakes on
+    // its boot key (HAS_BOOT_KEY) instead, polled separately below.
+    #[cfg(feature = "has-pmu")]
     if power.enable_pwron_events().is_ok() {
         println!("[POWER] PWRON events armed: IRQLEVEL 1.5s menu, 4s hw-off failsafe");
     } else {
@@ -3052,6 +3061,7 @@ async fn main(_spawner: Spawner) -> ! {
             if shell.power_menu_open() {
                 shell.set_vbus(power.is_vbus_in().unwrap_or(false));
             }
+            #[cfg(feature = "has-pmu")]
             match power.poll_power_key() {
                 Ok(Some(key)) if screen_state == 0 => {
                     println!("[PKEY] {:?} discarded (screen off, stale)", key);
@@ -5545,6 +5555,8 @@ async fn main(_spawner: Spawner) -> ! {
                             let requeue = &mut requeued;
                             let mut vol_during_play = || -> Option<(u8, bool)> {
                                 let mut act: Option<ButtonAction> = None;
+                                // has-pmu only: no AXP2101 PWRON on the S3-CYD.
+                                #[cfg(feature = "has-pmu")]
                                 if let Ok(Some(key)) = power.poll_power_key() {
                                     act = Some(match key {
                                         crate::peripherals::power::PowerKey::Long => pwron_long,
