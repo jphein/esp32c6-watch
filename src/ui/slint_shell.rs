@@ -59,10 +59,11 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = board::ui::SLIDER_BAND;
 // own their gestures (they swallow nav swipes first), and framebuffer games
 // never route touch through this module at all.
 //
-//   Bottom edge (start_y ≥ EDGE_BOTTOM_Y, ~85% of the 502px panel):
+//   Bottom edge (start_y ≥ EDGE_BOTTOM_Y — board-owned; C6 427/502, CYD 204/240,
+//   both ~85%):
 //     swipe UP        → app launcher (#29), from ANY watchface page
 //     HOLD ≥ 500 ms   → app switcher (#31)
-//   Top edge (start_y ≤ EDGE_TOP_Y, ~15%):
+//   Top edge (start_y ≤ EDGE_TOP_Y — board-owned; C6 75 = 14.9%, CYD 44 = 18.3%):
 //     swipe DOWN      → notification shade (#32)
 //   Mid-screen: unchanged — Left/Right page the carousel, Up on the clock
 //     page still opens the launcher (the legacy affordance).
@@ -73,13 +74,30 @@ pub const SLIDER_BAND: core::ops::RangeInclusive<u16> = board::ui::SLIDER_BAND;
 // the bottom zone by 4px and its exclusion is checked first — a drag that
 // close to the slider must never yank the launcher up.
 
-/// Bottom edge zone floor: `start_y >= EDGE_BOTTOM_Y` is an edge gesture
-/// (≈85% of the 502px panel height).
-pub const EDGE_BOTTOM_Y: u16 = 427;
+// Both edge bands are BOARD-OWNED. They were hardcoded to the C6's pixel values
+// (427 / 75) and shadowed `board::ui`, which nothing read — the fifth and sixth
+// instance of that shadowing bug in this file, after SWIPE_MIN_X/_Y and
+// HOLD_SLOP_PX. Four of this file's six board constants were already wired
+// (SLIDER_BAND, HUB_SLIDER_BAND, LAUNCHER_PAGE_SLOTS, SETTINGS_PAGE_COUNT), which
+// is what makes this a half-finished migration rather than a design choice.
+//
+// What the C6 numbers did on a 320x240 landscape panel:
+//   EDGE_BOTTOM_Y = 427  >=  240  ->  UNREACHABLE. Bottom-edge swipe-up
+//     (launcher) and hold-to-switcher were DEAD on this board — every gesture,
+//     the whole port. `board/cyd_c5.rs` predicted exactly this in writing
+//     ("not degraded, unreachable"), supplied 204, and was never read.
+//   EDGE_TOP_Y = 75  ->  the top 31.2 % of the panel was shade-open territory,
+//     which is why an accidental Down opened the shade constantly. The board's
+//     44 is 18.3 %.
 
-/// Top edge zone ceiling (#32): a swipe DOWN with `start_y <= EDGE_TOP_Y`
-/// (≈15%) pulls the notification shade over any watchface page.
-pub const EDGE_TOP_Y: u16 = 75;
+/// Bottom edge zone floor: `start_y >= EDGE_BOTTOM_Y` is an edge gesture.
+/// C6 427 (85 % of 502); CYD 204 (85 % of 240).
+pub const EDGE_BOTTOM_Y: u16 = board::ui::EDGE_BOTTOM_Y;
+
+/// Top edge zone ceiling (#32): a swipe DOWN with `start_y <= EDGE_TOP_Y` pulls
+/// the notification shade over any watchface page.
+/// C6 75 (14.9 %); CYD 44 (18.3 %).
+pub const EDGE_TOP_Y: u16 = board::ui::EDGE_TOP_Y;
 
 /// Bottom-edge HOLD (#31): a press that stays inside the edge zone for this
 /// long raises the app switcher.
