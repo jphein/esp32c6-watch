@@ -2635,10 +2635,10 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
     };
     let mut tiles: Vec<LauncherTile> = Vec::new();
     let mut titles: Vec<SharedString> = Vec::new();
-    // Audio leads on boards that can speak. Without has-audio the section
-    // holds at most Story, and a launcher that opens onto a near-empty page
-    // reads as breakage — the six games lead instead.
-    let order = if cfg!(feature = "has-audio") {
+    // Audio leads on boards that can speak (has-audio-out — playback). Without
+    // it the section holds at most Story, and a launcher that opens onto a
+    // near-empty page reads as breakage — the six games lead instead.
+    let order = if cfg!(feature = "has-audio-out") {
         [Section::Audio, Section::Games, Section::System]
     } else {
         [Section::Games, Section::System, Section::Audio]
