@@ -28,6 +28,37 @@ extern "Rust" fn custom_halt() -> ! {
     for _ in 0..24_000_000u32 {
         core::hint::spin_loop();
     }
+    // ★ HEAP STATE AT THE MOMENT OF THE PANIC — the number every allocation
+    // failure needs and none of them print.
+    //
+    // Two OOM panics have now cost a symbolization round each because the message
+    // says nothing about memory:
+    //   i-slint-core properties.rs:63   assert!(!mem.is_null(), "allocation failed")
+    //   vtable      vrc.rs:155          NonNull::new(mem).unwrap()   <- reads as a
+    //                                   refcount bug; it is `alloc()` returning null
+    // The second one is worse than useless: one line below it sits
+    // `assert!(!mem.is_null())` with a GOOD message, permanently unreachable behind
+    // the unwrap. So the crate that reports the failure decides how legible it is,
+    // and we do not control those crates. This does: whatever panics, for whatever
+    // reason, the heap state that caused it is on the wire.
+    //
+    // It also closes the sampling gap that made the first OOM unattributable — every
+    // other heap figure we have is a ~2.7 s beat sample, so the trough that actually
+    // failed was never observed. This reading is, by construction, the one that
+    // matters.
+    //
+    // ⚠️ READS ONLY. `stats()` is a plain struct read with no allocation.
+    // `largest_free_block()` is deliberately NOT called here: it probes by
+    // allocating, and allocating inside an out-of-memory panic invites a nested
+    // panic that would destroy the backtrace we just printed.
+    let hs = esp_alloc::HEAP.stats();
+    let region = |i: usize| hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0);
+    esp_println::println!(
+        "[PANIC-HEAP] total_free={} main_free={} recl_free={}",
+        esp_alloc::HEAP.free(),
+        region(0),
+        region(1),
+    );
     esp_println::println!("[PANIC] rebooting (custom-halt) — backtrace above");
     for _ in 0..4_000_000u32 {
         core::hint::spin_loop();

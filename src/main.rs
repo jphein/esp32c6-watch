@@ -4587,7 +4587,68 @@ async fn main(_spawner: Spawner) -> ! {
                 // overlay app doesn't fan out here.
                 shell.mirror_overlays(app_state);
                 shell.handle_touch(touch_point, swipe_event, swipe_start_y);
+                let prev_app_state = app_state;
                 app_state = shell.reconcile_overlay();
+                // ★ LAUNCHER PRE-FLIGHT: DECLINE RATHER THAN DIE.
+                //
+                // Opening the launcher instantiates the LauncherOverlay subtree plus
+                // 8 AppIcons in one burst, and on this board that allocation FAILS —
+                // `vtable/vrc.rs:155` (`NonNull::new(alloc(..)).unwrap()`) panics and
+                // custom-halt reboots the watch. JP reported it as "I can never go
+                // back to home page with buttons": he taps APPS, the watch reboots,
+                // and from outside that is a button doing nothing.
+                //
+                // This does not fix the OOM — PSRAM registration does, and that is its
+                // own floor-bracketed campaign. It converts a REBOOT into a TOAST.
+                //
+                // ★ Why shipping a threshold I cannot yet measure is defensible here,
+                // when it was not for TOUCH_PRESSURE_THRESHOLD: the failure is
+                // ASYMMETRIC. Today's behaviour is a reboot, so
+                //   too conservative -> launcher never opens, and it SAYS SO
+                //   too permissive   -> sometimes opens, sometimes reboots (= today)
+                // Every possible threshold is at least as good as the status quo.
+                // There is no wrong answer that is worse than what we have.
+                //
+                // ★ And it INSTRUMENTS ITS OWN GUESS. The launcher has never once
+                // opened successfully, so its true footprint is unmeasured and cannot
+                // be measured any other way. Logging BOTH paths means JP's captures
+                // converge on the real requirement, and the next iteration sets this
+                // number from data instead of inheriting it forever — which is the
+                // difference between this and the 400-threshold mistake.
+                //
+                // Reads `stats()` only, never `largest_free_block()`: that probes by
+                // allocating, and probing the heap to decide whether the heap can take
+                // an allocation is a good way to cause the thing you are testing for.
+                if app_state == AppState::Launcher && prev_app_state != AppState::Launcher {
+                    const LAUNCHER_FREE_FLOOR: usize = 24 * 1024;
+                    let hs = esp_alloc::HEAP.stats();
+                    let rf = |i: usize| hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0);
+                    let total = esp_alloc::HEAP.free();
+                    if total < LAUNCHER_FREE_FLOOR {
+                        println!(
+                            "[LAUNCHER] DECLINED open: total_free={} < floor={} (main={} recl={})",
+                            total,
+                            LAUNCHER_FREE_FLOOR,
+                            rf(0),
+                            rf(1)
+                        );
+                        shell.set_launcher_open(false);
+                        shell.set_toast("Low memory \u{2014} launcher unavailable");
+                        toast_until = now + Duration::from_secs(4);
+                        toast_active = true;
+                        app_state = prev_app_state;
+                    } else {
+                        // The other half of the measurement: this is what the heap
+                        // looked like on an attempt that was ALLOWED. Compare against
+                        // the next [PANIC-HEAP] line to learn the real cost.
+                        println!(
+                            "[LAUNCHER] open attempt: total_free={} main={} recl={}",
+                            total,
+                            rf(0),
+                            rf(1)
+                        );
+                    }
+                }
 
                 // WLED remote: back-chevron closes; a tapped tile broadcasts a
                 // WiZmote frame over ESP-NOW (reusing the mesh block's broadcast
