@@ -1386,8 +1386,15 @@ async fn main(_spawner: Spawner) -> ! {
 
     // === IMU ===
     let mut imu = Qmi8658Imu::new(RefCellDevice::new(&i2c_ref));
-    let _ = imu.init();
-    println!("[IMU] OK");
+    // Print by init result, not unconditionally: a board with no IMU (the
+    // ES3C28P / S3-CYD has none — BSP_CAPS_IMU=0) NACKs on the I2C probe, and
+    // an unconditional "[IMU] OK" is a vacuous instrument that reads identical
+    // whether the part is there or not. The C6 (QMI8658 present) still logs OK.
+    match imu.init() {
+        Ok(true) => println!("[IMU] OK"),
+        Ok(false) => println!("[IMU] absent (WHO_AM_I mismatch - no/other device)"),
+        Err(_) => println!("[IMU] absent (init NACK - no IMU on this board)"),
+    }
 
     // === Audio (ES8311 codec + I2S) ===
     // CRITICAL ORDER (mirrors the S3 reference):
