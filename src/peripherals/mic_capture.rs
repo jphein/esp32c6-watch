@@ -28,8 +28,13 @@ use embassy_time::{Duration, Timer};
 // compile unchanged on every board, and a board without `has-audio` simply
 // never spawns the tasks (the spawn sites live inside main.rs's gated audio
 // bring-up block).
-#[cfg(feature = "has-audio")]
-use esp_hal::i2s::master::{I2sRx, I2sTx};
+// Split by direction: the TX half (silent_clock_task + top_up) is the playback
+// path (has-audio-out, C6 + S3); the RX half (mic_capture_task) is the capture
+// path (has-audio-in, C6 only for now — the S3's ES8311-ASDOUT capture is phase 2).
+#[cfg(feature = "has-audio-out")]
+use esp_hal::i2s::master::I2sTx;
+#[cfg(feature = "has-audio-in")]
+use esp_hal::i2s::master::I2sRx;
 use esp_hal::Blocking;
 use heapless::Vec;
 
@@ -140,7 +145,7 @@ const PUSH_POLL_MS: u64 = 4;
 /// up via [`audio_out::PlaybackFeeder`]: clip samples (mono → stereo) while
 /// staged, silence otherwise. Any `Late`/DMA error mid-session aborts the
 /// clip and re-arms — the mic clock always comes back.
-#[cfg(feature = "has-audio")]
+#[cfg(feature = "has-audio-out")]
 #[embassy_executor::task]
 pub async fn silent_clock_task(mut i2s_tx: I2sTx<'static, Blocking>, ring: &'static [u8]) {
     use crate::peripherals::audio_out::{self, PlaybackFeeder};
@@ -225,7 +230,7 @@ async fn rearm_requested() {
 /// the stage buffer drains it in ≤ one-descriptor slices; `& !3` guards whole
 /// stereo frames. Plain fn (not async) so the 1 KB stage stays off the
 /// statically-allocated task future.
-#[cfg(feature = "has-audio")]
+#[cfg(feature = "has-audio-out")]
 fn top_up(
     xfer: &mut esp_hal::dma::DmaTransferTxCircular<'_, I2sTx<'static, Blocking>>,
     feeder: &mut crate::peripherals::audio_out::PlaybackFeeder,
@@ -290,7 +295,7 @@ async fn recording_cleared() {
 /// [`RECORDING`] it pops stereo frames, extracts mono, and `try_send`s chunks
 /// (dropping on channel-full = shed oldest audio under backpressure); while idle
 /// it drains-and-discards so the circular ring never overflows.
-#[cfg(feature = "has-audio")]
+#[cfg(feature = "has-audio-in")]
 #[embassy_executor::task]
 pub async fn mic_capture_task(
     mut i2s_rx: I2sRx<'static, Blocking>,

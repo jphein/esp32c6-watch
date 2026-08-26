@@ -47,7 +47,7 @@ include!("panic_reboot.rs");
 // Chip-gated esp-hal surfaces (#cyd-c5): the C5's esp-hal 1.1.x has no `i2s`
 // module and no `rtc_cntl::sleep`. Gated by CAPABILITY, not chip, per the board
 // model — the board feature says what the hardware has, code asks the capability.
-#[cfg(feature = "has-audio")]
+#[cfg(feature = "has-audio-out")]
 use esp_hal::i2s::master::{Config as I2sConfig, DataFormat, I2s};
 #[cfg(feature = "has-light-sleep")]
 use esp_hal::rtc_cntl::sleep::{GpioWakeupSource, TimerWakeupSource};
@@ -1456,37 +1456,61 @@ async fn main(_spawner: Spawner) -> ! {
     // Whole-block gate rather than per-line: everything from the I2S config to
     // the TX clock task exists only where the codec + mics do (has-audio). The
     // C5's esp-hal has no `i2s` module, so none of this can even name its types.
-    #[cfg(feature = "has-audio")]
+    #[cfg(feature = "has-audio-out")]
     {
-        println!("[AUDIO] Init I2S (full-duplex, shared clock)...");
+        println!("[AUDIO] Init I2S (playback master + optional mic RX)...");
+        // signal_loopback is the RX-slaves-to-TX-clock trick — only meaningful
+        // when the mic RX half is also built (full-duplex, has-audio-in). A
+        // playback-only board (S3 phase 1) leaves it off: TX just drives the DAC.
         let i2s_config = I2sConfig::default()
             .with_sample_rate(Rate::from_hz(16000))
             .with_data_format(DataFormat::Data16Channel16)
-            .with_signal_loopback(true);
+            .with_signal_loopback(cfg!(feature = "has-audio-in"));
+
+        // Board-gated I2S pins. Option B (AUDIO_BCLK_DERIVED=false @ a605ac2):
+        // MCLK is DRIVEN on BOTH boards via with_mclk — GPIO19 on the C6, GPIO4
+        // on the S3 — so the ES8311 runs MCLK-from-pin (reg 0x01=0x3F, the
+        // glass-proven C6 path) at 16 kHz on the S3 too, no pipeline fork.
+        #[cfg(not(feature = "board-esp32s3-cyd"))]
+        let (p_mclk, p_bclk, p_ws, p_dout) = (
+            peripherals.GPIO19,
+            peripherals.GPIO20,
+            peripherals.GPIO22,
+            peripherals.GPIO23,
+        );
+        #[cfg(feature = "board-esp32s3-cyd")]
+        let (p_mclk, p_bclk, p_ws, p_dout) = (
+            peripherals.GPIO4, // board::I2S_MCLK_GPIO — driven (option B)
+            peripherals.GPIO5, // board::I2S_BCK_GPIO
+            peripherals.GPIO7, // board::I2S_WS_GPIO
+            peripherals.GPIO8, // board::I2S_DOUT_GPIO → ES8311 DSDIN
+        );
+
         let i2s_periph = I2s::new(peripherals.I2S0, peripherals.DMA_CH1, i2s_config)
             .expect("I2S failed")
-            .with_mclk(peripherals.GPIO19);
-        // TX is the I2S MASTER: it drives the shared BCLK(GPIO20)/WS(GPIO22) + MCLK. A
-        // continuous SILENT circular TX (below) keeps them free-running so the ES8311 ADC
-        // clocks data onto ASDOUT; the RX slaves to this clock via signal_loopback (internal).
-        // A circular TX needs EXACTLY descriptor_count() descriptors for its ring buffer.
+            .with_mclk(p_mclk);
+
+        // TX is the I2S MASTER: it drives the shared BCLK/WS + MCLK. A continuous
+        // SILENT circular TX (below) keeps them free-running — the playback seam
+        // AND, on a full-duplex board, the clock the mic ADC needs to shift data
+        // onto ASDOUT. A circular TX needs EXACTLY descriptor_count() descriptors.
         const TX_RING_LEN: usize = audio_out::TX_RING_LEN; // 3072 bytes → 3 descriptors
         const TX_CIRC_DESCS: usize =
             esp_hal::dma::descriptor_count(TX_RING_LEN, esp_hal::dma::CHUNK_SIZE, true);
         static I2S_TX_DESC: StaticCell<[DmaDescriptor; TX_CIRC_DESCS]> = StaticCell::new();
-        let mut i2s_tx = i2s_periph
+        let i2s_tx = i2s_periph
             .i2s_tx
-            .with_bclk(peripherals.GPIO20) // TX-master BCLK → codec (shared w/ RX via loopback)
-            .with_ws(peripherals.GPIO22)   // TX-master WS/LRCK → codec
-            .with_dout(peripherals.GPIO23) // DAC data → ES8311 DSDIN=GPIO23 (schematic I2S_DSDIN)
+            .with_bclk(p_bclk) // TX-master BCLK → codec
+            .with_ws(p_ws) // TX-master WS/LRCK → codec
+            .with_dout(p_dout) // DAC data → ES8311 DSDIN
             .build(I2S_TX_DESC.init([DmaDescriptor::EMPTY; TX_CIRC_DESCS]));
-        // === I2S RX for mic capture (#42 voice + #28 meter) — SLAVE via signal_loopback ===
-        // `i2s_periph.i2s_rx` is still available (partial move — tx took i2s_tx). With
-        // signal_loopback=true the RX shares the TX-master WS/BCK internally (configure()
-        // sets rx_slave_mod + sig_loopback from the Config flag) and just reads DIN(GPIO21)=
-        // ASDOUT — NO with_bclk/with_ws, NO GPIO-matrix hack. This is the ONLY place
-        // I2S0/DMA_CH1 is claimed; voice PTT + the SoundLevel meter subscribe to MIC_CH.
-        // MCLK (GPIO19) is peripheral-wide (with_mclk on i2s_periph). Stays Blocking:
+
+        // === I2S RX for mic capture (#42 voice + #28 meter) — has-audio-in only ===
+        // C6 only for now: the mic is the SEPARATE ES7210 ADC (SLAVE via
+        // signal_loopback, DIN=GPIO21=ASDOUT). The S3's capture is the ES8311's
+        // own ASDOUT (GPIO6) — a different path, phase 2, so it stays cfg'd out
+        // here. `i2s_periph.i2s_rx` is still available (partial move — tx took
+        // i2s_tx). MCLK is peripheral-wide (with_mclk above). Stays Blocking:
         // mic_capture_task drives it via read_dma_circular + poll.
         //
         // v0.6.0 glass crash (Load fault mtval=0x8 in DmaTransferRxCircular::available):
@@ -1494,49 +1518,50 @@ async fn main(_spawner: Spawner) -> ! {
         // walk from chain.last() expecting last.next → first; a padded array leaves trailing
         // EMPTY descriptors whose next=null, so the first available() poll derefs null.
         // descriptor_count() gives the exact count (3 for the ring @ CHUNK_SIZE=4092).
-        const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
-            mic_capture::MIC_RING_LEN,
-            esp_hal::dma::CHUNK_SIZE,
-            true, // circular
-        );
-        static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
-        let i2s_rx = i2s_periph
-            .i2s_rx
-            .with_din(peripherals.GPIO21) // ADC/mic data ← ES8311 ASDOUT=GPIO21 (schematic I2S_ASDOUT)
-            .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
-        // Mic PCM channel (capture task → consumers) + the DMA capture ring.
-        // Channel::new() is const → a plain static; the ring needs a StaticCell.
-        // MIC_RING_LEN is 3 × STEREO_CHUNK = 3072 B (it was 8 KB until the
-        // three-descriptor rework — see mic_capture.rs for the live value).
-        static MIC_RING: StaticCell<[u8; mic_capture::MIC_RING_LEN]> = StaticCell::new();
-        let mic_ring = MIC_RING.init([0u8; mic_capture::MIC_RING_LEN]);
-        _spawner.spawn(
-            mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
-                .expect("mic_capture_task token"),
-        );
-        println!("[AUDIO] I2S RX (mic) ready on GPIO21 (DIN <- ES8311 ASDOUT)");
+        #[cfg(feature = "has-audio-in")]
+        {
+            #[cfg(not(feature = "board-esp32s3-cyd"))]
+            let p_din = peripherals.GPIO21; // ES7210 ASDOUT → ESP DIN
+            #[cfg(feature = "board-esp32s3-cyd")]
+            let p_din = peripherals.GPIO6; // ES8311 ASDOUT → ESP DIN (phase 2)
+            const MIC_RX_DESCS: usize = esp_hal::dma::descriptor_count(
+                mic_capture::MIC_RING_LEN,
+                esp_hal::dma::CHUNK_SIZE,
+                true, // circular
+            );
+            static I2S_RX_DESC: StaticCell<[DmaDescriptor; MIC_RX_DESCS]> = StaticCell::new();
+            let i2s_rx = i2s_periph
+                .i2s_rx
+                .with_din(p_din)
+                .build(I2S_RX_DESC.init([DmaDescriptor::EMPTY; MIC_RX_DESCS]));
+            // Mic PCM channel (capture task → consumers) + the DMA capture ring.
+            // MIC_RING_LEN is 3 × STEREO_CHUNK = 3072 B.
+            static MIC_RING: StaticCell<[u8; mic_capture::MIC_RING_LEN]> = StaticCell::new();
+            let mic_ring = MIC_RING.init([0u8; mic_capture::MIC_RING_LEN]);
+            _spawner.spawn(
+                mic_capture::mic_capture_task(i2s_rx, mic_ring, MIC_CH.sender())
+                    .expect("mic_capture_task token"),
+            );
+            println!("[AUDIO] I2S RX (mic) ready (DIN <- codec ASDOUT)");
+        }
 
-        // === Continuous full-duplex TX — the clock generator + playback ring ===
-        // The mic ADC only shifts data onto ASDOUT while it sees BCLK/WS edges. As the
-        // I2S MASTER, our TX must free-run those shared clocks continuously; RX slaves to
-        // them (signal_loopback). We stream this ring forever: the shared BCLK/WS keep
-        // toggling and the ADC keeps clocking real mic data into the RX DMA. The ring is
-        // ZEROS except while a queued SFX clip plays (#23): the clock task substitutes
-        // clip samples via DmaTransferTxCircular::push, and the feeder's tail scrubs the
-        // ring back to all-silence before the amp drops — idle is exactly the proven
-        // silent-clock behavior (amp GPIO6 LOW, data all-zero; no tone, no blasting).
+        // === Continuous TX — the clock generator + playback ring ===
+        // We stream this ring forever so BCLK/WS keep toggling (playback seam +,
+        // on a full-duplex board, the clock the mic ADC needs). The ring is ZEROS
+        // except while a queued SFX clip plays (#23): the clock task substitutes
+        // clip samples via DmaTransferTxCircular::push, and the feeder's tail
+        // scrubs the ring back to all-silence before the amp drops — idle is the
+        // proven silent-clock behavior (amp released, data all-zero; no blasting).
         static TX_RING: StaticCell<[u8; TX_RING_LEN]> = StaticCell::new();
         let tx_ring: &'static [u8] = TX_RING.init([0u8; TX_RING_LEN]);
-        // Clock + playback task; re-arms on CLOCK_REARM (AOD light sleep clock-gates
-        // I2S; the task restarts the DMA after each wake) and per playback session
-        // (see silent_clock_task docs: esp-hal's circular push-state goes Late after
-        // any idle lap, so each session opens on a fresh transfer). This produces the
-        // shared MCLK/BCLK/WS the ES7210 mic ADC (I2S slave) needs.
+        // Clock + playback task; re-arms on CLOCK_REARM (AOD light sleep
+        // clock-gates I2S) and per playback session (esp-hal's circular push-state
+        // goes Late after any idle lap, so each session opens on a fresh transfer).
         _spawner.spawn(
             mic_capture::silent_clock_task(i2s_tx, tx_ring)
                 .expect("silent_clock_task token"),
         );
-        println!("[AUDIO] I2S TX clock+playback task spawned (full-duplex master, re-arms after sleep)");
+        println!("[AUDIO] I2S TX clock+playback task spawned (re-arms after sleep)");
     }
 
 
@@ -1577,7 +1602,11 @@ async fn main(_spawner: Spawner) -> ! {
     // board with no mic ADC every access is an I2C error the callers already
     // handle. Only the INIT is audio-gated.
     let mut mic_adc = Es7210::new(RefCellDevice::new(&i2c_ref));
-    #[cfg(feature = "has-audio")]
+    // has-audio-in only: the ES7210 is the C6's SEPARATE mic ADC. The S3 has no
+    // ES7210 (its mic is the ES8311's own ASDOUT — phase 2), so compiling this
+    // init on the S3 would only NACK at 0x40 and log FAILED. The instance above
+    // stays constructed (the AOD-wake re-init references it in ungated code).
+    #[cfg(feature = "has-audio-in")]
     {
         Timer::after(Duration::from_millis(150)).await; // let silent_clock_task bring the clock up
         match mic_adc.init() {

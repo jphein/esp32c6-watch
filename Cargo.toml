@@ -48,7 +48,7 @@ board-waveshare-c6 = [
     "esp-hal/esp32c6", "esp-rtos/esp32c6", "esp-radio/esp32c6",
     "esp-storage/esp32c6", "esp-bootloader-esp-idf/esp32c6",
     "esp-println/esp32c6", "esp-backtrace/esp32c6",
-    "has-pmu", "has-imu", "has-audio", "has-cap-touch",
+    "has-pmu", "has-imu", "has-audio-out", "has-audio-in", "has-cap-touch",
     "has-die-temp", "has-light-sleep", "mesh-ota",
 ]
 board-cyd-c5 = [
@@ -74,6 +74,12 @@ board-esp32s3-cyd = [
     # FT6336U: same FocalTech register map + 0x38 address the C6 driver
     # speaks (board-class-verified); the coordinate transform is board::*.
     "has-cap-touch",
+    # ES8311 playback (option B: MCLK-from-pin @16k on GPIO4, AUDIO_BCLK_DERIVED
+    # flipped false @ a605ac2). SFX/beeps/TTS/story. NOT has-audio-in yet — the
+    # S3's mic is the ES8311's own ASDOUT, a different capture path than the C6's
+    # ES7210 (phase 2). Bench-gated: first-listen must confirm the codec locks to
+    # SoC MCLK on GPIO4; fallback is the 44100 BCLK-derived fork.
+    "has-audio-out",
     # mesh-ota rides ed25519-dalek on xtensa (ota-proto's per-arch dep) —
     # ed25519-compact crashes this backend; see ota-proto/Cargo.toml.
     "mesh-ota",
@@ -100,8 +106,15 @@ bard = ["dep:bard-core"]
 has-pmu = []
 # QMI8658 IMU: pedometer, wrist-raise, tilt games.
 has-imu = []
-# ES8311 codec + ES7210 ADC + amp: all sound out, mic, voice, story AUDIO.
-has-audio = []
+# Audio split into two capabilities because the S3-CYD can PLAY but its mic is
+# a different chip topology than the C6's (ES8311-ASDOUT vs the C6's separate
+# ES7210), so one flag was always two claims:
+#   has-audio-out — ES8311 DAC playback: I2S TX + amp. SFX/beeps/TTS/story.
+#                   C6 + S3. (S3: MCLK-from-pin @16k on GPIO4 — option B.)
+#   has-audio-in  — mic capture: I2S RX. C6 = ES7210; S3 = ES8311-ASDOUT (phase 2).
+#                   C6 only for now; enables Voice/STT + the SoundLevel meter.
+has-audio-out = []
+has-audio-in = []
 # Capacitive touch (FT3168). The CYD's XPT2046 is resistive: same TouchPoint
 # contract, different driver + calibration; nothing gates on this yet but the
 # distinction is real (pressure vs contact, debounce needs).
