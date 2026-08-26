@@ -24,6 +24,10 @@ JP's standing goal: **the watch as a full smol target, all features + parity, on
 - Mesh protocol is UNFORKED by vendoring smol's pure modules verbatim (mesh-flood, ota-proto) — re-vendor on wire changes, never edit locally.
 
 
+## S3 IS A FUNCTIONAL FLEET LEAF (2026-08-26)
+
+#447 soak CLEAN: eldritch-insignia joins the mesh as id 162 (0 reboots, 20/20 relays acked, associated). Fix ladder: PSRAM init → internal 96KB → **PSRAM-first (radio reserve)**. smol#448 has the post-soak polish (has-pmu gate + MQTT retry). Awaiting: JP's glass verdict, #446/#447/#448 merges, then blessed-sha build. C5 = morpheus's branch (image 9); C6 shipping.
+
 ## HOLD-OPEN STATE (2026-08-25 end — staying live for bench relays per JP)
 
 **Everything code-reachable from this seat is done, pushed, or specced.** All 3 fleet boards physically absent; gatekeeper refuses ssh (JP on the AP, #89).
