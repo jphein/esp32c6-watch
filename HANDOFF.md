@@ -114,3 +114,11 @@ Follow-ups (mine, queued, no urgency): NTP re-sync deadlock (periodic re-sync de
 ## S3 DELIVERED TO SMOL MAIN (2026-08-26)
 smol#451 (cumulative refresh to watch 4922dad) MERGED → smol main **ad29c12** carries the full verified S3 stack (arm_ramwr GUI + FT6336U touch + deploy). Verified on main: ili9341 arm_ramwr present, esp32s3_cyd touch consts present. #448 also merged; #446/#447/#449 redundant (subsumed by #448+#451) — smol-tree authority closes them per its post-merge sequencing (NOT mine). S3 = verified AND delivered.
 Also landed watch main: IMU honesty log (ae80072). Parity features (battery ADC, audio port) queued behind s3-cyd-45's board-consts-first handoff. Remaining boards: C5 (swipes=cyd-c5-e2 lane; 12-file merge mine, pending closure ping), C6 (awake re-probe).
+
+## S3 PARITY FEATURES (2026-08-26, s3-cyd-45 board-consts + me shared-code)
+Board consts for battery/audio landed (6ba5b74, all 3 boards, s3-cyd-45). Progress toward JP's "all features the hardware allows":
+- **IMU honesty** (ae80072, main): [IMU] logs by init result, not unconditional OK. Done.
+- **Boot button GPIO0** (13e64c2, main): S3 boot cfg-gated GPIO9→GPIO0 (latent bug: was sampling BAT_ADC divider node; also frees GPIO9 for ADC). Bench: verify BOOT on GPIO0.
+- **Battery ADC** (branch feat/s3-batt-adc @34f8329, NOT main): power::lipo_pct curve + ADC1 oneshot on GPIO9 ×divider → % → shell+BLE. Needs s3-cyd-45 build-check (esp-hal AdcCalCurve generics, written vs 1.1.2 source, unbuilt locally) + bench calibration of curve knees. Merge to main when green → next smol refresh. Low-batt notify on S3 = v1 follow-up.
+- **Audio port** (#2, queued): HAS_AUDIO + I2S pins(4/5/7/8/6) + AMP GPIO1 active-low + BCLK-derived consts ready; I author main.rs I2S/ES8311/amp init const-driven (C6 consts also captured, unifies path); big, needs bench. After battery lands.
+Split protocol: s3-cyd-45 = board consts + bench + build-loop; me = shared-file (main.rs/power.rs) authoring; board-consts-FIRST to keep builds green; feature branches for compiler-risky code so main's S3 build never breaks.
