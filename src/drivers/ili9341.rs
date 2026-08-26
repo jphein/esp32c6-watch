@@ -108,6 +108,14 @@ impl<'d> Ili9341Display<'d> {
         let y1 = y0 + h - 1;
         self.bus.write_c8d16d16(CMD_CASET, x0, x1);
         self.bus.write_c8d16d16(CMD_RASET, y0, y1);
+        // A new window means the next pixel push must restart at its origin
+        // with RAMWR (0x2C), not resume the prior run with RAMWR_CONT (0x3C).
+        // `SharedSpiBus` latches RAMWR_CONT after the first push, so without
+        // re-arming here every strip after the first lands at the previous
+        // GRAM pointer instead of this window — "chunks displaced/torn", colors
+        // and signal intact (JP on-glass 2026-08-26). The ST7789 sibling's
+        // set_addr_window arms it; the ILI9341 must too.
+        self.bus.arm_ramwr();
     }
 
     pub fn fill_screen(&mut self, color: Rgb565) {
