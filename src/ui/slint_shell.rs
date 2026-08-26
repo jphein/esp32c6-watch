@@ -84,10 +84,30 @@ pub const EDGE_TOP_Y: u16 = 75;
 /// Bottom-edge HOLD (#31): a press that stays inside the edge zone for this
 /// long raises the app switcher.
 const HOLD_MS: u64 = 500;
-/// Finger drift that cancels a pending hold — past this it's swipe intent.
-/// Kept under the touch driver's 36px swipe threshold so a cancelled hold can
-/// still classify as the edge-swipe.
-const HOLD_SLOP_PX: u16 = 24;
+// Finger drift that cancels a pending hold — past this it's swipe intent.
+//
+// BOARD-OWNED. This was a file-local `24` that shadowed `board::HOLD_SLOP_PX`
+// on every board, and its rationale ("kept under the touch driver's 36px swipe
+// threshold") was C6 reasoning that nobody re-derived for a 320x240 landscape
+// panel. The CYD declares **18** precisely so it stays under the SMALLER of its
+// two per-axis swipe minimums (X 32 / Y **24**).
+//
+// ★ Why this had to land in the SAME change as the per-axis swipe wiring:
+// with the old local `24` and `SWIPE_MIN_Y` newly honoured at 24, hold-slop
+// would EQUAL the vertical swipe minimum. At dy = 24 exactly, `drift > 24` is
+// false so the hold stays ARMED while `abs_dy >= 24` simultaneously qualifies
+// the gesture as a vertical swipe — one gesture, both verdicts. Fixing the
+// swipe half alone would have created that; see esp32c6-watch#91.
+//
+// ★ DECISION (design question 2): the drift test below stays AXIS-BLIND
+// (`max(|dx|,|dy|)`) even though the swipe gate is now per-axis. One slop
+// strictly below `min(SWIPE_MIN_X, SWIPE_MIN_Y)` satisfies the invariant on
+// both axes, which is all the invariant asks. A per-axis slop would only buy
+// something if we wanted a LARGER horizontal slop than vertical, which nothing
+// has asked for and nothing has measured — and it would change hold behaviour
+// on the C6 as a side effect of a C5 fix. Deliberately not done.
+// C6: 24 < 36 ✓ (unchanged behaviour). C5: 18 < 24 ✓.
+use crate::board::ui::HOLD_SLOP_PX;
 
 /// Switcher (#31) + shade (#32) card geometry — BOARD-OWNED (`board::ui`),
 /// because each board's overlay scene draws its own card stack: slot i spans

@@ -68,15 +68,12 @@ const MEDIAN_N: usize = 5;
 /// single dropout mid-drag would end the gesture and emit a spurious swipe.
 const RELEASE_DEBOUNCE: u8 = 2;
 
-/// Minimum dominant-axis travel (in logical pixels) for a lift-off to count as
-/// a swipe rather than a tap.
-///
-/// The watch uses 36 on a 410 px-wide panel — "a hair above the old 30 px tap
-/// cutoff", ~9 % of the width. 32 is the same fraction of this panel's 320 px.
-/// The classification rule below is otherwise the watch's verbatim, including
-/// its deliberate rejection of the "dominant axis must beat the other by 1.5x"
-/// rule that silently swallowed slightly-diagonal swipes.
-const SWIPE_MIN: u32 = 32;
+// The swipe minimums live on the BOARD (`board::ui::SWIPE_MIN_X` / `SWIPE_MIN_Y`),
+// not here. A file-local `SWIPE_MIN = 32` used to shadow them and was applied to
+// both axes — so `SWIPE_MIN_Y = 24` was declared, documented, and never read, and
+// vertical swipes silently needed 33 % more travel than the board specified. See
+// esp32c6-watch#91; the measured cost was a real gesture at dx=-23 dy=31 landing
+// as a Tap.
 
 // ---------------------------------------------------------------------------
 // Types
@@ -541,30 +538,67 @@ impl<'d> Xpt2046<'d> {
                 let abs_dx = dx.unsigned_abs();
                 let abs_dy = dy.unsigned_abs();
 
-                // Dominant-axis classification, verbatim from the watch: a
-                // directional swipe once the larger axis travels SWIPE_MIN, and
-                // the direction is simply that axis. No 1.5x dominance test —
-                // see SWIPE_MIN's docs and touch.rs:145-160 for why that rule
-                // was removed there.
-                let direction = if abs_dx.max(abs_dy) < SWIPE_MIN {
-                    SwipeDirection::Tap
-                } else if abs_dx >= abs_dy {
-                    if dx > 0 {
-                        SwipeDirection::Right
-                    } else {
-                        SwipeDirection::Left
-                    }
-                } else if dy > 0 {
+                // PER-AXIS classification. Each axis is judged against its OWN
+                // minimum, because this panel is 320x240 and one number cannot be
+                // 10 % of both axes — that is the whole argument in
+                // `board::cyd_c5`'s SWIPE_MIN_X/_Y docs.
+                //
+                // ★ DECISION (esp32c6-watch#91, design question 1): QUALIFY FIRST,
+                // then let the dominant axis break the tie — rather than
+                // "dominant axis only". Dominant-axis-only has a dead zone: with
+                // abs_dx = 30 (< X's 32) and abs_dy = 25 (>= Y's 24), X dominates
+                // and the gesture is a Tap even though the Y travel cleared its
+                // own bar. Qualifying first has no such hole, and the direction
+                // still always comes from an axis that actually met its
+                // threshold, so a swipe is never reported on an axis that did not
+                // earn it.
+                //
+                // Still NO 1.5x dominance test. JP's measured miss was 31/23 =
+                // 1.35x — under 1.5x — so reinstating that rule would swallow the
+                // exact gesture this change exists to recover. See
+                // touch.rs:145-160 for why it was removed on the C6 too.
+                let x_ok = abs_dx >= board::ui::SWIPE_MIN_X;
+                let y_ok = abs_dy >= board::ui::SWIPE_MIN_Y;
+                let horizontal = if dx > 0 {
+                    SwipeDirection::Right
+                } else {
+                    SwipeDirection::Left
+                };
+                let vertical = if dy > 0 {
                     SwipeDirection::Down
                 } else {
                     SwipeDirection::Up
                 };
+                let direction = match (x_ok, y_ok) {
+                    (false, false) => SwipeDirection::Tap,
+                    (true, false) => horizontal,
+                    (false, true) => vertical,
+                    // Both cleared: the larger travel names the gesture.
+                    (true, true) => {
+                        if abs_dx >= abs_dy {
+                            horizontal
+                        } else {
+                            vertical
+                        }
+                    }
+                };
 
                 // DIAGNOSTIC: one line per gesture, on lift. dx/dy are the arc
-                // the classifier actually saw. Compare `dom` against
-                // SWIPE_MIN_X/Y: a Tap with a large `rej` count and a
-                // `rej_zmax` close to `thr` is a TRUNCATED swipe, not a tap the
-                // user meant. Compiles to nothing without `touch-telemetry`.
+                // the classifier actually saw, and `dom` is the larger of the
+                // two — compare it against board::ui::SWIPE_MIN_X/_Y, which the
+                // classifier above now actually reads.
+                //
+                // HOW TO READ IT, corrected against JP's captures rather than
+                // guessed: the discriminator is `n`, the SAMPLE COUNT. A fast
+                // swipe yields n=2-4 where a slow one yields n=17-24, and too few
+                // samples compresses `dom`. `rej_zmax` approaching `thr` was the
+                // original hypothesis and it has NEVER fired on this hardware —
+                // rejects cluster at z<=30 (feather noise) against real contact
+                // at z=482..2341. A high `open` count with low `rej` means the
+                // reads never got past the z1==0 bridge-open test, which is a
+                // DIFFERENT failure from the pressure gate and is not fixed by
+                // moving the threshold.
+                // Compiles to nothing without `touch-telemetry`.
                 self.tel
                     .report(direction, self.threshold, dx, dy, abs_dx.max(abs_dy));
 
