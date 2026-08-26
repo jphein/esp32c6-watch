@@ -11,28 +11,23 @@
 #   3. fetching the xtensa ELF back (fambuild's fetch is hardcoded to the
 #      riscv triple; see the stale-artifact hazard note in fambuild itself).
 #
-# ⚠️ KNOWN BLOCKER (2026-08-25, espup 1.95.0.0): building with the ui/cyd
-# scene set crashes rustc's Xtensa isel —
+# ✅ RESOLVED (2026-08-26): the full ui/cyd scene builds AND renders on the S3
+# (JP glass-verified "gui looks good"). The LINK-ONLY cropped-C6 fallback this
+# script once carried is RETIRED — the build command below uses the real
+# board-esp32s3-cyd feature, no fallback branch. Do not reintroduce the
+# fallback language; it would be a correct-sounding claim about a dead limit.
+#
+# Historical record, kept because the failure mode is subtle and could recur:
+# the ui/cyd scene once crashed rustc's Xtensa isel —
 #   LLVM ERROR: Cannot select: XtensaISD::PCREL_WRAPPER TargetConstantPool
 #     [2 x float] [1.0, 0.0]   (symbol: InnerCydBacklightToggle...inits0_0)
 # at opt 1/2/3 fat LTO (thin LTO: scavenger crash; lto=off: spill crash).
-# The C6 scene set does NOT trigger it, so this script builds with the
-# LINK-ONLY C6 fallback (renders cropped) until the lane resolves it:
-# BISECTED 2026-08-25 (component-removal granularity — expression rewrites
-# are NOT valid proof, slint can normalize them back):
-#   * Stub ONLY CydBacklightToggle's two instantiations -> the FULL ui/cyd
-#     scene LINKS on the S3.
-#   * Restore the component but hold out its one float-expression binding
-#     (`property <bool> on: root.value > 0.5;`) -> LINKS.
-#   * Int-mediate it (Math.round(value*100) >= 50) -> CRASHES again with a
-#     new [0.0, 1.0] constpool: ANY float arithmetic in this component's
-#     bindings triggers the isel bug; float-free bindings are safe.
-# Fix shape (not yet landed): push the on/off bool FROM RUST alongside
-# set_brightness (root `backlight-on` property, in-property on the
-# component) so the scene carries no float expressions in this component.
-# espup 1.98.0.0 was tested and crashes identically — a toolchain bump is
-# NOT a path; the minimal .slint repro for upstream is (s3-cyd owns the
-# draft doc).
+# BISECTED to CydBacklightToggle's one float-expression binding
+# (`property <bool> on: root.value > 0.5;`): ANY float arithmetic in that
+# component's bindings triggered it; float-free bindings were safe. FIX
+# (landed): the on/off bool is pushed FROM RUST alongside set_brightness so
+# the component carries no float expressions. A toolchain bump was NOT the
+# path — espup 1.95.0.0 and 1.98.0.0 both crashed identically.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TRIPLE=xtensa-esp32s3-none-elf
