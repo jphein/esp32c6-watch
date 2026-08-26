@@ -124,6 +124,23 @@ pub const TOUCH_INVERT_Y: bool = false;
 /// board keeps the original FocalTech Monitor init.
 pub const TOUCH_FT6336_ACTIVE_QUIRK: bool = false;
 
+// --- Battery ADC: none known on the NM-CYD-C5 (USB-powered bench board). ---
+pub const HAS_BATT_ADC: bool = false;
+pub const BATT_ADC_GPIO: u8 = 0; // unused while HAS_BATT_ADC is false
+pub const BATT_ADC_DIVIDER: f32 = 1.0; // unused while HAS_BATT_ADC is false
+
+// --- Audio: none verified on the NM-CYD-C5 (its speaker header is un-scoped;
+// flip HAS_AUDIO with real pins if/when the cyd-c5 lane brings it up). -------
+pub const HAS_AUDIO: bool = false;
+pub const I2S_MCLK_GPIO: u8 = 0;
+pub const I2S_BCK_GPIO: u8 = 0;
+pub const I2S_WS_GPIO: u8 = 0;
+pub const I2S_DOUT_GPIO: u8 = 0;
+pub const I2S_DIN_GPIO: u8 = 0;
+pub const AMP_GPIO: u8 = 0;
+pub const AMP_ACTIVE_LOW: bool = false;
+pub const AUDIO_BCLK_DERIVED: bool = false;
+
 /// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
 /// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
 /// the first flash write — the wrong arm's image passes the 0xE9 magic check.

@@ -80,6 +80,25 @@ pub const TOUCH_INVERT_Y: bool = false;
 /// board keeps the original FocalTech Monitor init.
 pub const TOUCH_FT6336_ACTIVE_QUIRK: bool = false;
 
+// --- Battery ADC: N/A — this board's gauge is the AXP2101 PMU (has-pmu). ---
+pub const HAS_BATT_ADC: bool = false;
+pub const BATT_ADC_GPIO: u8 = 0; // unused while HAS_BATT_ADC is false
+pub const BATT_ADC_DIVIDER: f32 = 1.0; // unused while HAS_BATT_ADC is false
+
+// --- Audio: this board's live wiring, lifted verbatim from main.rs ---------
+/// The C6 watch drives the codec MCLK-clocked (with_mclk on the peripheral),
+/// unlike the S3 (BCLK-derived). Amp enable is GPIO6 ACTIVE-HIGH (LOW = off,
+/// the boot-safe level main.rs sets first).
+pub const HAS_AUDIO: bool = true;
+pub const I2S_MCLK_GPIO: u8 = 19;
+pub const I2S_BCK_GPIO: u8 = 20;
+pub const I2S_WS_GPIO: u8 = 22;
+pub const I2S_DOUT_GPIO: u8 = 23; // ESP → ES8311 DSDIN (playback)
+pub const I2S_DIN_GPIO: u8 = 21; // ES8311 ASDOUT → ESP (microphone)
+pub const AMP_GPIO: u8 = 6;
+pub const AMP_ACTIVE_LOW: bool = false;
+pub const AUDIO_BCLK_DERIVED: bool = false;
+
 /// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
 /// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
 /// the first flash write — the wrong arm's image passes the 0xE9 magic check.
