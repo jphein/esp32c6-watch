@@ -599,9 +599,21 @@ fn largest_free_block() -> (usize, usize) {
     // rung cannot distinguish "main can serve 512 B" from "main can serve nothing",
     // and the allocation that actually killed a watch was **16 B** — the Slint
     // dep-node push at `i-slint-core/properties.rs:63`. With a 16 B floor, a beat
-    // reporting `maxblk_main=16` (or worse, a global 16) is a PRE-MORTEM: the heap
-    // is one small allocation from the panic, visible on beat cadence, with no
-    // crash required to learn it.
+    // reporting a **global** 16 is a PRE-MORTEM: the heap is one small allocation
+    // from the panic, visible on beat cadence, with no crash required to learn it.
+    //
+    // ⚠️ READ `maxblk_main` CAREFULLY — only the GLOBAL figure is diagnostic. The
+    // main pool is DELIBERATELY consumed at init (Slint scene + statics) and the
+    // reclaimed pool (region 1) is the designed runtime arena, so `maxblk_main=0`
+    // with `main=` at a few dozen bytes is the EXPECTED steady state, not a
+    // warning. That field is pinned at 0 for the life of the process and can never
+    // report a healthy value, so a fatal reading of it is always a false alarm.
+    //
+    // This sentence exists because the earlier wording named `maxblk_main=16` as a
+    // pre-mortem signature in its own right, and that cost a real escalation:
+    // `maxblk_main=0` was read off 2,807 consecutive beats and reported as heap
+    // exhaustion (2026-08-26). The number was correct; the severity was not. A
+    // field that cannot be healthy must not be documented as if it could.
     const SIZES: [usize; 14] = [
         32768, 16384, 8192, 6144, 4096, 3584, 2048, 1024, 512, 256, 128, 64, 32, 16,
     ];
