@@ -112,6 +112,15 @@ pub const TOUCH_SWAP_XY: bool = true;
 pub const TOUCH_INVERT_X: bool = false;
 pub const TOUCH_INVERT_Y: bool = true;
 
+/// The FT6336U's Monitor mode is DEAF on this board class, and the chip
+/// re-enters Monitor on its own — measured on this exact panel by the
+/// emberburrito bench (burrito-fw/src/touch.rs: four self-re-arms in two
+/// minutes with nobody touching the glass). So this board must init the
+/// part Active (0xA5=0x00), pin it there (0x86=0x00), and put INT in
+/// level/polling mode (0xA4=0x00) because main.rs gates `touch.poll()` on
+/// the INT *level*. The C6's FT3168 keeps its original Monitor init.
+pub const TOUCH_FT6336_ACTIVE_QUIRK: bool = true;
+
 /// `chip_id` in the esp-idf app-image header (LE u16 at bytes 12..14) for
 /// this board's SoC. Both OTA paths (WiFi + mesh) refuse a mismatch BEFORE
 /// the first flash write — the wrong arm's image passes the 0xE9 magic check.

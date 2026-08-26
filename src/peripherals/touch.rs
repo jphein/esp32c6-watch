@@ -14,6 +14,21 @@ const REG_Y1_H: u8 = 0x05;
 const REG_Y1_L: u8 = 0x06;
 const REG_POWER_MODE: u8 = 0xA5;
 const REG_GESTURE_ID: u8 = 0xD3;
+/// ID_G_MODE — INT behaviour: 0x00 = polling (level-low while touched),
+/// 0x01 = trigger (pulses at report rate). main.rs samples the INT *level*
+/// (`touch_held`, `int_low || was_touching`), so boards on the quirk path
+/// need 0x00. Datasheet-labelled; init reads it back and says what took.
+const REG_G_MODE: u8 = 0xA4;
+/// ID_G_CTRL — 0x00 = stay Active with no touch, 0x01 = auto-drop to
+/// Monitor. The FT6336U drops on its own and its Monitor is deaf
+/// (emberburrito, measured on this panel class).
+const REG_CTRL: u8 = 0x86;
+
+/// How many touch samples to log after boot (raw + transformed) — enough
+/// for a four-corner calibration sweep plus a tap-around pass, then quiet.
+/// Emberburrito's TOUCH_LOG_BUDGET pattern: samples exist exactly when
+/// someone is standing at the glass asking why nothing happened.
+const TOUCH_LOG_BUDGET: u8 = 40;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TouchPoint {
@@ -62,6 +77,13 @@ pub struct Ft3168Touch<I> {
     start_y: u16,
     last_x: u16,
     last_y: u16,
+    /// Remaining raw-sample log budget (quirk boards; see TOUCH_LOG_BUDGET).
+    log_budget: u8,
+    /// Empty-read counter driving the periodic Monitor-mode reconcile on the
+    /// quirk path (the FT6336U can re-enter its deaf Monitor even with
+    /// CTRL written — emberburrito measured the race; reconcile is the
+    /// backstop that can only shrink the deaf window).
+    reconcile_tick: u16,
 }
 
 impl<I: I2c> Ft3168Touch<I> {
@@ -73,6 +95,8 @@ impl<I: I2c> Ft3168Touch<I> {
             start_y: 0,
             last_x: 0,
             last_y: 0,
+            log_budget: TOUCH_LOG_BUDGET,
+            reconcile_tick: 0,
         }
     }
 
@@ -86,10 +110,38 @@ impl<I: I2c> Ft3168Touch<I> {
         self.i2c.write(FT3168_ADDR, &[reg, val])
     }
 
-    /// Initialize touch controller in monitor power mode.
+    /// Initialize the touch controller.
+    ///
+    /// Two paths, chosen by the board (`TOUCH_FT6336_ACTIVE_QUIRK`):
+    /// - FT3168 (C6 watch): Monitor power mode, as always — byte-identical
+    ///   to the original init.
+    /// - FT6336U (S3 CYD): Monitor is DEAF on this part and it re-enters
+    ///   Monitor by itself, so force Active + stay-Active + level INT.
+    ///   Every write is read back and logged: a chip that ignores a
+    ///   register says so on serial instead of leaving us believing it
+    ///   was handled.
     pub fn init(&mut self) -> Result<(), I::Error> {
-        // Set power mode to monitor (triggers on touch)
-        self.write_reg(REG_POWER_MODE, 0x01)?;
+        if crate::board::TOUCH_FT6336_ACTIVE_QUIRK {
+            for (reg, val, name) in [
+                (REG_POWER_MODE, 0x00u8, "pmode-active"),
+                (REG_CTRL, 0x00, "ctrl-stay-active"),
+                (REG_G_MODE, 0x00, "gmode-level-int"),
+            ] {
+                self.write_reg(reg, val)?;
+                let back = self.read_reg(reg)?;
+                esp_println::println!(
+                    "[TOUCH] {} 0x{:02X}<=0x{:02X} readback 0x{:02X}{}",
+                    name,
+                    reg,
+                    val,
+                    back,
+                    if back == val { "" } else { " (IGNORED)" }
+                );
+            }
+        } else {
+            // Set power mode to monitor (triggers on touch)
+            self.write_reg(REG_POWER_MODE, 0x01)?;
+        }
         Ok(())
     }
 
@@ -97,6 +149,24 @@ impl<I: I2c> Ft3168Touch<I> {
     pub fn read(&mut self) -> Result<Option<TouchPoint>, I::Error> {
         let fingers = self.read_reg(REG_FINGER_NUM)?;
         if fingers == 0 {
+            // Quirk-path backstop: the FT6336U can drop back into its deaf
+            // Monitor mode on its own. Reconcile PMODE→Active every 64th
+            // empty read (one extra I2C read per ~64 polls, nothing on the
+            // touch hot path) and say so when it was caught — that count on
+            // serial is the evidence for whether CTRL actually took.
+            if crate::board::TOUCH_FT6336_ACTIVE_QUIRK {
+                self.reconcile_tick = self.reconcile_tick.wrapping_add(1);
+                if self.reconcile_tick % 64 == 0 {
+                    let pmode = self.read_reg(REG_POWER_MODE)?;
+                    if pmode != 0x00 {
+                        self.write_reg(REG_POWER_MODE, 0x00)?;
+                        esp_println::println!(
+                            "[TOUCH] monitor re-arm caught (pmode=0x{:02X}), forced Active",
+                            pmode
+                        );
+                    }
+                }
+            }
             return Ok(None);
         }
 
@@ -105,8 +175,10 @@ impl<I: I2c> Ft3168Touch<I> {
         let y_h = self.read_reg(REG_Y1_H)? as u16;
         let y_l = self.read_reg(REG_Y1_L)? as u16;
 
-        let mut x = ((x_h & 0x0F) << 8) | x_l;
-        let mut y = ((y_h & 0x0F) << 8) | y_l;
+        let raw_x = ((x_h & 0x0F) << 8) | x_l;
+        let raw_y = ((y_h & 0x0F) << 8) | y_l;
+        let mut x = raw_x;
+        let mut y = raw_y;
 
         // Board transform (identity on the C6): FocalTech parts report in the
         // PANEL-NATIVE frame, which is not always the frame the scene draws
@@ -121,6 +193,18 @@ impl<I: I2c> Ft3168Touch<I> {
         }
         if crate::board::TOUCH_INVERT_Y {
             y = (crate::board::LCD_HEIGHT - 1).saturating_sub(y);
+        }
+
+        // Budgeted calibration evidence (quirk boards): raw vs transformed,
+        // so a four-corner sweep on the bench verifies SWAP/INVERT against a
+        // real finger instead of asserting them from a table. Goes quiet
+        // after TOUCH_LOG_BUDGET samples.
+        if crate::board::TOUCH_FT6336_ACTIVE_QUIRK && self.log_budget > 0 {
+            self.log_budget -= 1;
+            esp_println::println!(
+                "[TOUCH] raw=({},{}) mapped=({},{}) fingers={} budget={}",
+                raw_x, raw_y, x, y, fingers, self.log_budget
+            );
         }
 
         Ok(Some(TouchPoint {
