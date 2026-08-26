@@ -3399,11 +3399,31 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
         }
-        if idle_secs >= 180 && screen_state > 0 {
+        // ★ NEVER ENTER A STATE YOU CANNOT REPAINT OUT OF.
+        //
+        // AOD (state 1) repaints ONLY on a minute change, and that repaint is gated
+        // on `last_dt` being Some. So with no time source the AOD screen freezes on
+        // whatever was last painted and never updates again — and `render()` is not
+        // even called, so nothing can recover it but a touch.
+        //
+        // On THIS board that is reachable in normal operation, not a corner: there is
+        // no RTC — every I2C device is `board::fake_i2c::FakeI2c` and `rtc.get_time()`
+        // always errors — so network time is the ONLY source. With the radio down
+        // (`boot-radio-off`, or simply no AP) the watch has no time indefinitely, and
+        // ~15 s of idle put it in an unrepaintable state. JP reported it as "it seems
+        // to freeze or something all the time", which is exactly what it is.
+        //
+        // So: no time, no sleep. Stay at state 2 (dim, still repainting) rather than
+        // descending into a state whose exit condition depends on data we do not have.
+        // This is self-limiting — a build with a working time source is unaffected,
+        // because `last_dt` is Some — and it is a latent bug on ANY board that loses
+        // its clock, not a CYD workaround.
+        let time_known = last_dt.is_some();
+        if time_known && idle_secs >= 180 && screen_state > 0 {
             display.set_brightness(0x00);
             display.display_off();
             screen_state = 0;
-        } else if idle_secs >= 15 && screen_state > 1 {
+        } else if time_known && idle_secs >= 15 && screen_state > 1 {
             // A shell modal (switcher/shade) blocks AOD: dimming into an AOD
             // clock OVER a modal would be dishonest — go dark like any
             // non-clock page instead.

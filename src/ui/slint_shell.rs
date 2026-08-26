@@ -2461,11 +2461,22 @@ fn build_scene(
     }
     {
         let r = req.clone();
-        ui.on_cpu_tap(move || r.cpu_cycle.set(true));
+        ui.on_cpu_tap(move || {
+            // CLICK PROOF. No Slint `clicked` callback has ever been observed to
+            // actuate on this board — taps ENTER clean but no control has a logged
+            // effect. This is the cheapest possible discriminator: one tap on the
+            // CPU chip either prints or it does not, and that separates "dispatch is
+            // broken" from "he is missing the hit box".
+            shell_dbg!("[SHELL-DBG] CLICK cpu_tap actuated");
+            r.cpu_cycle.set(true)
+        });
     }
     {
         let r = req.clone();
-        ui.on_gyro_tap(move || r.gyro_toggle.set(true));
+        ui.on_gyro_tap(move || {
+            shell_dbg!("[SHELL-DBG] CLICK gyro_tap actuated");
+            r.gyro_toggle.set(true)
+        });
     }
     {
         let r = req.clone();

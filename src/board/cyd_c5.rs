@@ -335,10 +335,29 @@ pub const TOUCH_CAL: crate::drivers::xpt2046::Calibration =
 ///
 /// ```text
 ///   noise ceiling      z <= 30           (idle, many samples, spike-free)
-///   ---- 100 ----                        3.3x over noise
+///   ---- 64 ----                         2.1x over noise   (image 10g, 2026-08-26)
+///   rejected REALS     93                (2026-08-26 — a COMPLETING gesture's
+///                                         light phase, one point under thr=100)
+///   ---- 100 ----                        (image 9, superseded)
 ///   rejected REALS     213 274 360 365 372
 ///   confirmed contact  z_min 478..534    (truncated gestures)
 /// ```
+///
+/// **100 → 64 (image 10g).** This was the PRE-REGISTERED answer, written down when
+/// `rej_zmax=93` first appeared, before the number that triggered it arrived — JP
+/// counting "it works like 1 in 3" while every *logged* swipe PAGED correctly. Two
+/// thirds of his attempts produced no TOUCH-DBG line at all, which is detection
+/// loss below the gate, not misclassification above it.
+///
+/// The 93 is why: it is a rejected sample from a gesture that COMPLETED, i.e. the
+/// gate was clipping the light phase of real contact by seven counts. Note the
+/// confirmed-real floor has fallen every time we have looked harder — 478, then
+/// 213, then 93 — which is the signature of a true contact floor below every
+/// threshold tried so far, not of a well-chosen one.
+///
+/// 64 keeps **2.1x** over the ≤30 noise ceiling. Retreat is pre-registered too: if
+/// short-travel `z=30..64` events show up as spurious navigation, go to **80** —
+/// not another hunt.
 ///
 /// The old 400 sat above every one of those rejected reals. It looked
 /// exonerated by the first capture — which showed rejects at z<=30 and contact
@@ -362,7 +381,7 @@ pub const TOUCH_CAL: crate::drivers::xpt2046::Calibration =
 /// the gate necessarily recovers it. (If a future capture shows high `open=`
 /// with low `rej=`, the remaining losses are open-bridge reads instead — a
 /// different failure, fixed in the driver's PD bits, not here.)
-pub const TOUCH_PRESSURE_THRESHOLD: u16 = 100;
+pub const TOUCH_PRESSURE_THRESHOLD: u16 = 64;
 
 /// Lines the renderer stages before a flush — **1 on this board**.
 ///
