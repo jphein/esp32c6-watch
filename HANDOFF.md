@@ -100,3 +100,13 @@ RAMWR_CONT diagnosis CONFIRMED on glass — arm_ramwr one-liner fixed the displa
 - **Touch root cause (s3-cyd-45's lane, branch fix/s3-ft6336-active-mode):** FT6336U Monitor mode (0xA5=0x01, written by Ft3168Touch::init) is DEAF and the chip self-re-arms into it — correct on C6's FT3168, lethal on S3. Cross-verified vs emberburrito on same panel. Fix: 0xA5=0x00 active + 0x86=0x00 stay-active + 0xA4=0x00 level-INT, S3-gated, C6 byte-identical. **touch.rs + board const are s3-cyd-45's; do NOT edit.** Register map + transform + main.rs dispatch gating all verified clean by me — only the power-mode was wrong.
 - **main.rs touch gating (MINE):** `touch_active = screen_state>=2 && (int_low||was_touching)` assumes level-INT. s3-cyd-45's 0xA4=0x00 makes it valid. FALLBACK if INT still pulses: drop int_low gate, poll unconditionally while screen_state>=2 (cfg-gated, C6 unchanged). Not needed unless level-INT fails on glass.
 - **NTP cadence (net_task.rs):** retries every 10s while !ntp_synced+associated (self-heals on assoc), STOPS after first sync (NO periodic re-sync — drift gap for multi-day uptime, real follow-up). MQTT announce every 300s ONLY after sync. So no-NTP ⇒ no-MQTT-burst (explains conntrack silence). S3 time-unsynced 26min w/ IP 10.0.8.214 ⇒ NTP server unreachable on VLAN8 leg this boot (per-seat firewall shape, like the MQTT broker), not firmware. "hourly NTP burst" comment in mqtt_climate is inaccurate.
+
+## S3 FULLY GLASS-VERIFIED (2026-08-26) — touch merged to watch main
+JP verdicts on glass: GUI "gui looks good" (arm_ramwr 928d35d) + touch "the s3 touch works really well" (FT6336U active-mode e2efaad). S3 now: GUI + touch + mesh(id162) + WiFi + NTP + MQTT + wake-on-tap all verified. Touch merged to watch main **4922dad** (merge commit). Watch main is the complete verified S3 source of truth.
+- JP's earlier "not working" was C5 SWIPES (XPT2046 resistive, cyd-c5-e2/morpheus lane) — NOT S3. C5 GUI+taps fine.
+MERGE TRAIN → smol main (smol-d8's subtree-refresh lane, never-self-merge):
+- #448 CUMULATIVE (subsumes #446/#447 — its main.rs diff carries PSRAM-first+heap-96). S3 scan/PSRAM/pmugate/MQTT-retry.
+- #449 arm_ramwr (mine, ili9341.rs-only, orthogonal, glass-verified).
+- Touch fix (e2efaad, in watch main 4922dad) NOT yet in a smol PR; its esp32s3_cyd.rs edits OVERLAP #448 → smol-d8 should refresh subtree to watch main @4922dad cumulatively rather than stack conflicting PRs.
+- Recommend: smol-d8 drives ONE cumulative subtree refresh to 4922dad (supersedes #446-449) OR merges #448+#449 then a touch refresh. smol-d8's call.
+Follow-ups (mine, queued, no urgency): NTP re-sync deadlock (periodic re-sync decoupled from announce gate); C5 12-file merge to watch main (pending cyd-c5-e2 closure ping) w/ dedup inventory.
