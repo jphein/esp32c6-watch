@@ -10,7 +10,8 @@
 //
 // Wire format (BYTE-COMPATIBLE with the C3 fleet, build 36+):
 //   [0..11)  "SMOLv1 SNK "  ASCII prefix
-//   [11]     ver    u8      1 (v2 = 19 B with trailing score byte; parse degrades)
+//   [11]     ver    u8      1 (v2 score-byte dropped fleet-wide — smol #232 /
+//                           9522a89; parse still accepts a stray 19 B frame, ignores it)
 //   [12]     id     u8      sender snake id
 //   [13]     tick   u8      wrapping step counter (ordering + dead-reckon base)
 //   [14]     flags  u8      bit0 alive | bits1-2 heading (0=U 1=R 2=D 3=L)
@@ -87,14 +88,10 @@ const DUR_PHOENIX_S: u32 = 10;
 pub const SNK_PREFIX: &[u8; 11] = b"SMOLv1 SNK ";
 /// Version 1 frame: 18 B, no score byte (score == length).
 const SNK_VER: u8 = 1;
-/// Version 2 frame: 18 B core + 1 B explicit score.
-const SNK_VER_SCORE: u8 = 2;
 /// Total on-wire length of a v1 frame.
 const SNK_FRAME_LEN: usize = 18;
-/// Total on-wire length of a v2 frame.
-const SNK_FRAME_LEN_V2: usize = 19;
 /// TX scratch size the main loop should provide.
-pub const SNK_TX_BUF: usize = SNK_FRAME_LEN_V2;
+pub const SNK_TX_BUF: usize = SNK_FRAME_LEN;
 
 // flags byte bit layout (FINAL, cross-board wire contract):
 const FLAG_ALIVE_MASK: u8 = 0b0000_0001;
@@ -164,9 +161,10 @@ pub fn encode_snk(f: &SnkFrame, out: &mut [u8]) -> Option<usize> {
 }
 
 /// Parse a SMOLv1 SNK frame. Version-degrading, not version-rejecting: the
-/// stable 18 B core decodes for any ver >= 1; the score byte is read only when
-/// ver >= 2 and 19 B are present, otherwise score = length. Total, rejects
-/// garbage, never panics.
+/// stable 18 B core decodes for any ver >= 1. score == length always — the v2
+/// explicit score byte was dropped fleet-wide (smol #232 / 9522a89); a legacy
+/// 19 B frame still decodes (its trailing byte is ignored). Rejects garbage,
+/// never panics.
 pub fn parse_snk(buf: &[u8]) -> Option<SnkFrame> {
     if buf.len() < SNK_FRAME_LEN {
         return None; // truncated
@@ -183,11 +181,7 @@ pub fn parse_snk(buf: &[u8]) -> Option<SnkFrame> {
     let heading = Dir::from_bits((flags >> FLAG_HEADING_SHIFT) & FLAG_HEADING_MASK);
     let power = (flags >> FLAG_POWER_SHIFT) & FLAG_POWER_MASK;
     let length = buf[17];
-    let score = if ver >= SNK_VER_SCORE && buf.len() >= SNK_FRAME_LEN_V2 {
-        buf[18]
-    } else {
-        length
-    };
+    let score = length; // v2 explicit-score byte dropped (smol #232 / 9522a89)
     Some(SnkFrame {
         ver,
         id: buf[12],
