@@ -370,6 +370,56 @@ codegen-units = 1       # LLVM can perform better optimizations using a single t
 debug = 2               # prefer slower builds but better debugging experience
 lto = 'fat'
 opt-level = 's'
+
+# ---------------------------------------------------------------------------
+# THE RASTERISER IS NOT A SIZE PROBLEM. It is the whole latency budget.
+# ---------------------------------------------------------------------------
+# MEASURED with [RENDER-DBG] dt on image 10e (26.67 MHz, 0.600 us/pixel exact):
+#
+#   page-turn hard cut   230 lines / 2 spans   -> 209 ms   (wire 44 ms = 21%)
+#   partial repaint      244 lines / 18 spans  -> 131 ms
+#   partial repaint      132 lines / 2 spans   ->  83 ms
+#
+# So 65-80% of every paint is RENDER CPU — software rasterisation on a 240 MHz
+# RV32IMAC with no FPU — and only ~21% is wire. Two corollaries settled the same
+# measurement: window setups cost ~nothing (218 spans vs 18 spans are
+# statistically indistinguishable, so no region-merge is worth doing), and the
+# 20 -> 26 MHz clock bump could only ever buy 1.33x of that 21% = ~5-6% end to
+# end, which is why it did not move the felt latency.
+#
+# And the whole time, the tight per-pixel loops were compiled with `-Os`. Size
+# optimisation is the single worst trade for a scalar rasteriser: it gives up
+# unrolling, inlining and strength reduction in exactly the loops that ARE the
+# 65-80%. Nothing had ever overridden it — there were no per-package profiles in
+# this manifest at all.
+#
+# ★ CROSS-TARGET SAFETY, checked before landing rather than after (smol#409,
+# targets/s3-cyd/PORT-SCOPING.md §6.1): the S3's Xtensa arm has an opt-level
+# constraint, and its resolution is the opposite of a blocker here —
+#   "opt-level = 2 (or 3) under fat LTO links; the size-optimising levels (s, z)
+#    are what provoke the scavenger crash"
+# So 3 is documented-safe on Xtensa, and `s` — what we were using — is the level
+# that CRASHES it. The S3 escapes via `CARGO_PROFILE_RELEASE_OPT_LEVEL=2`, an env
+# override of the profile DEFAULT; per-package entries are a different key and
+# survive it, so an S3 build gets these two crates at 3, which #409 permits. Its
+# rule "never the shared global profile" is honoured: the global stays 's'.
+#
+# ⚠️ MANIFEST-GLOBAL, so this changes the C6 arm's codegen too. Not a behaviour
+# change, but the C6 is a shipped product and its lane keeps a veto.
+#
+# ★ AND THE SIZE WENT DOWN, which is the opposite of what I predicted here before
+# measuring. C5 app image: 3,517,280 -> 3,423,856 B, **-93,424 B (-2.7%)**. Under
+# fat LTO, `-O3`'s aggressive inlining exposes cross-crate constant folding and
+# dead-code elimination that `-Os` was itself preventing; `-Os` optimises each
+# function for size and can thereby forgo the inlining that would have deleted
+# whole call graphs. So the size/speed trade this override was written to justify
+# does not exist on this codebase — it is faster AND smaller. Measured, not
+# argued: the prediction in this very comment was wrong and is left visible
+# rather than quietly deleted.
+[profile.release.package.i-slint-renderer-software]
+opt-level = 3
+[profile.release.package.i-slint-core]
+opt-level = 3
 # DEFERRED, deliberately not done in image 8: a `[profile.diagnostic]` inheriting
 # release with `debug-assertions = true`, to catch overflow/slicing faults on the
 # bench instead of as a silent wrong pixel.
