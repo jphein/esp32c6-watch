@@ -22,3 +22,21 @@ JP's standing goal: **the watch as a full smol target, all features + parity, on
 - morpheus's branches: never commit to them; the refused: error contract is shared (prefix, not suffix).
 - CYD/S3 physical flashing stays behind their sessions' serial-pinned guards.
 - Mesh protocol is UNFORKED by vendoring smol's pure modules verbatim (mesh-flood, ota-proto) — re-vendor on wire changes, never edit locally.
+
+
+## HOLD-OPEN STATE (2026-08-25 end — staying live for bench relays per JP)
+
+**Everything code-reachable from this seat is done, pushed, or specced.** All 3 fleet boards physically absent; gatekeeper refuses ssh (JP on the AP, #89).
+
+Landed today (watch main tip 242182c): full board seam (C6/C5/S3) · Luna's ui/cyd scene · S3 ILI9341V+touch drivers · S3 PSRAM fix (the reboot-loop root cause, 8a6ad9e) · §1d board-facts · provision.py · #75 wedge fix · BLE reclaim · #90 announce · refusal-path hardening · the ENTIRE #36 services layer host-tested (mesh-flood[flood/wire/etx/cfgsched], mesh-ledger[L1-L4], ota-proto[+leaf], cast-core, bard-core[40 golden]) · multihop #64 + mesh-OTA #86 wired live on all 3 boards · cast wired (feature) · bard on-device (feature). 409 host tests, 3 arms link.
+
+smol PRs pending merge (smol-d8): #445 (S3 PSRAM refresh — bench needs it for second first-light). Earlier refreshes #417/#423/#427/#444 merged.
+
+**Waiting on (external, will arrive as relays):**
+- S3 SECOND first-light: s3-cyd rebuilds from #445. Watch for `[PSRAM] octal, 8192 KB` boot line.
+- C5 on glass: morpheus image 9 under test; his feat/cyd-c5-gating driver merge is his lane.
+- cast pixels (WLED matrix), cross-arch mesh-OTA + multihop (multi-node windows): bench verifications.
+- story E2E: JP's AP fix (#89).
+- bard screen: spec at docs/specs/2026-08-25-bard-screen-spec.md → Luna + glass.
+
+**On a relay:** if a bench reports a bug, root-cause + fix + push + refresh-PR (the PSRAM pattern). If a verification passes, mark the issue. No polling — relays arrive via SendMessage.
