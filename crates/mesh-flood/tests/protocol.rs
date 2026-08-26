@@ -132,3 +132,89 @@ fn cfgsched_round_robin_never_starves_the_tail() {
     assert!(*min > 0, "every entry was relayed at least once (no tail starvation)");
     assert!(max - min <= 1, "round-robin stays fair: {hit:?}");
 }
+
+// ---- multi-node COMPOSITION (de-risks the multi-node bench window) ----------
+// The unit tests above cover each piece; these drive the pieces AGAINST each
+// other, the way three real nodes would: a stranded leaf escalates and emits
+// UP2, a relay forwards it, a second relay dedups it, and the gateway
+// reassembles. If the pieces compose wrong (hop math, dedup key, envelope
+// re-encode), it surfaces here in software instead of on the bench.
+
+#[test]
+fn stranded_leaf_reaches_gateway_through_one_relay() {
+    use mesh_flood::flood::{forward_decision, ForwardAction, HopLatch, SeenSet, MAX_HOP};
+    use mesh_flood::wire::{encode_relay, encode_up2, parse_up2};
+
+    // LEAF: three unacked relays -> latch -> emits at MAX_HOP.
+    let mut leaf = HopLatch::new();
+    for _ in 0..3 {
+        leaf.on_relay_exhausted(false);
+    }
+    assert!(leaf.latched());
+    let hop = leaf.origin_hop(false);
+    assert_eq!(hop, MAX_HOP);
+
+    // Leaf wraps its telemetry RELAY fragment in a UP2 envelope at that hop.
+    let origin = 176u8; // arcane-beacon
+    let env_msgid = 4242u16;
+    let mut inner = [0u8; 96];
+    let ilen = encode_relay(origin, 7, 0, 1, b"telemetry from the drawer", &mut inner);
+    let mut frame = [0u8; 250];
+    let flen = encode_up2(origin, env_msgid, hop, &inner[..ilen], &mut frame);
+
+    // RELAY node (not the gateway, hops left): forwards at hop-1.
+    let mut relay = SeenSet::new();
+    let (r_origin, r_msgid, r_hop, r_inner) = parse_up2(&frame[..flen]).unwrap();
+    assert_eq!((r_origin, r_msgid, r_hop), (origin, env_msgid, MAX_HOP));
+    let seen = relay.seen_or_insert(r_origin, r_msgid, 0);
+    let fwd = match forward_decision(false, r_hop, seen) {
+        ForwardAction::Forward { hop } => hop,
+        other => panic!("relay should forward, got {other:?}"),
+    };
+    assert_eq!(fwd, MAX_HOP - 1);
+    let mut fwd_frame = [0u8; 250];
+    let fwlen = encode_up2(r_origin, r_msgid, fwd, r_inner, &mut fwd_frame);
+
+    // A SECOND relay that already saw this envelope drops it (loop guard).
+    assert_eq!(
+        forward_decision(false, fwd, relay.seen_or_insert(r_origin, r_msgid, 0)),
+        ForwardAction::DedupDrop
+    );
+
+    // GATEWAY hears the forwarded frame: reassembles, never re-forwards.
+    let (g_origin, _, g_hop, g_inner) = parse_up2(&fwd_frame[..fwlen]).unwrap();
+    assert_eq!(g_origin, origin);
+    assert_eq!(g_hop, 1, "one hop consumed reaching the gateway");
+    assert_eq!(
+        forward_decision(true, g_hop, false),
+        ForwardAction::Reassemble
+    );
+    assert_eq!(g_inner, &inner[..ilen], "the leaf's fragment arrived intact");
+}
+
+#[test]
+fn ttl_exhausts_before_an_unreachable_gateway() {
+    // A leaf two relays from a gateway on a MAX_HOP=2 mesh: the frame dies at
+    // the second relay (hop budget spent) rather than looping forever — the
+    // property that makes managed flood terminate.
+    use mesh_flood::flood::{forward_decision, ForwardAction, SeenSet};
+    use mesh_flood::wire::{encode_up2, parse_up2};
+    let mut frame = [0u8; 64];
+    let n = encode_up2(9, 1, 2, b"x", &mut frame);
+    // relay 1: 2 -> 1
+    let (_, _, h1, inner) = parse_up2(&frame[..n]).unwrap();
+    let f1 = match forward_decision(false, h1, SeenSet::new().seen_or_insert(9, 1, 0)) {
+        ForwardAction::Forward { hop } => hop,
+        o => panic!("{o:?}"),
+    };
+    let mut frame2 = [0u8; 64];
+    let n2 = encode_up2(9, 1, f1, inner, &mut frame2);
+    // relay 2: hop is now 1 -> TtlDrop (never reaches the gateway)
+    let (_, _, h2, _) = parse_up2(&frame2[..n2]).unwrap();
+    assert_eq!(h2, 1);
+    assert_eq!(
+        forward_decision(false, h2, false),
+        ForwardAction::TtlDrop,
+        "budget spent — the flood terminates instead of looping"
+    );
+}
