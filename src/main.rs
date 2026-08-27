@@ -1549,22 +1549,52 @@ async fn main(_spawner: Spawner) -> ! {
     // `LineAssembler`, so the command grammar cannot fork, and whoever plugs the
     // native port in later keeps a working console without another image.
     //
-    // RX-only, and NO PINS NAMED — deliberately. `UartRx::new` takes no pin
-    // arguments and `UartBuilder::init` sets baud/framing without touching the
-    // GPIO matrix, so the pins stay as the bootloader configured them (which is
-    // already proven, since logs arrive). This board has **no cited source** for
-    // UART0's pin numbers and the rule here is no defaults from memory, so the
-    // right move is to name none. TX stays with esp-println, which drives it
-    // through ROM functions and owns no driver state to collide with — but it does
-    // assume a sane configuration, hence baud pinned to the monitor's 115200
-    // instead of inheriting a default.
+    // RX pin EXPLICIT — and the previous version of this comment argued for the
+    // opposite, so here is why it was wrong.
+    //
+    // img14b reasoned: `UartRx::new` takes no pin arguments and `init` sets
+    // baud/framing without touching the GPIO matrix, therefore the pins stay as
+    // the bootloader left them. The first half is true and the conclusion does not
+    // follow. Not touching the matrix also means not ESTABLISHING the route, and
+    // esp-hal ties an unconnected peripheral input to a fixed level rather than
+    // leaving it floating — so the peripheral constructed perfectly, announced
+    // itself, and read a constant forever.
+    //
+    // Measured on glass: `[DBGCON] ready (uart0)` PRINTED, `UART0 RX unavailable`
+    // did NOT, the board went on logging — and `ping`/`help` written with the
+    // modem lines held still got zero bytes into the reader. Construction success
+    // and byte delivery are separate things, and a "ready" line only ever proved
+    // the first. Announced-ready-but-deaf is exactly what an unrouted RX looks
+    // like, which is why the acceptance line for the NEXT image is an answered
+    // `ping`, not a printed banner.
+    //
+    // U0RXD = GPIO12 on the ESP32-C5, CITED rather than remembered:
+    // esp-metadata-generated-0.4.0 (the version Cargo.lock resolves)
+    // `src/_generated_esp32c5.rs:4114` — `(12, GPIO12(_0 => U0RXD) () ([Input]
+    // [Output]))`, i.e. IOMUX function 0. U0TXD is GPIO11 on the same evidence.
+    // GPIO12 is otherwise unused on this board (grep confirms no other consumer),
+    // and the C5's PSRAM sits on dedicated MSPI pins, so registering 8 MB does not
+    // contend for it.
+    //
+    // TX is still NOT taken: esp-println drives it through ROM functions addressed
+    // directly, owns no driver state to collide with, and its route demonstrably
+    // survives into the app — logs arrive. Only RX needed connecting. Baud stays
+    // pinned to the monitor's 115200 rather than inheriting a default.
+    //
+    // FOLLOW-UP (Family A, approved for after this image): this site should get the
+    // `declared_pin!` assert so GPIO12 and a board constant cannot drift apart. Not
+    // added here on purpose — introducing a new board constant with no reader is the
+    // disease that audit exists to end, and the assert pattern lands as its own
+    // change.
     #[cfg(all(feature = "debug-console", feature = "board-cyd-c5"))]
     {
         use esp_hal::uart::{Config as UartConfig, UartRx};
         match UartRx::new(
             peripherals.UART0,
             UartConfig::default().with_baudrate(115_200),
-        ) {
+        )
+        .map(|rx| rx.with_rx(peripherals.GPIO12))
+        {
             Ok(rx) => {
                 _spawner.spawn(
                     debug_console::debug_console_uart_task(rx.into_async())

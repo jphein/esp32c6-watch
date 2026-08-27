@@ -103,7 +103,30 @@ class _Port:
             import serial  # type: ignore
 
             # USB-CDC-ACM ignores baud; 115200 is a harmless conventional value.
-            self._ser = serial.Serial(dev, 115200, timeout=timeout)
+            # A real UART bridge (CH340) does NOT ignore it — 115200 is the
+            # firmware's configured rate there, not a convention.
+            #
+            # ⚠️ DTR/RTS MUST BE DEASSERTED BEFORE THE PORT OPENS, or this tool
+            # reboots the board it is trying to test.
+            #
+            # `serial.Serial(dev, ...)` opens immediately and pyserial asserts DTR
+            # and RTS on open. On a CH340 wired for auto-download those lines drive
+            # EN and BOOT, so opening the port resets the chip — and the first
+            # command then fires into a booting board and is answered by silence.
+            # Measured 2026-08-27: the first hands-free run failed exactly this way,
+            # and it is indistinguishable from "the console is deaf" unless you
+            # already suspect the cable. Setting the levels on an unopened instance
+            # and opening afterwards keeps both lines low through the transition.
+            #
+            # Unconditional rather than gated on port type: CDC-ACM ignores modem
+            # lines, so this is a no-op there and one less thing to get wrong.
+            self._ser = serial.Serial()
+            self._ser.port = dev
+            self._ser.baudrate = 115200
+            self._ser.timeout = timeout
+            self._ser.dtr = False
+            self._ser.rts = False
+            self._ser.open()
             self._mode = "pyserial"
         except ImportError:
             import os
