@@ -1036,13 +1036,24 @@ impl ShellUi {
         self.last_second = dt.seconds;
         let Some(ui) = self.ui.as_ref() else { return true; };
         ui.set_time_text(slint::format!("{:02}:{:02}", dt.hours, dt.minutes));
-        ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
         let weekday = WEEKDAYS[(dt.weekday % 7) as usize];
         let month = MONTHS[(dt.month.clamp(1, 12) - 1) as usize];
         ui.set_date_text(slint::format!(
             "{} {:02} {} 20{:02}", weekday, dt.day, month, dt.year
         ));
-        ui.set_minute_progress(dt.seconds as f32 / 59.0);
+        // Per-second writes are gated to when the clock face is actually visible
+        // (`clock-seconds-live` = page 0 && !covered). Off page 0 or under an
+        // overlay these would dirty a page-0 item every second, forcing a
+        // zero-pixel full scene walk (~1 Hz idle repaint measured on C6 + CYD).
+        // time_text/date_text stay UNCONDITIONAL: Slint skips the dirty-mark when
+        // the string is unchanged, so they cost nothing until the minute/day rolls.
+        // Accepted cost: returning to the clock can show a <=1 s stale seconds
+        // value for one frame until the next tick — a page turn already forces a
+        // full repaint and the tick is <=1 s behind it.
+        if ui.get_clock_seconds_live() {
+            ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
+            ui.set_minute_progress(dt.seconds as f32 / 59.0);
+        }
         true
     }
 
