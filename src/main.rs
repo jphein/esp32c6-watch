@@ -2410,6 +2410,28 @@ async fn main(_spawner: Spawner) -> ! {
     #[cfg(feature = "mesh-ota")]
     let mut mesh_ota = crate::net::ota_mesh::MeshOta::new();
     let mut mesh = SmolMesh::new(node_id);
+    // WS2812 peer-state pixel (#491): the fleet's status-light semantics on
+    // the GUI flavor. Setup failure degrades to a dark LED — never a panic.
+    #[cfg(feature = "has-ws2812")]
+    let mut ws2812_led = {
+        use esp_hal::rmt::{Rmt, TxChannelConfig, TxChannelCreator as _};
+        use esp_hal::time::Rate;
+        // 80 MHz / divider 1 = 12.5 ns/tick — the encoder's tick base.
+        let ch = Rmt::new(peripherals.RMT, Rate::from_mhz(80)).ok().and_then(|rmt| {
+            #[cfg(feature = "board-esp32s3-cyd")]
+            let pin = peripherals.GPIO42; // board::WS2812_GPIO = 42 (ES3C28P)
+            #[cfg(feature = "board-cyd-c5")]
+            let pin = peripherals.GPIO27; // board::WS2812_GPIO = 27
+            rmt.channel0
+                .configure_tx(&TxChannelConfig::default().with_clk_divider(1))
+                .ok()
+                .map(|c| c.with_pin(pin))
+        });
+        if ch.is_none() {
+            println!("[LED] WS2812 RMT setup failed - status pixel dark");
+        }
+        crate::peripherals::ws2812::Ws2812::new(ch)
+    };
     // Mesh Familiar (fleet #57): always-on holder/arbitration state machine,
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(node_id);
@@ -3933,6 +3955,18 @@ async fn main(_spawner: Spawner) -> ! {
                 if peers != last_mesh_peers {
                     last_mesh_peers = peers;
                 }
+                // #491: peer-state pixel — mesh is unconditional in this loop,
+                // so the ladder is blink (searching) / solid (>=1 peer); frames
+                // only go on the wire when the lit flag changes.
+                #[cfg(feature = "has-ws2812")]
+                ws2812_led.service(
+                    if peers > 0 {
+                        crate::peripherals::ws2812::LedState::Solid
+                    } else {
+                        crate::peripherals::ws2812::LedState::Blink
+                    },
+                    now_ms,
+                );
                 // DIAG record every 60s: full field set in spec order (the HA
                 // dashboard parses positionally), zeros where the watch has
                 // no equivalent counter yet.

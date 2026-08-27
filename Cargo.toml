@@ -85,6 +85,9 @@ board-esp32s3-cyd = [
     # mesh-ota rides ed25519-dalek on xtensa (ota-proto's per-arch dep) —
     # ed25519-compact crashes this backend; see ota-proto/Cargo.toml.
     "mesh-ota",
+    # WS2812 peer-state pixel on GPIO42 (#491) — the same physical pixel the
+    # fleet flavor drives (JP-verified green 2026-08-26), now from the GUI.
+    "has-ws2812",
 ]
 # MESH SERVICES (#36). mesh-ota (#86): peer-sourced firmware over ESP-NOW.
 # A SERVICE feature, not a capability. ON for all three boards: the S3 arm
@@ -117,6 +120,12 @@ has-imu = []
 #                   C6 only for now; enables Voice/STT + the SoundLevel meter.
 has-audio-out = []
 has-audio-in = []
+# WS2812 status pixel over RMT (#491): the fleet's peer-state light (off →
+# blink=searching → solid=peers) on the GUI flavor. Reads board::WS2812_GPIO.
+# S3 = GPIO42 (bench-proven pixel, same part the fleet flavor drives); the
+# C5 declares GPIO27 but stays OFF here until its lane proves the seam on
+# glass — a capability is a tested claim, not an inventory line.
+has-ws2812 = []
 # Capacitive touch (FT3168). The CYD's XPT2046 is resistive: same TouchPoint
 # contract, different driver + calibration; nothing gates on this yet but the
 # distinction is real (pressure vs contact, debounce needs).
