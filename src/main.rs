@@ -1269,6 +1269,53 @@ async fn main(_spawner: Spawner) -> ! {
     // fallback that decides whether a 4 KB renderer request panics (#75).
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
 
+    // === FLASH + ROLLBACK GATE — MOVED HERE DELIBERATELY ===================
+    // Was ~750 lines further down, after the display, touch, console and the
+    // WS2812 probe. Every one of those was a window in which a panic reached the
+    // reset WITHOUT the gate having consumed the one try — so otadata stayed
+    // `New` and the board looped forever. Bench-proven, not theorised: the
+    // prologue-panic discriminator produced 6+ identical
+    // `panic -> rst:0x3 -> rst:0x10` cycles with ZERO [ROLLBACK] lines.
+    //
+    // Placed immediately after the heap/PSRAM block because the gate needs the
+    // allocator (it reads the partition table into a Vec) and nothing else. The
+    // residual window is now clock config + heap + PSRAM only — small, and
+    // mostly infallible.
+    //
+    // ⚠️ A panic inside that residual window still cannot be remembered: the gate
+    // never ran, so hole 4 records nothing and the retained announce must be
+    // cleared by hand. The gate cannot remember what it never saw.
+    // ======================================================================
+    let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
+
+    // === ROLLBACK GATE — this board's bootloader has none (acceptance 5.9) =====
+    // The on-flash second stage is built without BOOTLOADER_APP_ROLLBACK_ENABLE, so
+    // it boots whatever otadata REQUESTS and ignores the state field. A bad image
+    // therefore loops forever unless the app rolls itself back. See
+    // net/ota_rollback.rs for the state machine and why the retained block is
+    // checksummed.
+    //
+    // ⚠️ KEEP THIS EARLY. Everything that runs BEFORE the gate is a window in which
+    // a panic reaches the reset without the one try having been consumed — otadata
+    // stays `New`, the gate never fires, and the board loops forever. That is not a
+    // theory: the prologue-panic discriminator produced 6+ identical
+    // `panic -> rst:0x3 -> rst:0x10` cycles with ZERO [ROLLBACK] lines when the gate
+    // sat after the display.
+    //
+    // Only the heap/PSRAM block may precede it, because the gate needs the allocator
+    // (it reads the partition table into a Vec). **Do not move display, touch,
+    // console or probe init above this point** — each one would silently re-open the
+    // window, and nothing in the type system will stop you.
+    match net::ota_rollback::gate(&mut flash) {
+        net::ota_rollback::Outcome::RolledBack => {
+            // NOT `deliberate_reset`: a rollback is not the user choosing to
+            // reboot, and marking it intentional would excuse the next failure.
+            // The gate has already recorded what it needs to survive this reset.
+            armed_reset("rollback gate flipped boot slot")
+        }
+        other => println!("[ROLLBACK] gate: {other:?}"),
+    }
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
@@ -2010,33 +2057,7 @@ async fn main(_spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
-    // === OTA foundation: report partition layout + boot slot ===
-    let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
-
-    // === ROLLBACK GATE — this board's bootloader has none (acceptance 5.9) =====
-    // The on-flash second stage is built without BOOTLOADER_APP_ROLLBACK_ENABLE, so
-    // it boots whatever otadata REQUESTS and ignores the state field. A bad image
-    // therefore loops forever unless the app rolls itself back. See
-    // net/ota_rollback.rs for the state machine and why the retained block is
-    // checksummed.
-    //
-    // ⚠️ THIS RUNS LATER THAN IT SHOULD. Everything above — PSRAM, the heap, the
-    // display, touch, the console — executes BEFORE the gate, so a panic in that
-    // prologue never consumes the one try and the board loops exactly as 5.9
-    // observed. Closing that window means moving `FlashStorage::new` and this call
-    // up together, which is a separate commit precisely so it can be TESTED: an
-    // image rigged to panic before this line must fail the acceptance before the
-    // move and pass after. Moving it speculatively would be an unverifiable
-    // reorder of boot init in a 7,000-line function.
-    match net::ota_rollback::gate(&mut flash) {
-        net::ota_rollback::Outcome::RolledBack => {
-            // NOT `deliberate_reset`: a rollback is not the user choosing to
-            // reboot, and marking it intentional would excuse the next failure.
-            // The gate has already recorded what it needs to survive this reset.
-            armed_reset("rollback gate flipped boot slot")
-        }
-        other => println!("[ROLLBACK] gate: {other:?}"),
-    }
+    // === OTA foundation (cont.): partition layout + boot slot ===
     let mut config_offset: Option<u32> = None;
     // #55: the app slot the CPU is actually executing from (MMU probe) and
     // both app slots' geometry, feeding the GuardedFlash deny-list below.
