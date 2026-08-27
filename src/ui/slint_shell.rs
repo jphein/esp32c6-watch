@@ -2244,7 +2244,29 @@ impl ShellUi {
         // Same clock for the ping receiver pulse (#35): breathe + auto-dismiss.
         self.tick_ping_pulse();
         slint::platform::update_timers_and_animations();
-        self.window.draw_if_needed(|renderer| {
+        // PER-PAINT COST. `debug-console` builds only — a shipped build is
+        // byte-identical to before this change.
+        #[cfg(feature = "debug-console")]
+        let _render_t0 = embassy_time::Instant::now();
+        // ★ CAPTURE THE RETURN VALUE. This was discarded, and it is the single bit
+        // that separates "the scene was never marked dirty" from "the scene was
+        // dirty and the region came out EMPTY".
+        //
+        // That distinction is not academic. A repaint that walks the whole scene
+        // and emits zero pixels costs full scene-walk CPU for no visible result,
+        // and because it is a paint (`draw_if_needed` returns true) it is
+        // indistinguishable from a small real paint in every other instrument we
+        // have: `perf`'s `record_frame` fires per render CALL whether or not
+        // anything was painted, and `dt` measures the interval between paints
+        // rather than their cost. So a 1 Hz zero-pixel walk on the CYD survived
+        // four days of hand testing until this bit was printed — it was caused by
+        // per-second clock properties being written while the clock page was
+        // occluded, fixed in 9d203e9, and the same code path exists here.
+        //
+        // Discarding this return value was therefore a blindness on the shipped
+        // board, not merely a missing convenience: it is why that class of bug
+        // could not be A/B-tested on the C6 at all.
+        let _drew = self.window.draw_if_needed(|renderer| {
             let mut flusher =
                 TwoLineFlusher::new(display, &mut self.line_buf, &mut self.scratch);
             // Cast tap (feature `cast`): hand the flusher a sink borrowing this
@@ -2263,6 +2285,35 @@ impl ShellUi {
             renderer.render_by_line(&mut flusher);
             flusher.flush_pending();
         });
+        // Emitted ONLY when a paint actually happened, which is deliberate: the
+        // LINE RATE IS THEN THE PAINT RATE, countable straight off a capture with
+        // no parsing. Placed before the `cast` block so the timing covers the
+        // render and flush and nothing else.
+        //
+        // `render=` brackets the whole `draw_if_needed` — scene walk, per-line
+        // render, SPI flush. It is the per-PAINT cost, and it is deliberately not
+        // called `frame_ms`: `perf`'s figure is per render CALL and the ArmTimer's
+        // is per LOOP BODY, three nested scopes that have already been conflated
+        // once. A timing field should name its own scope.
+        //
+        // ⚠️ HOW TO USE IT FOR ZERO-PIXEL WALKS, because the obvious probe gives a
+        // false negative. The test is: in a state where there should be NO
+        // legitimate paint, is `drew=true` still appearing? ~1/s means something is
+        // dirtying an occluded scene; ~0 means it is not. That inference REQUIRES a
+        // provably static state — a covered, non-animating page. An overlay that
+        // animates its own content (Settings paints ~3.3/s of its own) will swamp a
+        // 1 Hz walk and the reading proves nothing. Distinguishing a walk from a
+        // small REAL paint in the same interval would need per-paint line counts,
+        // which this board does not have: `RDBG_LINES` instruments the CYD's
+        // `SingleLineFlusher` only, and `TwoLineFlusher` here is uninstrumented.
+        // Picking a static state is what makes the cheap version sound.
+        #[cfg(feature = "debug-console")]
+        if _drew {
+            esp_println::println!(
+                "[RENDER-DBG] drew=true render={}ms",
+                (embassy_time::Instant::now() - _render_t0).as_millis(),
+            );
+        }
         #[cfg(feature = "cast")]
         if let Some(cs) = self.cast.as_mut() {
             cs.frame_ready = true;
