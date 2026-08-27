@@ -393,6 +393,30 @@ pub const TOUCH_PRESSURE_THRESHOLD: u16 = 64;
 /// halves the strip buffers, which this constant sizes.
 pub const FLUSH_STRIP_LINES: usize = 1;
 
+/// External quad-SPI PSRAM fitted to this module, in bytes — **8 MB**.
+///
+/// This is a DECLARED EXPECTATION, not the number the allocator uses. esp-hal
+/// measures the real part at boot: `psram/quad.rs` reads the PSRAM chip's device
+/// ID over SPI and decodes its density bits, so the registered region is always
+/// the size of the silicon actually present. This constant exists to be COMPARED
+/// against that measurement in `main()`.
+///
+/// The comparison is the point. The detect path fails SOFTLY — an unresponsive
+/// chip logs one `warn!` and returns with the size left at `AutoDetect` (which
+/// reads back as 0), while the C5's `init_psram` returns `true` unconditionally,
+/// so registration proceeds with an EMPTY region. Nothing downstream errors: the
+/// allocator simply finds no space at index 0 and falls through to the internal
+/// pools, i.e. the firmware behaves exactly like the pre-PSRAM build while
+/// claiming to be the PSRAM build. That is the failure this constant catches,
+/// and it is the only one that could make image 11 look like a null result when
+/// the truth is that the memory never arrived.
+///
+/// Density decoding is conservative in the safe direction (`_ => 2 MB`), so a
+/// mis-detect under-reports and can never hand the allocator memory that is not
+/// there. Provenance for 8 MB: the module's own spec (16 MB flash + 8 MB PSRAM),
+/// which is corroborated rather than assumed — mismatch prints loudly.
+pub const PSRAM_BYTES: usize = 8 * 1024 * 1024;
+
 /// UI hit-geometry for the CYD layout set (`ui/cyd/`, 320x240 landscape).
 /// PLACEHOLDER values pending the layout work — they mirror nothing yet, and
 /// the C5 arm's story playback is gated off until they do.

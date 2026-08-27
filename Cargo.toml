@@ -61,7 +61,7 @@ board-cyd-c5 = [
     "esp-hal/esp32c5", "esp-rtos/esp32c5", "esp-radio/esp32c5",
     "esp-storage/esp32c5", "esp-bootloader-esp-idf/esp32c5",
     "esp-println/esp32c5", "esp-backtrace/esp32c5",
-    "has-5ghz-wifi",
+    "has-5ghz-wifi", "has-psram",
     # DIAGNOSTIC, carried deliberately (image 8). Not a capability — a live
     # investigation. Listed HERE rather than passed as `--features` because
     # tools/ota_push.sh documents that forgetting `--features` silently REMOVES
@@ -103,6 +103,27 @@ has-ble = []
 # onto a 5 GHz leg leaves the mesh and lands where the C3/C6 fleet cannot follow.
 # See `set_sta_config` in src/net/net_task.rs.
 has-5ghz-wifi = []
+# External SPI RAM wired to the MSPI bus. The C5 module carries 8 MB; the C6
+# board has none (see the header comment in src/main.rs).
+#
+# This gates TWO things that must stay in lockstep, which is the whole reason it
+# is a capability and not an inline `#[cfg(feature = "board-cyd-c5")]`:
+#
+#   1. the `psram_allocator!` registration in `main()`, and
+#   2. `RGN_MAIN`/`RGN_RECL` — the INDICES the heap logs read.
+#
+# Registering a third region shifts the internal pools one slot along in
+# `HEAP.stats().region_stats`, so a board that gains PSRAM without moving those
+# indices keeps printing `main=`/`recl=` against the wrong regions. That failure
+# is silent and it corrupts the exact telemetry a PSRAM image exists to produce.
+# One flag, both sites, no way to move one without the other.
+#
+# ⚠️ NOT a licence to allocate DMA buffers from the heap: C5 DMA cannot reach
+# PSRAM under esp-hal 1.1.x. The display's buffers come from `dma_buffers!`
+# (static, internal) and every heap-side pixel slice is re-staged through
+# `SharedSpiBus::stage` before the transfer — see the note at
+# src/drivers/spi_bus.rs:342, which is now load-bearing for more than byte order.
+has-psram = []
 
 # ---------------------------------------------------------------------------
 # DIAGNOSTICS. Not capabilities — capabilities describe a board and are

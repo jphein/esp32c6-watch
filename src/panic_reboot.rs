@@ -51,14 +51,30 @@ extern "Rust" fn custom_halt() -> ! {
     // `largest_free_block()` is deliberately NOT called here: it probes by
     // allocating, and allocating inside an out-of-memory panic invites a nested
     // panic that would destroy the backtrace we just printed.
+    //
+    // Reported region-BY-region, and deliberately NOT by index. This file is
+    // `include!`d into BOTH binaries and only `main` registers PSRAM, so a
+    // positional `main_free=`/`recl_free=` labelling is wrong in one of the two
+    // by construction — and wrong SILENTLY. Image 11 added a third region at the
+    // FRONT of this list, which is exactly the edit that re-points positional
+    // labels with no compile error to catch it. Enumerating cannot mislabel:
+    // every line states its own index, size and capability, so it reads
+    // correctly at 2 regions or 3 and needs no edit at 4.
     let hs = esp_alloc::HEAP.stats();
-    let region = |i: usize| hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0);
-    esp_println::println!(
-        "[PANIC-HEAP] total_free={} main_free={} recl_free={}",
-        esp_alloc::HEAP.free(),
-        region(0),
-        region(1),
-    );
+    esp_println::println!("[PANIC-HEAP] total_free={}", esp_alloc::HEAP.free());
+    for (i, r) in hs.region_stats.iter().enumerate() {
+        if let Some(r) = r.as_ref() {
+            esp_println::println!(
+                "[PANIC-HEAP] rgn{} size={} used={} free={} ext={}",
+                i,
+                r.size,
+                r.used,
+                r.free,
+                r.capabilities
+                    .contains(esp_alloc::MemoryCapability::External),
+            );
+        }
+    }
     esp_println::println!("[PANIC] rebooting (custom-halt) — backtrace above");
     for _ in 0..4_000_000u32 {
         core::hint::spin_loop();

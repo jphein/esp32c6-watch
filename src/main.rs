@@ -534,11 +534,39 @@ struct ClimatePending {
     sent_at: Option<Instant>,
 }
 
+/// Index of the EXTERNAL PSRAM region in `HEAP.stats().region_stats`.
+///
+/// `region_stats` is ordered by REGISTRATION, not by name, so these indices are
+/// a restatement of the `add_region` order at the top of `main()` and have no
+/// other source of truth. They are named — rather than written as `0`/`1` at the
+/// seven sites that read them — because of what image 11 did: registering PSRAM
+/// FIRST shifted both internal pools one slot along, which re-pointed every
+/// `main=`/`recl=` label in this firmware at the wrong region. That break has no
+/// compile error and no runtime symptom; it just makes the heap telemetry lie,
+/// in the exact instrument a PSRAM image exists to read. Gating the indices on
+/// the same `has-psram` capability that performs the registration is what makes
+/// the two impossible to move independently.
+#[cfg(feature = "has-psram")]
+const RGN_PSRAM: usize = 0;
+/// Index of the MAIN internal pool. See [`RGN_PSRAM`] for why this is named.
+#[cfg(feature = "has-psram")]
+const RGN_MAIN: usize = 1;
+/// Index of the ROM-reclaimed internal pool (dram2_seg). See [`RGN_PSRAM`].
+#[cfg(feature = "has-psram")]
+const RGN_RECL: usize = 2;
+/// Index of the MAIN internal pool on a board with no external RAM — the pools
+/// are then the only two regions, in `heap_allocator!` order.
+#[cfg(not(feature = "has-psram"))]
+const RGN_MAIN: usize = 0;
+/// Index of the ROM-reclaimed internal pool (dram2_seg). See [`RGN_MAIN`].
+#[cfg(not(feature = "has-psram"))]
+const RGN_RECL: usize = 1;
+
 /// Log per-region free heap at boot / app-enter. The framebuffer must come from
 /// ONE region, so total-free (HEAP.free()) can read fine while the main region
-/// alone is short. `region_stats[0]` = the MAIN pool, `[1]` = the ROM-reclaimed
-/// pool (dram2_seg), in declaration order of the two `heap_allocator!` calls in
-/// `main()` — read the sizes THERE, not from a number copied into this comment.
+/// alone is short. The regions are addressed through [`RGN_MAIN`] / [`RGN_RECL`]
+/// rather than by literal index — read the pool sizes at the `heap_allocator!`
+/// calls in `main()`, not from a number copied into this comment.
 ///
 /// `need` is a CONSTANT, not a measurement. It is the half-res GAMES framebuffer
 /// footprint — `(410/2) * (502/2)` = 51,455 B, one byte per pixel (RGB332, see
@@ -566,11 +594,18 @@ fn log_heap(tag: &str) {
             .map(|r| r.free)
             .unwrap_or(0)
     };
+    // Present as a field on EVERY board, reading 0 where there is no external
+    // RAM, so a log consumer never has to branch on board to parse this line.
+    #[cfg(feature = "has-psram")]
+    let psram_free = region_free(RGN_PSRAM);
+    #[cfg(not(feature = "has-psram"))]
+    let psram_free = 0usize;
     println!(
-        "[HEAP] {}: main_free={} recl_free={} total_free={} need={}",
+        "[HEAP] {}: main_free={} recl_free={} psram_free={} total_free={} need={}",
         tag,
-        region_free(0),
-        region_free(1),
+        region_free(RGN_MAIN),
+        region_free(RGN_RECL),
+        psram_free,
         esp_alloc::HEAP.free(),
         (410usize / 2) * (502usize / 2),
     );
@@ -698,15 +733,28 @@ fn largest_free_block() -> (usize, usize) {
         // layout before continuing.
         unsafe {
             let layout = core::alloc::Layout::from_size_align_unchecked(sz, 4);
-            let before = region_used(0);
+            let before = region_used(RGN_MAIN);
             let p = alloc::alloc::alloc(layout);
             if !p.is_null() {
                 // WHICH POOL SERVED IT, without hardcoding an address. `alloc_caps`
-                // walks region 0 then region 1 and falls through only on failure, so
-                // a rise in region 0's `used` means MAIN served this size. An
-                // address-range test would work too but would rot on any layout
-                // change; a `used` delta cannot.
-                let from_main = region_used(0) > before;
+                // walks the regions in registration order and falls through only on
+                // failure, so a rise in the MAIN pool's `used` means main served this
+                // size. An address-range test would work too but would rot on any
+                // layout change; a `used` delta cannot.
+                //
+                // ⚠️ ON A `has-psram` BOARD `mb_main` IS STRUCTURALLY 0. PSRAM is
+                // registered ahead of both pools and an uncapability'd `alloc` takes
+                // the first region that fits, so no ordinary allocation ever reaches
+                // main and this delta never rises. Zero here means "main is not being
+                // drawn from" — the DESIGNED state, and the point of the change — not
+                // exhaustion. That distinction is written down because this exact
+                // field was already once read off 2,807 consecutive beats and reported
+                // as heap exhaustion when the number was correct and the severity was
+                // invented. The useful counterpart on such a board is the internal
+                // pools' own largest hole, which needs an `alloc_caps(Internal)` probe
+                // rather than this one; deliberately not added in the same image that
+                // introduces the region, so one variable moves at a time.
+                let from_main = region_used(RGN_MAIN) > before;
                 alloc::alloc::dealloc(p, layout);
                 // SELF-VALIDATION (#75). A successful probe at `sz` must come out of
                 // ONE region's span, so `sz` can never exceed total free. If it does,
@@ -989,6 +1037,101 @@ async fn main(_spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // =====================================================================
+    // EXTERNAL PSRAM — REGISTERED BEFORE BOTH INTERNAL POOLS, DELIBERATELY.
+    // =====================================================================
+    // The ordering IS the fix, so it is worth saying why rather than trusting
+    // "the S3 does it this way".
+    //
+    // `EspHeap::alloc` (the plain global allocator, esp-alloc-0.10.0
+    // src/lib.rs:703) requests `EnumSet::empty()` — NO capability — and the
+    // region filter at :542 is `region.capabilities.is_superset(requested)`.
+    // The empty set is a subset of every set, so an ordinary Rust allocation
+    // matches EVERY region and takes the FIRST that fits. Registering PSRAM at
+    // index 0 therefore sends all ordinary allocation here: the Slint scene, the
+    // launcher's snapshots, every Box and Vec in the UI.
+    //
+    // esp-radio is the mirror image. It allocates WITH `Internal`, and
+    // `External.is_superset(Internal)` is FALSE, so the radio structurally
+    // CANNOT be served from PSRAM — it skips index 0 and lands in the pools
+    // below. That asymmetry is the whole mechanism: the internal 112 KB + 64 KB
+    // stop being contended general-purpose memory and become a near-private
+    // arena for the WiFi blob, while the UI moves out to external RAM. It is
+    // enforced by the capability types, not by discipline.
+    //
+    // Which is also why the pool sizes are UNTOUCHED here. The main pool is a
+    // static array whose size sets `_bss_end` and therefore the stack ceiling
+    // (see the coupling note on the `heap_allocator!` call below); PSRAM changes
+    // what COMPETES for those pools, not how big they may safely be. Two
+    // independent variables, and image 11 moves exactly one.
+    //
+    // DMA AND PSRAM — a claim in this tree was wrong, so here is the measurement.
+    // The comment at the `dma_buffers!` call said C5 DMA "cannot reach PSRAM under
+    // esp-hal 1.1.x". It can. `dma_can_access_psram` is a build-script cfg, and in
+    // the version this crate actually RESOLVES to — esp-metadata-generated 0.4.0,
+    // per Cargo.lock, not the 0.5.0 also present in the registry — it is emitted
+    // inside the `esp32c5` block (_build_script_utils.rs:1837, between the
+    // "esp32c5" marker at :1696 and "esp32c6" at :2298). The chips that get it are
+    // esp32c5, esp32s2, esp32s3; the C6 block has none, which is why the claim
+    // sounded right on this codebase's home board. Under that cfg the
+    // `UnsupportedMemoryRegion` error is raised per CHANNEL
+    // (`dma/mod.rs:2087`, `!tx_impl.can_access_psram()`), not per chip.
+    //
+    // None of which this image relies on, and that is the point worth keeping: the
+    // display path never hands heap memory to DMA at all. The transfer buffers are
+    // static (`dma_buffers!`), and `SharedSpiBus::stream_pixels` copies every pixel
+    // into the static `stage` before writing, so the renderer's `line_buf`/`scratch`
+    // Vecs are memcpy SOURCES only. So PSRAM is safe here on a proven property
+    // rather than on a chip-capability claim — which is the safer of the two to
+    // rest on, given one of them was already folklore.
+    //
+    // That safety was also bought by accident: the raw `&[u8]` pass-through deleted
+    // at drivers/spi_bus.rs:342 was removed for byte-order ENCAPSULATION, and it is
+    // the same edit that stopped a renderer buffer reaching the DMA engine
+    // directly. Anyone restoring that fast path for its ~5% is also taking on the
+    // PSRAM-reachability question this firmware currently gets to ignore.
+    #[cfg(feature = "has-psram")]
+    {
+        esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+
+        // ACCEPTANCE EVIDENCE. Read back from the ALLOCATOR rather than from
+        // the driver: this proves the region reached the heap with the right
+        // capability, which is the claim that matters. A driver-side size would
+        // only prove PSRAM initialised, and the soft-failure path (see
+        // `board::PSRAM_BYTES`) initialises "successfully" with zero bytes.
+        let hs = esp_alloc::HEAP.stats();
+        let rgn = hs.region_stats[RGN_PSRAM].as_ref();
+        let size = rgn.map(|r| r.size).unwrap_or(0);
+        let external = rgn
+            .map(|r| {
+                r.capabilities
+                    .contains(esp_alloc::MemoryCapability::External)
+            })
+            .unwrap_or(false);
+        println!(
+            "[PSRAM] region{} registered: size={} B ({} MB) free={} external={} declared={} B",
+            RGN_PSRAM,
+            size,
+            size / (1024 * 1024),
+            rgn.map(|r| r.free).unwrap_or(0),
+            external,
+            board::PSRAM_BYTES,
+        );
+        if size != board::PSRAM_BYTES || !external {
+            // Loud, and deliberately NOT a panic. If the memory did not arrive
+            // the firmware is still the previous image and still runnable on the
+            // internal pools — refusing to boot would forfeit every other
+            // reading in the capture. What must not happen is this going by
+            // unnoticed and a null result being read as "PSRAM did not help".
+            println!(
+                "[PSRAM] ⚠️ MISMATCH: expected {} B External. A size of 0 means the \
+                 chip did not answer the ID probe and the region is EMPTY — this \
+                 build is running on internal RAM only.",
+                board::PSRAM_BYTES,
+            );
+        }
+    }
+
     // Heap / stack layout (esp32c6 memory.x). The RAM region is
     // 0x40800000..0x4086E610 (~441.5KB); the stack grows DOWN from 0x4086E610
     // (RAM top) and its floor is _bss_end, so `stack = 0x4086E610 - _bss_end`.
@@ -1268,10 +1411,24 @@ async fn main(_spawner: Spawner) -> ! {
         let backlight = Output::new(peripherals.GPIO25, Level::High, OutputConfig::default());
 
         // RX only has to hold a 3-byte XPT2046 answer; TX holds one full strip.
-        // ⚠️ These are the buffers the DMA engine actually reads, and DMA cannot
-        // reach PSRAM on the C5 under esp-hal 1.1.x — keep them off any PSRAM
-        // allocator. (It fails as a typed `UnsupportedMemoryRegion`, not silent
-        // corruption, but the distinction is worth not learning at 2 a.m.)
+        //
+        // These are the buffers the DMA engine actually reads. `dma_buffers!`
+        // places them in STATIC internal memory, which is what keeps them clear of
+        // the external region image 11 registers — the placement does the work
+        // here, not a rule anyone has to remember.
+        //
+        // CORRECTED 2026-08-27: this comment previously said DMA "cannot reach
+        // PSRAM on the C5 under esp-hal 1.1.x". That is false. `dma_can_access_psram`
+        // IS emitted for esp32c5 by the version actually resolved
+        // (esp-metadata-generated 0.4.0, _build_script_utils.rs:1837 inside the
+        // "esp32c5" block at :1696..:2298 — esp32c5/s2/s3 get it, the C6 does not,
+        // which is presumably how the claim survived on this codebase's home
+        // board). Under that cfg `UnsupportedMemoryRegion` is a per-CHANNEL
+        // verdict (`dma/mod.rs:2087`), not a chip-wide prohibition, and RX carries
+        // a 16/32/64 B alignment requirement that TX does not. Nothing here
+        // depends on the answer — see the PSRAM block at the top of `main()` —
+        // but a wrong "cannot" would deter a future optimisation on false grounds,
+        // which is the same failure class as the bootloader-offset folklore.
         let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
             esp_hal::dma_buffers!(64, STAGE_BYTES);
         let dma_rx = DmaRxBuf::new(rx_descriptors, rx_buffer).expect("dma rx");
@@ -2917,7 +3074,7 @@ async fn main(_spawner: Spawner) -> ! {
         {
             let mf = esp_alloc::HEAP
                 .stats()
-                .region_stats[0]
+                .region_stats[RGN_MAIN]
                 .as_ref()
                 .map(|r| r.free)
                 .unwrap_or(0);
@@ -2942,14 +3099,21 @@ async fn main(_spawner: Spawner) -> ! {
             let region_free = |i: usize| {
                 hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0)
             };
+            // `psram=` reads 0 on a board with no external RAM, so this line has
+            // ONE shape on both boards and log-parsing never branches on board.
+            #[cfg(feature = "has-psram")]
+            let psram_free = region_free(RGN_PSRAM);
+            #[cfg(not(feature = "has-psram"))]
+            let psram_free = 0usize;
             println!(
-                "[LOOP] beat={} up={}s heap={} low={} main={} recl={} maxblk={}",
+                "[LOOP] beat={} up={}s heap={} low={} main={} recl={} psram={} maxblk={}",
                 loop_beats,
                 now.as_secs(),
                 heap_now,
                 heap_low,
-                region_free(0),
-                region_free(1),
+                region_free(RGN_MAIN),
+                region_free(RGN_RECL),
+                psram_free,
                 mb_global,
             );
             // Pooled scene-vector capacities (#75). The vector that GROWS is the one
@@ -4702,14 +4866,26 @@ async fn main(_spawner: Spawner) -> ! {
                     const LAUNCHER_FREE_FLOOR: usize = 24 * 1024;
                     let hs = esp_alloc::HEAP.stats();
                     let rf = |i: usize| hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0);
+                    #[cfg(feature = "has-psram")]
+                    let psram_rf = rf(RGN_PSRAM);
+                    #[cfg(not(feature = "has-psram"))]
+                    let psram_rf = 0usize;
+                    // NOTE on the floor now that PSRAM exists: `total` includes the
+                    // external region, so on a `has-psram` board this gate passes with
+                    // ~8 MB of headroom and the decline path should never fire again.
+                    // The gate STAYS rather than being deleted — it is the tripwire that
+                    // says so out loud. If a DECLINE line ever appears on a PSRAM build,
+                    // the external region did not register (compare the `[PSRAM]` boot
+                    // line) and the firmware silently fell back to internal RAM.
                     let total = esp_alloc::HEAP.free();
                     if total < LAUNCHER_FREE_FLOOR {
                         println!(
-                            "[LAUNCHER] DECLINED open: total_free={} < floor={} (main={} recl={})",
+                            "[LAUNCHER] DECLINED open: total_free={} < floor={} (main={} recl={} psram={})",
                             total,
                             LAUNCHER_FREE_FLOOR,
-                            rf(0),
-                            rf(1)
+                            rf(RGN_MAIN),
+                            rf(RGN_RECL),
+                            psram_rf,
                         );
                         shell.set_launcher_open(false);
                         shell.set_toast("Low memory \u{2014} launcher unavailable");
@@ -4721,10 +4897,11 @@ async fn main(_spawner: Spawner) -> ! {
                         // looked like on an attempt that was ALLOWED. Compare against
                         // the next [PANIC-HEAP] line to learn the real cost.
                         println!(
-                            "[LAUNCHER] open attempt: total_free={} main={} recl={}",
+                            "[LAUNCHER] open attempt: total_free={} main={} recl={} psram={}",
                             total,
-                            rf(0),
-                            rf(1)
+                            rf(RGN_MAIN),
+                            rf(RGN_RECL),
+                            psram_rf,
                         );
                     }
                 }
