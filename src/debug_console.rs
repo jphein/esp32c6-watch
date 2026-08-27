@@ -249,36 +249,112 @@ pub fn arm_exempt() {
 // Console task
 // ============================================================================
 
-/// The debug-console task: read newline-delimited commands from the
-/// USB-Serial-JTAG RX, echo each command's result on the SAME serial (via
-/// `println!`), and inject synthetic input / report state.
-#[embassy_executor::task]
-pub async fn debug_console_task(mut usb: UsbSerialJtag<'static, Async>) -> ! {
-    println!("[DBGCON] ready");
-    let mut line = [0u8; 96];
-    let mut len = 0usize;
-    let mut buf = [0u8; 32];
-    loop {
-        let n = usb.read(&mut buf).await.unwrap_or(0);
-        for &b in &buf[..n] {
+/// Newline-delimited command assembler — the grammar, shared by every transport.
+///
+/// Extracted when UART0 became a second source, and the reason it is shared
+/// rather than copied per transport is the failure it prevents: a command that
+/// works over one cable and mysteriously does not over the other. One grammar,
+/// two readers.
+struct LineAssembler {
+    line: [u8; 96],
+    len: usize,
+}
+
+impl LineAssembler {
+    const fn new() -> Self {
+        Self { line: [0u8; 96], len: 0 }
+    }
+
+    /// Feed raw bytes; dispatches `handle_line` on each complete line.
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
             match b {
                 b'\n' | b'\r' => {
-                    if len > 0 {
-                        handle_line(&line[..len]);
-                        len = 0;
+                    if self.len > 0 {
+                        handle_line(&self.line[..self.len]);
+                        self.len = 0;
                     }
                 }
                 _ => {
-                    if len < line.len() {
-                        line[len] = b;
-                        len += 1;
+                    if self.len < self.line.len() {
+                        self.line[self.len] = b;
+                        self.len += 1;
                     } else {
                         // Overflow: drop the line so parsing stays deterministic.
-                        len = 0;
+                        self.len = 0;
                         println!("[DBGCON] err line-too-long");
                     }
                 }
             }
+        }
+    }
+}
+
+/// The debug-console task: read newline-delimited commands from the
+/// USB-Serial-JTAG RX, echo each command's result via `println!`, and inject
+/// synthetic input / report state.
+///
+/// ⚠️ ON A BOARD WITH THE NATIVE USB PORT UNPLUGGED THIS TASK IS DEAF, and it
+/// fails silently — it waits forever on a peripheral with no host. That is the
+/// CYD, and it cost a diagnosis: commands sent to the cabled port got silence
+/// while logs streamed out of it perfectly well. See
+/// [`debug_console_uart_task`] for the counterpart and the mechanism.
+#[embassy_executor::task]
+pub async fn debug_console_task(mut usb: UsbSerialJtag<'static, Async>) -> ! {
+    println!("[DBGCON] ready (usb-serial-jtag)");
+    let mut asm = LineAssembler::new();
+    let mut buf = [0u8; 32];
+    loop {
+        let n = usb.read(&mut buf).await.unwrap_or(0);
+        asm.feed(&buf[..n]);
+    }
+}
+
+/// The same console, reading **UART0** — the transport the logs actually use on
+/// a board whose native USB port is not plugged in.
+///
+/// # Why this exists
+///
+/// `esp-println` runs with the `auto` feature, which chooses its transport at
+/// RUNTIME rather than compile time: it reads the USB_DEVICE SOF interrupt raw
+/// flag (`0x6000f008` bit 1), set only while a USB host is attached, and never
+/// resets it. On the CYD the native USB port is unplugged, so the flag never
+/// latches and **every `println!` leaves via UART0 to the CH340**.
+///
+/// The console, meanwhile, read `UsbSerialJtag` only. So output and input sat on
+/// different transports and the asymmetry was invisible: the cable showed a
+/// healthy log stream, which reads as "the console is fine", while every command
+/// written back to it went nowhere. Structural, not a misconfiguration.
+///
+/// # Why RX-only, and why no pins
+///
+/// `UartRx::new` is an RX-only constructor that takes **no pin arguments**, and
+/// `UartBuilder::init` configures baud and framing without touching the GPIO
+/// matrix. So the pins stay exactly as the bootloader left them — which is how
+/// logs already reach the CH340 — and this code never has to name them. That
+/// matters because **this board has no cited source for UART0's pin numbers**,
+/// and the bring-up rule here is no defaults from memory.
+///
+/// TX is deliberately not taken. `esp-println`'s UART path transmits through ROM
+/// functions addressed directly, so it holds no driver state to collide with, but
+/// it does assume the peripheral stays sanely configured — hence the baud is
+/// pinned to the monitor's 115200 rather than left to a default.
+#[cfg(feature = "board-cyd-c5")]
+#[embassy_executor::task]
+pub async fn debug_console_uart_task(
+    mut rx: esp_hal::uart::UartRx<'static, Async>,
+) -> ! {
+    println!("[DBGCON] ready (uart0)");
+    let mut asm = LineAssembler::new();
+    let mut buf = [0u8; 32];
+    loop {
+        match rx.read_async(&mut buf).await {
+            Ok(n) => asm.feed(&buf[..n]),
+            // Framing/overrun/parity: drop the fragment and keep serving. A
+            // console that dies on one bad byte from a cable being plugged in
+            // mid-session is worse than one that resynchronises at the next
+            // newline, which `LineAssembler` does for free.
+            Err(_) => {}
         }
     }
 }

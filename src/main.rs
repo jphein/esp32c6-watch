@@ -1533,6 +1533,52 @@ async fn main(_spawner: Spawner) -> ! {
         _spawner.spawn(debug_console::debug_console_task(usb).expect("debug_console_task token"));
     }
 
+    // ALSO listen on UART0 — on this board it is the ONLY transport that reaches
+    // a host, and the USB-JTAG task above is deaf here.
+    //
+    // `esp-println` uses the `auto` feature, which picks its transport at RUNTIME
+    // by reading the USB_DEVICE SOF interrupt flag (`0x6000f008` bit 1) — set only
+    // while a USB host is attached, and never reset. The CYD's native USB port is
+    // unplugged, so the flag never latches and every `println!` goes out UART0 to
+    // the CH340. The console read USB-JTAG only, so logs left by one transport
+    // while commands were awaited on another: the cable showed a perfectly healthy
+    // log stream, which reads as "console is fine", and every command written back
+    // to it went nowhere.
+    //
+    // Both tasks run rather than swapping one for the other. They share
+    // `LineAssembler`, so the command grammar cannot fork, and whoever plugs the
+    // native port in later keeps a working console without another image.
+    //
+    // RX-only, and NO PINS NAMED — deliberately. `UartRx::new` takes no pin
+    // arguments and `UartBuilder::init` sets baud/framing without touching the
+    // GPIO matrix, so the pins stay as the bootloader configured them (which is
+    // already proven, since logs arrive). This board has **no cited source** for
+    // UART0's pin numbers and the rule here is no defaults from memory, so the
+    // right move is to name none. TX stays with esp-println, which drives it
+    // through ROM functions and owns no driver state to collide with — but it does
+    // assume a sane configuration, hence baud pinned to the monitor's 115200
+    // instead of inheriting a default.
+    #[cfg(all(feature = "debug-console", feature = "board-cyd-c5"))]
+    {
+        use esp_hal::uart::{Config as UartConfig, UartRx};
+        match UartRx::new(
+            peripherals.UART0,
+            UartConfig::default().with_baudrate(115_200),
+        ) {
+            Ok(rx) => {
+                _spawner.spawn(
+                    debug_console::debug_console_uart_task(rx.into_async())
+                        .expect("debug_console_uart_task token"),
+                );
+            }
+            // Non-fatal on purpose: losing the automation transport must not cost
+            // the watch its boot. It is loud because a silent failure here would
+            // present as "ui_test hangs", which is the ambiguity this whole change
+            // exists to remove.
+            Err(e) => println!("[DBGCON] ⚠️ UART0 RX unavailable ({:?}) — ui_test cannot drive this build", e),
+        }
+    }
+
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
     #[cfg(feature = "has-cap-touch")]
     let (mut touch_int, mut touch) = {

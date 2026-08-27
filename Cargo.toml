@@ -70,6 +70,28 @@ board-cyd-c5 = [
     # this line (and the block at the end of drivers/xpt2046.rs) when the swipe
     # question is answered.
     "touch-telemetry",
+    # SELF-VERIFICATION, and listed HERE for the same reason `touch-telemetry` is
+    # — the reasoning above applies with more force, not less.
+    #
+    # JP's directive: "stop waiting for me on anything you should be testing
+    # yourself." `tools/ui_test.py` drives synthetic taps/swipes through the real
+    # touch path and reads back per-frame render durations, so an image can be
+    # asserted PASS/FAIL before a human ever wears it. That only works if the
+    # console is IN the image — and it was not: `strings` found zero `DBGCON` in
+    # every C5 image of this series, because `--no-default-features --features
+    # board-cyd-c5` never included it.
+    #
+    # Passing it as `--features` would leave it able to vanish on the next routine
+    # OTA, and a self-test that silently drops out is WORSE than none: the next
+    # green run would be trusted while testing a binary that cannot be driven at
+    # all. An investigation that evaporates cannot answer the question it was cut
+    # for; a verification that evaporates lies about one.
+    #
+    # Costs, both checked rather than assumed: it disables AOD light-sleep (moot
+    # here — this board does not declare `has-light-sleep`, so AOD already uses a
+    # plain timer wait) and it pulls `embedded-io-async`, which the UART0 reader
+    # needs anyway.
+    "debug-console",
 ]
 # Hardware capabilities. Empty markers — they exist to be cfg'd on.
 # AXP2101 PMU: battery gauge, power-key latch, power page.
