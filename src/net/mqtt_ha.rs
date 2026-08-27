@@ -35,18 +35,8 @@ pub(crate) const CLIENT_ID_PREFIX: &str = "smolwatch-";
 pub(crate) const CLIENT_ID_CAP: usize = 40;
 const KEEPALIVE_SECS: u16 = 30;
 
-/// Home Assistant discovery config for the battery sensor (retained).
-const DISCOVERY_TOPIC: &str = "homeassistant/sensor/smolwatch/battery/config";
-const DISCOVERY_PAYLOAD: &str = concat!(
-    r#"{"name":"smol watch battery","state_topic":"smolwatch/battery","#,
-    r#""unit_of_measurement":"%","device_class":"battery","#,
-    r#""unique_id":"smolwatch_battery","device":{"identifiers":["smolwatch042"],"#,
-    r#""name":"smol watch","model":"ESP32-C6-Touch-AMOLED-2.06","#,
-    r#""manufacturer":"jphein"}}"#
-);
-
-const BATTERY_TOPIC: &str = "smolwatch/battery";
-const UPTIME_TOPIC: &str = "smolwatch/uptime";
+/// HA discovery config + state topics are built PER-DEVICE from the sigil in
+/// `burst()` (#492) — a shared literal made two watches collide on one HA entity.
 
 /// Largest single packet we build (discovery config is ~330 bytes).
 /// `pub(crate)` so the climate session reuses the shared packet builders.
@@ -200,16 +190,54 @@ async fn burst(
         return Err("broker refused connection (check MQTT_USER/MQTT_PASS)");
     }
 
+    // Per-device HA discovery + state topics (#492), keyed on the device sigil.
+    // The client-id is already per-device (#34), but the discovery config,
+    // unique_id, device identifier and state topics were a shared literal
+    // ("smolwatch042"/"smolwatch/battery") — so two watches published to ONE HA
+    // entity and overwrote each other's battery. Keying every topic + id on the
+    // sigil (topic-safe by construction: lowercase + '-', host-tested) makes each
+    // watch its own HA device. Model is board-relative via board::CHIP_NAME, so
+    // the C6 claims the reserved "smol ESP32-C6 Watch" string and the S3/C5 read
+    // true. State topics MUST match the discovery's state_topic or HA shows an
+    // unavailable entity.
+    let sigil = crate::net::sigil::get().sigil.as_str();
+    let mut batt_topic: heapless::String<48> = heapless::String::new();
+    let _ = batt_topic.push_str("smolwatch-");
+    let _ = batt_topic.push_str(sigil);
+    let _ = batt_topic.push_str("/battery");
+    let mut uptime_topic: heapless::String<48> = heapless::String::new();
+    let _ = uptime_topic.push_str("smolwatch-");
+    let _ = uptime_topic.push_str(sigil);
+    let _ = uptime_topic.push_str("/uptime");
+    let mut disc_topic: heapless::String<80> = heapless::String::new();
+    let _ = disc_topic.push_str("homeassistant/sensor/smolwatch-");
+    let _ = disc_topic.push_str(sigil);
+    let _ = disc_topic.push_str("/battery/config");
+    // Discovery JSON, built per-device. HA renders "<device name> <entity name>",
+    // so the entity name is the bare "Battery".
+    let mut disc: heapless::String<384> = heapless::String::new();
+    let _ = disc.push_str(r#"{"name":"Battery","state_topic":""#);
+    let _ = disc.push_str(batt_topic.as_str());
+    let _ = disc.push_str(r#"","unit_of_measurement":"%","device_class":"battery","unique_id":"smolwatch_"#);
+    let _ = disc.push_str(sigil);
+    let _ = disc.push_str(r#"_battery","device":{"identifiers":["smolwatch-"#);
+    let _ = disc.push_str(sigil);
+    let _ = disc.push_str(r#""],"name":"smol watch "#);
+    let _ = disc.push_str(sigil);
+    let _ = disc.push_str(r#"","model":"smol "#);
+    let _ = disc.push_str(crate::board::CHIP_NAME);
+    let _ = disc.push_str(r#" Watch","manufacturer":"jphein"}}"#);
+
     // Discovery config (retained) + state topics (QoS 0).
-    publish(&mut socket, DISCOVERY_TOPIC, DISCOVERY_PAYLOAD.as_bytes(), true).await?;
+    publish(&mut socket, disc_topic.as_str(), disc.as_bytes(), true).await?;
 
     let mut num = [0u8; 20];
     let batt = fmt_u64(batt_pct as u64, &mut num);
-    publish(&mut socket, BATTERY_TOPIC, batt, false).await?;
+    publish(&mut socket, batt_topic.as_str(), batt, false).await?;
 
     let mut num = [0u8; 20];
     let uptime = fmt_u64(Instant::now().as_secs(), &mut num);
-    publish(&mut socket, UPTIME_TOPIC, uptime, false).await?;
+    publish(&mut socket, uptime_topic.as_str(), uptime, false).await?;
 
     // Push-OTA window: SUBSCRIBE the retained announce topic and linger
     // ANNOUNCE_WAIT for the broker's immediate retained delivery. Placed after
