@@ -487,19 +487,38 @@ async fn run(
     Ok(())
 }
 
-/// Rollback-safety: confirm the running image is healthy so the bootloader keeps
-/// it. A freshly-OTA'd slot is staged as [`OtaImageState::New`]; when the
-/// bootloader has auto-rollback enabled it flips that to
-/// [`OtaImageState::PendingVerify`] on first boot. If the app never transitions
-/// that to [`OtaImageState::Valid`], the bootloader reverts to the previous slot
-/// on the next boot (and marks the unconfirmed slot `Aborted`). So a good image
-/// only *sticks* once this is called — and a bricked one that never reaches this
-/// call auto-rolls-back. Call it once the app has proven itself healthy
-/// (peripherals up + the main loop running for a few seconds).
+/// Confirm the running image healthy by writing [`OtaImageState::Valid`].
 ///
-/// Transitions both `New` and `PendingVerify` -> `Valid` so the confirm is
-/// correct whether or not the bootloader was built with auto-rollback (with it
-/// off the state stays `New`; marking it valid is harmless and forward-safe).
+/// # 🔴 THIS BOARD HAS NO BOOTLOADER ROLLBACK. MEASURED, 2026-08-27 (acceptance 5.9)
+///
+/// The doc that stood here described auto-rollback as a working safety net — a
+/// fresh slot staged `New`, flipped to `PendingVerify` on first boot, reverted if
+/// the app never marked it `Valid`. **None of that happens on this board**, and the
+/// belief was load-bearing: it was the stated reason a bad OTA was survivable.
+///
+/// The bench ran the full cycle. rollback3 was announced, fetched (3.4 MB), staged,
+/// and booted from `ota_1`, where it panicked at t+5 s exactly as designed. The
+/// bootloader then **booted `ota_1` again**, and again, logging
+/// `otadata requests Ok(Ota1), state Ok(New)` every cycle. The on-flash second
+/// stage (espflash-bundled *ESP-IDF v5.5.1-838-gd66ebb86d2e*) is built **without**
+/// `BOOTLOADER_APP_ROLLBACK_ENABLE`, so `New`/`PendingVerify` carry no meaning for
+/// it: it boots whatever slot otadata requests and ignores the state field
+/// entirely. The board sat in a permanent panic loop until otadata was erased by
+/// hand over serial.
+///
+/// So **this function currently writes a state that nothing reads.** It is the
+/// unread-constant disease one layer down: not a value no code consumes, but a
+/// value no *bootloader* consumes — and unlike a dead constant, the compiler
+/// cannot warn about it, and its absence is invisible until the day it was
+/// supposed to save you.
+///
+/// It is kept, not deleted, for two reasons: it is correct and forward-safe if the
+/// bootloader is ever replaced with a rollback-enabled build, and the app-level
+/// gate that must now provide rollback (see [`crate::net::ota_http`] module docs /
+/// the `rollback_gate` design) uses exactly these states as its own bookkeeping.
+/// **Do not treat a successful call as evidence the image can be rolled back.**
+///
+/// Transitions both `New` and `PendingVerify` -> `Valid`.
 ///
 /// Returns `Ok(true)` if it just marked the slot valid, `Ok(false)` if there was
 /// nothing to do (already `Valid`/`Invalid`, or a factory layout with no
@@ -531,6 +550,99 @@ pub fn mark_valid_if_pending(
         }
         _ => Ok(false),
     }
+}
+
+/// Would rolling back land on a bootable image? — **hole 3 of the rollback gate.**
+///
+/// Returns `(target_slot, bootable)`. The caller must **refuse to flip** when
+/// `bootable` is false.
+///
+/// # Why this must exist before any flipping code
+///
+/// This board's bootloader has no rollback (see [`mark_valid_if_pending`]), so the
+/// app has to perform it — and an app-level rollback that flips to "the other slot"
+/// on faith can flip into a **blank or garbage partition.**
+///
+/// That is strictly worse than the bad image it is rescuing you from. A panicking
+/// image still reboots and still prints, so it is recoverable over serial and it
+/// keeps announcing itself. A slot with no valid app gives a ROM-stage hang with no
+/// app at all — on a chip whose software reset *already* hangs in ROM (see
+/// `armed_reset` in panic_reboot.rs). **The rollback would brick harder than the
+/// fault.** The honest hierarchy is: *bad image that loops* > *no image at all*.
+///
+/// Not hypothetical: `#55` records that after `#50`'s re-partition, stale otadata
+/// claimed `Ota1, Valid` while `ota_1` was **empty**.
+///
+/// # How it avoids repeating that mistake
+///
+/// The running slot comes from [`partitions::PartitionTable::booted_partition`],
+/// which reads the **MMU** — which physical flash page the CPU is executing from.
+/// That is a boot *fact*. otadata is a boot *request*, and believing it is exactly
+/// what bricked the watch in `#55` (a download streamed over the running image).
+///
+/// The header checks are the same pair the download path uses and the same pair
+/// acceptance 5.8 proved on the bench: magic `0xE9`, then `chip_id` as a LE `u16` at
+/// bytes 12..14 against [`crate::board::ESP_IMAGE_CHIP_ID`]. Magic alone is not
+/// enough — a C6 and a C5 app image both start `0xE9`, which is the whole reason the
+/// chip gate exists. An erased slot reads `0xFF` and fails the magic check.
+pub fn rollback_target_is_bootable(
+    flash: &mut impl Storage,
+) -> Result<(AppPartitionSubType, bool), &'static str> {
+    let mut pt_mem = vec![0u8; partitions::PARTITION_TABLE_MAX_LEN];
+    let pt = partitions::read_partition_table(flash, &mut pt_mem)
+        .map_err(|_| "partition table read failed")?;
+
+    // MMU, not otadata — see above.
+    let booted = pt
+        .booted_partition()
+        .map_err(|_| "booted-slot probe failed")?
+        .ok_or("booted slot not in partition table")?;
+    let current = match booted.partition_type() {
+        PartitionType::App(sub) => sub,
+        _ => return Err("booted partition is not an app slot"),
+    };
+    let target = match current {
+        AppPartitionSubType::Ota0 | AppPartitionSubType::Factory => AppPartitionSubType::Ota1,
+        AppPartitionSubType::Ota1 => AppPartitionSubType::Ota0,
+        _ => return Err("unexpected boot slot"),
+    };
+
+    let Some(entry) = pt
+        .find_partition(PartitionType::App(target))
+        .map_err(|_| "partition table scan failed")?
+    else {
+        println!("[ROLLBACK] target {target:?} is not in the partition table - refusing");
+        return Ok((target, false));
+    };
+
+    let mut header = [0u8; 16];
+    let mut region = entry.as_embedded_storage(flash);
+    if embedded_storage::ReadStorage::read(&mut region, 0, &mut header).is_err() {
+        println!("[ROLLBACK] target {target:?} header unreadable - refusing");
+        return Ok((target, false));
+    }
+
+    if header[0] != 0xE9 {
+        // 0xFF here means an erased slot; anything else means not an app image.
+        println!(
+            "[ROLLBACK] target {target:?} magic 0x{:02X} != 0xE9 (erased or not an app image) - refusing",
+            header[0]
+        );
+        return Ok((target, false));
+    }
+
+    let img_chip = u16::from_le_bytes([header[12], header[13]]);
+    if img_chip != crate::board::ESP_IMAGE_CHIP_ID {
+        println!(
+            "[ROLLBACK] target {target:?} chip_id 0x{:04X} != this board 0x{:04X} - refusing",
+            img_chip,
+            crate::board::ESP_IMAGE_CHIP_ID
+        );
+        return Ok((target, false));
+    }
+
+    println!("[ROLLBACK] target {target:?} looks bootable (magic 0xE9, chip 0x{img_chip:04X})");
+    Ok((target, true))
 }
 
 /// `http://a.b.c.d[:port][/path]` -> (addr, port, host, path). IPv4 only.
