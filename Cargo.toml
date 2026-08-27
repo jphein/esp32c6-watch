@@ -77,15 +77,32 @@ board-cyd-c5 = [
     # yourself." `tools/ui_test.py` drives synthetic taps/swipes through the real
     # touch path and reads back per-frame render durations, so an image can be
     # asserted PASS/FAIL before a human ever wears it. That only works if the
-    # console is IN the image — and it was not: `strings` found zero `DBGCON` in
-    # every C5 image of this series, because `--no-default-features --features
-    # board-cyd-c5` never included it.
+    # console is IN the image.
     #
-    # Passing it as `--features` would leave it able to vanish on the next routine
-    # OTA, and a self-test that silently drops out is WORSE than none: the next
-    # green run would be trusted while testing a binary that cannot be driven at
-    # all. An investigation that evaporates cannot answer the question it was cut
-    # for; a verification that evaporates lies about one.
+    # ★ IT ALREADY DROPPED OUT ONCE, SILENTLY, MID-CAMPAIGN. This is not a
+    # hypothetical risk — it is a measured incident, and it is why the flag lives
+    # here instead of on the command line. `strings <elf> | grep -c DBGCON`, run
+    # over the preserved artifacts:
+    #
+    #     img9dbg  15     img10d 15     img10f 15     img10h 15     img10i 15
+    #     img11     0     img12   0     img13   0     img14   0
+    #
+    # It was present for five images and vanished at the **img11 rebuild** — the
+    # build where `boot-radio-off` was removed and the `--features` line was
+    # retyped from scratch. Nobody noticed for FOUR images. It surfaced only when
+    # someone tried to drive the board and got silence, and even then the first
+    # diagnosis blamed the transport, because a healthy log stream on the cable
+    # reads as "the console is fine".
+    #
+    # (An earlier version of this comment claimed the console had never been in
+    # ANY image of the series. That was wrong — measured on two artifacts and
+    # generalised to ten — and it made the case for this change WEAKER by turning
+    # a real incident into a counterfactual.)
+    #
+    # A self-test that can silently drop out is WORSE than none: the next green run
+    # gets trusted while testing a binary that cannot be driven at all. An
+    # investigation that evaporates cannot answer the question it was cut for; a
+    # verification that evaporates lies about one.
     #
     # Costs, both checked rather than assumed: it disables AOD light-sleep (moot
     # here — this board does not declare `has-light-sleep`, so AOD already uses a
