@@ -686,7 +686,24 @@ export component WatchShell inherits Window {
         width: parent.width;
         height: Geom.chrome-hit;
         opacity: root.chrome-alpha;
-        animate opacity { duration: 480ms; easing: ease-in-out; }
+        // TWEEN DELETED — invoking the exit condition written above it. Ground 2
+        // ("it only ever tweens on a PEEK over a non-clock page ... the resident
+        // case costs nothing") is FALSE off page 0, which is where JP reports the
+        // bog. `chrome-alpha` is the constant 1.0 only on page 0; everywhere else
+        // it takes the computed branch `hints-lit ? 1.0 : 0.0`, so EVERY hint
+        // cycle ran a 480 ms tween across this full-width 44-row band and the
+        // rail's 88 rows with it. The three grounds had to hold together; one
+        // failed, and the note pre-committed the remedy: hard cut, peek simply
+        // appears.
+        //
+        // The four sibling hint tweens (:559 :583 :609 :642) are KEPT, and the
+        // dividing line is ROWS rather than area — this renderer issues one SPI
+        // window per line, so a full-WIDTH row is the unit that costs. This band
+        // is 320 px wide over 44 rows; the hints are 30 px and 104 px wide, so
+        // their rows are nearly free and they still satisfy the "one small
+        // contiguous region" rule the note sets out. They are also the actual
+        // gesture affordance, so fading them is doing visible work. Deleted here:
+        // the two widest consumers (this band, and the rail's 88 rows below).
 
         RadioChip {
             x: Geom.safe-side; y: Geom.chrome-y;
@@ -747,7 +764,10 @@ export component WatchShell inherits Window {
         width: 44px;
         height: 88px;
         opacity: root.chrome-alpha;
-        animate opacity { duration: 480ms; easing: ease-in-out; }
+        // TWEEN DELETED — same `chrome-alpha` ground-2 failure as the chrome band
+        // above. This one is 44x88, so it added another 88 rows to every tweened
+        // frame; the two together are what made "swiping away" unreliable, since
+        // the touch poll competes with the repaint for the same ~30 ms.
         clicked => { root.current-page = mod(root.current-page + 1, 5); }
         VerticalLayout {
             x: 33px;
