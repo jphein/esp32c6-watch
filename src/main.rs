@@ -1680,8 +1680,16 @@ async fn main(_spawner: Spawner) -> ! {
     #[cfg(feature = "board-esp32s3-cyd")]
     macro_rules! s3_batt_sample {
         () => {{
+            // v2 (bench-refuted v1): the RTC-side RDE alone did NOT load the
+            // pad — an empty connector read loaded 1983 ≈ unloaded 1997 (no
+            // sag at all), i.e. no resistor engaged. Whichever mux owns the
+            // pad during esp-hal's ADC config gets its pulldown: toggle BOTH
+            // the RTC pad's RDE and the IO_MUX pad's FUN_WPD. Harmless to
+            // double-enable; the bench decides if it's enough.
             let rtcio = esp_hal::peripherals::RTC_IO::regs();
+            let iomux = esp_hal::peripherals::IO_MUX::regs();
             rtcio.touch_pad(9).modify(|_, w| w.rde().set_bit());
+            iomux.gpio(9).modify(|_, w| w.fun_wpd().set_bit());
             // First loaded read doubles as RC settle; the second is trusted.
             let mut loaded: Option<u16> = None;
             for pass in 0..2u8 {
@@ -1695,6 +1703,7 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             }
             rtcio.touch_pad(9).modify(|_, w| w.rde().clear_bit());
+            iomux.gpio(9).modify(|_, w| w.fun_wpd().clear_bit());
             let mut unloaded: Option<u16> = None;
             for _ in 0..10_000u16 {
                 if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
