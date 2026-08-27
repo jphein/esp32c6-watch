@@ -847,6 +847,21 @@ struct Harvest {
 /// `net_task`, and the WiFi blob through esp-alloc's `compat` `malloc`. `reserve`
 /// is their headroom. Do not shrink it, and do not enable this feature on a
 /// shipped build.
+///
+/// **⚠️ CAPABILITY-BLIND — this sweep no longer measures what it was written to
+/// measure on a `has-psram` board.** It allocates through `alloc::alloc::alloc`
+/// and budgets from `HEAP.free()`, neither of which carries a capability, and
+/// PSRAM registers at region 0. So `budget` becomes ~8 MB rather than the ~40 KB
+/// the `reserve` was tuned against, every rung is served from external RAM by
+/// first-fit, and the internal pools are never reached. The `stop=nomem` /
+/// `stop=budget` distinction — "the whole measurement", per the comment below —
+/// silently becomes a fact about PSRAM.
+///
+/// Fix before next use: allocate via `alloc_caps(MemoryCapability::Internal)` and
+/// derive `budget` from `RGN_MAIN` + `RGN_RECL` free rather than the global total.
+/// Deliberately NOT done in the image that introduced the region — this path is
+/// feature-gated off, and one variable moves per image. Full runbook context at
+/// `slint_shell::WatchShell::SCENE_DROP_ON_SUSPEND`.
 #[cfg(feature = "heap-forensics")]
 fn harvest_free(reserve: usize) -> Harvest {
     // Ladder bottom is 16 B so every harvested block can hold the 8-byte link.

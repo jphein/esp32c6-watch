@@ -639,6 +639,43 @@ impl ShellUi {
     /// exit recovers normally.
     ///
     /// Never ship `true`.
+    ///
+    /// # ⚠️ PSRAM BROKE THIS RUNBOOK — read before running the experiment
+    ///
+    /// Added 2026-08-27 with the `has-psram` registration, by the author of that
+    /// change. The steps above are no longer sufficient on a PSRAM board, and the
+    /// failure is silent: **the experiment will report a clean result it did not
+    /// measure.**
+    ///
+    /// `harvest_free` sweeps with `alloc::alloc::alloc` and budgets from
+    /// `HEAP.free()`. Both are capability-BLIND, and PSRAM is registered at region
+    /// 0, so on the CYD:
+    ///
+    /// * `budget` becomes ~8 MB instead of the ~40 KB the reserve was tuned for,
+    /// * every rung is served from PSRAM by first-fit, and
+    /// * the internal pools — where this corruption lives — are never touched.
+    ///
+    /// So `stop=nomem` vs `stop=budget` stops being a statement about the internal
+    /// free-list, and the "post-drop is `stop=nomem` with a large `left`" verdict
+    /// that confirms live corruption becomes **unreachable**. The corruption is
+    /// unaffected; only the detector is.
+    ///
+    /// To run this experiment on the CYD, the harvest must first be scoped to
+    /// internal memory: allocate via `alloc_caps(MemoryCapability::Internal)` and
+    /// compute `budget` from the internal regions' free (`RGN_MAIN` + `RGN_RECL`)
+    /// rather than `HEAP.free()`. Note that dropping `has-psram` instead is NOT a
+    /// workaround — it is carried inside the `board-cyd-c5` feature, and cargo
+    /// features are additive, so it cannot be subtracted from the command line.
+    ///
+    /// Why the gate did not block the PSRAM work anyway, stated with its condition
+    /// so the next reader can check whether it still holds: this flag is `false`,
+    /// so the panicking teardown is not armed in any shipped image, and the
+    /// launcher OOM path (`vrc.rs:155`, instantiating `LauncherOverlay` + 8
+    /// `AppIcon`s) never drops the scene tree. The corruption's only known trigger
+    /// is therefore unreachable in the images that OOM'd. That is a stronger basis
+    /// than "reported free was steady" — steadiness excludes a LEAK, and a freed
+    /// node aliasing an existing hole is not a leak; the totals can look perfect
+    /// while the list is damaged.
     const SCENE_DROP_ON_SUSPEND: bool = false;
 
     /// Recreate the scene after a game exits: fresh component, callbacks
