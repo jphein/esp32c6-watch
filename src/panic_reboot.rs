@@ -23,6 +23,54 @@
 // crate-wide feature, so every binary must resolve the symbol, and neither binary
 // references the lib target so its rlib is never linked (`--gc-sections` drops it,
 // and the link fails with `undefined symbol: custom_halt`).
+/// Arm RWDT stage 0, then software-reset — **the only safe way to reset this chip.**
+///
+/// # Why every reset must go through here
+///
+/// `esp_hal::system::software_reset()` CAN HANG IN ROM on this board. Measured on
+/// the bench, 2026-08-27, on two independent paths:
+///
+/// * the OTA staged-reboot ("[OTA] staged - rebooting to apply") printed the ROM
+///   banner `rst:0x3 (RTC_SW_HPSYS)` and then went **silent for over four
+///   minutes** — no `SPI mode:` load lines, no boot. It needed a manual EN pulse
+///   to recover, which on a wrist device means a dead watch.
+/// * every `custom_halt` reset in the 5.9 panic loop wedged the same way — and the
+///   RWDT armed there **rescued it each time**, observed twice as
+///   `rst:0x10 (RTC_WDT_SYS)`.
+///
+/// That contrast is the proof: same reset instruction, same hang, and the only
+/// difference between "dead until someone pulses EN" and "back in 5 s" was whether
+/// a watchdog had been armed first. So arming is not belt-and-braces — on this
+/// chip the software reset is **not reliable on its own**, and a reset path
+/// without a watchdog is a latent brick.
+///
+/// It also does not require knowing WHY the ROM hangs, which is fortunate: the
+/// mechanism is still unidentified. Arm the thing that fires when everything else
+/// is stuck, then attempt the reset.
+///
+/// 5 s is well above any real handler's work and well below the point a wearer
+/// gives up. `enable()` needs no stage configuration — esp-hal documents stage 0
+/// as resetting the system by default.
+///
+/// SAFETY of the LPWR steal: a terminal path. On this board LPWR is never claimed
+/// (`Rtc::new(peripherals.LPWR)` in `main` is gated on `has-light-sleep`, which the
+/// CYD does not declare); where it IS claimed the alias touches only LP_WDT
+/// registers, on a path whose only remaining job is to reset. `Rtc::new` is a pure
+/// constructor and neither `Rtc` nor `Rwdt` implements `Drop`, so the armed timeout
+/// survives this function returning — which it does not, but the scope ends.
+#[allow(dead_code)] // called from main.rs; unused in the slint-demo binary
+fn armed_reset(reason: &str) -> ! {
+    use esp_hal::rtc_cntl::{Rtc, RwdtStage};
+    // `esp_hal::time::Duration`, NOT `core::time::Duration` — rtc_cntl's own doc
+    // example shows the latter and does not compile against this signature.
+    let mut rtc = Rtc::new(unsafe { esp_hal::peripherals::LPWR::steal() });
+    rtc.rwdt
+        .set_timeout(RwdtStage::Stage0, esp_hal::time::Duration::from_millis(5_000));
+    rtc.rwdt.enable();
+    esp_println::println!("[RESET] {reason} - RWDT armed (5s), resetting");
+    esp_hal::system::software_reset()
+}
+
 #[unsafe(no_mangle)]
 extern "Rust" fn custom_halt() -> ! {
     // ═════════════════════════════════════════════════════════════════════════

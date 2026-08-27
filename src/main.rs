@@ -4030,7 +4030,10 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.render(&mut display);
                         Timer::after(Duration::from_millis(1200)).await;
                     }
-                    esp_hal::system::software_reset();
+                    // ARMED: a bare software_reset can hang in ROM on this chip —
+                    // measured on this very path (OTA staged-reboot, >4 min silent,
+                    // manual EN pulse to recover). See `armed_reset`.
+                    armed_reset("OTA staged - applying update");
                 }
                 OtaPhase::Failed { msg } => {
                     ota_status_text = msg;
@@ -4051,8 +4054,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // honor the reboot now (edge-triggered, so a stale Failed
                     // from an earlier update can never false-fire).
                     if reboot_deadline.is_some() {
-                        println!("[OTA] reboot-queued update failed - rebooting anyway");
-                        esp_hal::system::software_reset();
+                        armed_reset("OTA reboot-queued update failed - rebooting anyway");
                     }
                 }
             }
@@ -4060,8 +4062,7 @@ async fn main(_spawner: Spawner) -> ! {
         }
         // REBOOT-with-OTA deadline backstop (edge above handles the fast path).
         if reboot_deadline.is_some_and(|t| now >= t) {
-            println!("[OTA] reboot-queued update still pending at deadline - rebooting");
-            esp_hal::system::software_reset();
+            armed_reset("OTA reboot-queued update still pending at deadline");
         }
 
         // === Push-OTA announce accept ===
@@ -4346,8 +4347,7 @@ async fn main(_spawner: Spawner) -> ! {
                         // consumed but ignored — never a reboot-loop).
                         Some(MeshEvent::CfgReboot) => {
                             if now_ms >= REBOOT_DEBOUNCE_MS {
-                                println!("[CFG] remote reboot - software_reset()");
-                                esp_hal::system::software_reset();
+                                armed_reset("CFG remote reboot");
                             } else {
                                 println!("[CFG] reboot ignored (boot debounce)");
                             }
@@ -6857,7 +6857,7 @@ async fn main(_spawner: Spawner) -> ! {
                         toast_until = now + Duration::from_secs(30);
                         toast_active = true;
                     } else {
-                        esp_hal::system::software_reset();
+                        armed_reset("power-page reboot");
                     }
                 }
                 if shell.req.power_shutdown.take() {
