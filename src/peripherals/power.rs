@@ -218,3 +218,39 @@ impl<I: I2c> Axp2101Power<I> {
         Ok((1..=3).contains(&chg))
     }
 }
+
+/// Approximate 1S-LiPo charge percentage from cell voltage (mV).
+///
+/// For boards with no fuel-gauge IC (the S3-CYD reads battery voltage off a
+/// divider ADC — see `board::HAS_BATT_ADC`), not the AXP2101's gauge. v1 is a
+/// piecewise-linear fit to the standard 1S discharge knee; the flat 3.7-3.9 V
+/// plateau makes any voltage→% mapping coarse, so refine the knee points on the
+/// bench against a known charge state rather than trusting these to a percent.
+/// Saturates to 0..=100 and is monotonic. Pure — unit-tested, no hardware.
+pub fn lipo_pct(mv: u16) -> u8 {
+    // (mV, %) knees, ascending. Below the first → 0, above the last → 100.
+    const KNEES: [(u16, u8); 7] = [
+        (3300, 0),
+        (3500, 15),
+        (3650, 30),
+        (3750, 45),
+        (3850, 60),
+        (4000, 85),
+        (4200, 100),
+    ];
+    if mv <= KNEES[0].0 {
+        return 0;
+    }
+    if mv >= KNEES[KNEES.len() - 1].0 {
+        return 100;
+    }
+    let mut i = 0;
+    while i + 1 < KNEES.len() && mv > KNEES[i + 1].0 {
+        i += 1;
+    }
+    let (v0, p0) = KNEES[i];
+    let (v1, p1) = KNEES[i + 1];
+    // Linear interpolate within [v0, v1]. u32 math; range keeps it well clear
+    // of overflow (max ~100*900).
+    (p0 as u32 + (p1 as u32 - p0 as u32) * (mv - v0) as u32 / (v1 - v0) as u32) as u8
+}

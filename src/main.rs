@@ -1732,6 +1732,103 @@ async fn main(_spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
+    // Battery ADC (S3-CYD only): no PMU fuel gauge, so read the cell voltage
+    // off the GPIO9 2:1 divider (board::BATT_ADC_GPIO=9 = ADC1_CH8 on the S3,
+    // board::BATT_ADC_DIVIDER=2.0). Curve-calibrated oneshot returns the pin
+    // voltage in mV; ×divider = cell mV → power::lipo_pct. GPIO9 was freed by
+    // moving the boot button to GPIO0 above. The complex AdcPin/AdcCalCurve
+    // types are inferred, so the binding stays untyped.
+    // NOTE(build): esp-hal ADC generics written against the 1.1.2 source but
+    // NOT locally compiled (xtensa is fambuild-only) — if the AdcCalCurve
+    // turbofish or ADC1 lifetime needs a nudge, that's the spot; falling back
+    // to enable_pin() + a raw→mV scale is the escape hatch.
+    #[cfg(feature = "board-esp32s3-cyd")]
+    let (mut bat_adc, mut bat_adc_pin) = {
+        use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
+        let mut adc_config = AdcConfig::new();
+        let pin = adc_config
+            .enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1<'_>>>(
+                peripherals.GPIO9,
+                Attenuation::_11dB,
+            );
+        (Adc::new(peripherals.ADC1, adc_config), pin)
+    };
+    // ⚠️ SUPERSEDED BY BENCH TRUTH (2026-08-27, JP + targets/s3-cyd/PARITY.md):
+    // the presence-detection below CANNOT WORK ON THIS BOARD, and `present` is
+    // effectively ALWAYS TRUE here. JP confirmed there is NO cell fitted, yet the
+    // divider read 3.93-3.98 V all day. Root cause is the charger topology, not
+    // the probe: BOARD.md's power section is a TP4054 + 200K/200K divider, and on
+    // VBUS the TP4054's BAT pin DRIVES the node toward its float voltage — so the
+    // node is DRIVEN, not floating, and NO pulldown (RTC RDE, IO_MUX FUN_WPD, v1
+    // or v2 below) can collapse a driven rail. No VBUS-sense or CHRG-status pin
+    // reaches a GPIO either. Therefore empty-vs-present is UNDETECTABLE BY VOLTAGE
+    // on USB power, permanently; off USB with no cell the board is simply off
+    // (moot). A cell-less USB-powered board reads the charger float (~78%) — a
+    // documented HARDWARE limitation, not a firmware bug. The gauge is still
+    // correct BY CONSTRUCTION when a real cell is fitted (a discharging cell reads
+    // its true voltage through the divider = the C6-parity behaviour). The
+    // pulldown mechanism below is a sound design DEFEATED by this board's charger,
+    // kept (not deleted) because it is correct on a board whose BAT node floats;
+    // here it is inert. Do not chase the "empty → 0%" arm on the S3-CYD — it can
+    // only fire on a genuinely unpowered node, which this board never is on USB.
+    //
+    // #s3-batt-presence (2026-08-26 bench finding, now superseded): an EMPTY
+    // battery connector floats the divider node square into the plausible-LiPo
+    // band — pin 2048 mV read as "4096 mV / 92%" with NO cell attached, which is
+    // WORSE than the honest 0% it replaced (a dashboard shows a healthy battery on
+    // a board that dies the moment USB drops). Presence is decided by TWO ADC
+    // samples: one
+    // with the pad's internal ~45 kΩ PULLDOWN enabled, one unloaded. A floating
+    // node COLLAPSES toward 0 under the pulldown; a real cell through the 2:1
+    // divider sags but holds far above it. A DIGITAL read cannot do this: with a
+    // cell the node sits ~1.9-2.1 V, below the 3.3 V-logic V_IH (~2.475 V), so a
+    // GPIO read would call a real battery LOW too. The pin object is owned by
+    // the ADC config, so the pulldown is toggled at the register (RTC_IO
+    // TOUCH_PAD9.RDE — GPIO9 is RTC pad 9; the #43 PAC-via-regs() pattern).
+    // Yields (present, unloaded_pin_mv, loaded_pin_mv); the loaded value is
+    // printed at boot so the 250 mV threshold can be iterated against the real
+    // divider impedance on glass (floating measured ≈clamp unloaded, ≈0 loaded).
+    #[cfg(feature = "board-esp32s3-cyd")]
+    macro_rules! s3_batt_sample {
+        () => {{
+            // v2 (bench-refuted v1): the RTC-side RDE alone did NOT load the
+            // pad — an empty connector read loaded 1983 ≈ unloaded 1997 (no
+            // sag at all), i.e. no resistor engaged. Whichever mux owns the
+            // pad during esp-hal's ADC config gets its pulldown: toggle BOTH
+            // the RTC pad's RDE and the IO_MUX pad's FUN_WPD. Harmless to
+            // double-enable; the bench decides if it's enough.
+            let rtcio = esp_hal::peripherals::RTC_IO::regs();
+            let iomux = esp_hal::peripherals::IO_MUX::regs();
+            rtcio.touch_pad(9).modify(|_, w| w.rde().set_bit());
+            iomux.gpio(9).modify(|_, w| w.fun_wpd().set_bit());
+            // First loaded read doubles as RC settle; the second is trusted.
+            let mut loaded: Option<u16> = None;
+            for pass in 0..2u8 {
+                for _ in 0..10_000u16 {
+                    if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
+                        if pass == 1 {
+                            loaded = Some(v);
+                        }
+                        break;
+                    }
+                }
+            }
+            rtcio.touch_pad(9).modify(|_, w| w.rde().clear_bit());
+            iomux.gpio(9).modify(|_, w| w.fun_wpd().clear_bit());
+            let mut unloaded: Option<u16> = None;
+            for _ in 0..10_000u16 {
+                if let Ok(v) = bat_adc.read_oneshot(&mut bat_adc_pin) {
+                    unloaded = Some(v);
+                    break;
+                }
+            }
+            match (loaded, unloaded) {
+                (Some(l), Some(u)) => (l >= 250, u, l),
+                _ => (false, 0u16, 0u16),
+            }
+        }};
+    }
+
     // === OTA foundation: report partition layout + boot slot ===
     let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
     let mut config_offset: Option<u32> = None;
@@ -2105,6 +2202,39 @@ async fn main(_spawner: Spawner) -> ! {
         shell.set_battery(batt_pct, batt_mv, charging);
         crate::peripherals::ble::BATTERY_PERCENT
             .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+    }
+    // S3-CYD: the AXP block above NACKs (no PMU), leaving 0%; read the real
+    // value off the divider ADC. board::BATT_ADC_DIVIDER scales pin→cell mV.
+    #[cfg(feature = "board-esp32s3-cyd")]
+    {
+        let (present, pin_mv, loaded_mv) = s3_batt_sample!();
+        if present {
+            let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
+            batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
+            batt_mv = cell_mv;
+            // Boot-time diag (once, not per-poll): the loaded mV is the
+            // presence evidence — print it so the threshold can be iterated
+            // against the real divider impedance on the bench.
+            println!(
+                "[BATT] adc pin_mv={} (loaded {}) cell_mv={} pct={}",
+                pin_mv, loaded_mv, cell_mv, batt_pct
+            );
+            shell.set_battery(batt_pct, batt_mv, charging);
+            crate::peripherals::ble::BATTERY_PERCENT
+                .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            // No cell: the floating node collapsed under the probe pulldown.
+            // Report honestly (0%, not a floating-band fiction) and say why.
+            println!(
+                "[BATT] no cell (probe collapsed: loaded {} mV, unloaded {} mV)",
+                loaded_mv, pin_mv
+            );
+            batt_pct = 0;
+            batt_mv = 0;
+            shell.set_battery(0, 0, charging);
+            crate::peripherals::ble::BATTERY_PERCENT
+                .store(0, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     if let Ok(dt) = rtc.get_time() {
         let _ = shell.set_time(&dt);
@@ -3155,6 +3285,25 @@ async fn main(_spawner: Spawner) -> ! {
                 } else if low_batt_notified && (charging || batt_pct >= 20) {
                     low_batt_notified = false;
                 }
+            }
+            // S3-CYD: divider ADC read (the AXP block above NACKs — no PMU).
+            // v1 drives the battery display + BLE service; the low-battery
+            // notify latch stays on the AXP path for now (S3 follow-up).
+            #[cfg(feature = "board-esp32s3-cyd")]
+            {
+                let (present, pin_mv, _loaded_mv) = s3_batt_sample!();
+                if present {
+                    let cell_mv = (pin_mv as f32 * crate::board::BATT_ADC_DIVIDER) as u16;
+                    batt_pct = crate::peripherals::power::lipo_pct(cell_mv);
+                    batt_mv = cell_mv;
+                } else {
+                    // Empty connector: honest zero, never the floating fiction.
+                    batt_pct = 0;
+                    batt_mv = 0;
+                }
+                shell.set_battery(batt_pct, batt_mv, charging);
+                crate::peripherals::ble::BATTERY_PERCENT
+                    .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
             }
             next_battery = if screen_state == 0 {
                 now + Duration::from_secs(600)
