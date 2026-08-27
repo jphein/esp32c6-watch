@@ -8,6 +8,20 @@ pub const LCD_HEIGHT: u16 = 502;
 pub const LCD_COL_OFFSET: u16 = 22;
 pub const LCD_ROW_OFFSET: u16 = 0;
 
+/// Floor under the UI brightness fraction, in raw panel units.
+///
+/// **0x10 here, and it is a real safety rail on THIS board.** The CO5300 takes a
+/// register value, the control is a continuous SLIDER, and a slider that can
+/// reach 0 lets a user black out the screen that carries the slider — with no
+/// visible way back. The floor keeps the dimmest setting still legible.
+///
+/// It is board-owned because it is a property of *register-controlled brightness
+/// driven by a slider*, not of displays in general. On a board whose backlight is
+/// one GPIO, 0 is the only value that means off, and this floor would silently
+/// convert "off" into "full on" — see `board::cyd_c5::BRIGHTNESS_FLOOR`, which is
+/// 0 for exactly that reason.
+pub const BRIGHTNESS_FLOOR: u8 = 0x10;
+
 // === I2C Bus (SDA=GPIO8, SCL=GPIO7) ===
 pub const I2C_FREQ_HZ: u32 = 400_000;
 

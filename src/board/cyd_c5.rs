@@ -64,12 +64,40 @@ pub const PIN_SD_CS: u8 = 10;
 ///
 /// ⚠️ Plain on/off. The driver's `set_brightness` is 0 = off, non-zero = on, so
 /// the firmware's intermediate steps (`0x18` for the AOD dim at main.rs:2982)
-/// land as FULL brightness on this board. The off path is correct, so the
-/// degradation is in the harmless direction. Real dimming needs an LEDC channel
-/// here — the vendor's `interface.cpp:85` uses `analogWrite`, i.e. a soft LEDC
-/// channel — which the display driver deliberately does not claim so the
-/// firmware keeps the timer peripheral. TODO: LEDC PWM, then delete this note.
+/// land as FULL brightness on this board — a battery cost, not a break.
+///
+/// 🔴 CORRECTED 2026-08-27. This note used to add "the off path is correct, so the
+/// degradation is in the harmless direction." **It was not, and that sentence is
+/// why the bug outlived several images.** JP: "backlight off button does not turn
+/// off the backlight." The reasoning was right about the DRIVER — 0 really is off
+/// — and never traced the CALLER: `slint_shell::brightness_raw` floored every
+/// fraction at `0x10`, so the toggle's 0.0 arrived as 16, and 16 is non-zero, so
+/// the GPIO went HIGH. The off path could not emit the one value that means off.
+/// Two layers each locally correct, composing into a defect, with a confident
+/// exoneration sitting next to it telling the next reader to stop looking. Fixed
+/// by making the floor board-owned: see [`BRIGHTNESS_FLOOR`].
+///
+/// Real dimming needs an LEDC channel here — the vendor's `interface.cpp:85` uses
+/// `analogWrite`, i.e. a soft LEDC channel — which the display driver deliberately
+/// does not claim so the firmware keeps the timer peripheral. TODO: LEDC PWM, then
+/// delete this note.
 pub const PIN_BACKLIGHT: u8 = 25;
+
+/// Floor under the UI brightness fraction, in raw panel units — **0 on this board,
+/// and the 0 is load-bearing.**
+///
+/// The C6 carries `0x10` as a genuine safety rail: its brightness is a register
+/// value driven by a continuous SLIDER, and a slider reaching 0 would black out
+/// the screen that carries it. Neither premise holds here. The backlight is one
+/// GPIO, the control is a binary TOGGLE (`ui/cyd/power.slint` `CydBacklightToggle`),
+/// and `St7789Display::set_brightness` reads 0 as off and every other value as on
+/// — so a non-zero floor does not dim this panel, it makes "off" unreachable.
+///
+/// The recoverability worry that motivates the C6's floor is already answered here
+/// by design rather than by clamping: `power.slint:198` prints "no PWM — tap the
+/// screen to relight" ABOVE the toggle, so the way back is readable before the tap
+/// instead of discoverable after it.
+pub const BRIGHTNESS_FLOOR: u8 = 0;
 
 // ---------------------------------------------------------------------------
 // THERE IS NO DISPLAY RESET GPIO.

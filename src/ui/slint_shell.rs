@@ -38,9 +38,25 @@ const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 
-/// Map the UI slider fraction (0.0..1.0) onto the CO5300 brightness range,
-/// with a floor so the slider can never black the panel out completely.
-const BRIGHTNESS_MIN: u8 = 0x10;
+/// Map the UI brightness fraction (0.0..1.0) onto the panel's raw range.
+///
+/// The floor is **board-owned** ([`board::BRIGHTNESS_FLOOR`]) and that is the whole
+/// point of this comment. It was a hardcoded `0x10` — correct for the C6, where
+/// brightness is a register value driven by a continuous slider and a floor stops a
+/// user blacking out the screen that carries the slider.
+///
+/// On the CYD it was the bug JP reported as "backlight off button does not turn off
+/// the backlight". That backlight is one GPIO: `St7789Display::set_brightness` reads
+/// 0 as off and EVERY other value as on. So a floor of `0x10` meant the toggle's
+/// 0.0 arrived as 16, and 16 is on — this function could not emit the single value
+/// that means off. Nothing downstream was broken; the range simply excluded the
+/// only useful point.
+///
+/// Which is why the floor is a board constant rather than a `#[cfg]` here: it is a
+/// property of *how the panel takes brightness*, and the boards already declare
+/// their own hardware. Per the house rule — predicate on a declared capability,
+/// never on a chip name.
+const BRIGHTNESS_MIN: u8 = board::BRIGHTNESS_FLOOR;
 pub fn brightness_raw(frac: f32) -> u8 {
     let frac = frac.clamp(0.0, 1.0);
     BRIGHTNESS_MIN + (frac * (0xFF - BRIGHTNESS_MIN) as f32) as u8
