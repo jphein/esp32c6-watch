@@ -1230,18 +1230,45 @@ impl ShellUi {
         }
         self.last_second = dt.seconds;
         let Some(ui) = self.ui.as_ref() else { return true; };
+        // MINUTE-granularity, written unconditionally: `time_text` is read by the
+        // chrome on every page, and both of these change at most once a minute, so
+        // they cannot be the source of a 1 Hz repaint.
         ui.set_time_text(slint::format!("{:02}:{:02}", dt.hours, dt.minutes));
-        ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
         let weekday = WEEKDAYS[(dt.weekday % 7) as usize];
         let month = MONTHS[(dt.month.clamp(1, 12) - 1) as usize];
         ui.set_date_text(slint::format!(
             "{} {:02} {} 20{:02}", weekday, dt.day, month, dt.year
         ));
-        // /60 not /59: seconds run 0..=59, so dividing by 59 put the bar at 100 %
-        // for the whole of second 59 and snapped it to 0 at second 0 — one second
-        // of full bar per minute. /60 makes the last step land at 59/60 and the
-        // wrap at 0 be the only reset.
-        ui.set_minute_progress(dt.seconds as f32 / 60.0);
+
+        // SECOND-granularity, GATED — this is the 1 Hz phantom repaint.
+        //
+        // These two change every second and are consumed by exactly one component
+        // (`clock.slint`, page 0). Writing them while the clock face is off screen
+        // still dirties its items, so the renderer walks the entire scene, pays the
+        // full walk, and emits ZERO spans: the `draw=true lines=0 spans=0` seen
+        // five times at ~1 s intervals on img13 while JP was inside the launcher
+        // reporting "bogs down and doesn't swipe". One wasted scene walk per
+        // second, forever, competing with the touch poll for the same frame.
+        //
+        // The predicate is asked of Slint (`clock-seconds-live`) rather than
+        // recomputed here, because it depends on `covered`, which shell.slint
+        // composes from thirteen overlay flags. A Rust-side copy would be a second
+        // definition free to drift — the exact disease the board-const audit found.
+        //
+        // KNOWN, ACCEPTED: on returning to the clock the seconds field can be up to
+        // one second stale, because the refresh now waits for the next tick. A page
+        // turn already forces a full repaint, and the tick is ≤1 s behind it, so the
+        // worst case is one frame showing a seconds value one off. If that ever
+        // proves visible, the fix is a forced refresh on the visibility edge, not
+        // reverting this gate.
+        if ui.get_clock_seconds_live() {
+            ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
+            // /60 not /59: seconds run 0..=59, so dividing by 59 put the bar at
+            // 100 % for the whole of second 59 and snapped it to 0 at second 0 —
+            // one second of full bar per minute. /60 makes the last step land at
+            // 59/60 and the wrap at 0 be the only reset.
+            ui.set_minute_progress(dt.seconds as f32 / 60.0);
+        }
         true
     }
 
@@ -2343,12 +2370,35 @@ impl ShellUi {
         // `draw_if_needed` returns whether it actually painted — we discarded
         // that for the whole port, which is precisely the fact needed to tell
         // "never marked dirty" from "dirty but empty region".
+        #[cfg(feature = "touch-telemetry")]
+        let render_start = embassy_time::Instant::now();
         let _drew = self.window.draw_if_needed(|renderer| {
             let mut flusher =
                 board::BoardFlusher::new(display, &mut self.line_buf, &mut self.scratch);
             renderer.render_by_line(&mut flusher);
             flusher.flush_pending();
         });
+        // COST, as distinct from CADENCE — the blind spot `dt` alone could not see.
+        //
+        // `dt` is time SINCE THE LAST PAINT, so it conflates two different things:
+        // for back-to-back frames it approximates per-paint cost, but for
+        // 1 Hz-paced paints it reports the PACING and says nothing about cost. The
+        // img13 capture was entirely the second kind (59 dt lines, all ~60 s or
+        // ~1 s gaps), which left per-paint cost unmeasured on exactly the build
+        // where the pre-registered PSRAM risk lives — `line_buf`/`scratch` moved to
+        // external RAM would raise the cost of every render+flush while leaving
+        // paint frequency untouched, i.e. invisible to `dt` by construction.
+        //
+        // This brackets the whole `draw_if_needed`: scene walk, per-line render and
+        // SPI flush, start to end. One field, and cost becomes readable at any
+        // pacing — which is also what decides the PSRAM-last retreat, instead of
+        // retreating on a number nobody measured.
+        //
+        // It also prices the `lines=0` phantom directly: those paint with
+        // `draw=true` and emit zero pixels, so their `render_ms` is the cost of a
+        // scene walk that produced nothing.
+        #[cfg(feature = "touch-telemetry")]
+        let render_ms = (embassy_time::Instant::now() - render_start).as_millis();
         // BOUNDED ON PURPOSE. Renders are attempted every loop iteration, so an
         // unconditional line here would bury the [SHELL-DBG] stream it has to be
         // correlated against. Print only on an ACTUAL paint.
@@ -2377,10 +2427,11 @@ impl ShellUi {
             self.rdbg_last_paint = Some(now);
             crate::ui::slint_platform::RDBG_PAINTS.fetch_add(1, Relaxed);
             esp_println::println!(
-                "[RENDER-DBG] draw=true lines={} spans={} dt={}ms",
+                "[RENDER-DBG] draw=true lines={} spans={} dt={}ms render={}ms",
                 crate::ui::slint_platform::RDBG_LINES.load(Relaxed),
                 crate::ui::slint_platform::RDBG_SPANS.load(Relaxed),
                 dt_ms,
+                render_ms,
             );
         }
     }

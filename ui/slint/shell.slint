@@ -431,6 +431,30 @@ export component WatchShell inherits Window {
         || root.shade-open || root.switcher-open
         || root.story-open;
 
+    /// Is anything actually LOOKING at the per-second clock properties?
+    ///
+    /// `seconds-text` and `minute-progress` change every second and are consumed by
+    /// exactly one component — `clock.slint`, page 0. Writing them while the clock
+    /// face is off screen still dirties its items, so the renderer marks the scene
+    /// dirty, walks all of it, and emits ZERO spans: a full scene walk per second
+    /// that produces no pixels.
+    ///
+    /// FOUND ON THE CYD, and it is NOT CYD-specific — this board has the same
+    /// property, the same single consumer and the same `covered`, so it has been
+    /// paying the same wasted walk every second whenever an overlay is up or the
+    /// watch is off page 0. On the CYD it was measured as five `draw=true lines=0
+    /// spans=0` lines at ~1 s intervals while the launcher was open, during which
+    /// JP reported the UI "bogs down and doesn't swipe".
+    ///
+    /// `out` rather than a Rust-side recomputation on purpose: `covered` is composed
+    /// from a dozen overlay flags above, and duplicating that in Rust would create a
+    /// second definition free to drift from this one.
+    ///
+    /// Checked against the RULE below before adding: both properties feed only the
+    /// clock face, which sits UNDER every overlay, so neither can become visible
+    /// *because* a covered surface is up.
+    out property <bool> clock-seconds-live: root.current-page == 0 && !root.covered;
+
     // ---- RULE, learned the hard way (0685985) ----------------------------------
     // NEVER gate an element on `covered` if that element can only become visible
     // BECAUSE a covered surface is up. The first version of this gate included the

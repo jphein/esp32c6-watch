@@ -451,6 +451,30 @@ export component WatchShell inherits Window {
     property <float> chrome-alpha: root.current-page == 0
         ? 1.0 : (root.hints-lit ? 1.0 : 0.0);
 
+    /// Is anything actually LOOKING at the per-second clock properties?
+    ///
+    /// `seconds-text` and `minute-progress` are consumed by exactly one component
+    /// — `clock.slint`, page 0 — and both genuinely change every second. So
+    /// writing them while the clock face is off screen dirties an occluded region:
+    /// the renderer marks the scene dirty, walks all of it, pays the full
+    /// scene-walk CPU, and emits ZERO spans. That is the `draw=true lines=0
+    /// spans=0` phantom observed five times at ~1 s intervals on img13, while JP
+    /// was inside the launcher and reported "bogs down and doesn't swipe".
+    ///
+    /// Same starvation as the chrome tween this file just lost, arriving by a
+    /// different route: the tween burned frames in bursts, this burns one walk per
+    /// second forever. A repaint that emits no pixels is pure theft.
+    ///
+    /// `out` rather than a Rust-side recomputation ON PURPOSE. `covered` is
+    /// composed from thirteen overlay flags above; duplicating that expression in
+    /// Rust would create a second definition free to drift from this one — the
+    /// declared-but-unchecked disease. Rust asks; Slint decides.
+    ///
+    /// Checked against the RULE above before writing this, rather than assuming:
+    /// these two properties feed only the clock face, which sits UNDER every
+    /// overlay, so neither can become visible *because* a covered surface is up.
+    out property <bool> clock-seconds-live: root.current-page == 0 && !root.covered;
+
     // Page backdrop. On the dark schemes `Theme.bg` is solid #000000. NOTE for
     // this panel: black is no longer free. The C6 comment called true black
     // "self-emissive, battery-optimal" — that is an AMOLED property. The ST7789
