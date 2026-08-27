@@ -1052,7 +1052,7 @@ impl ShellUi {
         // full repaint and the tick is <=1 s behind it.
         if ui.get_clock_seconds_live() {
             ui.set_seconds_text(slint::format!("{:02}", dt.seconds));
-            ui.set_minute_progress(dt.seconds as f32 / 59.0);
+            ui.set_minute_progress(dt.seconds as f32 / 60.0);
         }
         true
     }
