@@ -17,6 +17,12 @@ pub mod spi_bus;
 pub mod st7789;
 #[cfg(feature = "board-cyd-c5")]
 pub mod xpt2046;
+/// WS2812 status LED encoder — SPIKE for smol#486 / #491. Board-gated because it
+/// reads `board::WS2812_GPIO`, which only the CYD declares. Gives that constant its
+/// first reader: it was one of the 10 pins the board-const audit found declared and
+/// unread, and the least documented of them.
+#[cfg(feature = "board-cyd-c5")]
+pub mod ws2812;
 
 /// Panel orientation. **CYD-only** — the CO5300 is fixed-orientation, so this
 /// has no C6 meaning and is gated with the drivers that consume it.

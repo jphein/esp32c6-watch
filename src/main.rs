@@ -1609,6 +1609,83 @@ async fn main(_spawner: Spawner) -> ! {
         }
     }
 
+    // === WS2812 status LED — SPIKE probe (smol#486 / #491) ==================
+    // Walks the LED through dim red, green, blue and off, one step per 600 ms, and
+    // LOGS EACH STEP. See drivers/ws2812.rs for the timing derivation.
+    //
+    // Why it logs as loudly as it lights: the pin is vendor-cited but **the LED's
+    // presence is not** — a routed net can have nothing populated, the same open
+    // question this board's BOOT-pin note records. A dark LED is therefore
+    // ambiguous (no LED fitted / wrong pin / bad timing / wrong channel), and the
+    // log is what separates those from firmware that never reached here at all.
+    // Silence and failure must not look alike.
+    //
+    // The probe shows R, G and B SEPARATELY and never white: white is the one
+    // colour that cannot reveal a wire-order swap, which is the most common way
+    // these parts are mis-driven.
+    //
+    // Non-fatal at every step. A status LED must never be able to cost the watch
+    // its boot, and on unproven hardware the failure path is the likely one.
+    #[cfg(feature = "board-cyd-c5")]
+    {
+        use crate::drivers::ws2812;
+        use esp_hal::rmt::{Rmt, TxChannelConfig, TxChannelCreator};
+
+        // Ties the encoder's tick constants to the divider chosen HERE. They are
+        // tick counts, not durations, so a divider change silently invalidates
+        // every one of them — this is the only thing stopping that being silent.
+        const _: () = assert!(ws2812::TICK_NS == 100 && ws2812::CLK_DIVIDER == 8);
+
+        match Rmt::new(peripherals.RMT, Rate::from_mhz(ws2812::SRC_MHZ)) {
+            Ok(rmt) => {
+                let cfg = TxChannelConfig::default().with_clk_divider(ws2812::CLK_DIVIDER);
+                match rmt.channel0.configure_tx(&cfg) {
+                    Ok(ch) => {
+                        let mut ch = ch.with_pin(peripherals.GPIO27);
+                        println!(
+                            "[LED] WS2812 probe: GPIO{} · {} MHz / div {} = {} ns/tick",
+                            board::WS2812_GPIO,
+                            ws2812::SRC_MHZ,
+                            ws2812::CLK_DIVIDER,
+                            ws2812::TICK_NS,
+                        );
+                        for (label, g, r, b) in ws2812::PROBE {
+                            let data = ws2812::encode_grb(g, r, b);
+                            match ch.transmit(&data) {
+                                Ok(t) => match t.wait() {
+                                    Ok(c) => {
+                                        ch = c;
+                                        println!("[LED] sent {label} (g={g} r={r} b={b})");
+                                    }
+                                    // The error tuple hands the channel back, but
+                                    // the probe is aborting, so it is dropped.
+                                    Err((e, _c)) => {
+                                        println!("[LED] ⚠️ wait failed at {label}: {e:?}");
+                                        break;
+                                    }
+                                },
+                                Err((e, _c)) => {
+                                    println!("[LED] ⚠️ transmit failed at {label}: {e:?}");
+                                    break;
+                                }
+                            }
+                            Timer::after(Duration::from_millis(600)).await;
+                        }
+                        println!("[LED] probe done — if nothing lit, see drivers/ws2812.rs");
+                    }
+                    Err(e) => println!("[LED] ⚠️ channel0 configure_tx failed: {e:?}"),
+                }
+            }
+            // Most likely cause if this fires: the clock-source assumption is wrong.
+            // The C5's default is PLL 80 MHz per the generated metadata; a chip whose
+            // RMT lacks that source would land here.
+            Err(e) => println!(
+                "[LED] ⚠️ Rmt::new({} MHz) failed: {e:?} — clock-source assumption wrong",
+                ws2812::SRC_MHZ
+            ),
+        }
+    }
+
     // === Touch (FT3168: INT=GPIO15, RST=GPIO10) ===
     #[cfg(feature = "has-cap-touch")]
     let (mut touch_int, mut touch) = {
