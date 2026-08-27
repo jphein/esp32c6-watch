@@ -193,9 +193,21 @@ def analyse(paths):
         print("      is void if the page animates its own content.")
         print("      (That board's TwoLineFlusher carries no RDBG_* counters.)")
     elif not renders:
-        print("  no [RENDER-DBG] lines at all — instrument absent from the build,")
-        print("  or the capture missed every paint. NOT the same as 'zero paints':")
-        print("  check for a [DBGCON]/boot banner to tell a live capture from a gap.")
+        # ZERO IS THE AMBIGUOUS READING, and it is also the pass condition for the
+        # "is the phantom gone?" test — so the tool must refuse that inference
+        # rather than let a silent instrument look like a clean result.
+        print("  🔴 ZERO [RENDER-DBG] lines — and this is NOT evidence of zero paints.")
+        print("     Indistinguishable causes: instrument not compiled in (wrong")
+        print("     feature/gate), print optimised out, capture missed the window,")
+        print("     or the board genuinely never painted.")
+        print()
+        print("     ⚠️  DO NOT conclude 'no phantom repaints' from this. A dead")
+        print("     instrument and a fixed bug produce the SAME output. A negative")
+        print("     is only meaningful after the instrument has been seen to fire:")
+        print("     take a KNOWN-POSITIVE first — page 0 uncovered, where the")
+        print("     seconds tick guarantees ~1 paint/s by design — then the static")
+        print("     covered state. The CONTRAST is the measurement; either reading")
+        print("     alone is ambiguous. (~0 in both = dead instrument, not success.)")
     else:
         phantom = [r for r in renders if r[0] == 0 and r[1] == 0]
         real = [r for r in renders if r[0] > 0]
