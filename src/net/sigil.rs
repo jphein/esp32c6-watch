@@ -51,6 +51,14 @@ static BUILD_STAMP: &str = concat!(
     env!("BUILD_HASH"),
     "|v",
     env!("CARGO_PKG_VERSION"),
+    // Push-OTA build epoch (unix-seconds, "0" when unset) — the same value
+    // baked into ota_http::BUILD_EPOCH, but here made greppable so a publisher
+    // can verify an image's baked epoch before announcing (prevents the
+    // announce>baked self-reinstall loop; build.rs emits OTA_BUILD_MARK).
+    // Appended AFTER the version so existing WSIGIL parsers (fields 1-3) and the
+    // `v[0-9.]*`-terminated sigil grep are unaffected.
+    "|OTA=",
+    env!("OTA_BUILD_MARK"),
     // Explicit terminator: a Rust `&str` literal is NOT NUL-terminated, so a
     // reader scanning for "not NUL" would run past the end into whatever
     // .rodata the linker placed next and report garbage as part of the version.

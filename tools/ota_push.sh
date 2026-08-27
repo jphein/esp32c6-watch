@@ -188,6 +188,26 @@ else
         echo "ota_push:  HASH   $(echo "$SIGIL_STAMP" | cut -d'|' -f2)"
         echo "ota_push:  VER    $(echo "$SIGIL_STAMP" | cut -d'|' -f3)"
         echo "ota_push: ---- compare on SYSTEM page / Settings p4 ----"
+        # EPOCH GUARD (S3 probe-v2 loop, 2026-08-27): the accept-gate is
+        # `announce > baked BUILD_EPOCH` with zero-touch reinstall, so announcing
+        # an epoch GREATER than the image actually bakes = an infinite
+        # self-reinstall loop (install → still-lower baked epoch < announce →
+        # reinstall → …). The WSIGIL marker now carries the baked epoch as
+        # `OTA=<n>` (field 4); refuse if we're about to announce past it.
+        BAKED_EPOCH=$(echo "$SIGIL_STAMP" | sed -n 's/.*|OTA=\([0-9]\{1,\}\).*/\1/p')
+        if [ -n "$BAKED_EPOCH" ]; then
+            echo "ota_push:  OTA    baked epoch $BAKED_EPOCH (announce $EPOCH)"
+            if [ "$EPOCH" -gt "$BAKED_EPOCH" ]; then
+                echo "ota_push: ABORT - announce epoch $EPOCH > image's baked OTA_BUILD $BAKED_EPOCH." >&2
+                echo "ota_push:         Zero-touch + monotonic-accept would self-reinstall-LOOP this." >&2
+                echo "ota_push:         The image was not stamped with this epoch at build time — rebuild" >&2
+                echo "ota_push:         with OTA_BUILD=$EPOCH in .cargo/config.toml [env], or announce <= $BAKED_EPOCH." >&2
+                exit 3
+            fi
+        else
+            echo "ota_push: WARNING image predates the OTA= epoch marker — cannot verify the"
+            echo "ota_push:         announce>baked reinstall-loop guard for this push."
+        fi
     else
         # An image with no marker predates this change (or LTO dropped it) — say
         # so, because silence would read as "sigil matches".

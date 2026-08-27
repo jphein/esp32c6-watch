@@ -89,6 +89,24 @@ fn main() {
 /// `ui` and `.git/HEAD` costs a `slint` recompile on each source edit; a version
 /// label that silently lags the binary is not worth saving those seconds.
 fn stamp_build_sigil() {
+    // Bake the push-OTA build epoch into a GREPPABLE marker (appended to WSIGIL
+    // below) so any publisher can read an image's baked OTA_BUILD before it
+    // announces. The running firmware's BUILD_EPOCH is a `const u64` (invisible
+    // to `strings`), so before this a hand-rolled push could announce an epoch
+    // GREATER than the image actually bakes — and since the accept-gate is
+    // `announce > BUILD_EPOCH` with zero-touch reinstall, that mismatch is an
+    // infinite self-reinstall loop (S3 probe-v2, 2026-08-27). Emitted here,
+    // ahead of both return paths, so every build carries it; "0" when unset
+    // (dev builds), matching ota_http::BUILD_EPOCH's own fallback.
+    println!("cargo:rerun-if-env-changed=OTA_BUILD");
+    println!(
+        "cargo:rustc-env=OTA_BUILD_MARK={}",
+        std::env::var("OTA_BUILD")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "0".to_string())
+    );
     // Declared inputs. `crates` is NOT optional here and was the hole in the
     // first version of this: every path dependency (including the vendored Slint
     // renderer, where most of this project's hot work happens) lives there, so
