@@ -25,6 +25,67 @@
 // and the link fails with `undefined symbol: custom_halt`).
 #[unsafe(no_mangle)]
 extern "Rust" fn custom_halt() -> ! {
+    // ═════════════════════════════════════════════════════════════════════════
+    // ARM THE RTC WATCHDOG FIRST — before any call below can block. (#11)
+    // ═════════════════════════════════════════════════════════════════════════
+    // Everything after this point is best-effort. This is the part that MUST
+    // work, because without it this handler has a path that never reaches its
+    // own `software_reset()` and hangs exactly like the esp-backtrace default it
+    // was written to replace.
+    //
+    // THE DEADLOCK. `HEAP.stats()` and `HEAP.free()` both go through
+    // `self.inner.with(..)` (esp-alloc-0.10.0 lib.rs:627-634) — they TAKE THE
+    // HEAP LOCK. There is no non-blocking accessor: every public reader on
+    // `EspHeap` (`used`, `free`, `free_caps`, `stats`) locks. So if a panic fires
+    // while that lock is held, the heap read below blocks forever, the reset is
+    // never reached, and the wearer has to physically power-cycle the watch.
+    //
+    // That is not hypothetical. The known 100 %-reproducible corruption panic —
+    // `Freed node aliases existing hole! Bad free?` — is an assert INSIDE
+    // `linked_list_allocator`'s `dealloc`, which runs inside `with(..)`, i.e.
+    // with the lock held. The `[PANIC-HEAP]` instrumentation added to make OOM
+    // panics legible would therefore wedge on the one panic class that
+    // reproduces every time, and wedge BEFORE printing — strictly worse than not
+    // instrumenting at all.
+    //
+    // Currently reachable? Barely: `SCENE_DROP_ON_SUSPEND` is `false`, so that
+    // teardown is unarmed, and the two known OOM sites (properties.rs:63,
+    // vrc.rs:155) assert AFTER `alloc()` has returned and released the lock. The
+    // condition is written down because it is a condition, not a guarantee — any
+    // future panic raised from inside an alloc/dealloc critical section lands in
+    // the wedge, and nothing warns you.
+    //
+    // WHY A WATCHDOG rather than a try-lock: esp-alloc exposes no try-lock, so
+    // the choice is between reading the heap and being deadlock-proof. The RWDT
+    // buys both — it is the only mechanism that still fires when the core is
+    // stuck in a lock it can never acquire.
+    //
+    // 5 s: far above this handler's real cost (~28M spin cycles plus a handful of
+    // prints, well under a second) so it never truncates a healthy panic report,
+    // and far below the "user gives up and pulls power" threshold. `enable()`
+    // needs no stage configuration — esp-hal documents its default as "stage 0
+    // resets the system".
+    {
+        use esp_hal::rtc_cntl::{Rtc, RwdtStage};
+        // SAFETY: a terminal path that ends in `software_reset()`. On this board
+        // LPWR is never claimed at all — `Rtc::new(peripherals.LPWR)` in `main`
+        // is gated on `has-light-sleep`, which the CYD does not declare — so
+        // there is nothing to alias. On a board that does claim it, the alias
+        // touches only the LP_WDT registers, on a path whose sole remaining job
+        // is to reset the chip. `Rtc::new` is a pure constructor (no register
+        // writes, no allocation), and neither `Rtc` nor `Rwdt` implements `Drop`,
+        // so the armed timeout survives this scope ending.
+        // `esp_hal::time::Duration`, NOT `core::time::Duration` — rtc_cntl's own
+        // doc example shows `use core::time::Duration`, which does not compile
+        // against this signature. Read from the signature, not the example.
+        let mut rtc = Rtc::new(unsafe { esp_hal::peripherals::LPWR::steal() });
+        rtc.rwdt.set_timeout(
+            RwdtStage::Stage0,
+            esp_hal::time::Duration::from_millis(5_000),
+        );
+        rtc.rwdt.enable();
+    }
+
     for _ in 0..24_000_000u32 {
         core::hint::spin_loop();
     }
