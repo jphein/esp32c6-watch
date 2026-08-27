@@ -44,6 +44,9 @@ RE_PSRAM_BAD = re.compile(r"\[PSRAM\] .*MISMATCH|\[PSRAM\] init reported 0")
 RE_LAUNCH_OK = re.compile(r"\[LAUNCHER\] open attempt: total_free=(\d+)")
 RE_LAUNCH_NO = re.compile(r"\[LAUNCHER\] DECLINED open: total_free=(\d+)")
 RE_DBGCON = re.compile(r"\[DBGCON\] ready \(([^)]+)\)")
+RE_PERF = re.compile(
+    r"\[DBGCON\] perf .*?frames_us=\[([0-9,\s]*)\].*?max_us=(\d+).*?avg_us=(\d+)"
+)
 RE_DBGCON_FAIL = re.compile(r"\[DBGCON\].*UART0 RX unavailable")
 RE_PANIC = re.compile(r"\[PANIC")
 RE_BOOT = re.compile(r"=== smol watch")
@@ -81,6 +84,7 @@ def analyse(paths):
     psram = []
     launch_ok, launch_no = [], []
     transports, dbgcon_fail = [], 0
+    perf = []  # (max_us, avg_us, [frames_us])
     panics = boots = 0
     total_lines = 0
 
@@ -101,6 +105,9 @@ def analyse(paths):
                 launch_ok.append(int(m[1]))
             elif m := RE_LAUNCH_NO.search(raw):
                 launch_no.append(int(m[1]))
+            elif m := RE_PERF.search(raw):
+                frames = [int(x) for x in m[1].split(",") if x.strip()]
+                perf.append((int(m[2]), int(m[3]), frames))
             elif m := RE_DBGCON.search(raw):
                 transports.append(m[1])
             if RE_DBGCON_FAIL.search(raw):
@@ -182,28 +189,76 @@ def analyse(paths):
                     f"  {'per-line cost':<34} INSUFFICIENT (n={len(per)}) "
                     f"raw={[round(x,3) for x in per]} ms/line"
                 )
-            # THE DECOMPOSITION — the question dt alone could never answer.
+            # THE DECOMPOSITION — and the trap inside it.
+            #
+            # ⚠️ AN EARLIER VERSION OF THIS BLOCK GOT THIS WRONG, in exactly the
+            # error class this tool exists to prevent. It computed
+            # render/dt and, on a low share, printed "suspect loop-body latency".
+            # But `dt` is time since the last paint, so the remainder is IDLE
+            # WAITING whenever the loop is not painting continuously — and on a
+            # real capture the dt max was 40,274 ms, i.e. forty seconds of an idle
+            # board. Calling that "latency" is the same mistake as reading `dt` as
+            # cost, wearing a different hat. The remainder is only work if the
+            # paints were back-to-back, which is exactly what dt cannot tell you.
+            #
+            # The honest discriminator is `perf`, which times the LOOP BODY
+            # directly: if worst-loop ≈ worst-render, there is no hidden non-render
+            # work, whatever dt says. That comparison is made below.
             rem = [(r[2] - r[3]) for r in have_render if r[2] >= r[3]]
+            dts = [r[2] for r in have_render]
             if len(rem) >= MIN_SAMPLES:
                 print("\n  DECOMPOSITION  dt = render + inter-paint remainder")
-                print(stat_line("remainder (NOT render)", rem))
-                p50r = pct([r[3] for r in have_render], 50)
-                p50d = pct([r[2] for r in have_render], 50)
-                if p50d and p50r is not None and p50d > 0:
-                    share = 100.0 * p50r / p50d
-                    print(f"  {'render share of dt (p50)':<34} {share:.0f}%")
-                    if share < 60:
-                        print("  → Most of dt is NOT render. Suspect loop-body latency")
-                        print("    between paints; confirm with `perf` max_us, not dt.")
-                    else:
-                        print("  → Render dominates dt. Paint cost is the right target.")
+                print(stat_line("remainder (render-free interval)", rem))
+                p95d = pct(dts, 95) or 0
+                if max(dts) > 3 * max(p95d, 1):
+                    print(f"  ⚠️  dt is IDLE-DOMINATED: max={max(dts)}ms vs "
+                          f"p95={p95d:.0f}ms.")
+                    print("      The remainder here is mostly the board WAITING, not")
+                    print("      working. Do NOT read it as loop latency — use `perf`.")
+                else:
+                    print("  dt spread is not idle-dominated; remainder may be real work,")
+                    print("  but `perf` is still the instrument that can prove it.")
             elif rem:
                 print(
                     f"\n  DECOMPOSITION  INSUFFICIENT (n={len(rem)}<{MIN_SAMPLES}) "
                     f"remainder raw={sorted(rem)}ms"
                 )
-                print("  Cadence-paced paints make dt meaningless as cost; a page-turn")
-                print("  hard cut is the sample that matters here.")
+
+    # ---- loop body, from perf -------------------------------------------
+    # THE instrument for "is there non-render work in the loop". `perf` times the
+    # loop BODY, so unlike `dt` it cannot confuse waiting with working.
+    if perf:
+        print("\nLOOP BODY (from `perf` — the only instrument that can settle this)")
+        all_frames = [f for _, _, frames in perf for f in frames]
+        max_us = max(m for m, _, _ in perf)
+        print(f"  perf reports={len(perf)}  frames={len(all_frames)}  "
+              f"worst loop body={max_us/1000:.1f}ms")
+        if all_frames:
+            # The distribution is expected to be BIMODAL: idle iterations cost
+            # microseconds, painting iterations cost render-sized milliseconds.
+            # A middle band would be the interesting thing — work that is neither.
+            idle = [f for f in all_frames if f < 1000]
+            work = [f for f in all_frames if f >= 1000]
+            print(f"  idle frames (<1ms): n={len(idle)}"
+                  + (f" range={min(idle)}-{max(idle)}µs" if idle else ""))
+            print(f"  work frames (>=1ms): n={len(work)}"
+                  + (f" range={min(work)/1000:.1f}-{max(work)/1000:.1f}ms" if work else ""))
+        if renders:
+            rmax = max((r[3] for r in renders if r[3] is not None), default=None)
+            if rmax is not None:
+                gap = max_us / 1000.0 - rmax
+                print(f"\n  worst loop body  {max_us/1000:.1f}ms")
+                print(f"  worst render=    {rmax}ms")
+                print(f"  UNACCOUNTED      {gap:+.1f}ms")
+                if abs(gap) <= max(10.0, 0.15 * rmax):
+                    print("  ✅ The worst loop iteration IS the worst render. There is")
+                    print("     NO hidden non-render work of consequence — whatever the")
+                    print("     dt remainder suggests, it was idleness.")
+                else:
+                    print("  🔴 A real gap: the worst loop iteration carries work beyond")
+                    print("     rendering. THIS is the number worth hunting (dt is not).")
+        else:
+            print("  no render= to correlate against — cannot attribute the loop cost")
 
     # ---- launcher / heap ------------------------------------------------
     print("\nLAUNCHER")
