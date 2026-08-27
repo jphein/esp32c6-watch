@@ -34,6 +34,17 @@ MIN_SAMPLES = 5  # below this, report INSUFFICIENT rather than a statistic
 RE_RENDER = re.compile(
     r"\[RENDER-DBG\] draw=true lines=(\d+) spans=(\d+) dt=(\d+)ms(?: render=(\d+)ms)?"
 )
+# THE MINIMAL VARIANT, as landed on watch main (1ed276d): paint bit + cost, no
+# counters (that board's `TwoLineFlusher` is uninstrumented).
+#
+# Accepted here because NOT accepting it was a false negative in this tool: fed a
+# capture from main, it reported "no [RENDER-DBG] lines", which reads as *telemetry
+# absent* when the truth was *format unrecognised*. A parser that silently skips
+# what it does not recognise is the non-discriminating-instrument class again — the
+# whole thing this file exists to avoid — so it matches BOTH spellings of the
+# constant label (`draw=` on the CYD, `drew=` on main) rather than making the
+# reader guess which capture they hold.
+RE_RENDER_MIN = re.compile(r"\[RENDER-DBG\] (?:draw|drew)=true render=(\d+)ms")
 RE_LOOP = re.compile(
     r"\[LOOP\] beat=(\d+) up=(\d+)s heap=(\d+) low=(\d+) main=(\d+) recl=(\d+)"
     r"(?: psram=(\d+))? maxblk=(\d+)"
@@ -88,7 +99,8 @@ def stat_line(label, vals, unit="ms"):
 
 
 def analyse(paths):
-    renders = []  # (lines, spans, dt, render_or_None)
+    renders = []  # (lines, spans, dt, render_or_None) — full CYD format
+    renders_min = []  # render_ms only — main's minimal format, no counters
     loops = []
     psram = []
     launch_ok, launch_no = [], []
@@ -105,6 +117,8 @@ def analyse(paths):
                 renders.append(
                     (int(m[1]), int(m[2]), int(m[3]), int(m[4]) if m[4] else None)
                 )
+            elif m := RE_RENDER_MIN.search(raw):
+                renders_min.append(int(m[1]))
             elif m := RE_LOOP.search(raw):
                 loops.append(m.groups())
             elif m := RE_PSRAM.search(raw):
@@ -166,8 +180,22 @@ def analyse(paths):
 
     # ---- render ---------------------------------------------------------
     print("\nRENDER")
-    if not renders:
-        print("  no [RENDER-DBG] lines (needs --features touch-telemetry)")
+    if not renders and renders_min:
+        # Minimal format: the paint bit and its cost, nothing else. Say what is
+        # MISSING as loudly as what is present — a reader who does not notice the
+        # absence of `lines` will draw phantom conclusions this data cannot support.
+        print(f"  paints={len(renders_min)}  (MINIMAL format — main's `drew=`/`draw=`)")
+        print(stat_line("render= (per paint)", renders_min))
+        print("  ⚠️  NO lines/spans in this format, so PHANTOM DETECTION IS")
+        print("      IMPOSSIBLE here: a zero-pixel scene walk and a small real")
+        print("      paint are indistinguishable. Counting paints in a provably")
+        print("      STATIC, COVERED state is the only inference available — and it")
+        print("      is void if the page animates its own content.")
+        print("      (That board's TwoLineFlusher carries no RDBG_* counters.)")
+    elif not renders:
+        print("  no [RENDER-DBG] lines at all — instrument absent from the build,")
+        print("  or the capture missed every paint. NOT the same as 'zero paints':")
+        print("  check for a [DBGCON]/boot banner to tell a live capture from a gap.")
     else:
         phantom = [r for r in renders if r[0] == 0 and r[1] == 0]
         real = [r for r in renders if r[0] > 0]
