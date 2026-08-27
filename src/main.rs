@@ -394,27 +394,93 @@ fn rtc_sleep_cal_init(delay: &Delay) -> bool {
 }
 
 /// Convert a Unix timestamp to Pacific local time and write it to the RTC.
-fn set_rtc_from_unix(
-    rtc: &mut crate::peripherals::rtc::Pcf85063aRtc<impl embedded_hal::i2c::I2c>,
-    unix_secs: u32,
-) -> (u8, u8, u8) {
+/// Unix seconds → local civil `DateTime`. Pure; no chip involved.
+///
+/// Extracted from `set_rtc_from_unix`, which computed exactly this and then threw
+/// it at the RTC and re-read it back. On a board with no RTC that round trip
+/// discards the answer it already had — see `SoftClock`.
+fn unix_to_datetime(unix_secs: u32) -> crate::peripherals::rtc::DateTime {
     let utc_days = (unix_secs / 86400) as i32;
     let local_secs = unix_secs as i64 + us_pacific_offset_secs(utc_days);
     let time_of_day = (local_secs.rem_euclid(86400)) as u32;
-    let hours = (time_of_day / 3600) as u8;
-    let minutes = ((time_of_day % 3600) / 60) as u8;
-    let seconds = (time_of_day % 60) as u8;
     let (year, month, day) = days_to_date(local_secs.div_euclid(86400) as i32);
-    let dt = crate::peripherals::rtc::DateTime::new(
+    crate::peripherals::rtc::DateTime::new(
         (year - 2000) as u8,
         month as u8,
         day as u8,
-        hours,
-        minutes,
-        seconds,
-    );
-    let _ = rtc.set_time(&dt);
-    (hours, minutes, seconds)
+        (time_of_day / 3600) as u8,
+        ((time_of_day % 3600) / 60) as u8,
+        (time_of_day % 60) as u8,
+    )
+}
+
+/// A clock for boards with no clock.
+///
+/// ★ WHY THIS EXISTS. The C5 has NO RTC — every I2C device on it is
+/// `board::fake_i2c::FakeI2c`, which errors on every transaction by design. So
+/// `rtc.set_time()` fails silently (`let _ =`) and `rtc.get_time()` fails always.
+/// Mesh time adoption worked perfectly — SIX adoptions in one boot, from id162 and
+/// id8 — and the clock face stayed blank, because the adopted value was written to
+/// a chip that does not exist and then read back from it.
+///
+/// A FALLBACK rather than a `#[cfg]`, deliberately. Gating on a `has-rtc`
+/// capability would work, but a fallback is strictly better: it needs no new
+/// feature, it is correct on both boards without divergence, and it upgrades the
+/// C6 too — an RTC that fails at runtime there currently yields a blank clock and
+/// a frozen AOD, and now yields a watch that keeps time. The hardware chip retains
+/// authority wherever it answers.
+///
+/// RAM-only, so a reboot loses it. That is the correct behaviour per board with no
+/// code difference: the C6's chip persists across resets, and the C5 re-adopts
+/// from the mesh within a beat.
+struct SoftClock {
+    unix_at_stamp: u32,
+    stamp: Instant,
+}
+
+impl SoftClock {
+    fn set(unix_secs: u32) -> Self {
+        Self { unix_at_stamp: unix_secs, stamp: Instant::now() }
+    }
+    /// Current civil time, advanced by the monotonic clock since the stamp.
+    fn now(&self) -> crate::peripherals::rtc::DateTime {
+        let elapsed = (Instant::now() - self.stamp).as_secs() as u32;
+        unix_to_datetime(self.unix_at_stamp.saturating_add(elapsed))
+    }
+}
+
+/// Read the clock: hardware first, software fallback.
+///
+/// One place, so a board without a chip cannot be blank in one call site and fine
+/// in another — the four original `if let Ok(dt) = rtc.get_time()` sites each had
+/// their own silent failure.
+fn read_clock(
+    rtc: &mut crate::peripherals::rtc::Pcf85063aRtc<impl embedded_hal::i2c::I2c>,
+    soft: &Option<SoftClock>,
+) -> Option<crate::peripherals::rtc::DateTime> {
+    match rtc.get_time() {
+        Ok(dt) => Some(dt),
+        Err(_) => soft.as_ref().map(|s| s.now()),
+    }
+}
+
+/// Store `unix_secs` into the RTC. Returns the computed `DateTime` and **whether
+/// the chip actually took it**.
+///
+/// ⚠️ THE OLD VERSION'S LOG LIED, and it cost real hours. It printed the h:m:s it
+/// had COMPUTED — "[MESH] RTC set from mesh (id162): 14:21:54" — regardless of
+/// whether `set_time` succeeded, because the result was discarded with `let _ =`.
+/// So the capture reported six successful adoptions on a board that cannot store
+/// time, and the blank clock looked like an adoption failure rather than a storage
+/// one. A message that describes INTENT rather than OUTCOME, which is the same
+/// defect shape as every other one in this port.
+fn set_rtc_from_unix(
+    rtc: &mut crate::peripherals::rtc::Pcf85063aRtc<impl embedded_hal::i2c::I2c>,
+    unix_secs: u32,
+) -> (crate::peripherals::rtc::DateTime, bool) {
+    let dt = unix_to_datetime(unix_secs);
+    let stored = rtc.set_time(&dt).is_ok();
+    (dt, stored)
 }
 
 /// Page label for the WATCH telemetry `scr` field, keyed by the Slint shell's
@@ -1957,6 +2023,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut gyro_enabled = false;
     let mut cpu_mhz: u16 = 160;
     let mut last_dt: Option<DateTime> = None;
+    // The clock for a board with no clock. `None` until the first NTP or mesh
+    // adoption arms it; from then on it is what `read_clock` falls back to when
+    // the hardware RTC cannot answer — which on the C5 is always, because every
+    // I2C device there is `FakeI2c`. See `SoftClock`.
+    let mut soft_clock: Option<SoftClock> = None;
     display.set_brightness(brightness);
     // Sync the power-page slider knob to the real boot brightness (else it shows
     // the Slint default while the panel is at watch_cfg.brightness).
@@ -2037,7 +2108,7 @@ async fn main(_spawner: Spawner) -> ! {
         crate::peripherals::ble::BATTERY_PERCENT
             .store(batt_pct, core::sync::atomic::Ordering::Relaxed);
     }
-    if let Ok(dt) = rtc.get_time() {
+    if let Some(dt) = read_clock(&mut rtc, &soft_clock) {
         let _ = shell.set_time(&dt);
         last_dt = Some(dt);
     }
@@ -2740,7 +2811,7 @@ async fn main(_spawner: Spawner) -> ! {
             // embassy-time froze during sleep, so the loop's next_rtc gate won't
             // refresh last_dt — force a read now so the AOD minute repaint and the
             // wall-clock AOD->off (below) both see the real time (#29 DS1).
-            if let Ok(dt) = rtc.get_time() {
+            if let Some(dt) = read_clock(&mut rtc, &soft_clock) {
                 last_dt = Some(dt);
             }
             println!(
@@ -3038,7 +3109,7 @@ async fn main(_spawner: Spawner) -> ! {
         // no-ops until the second actually ticks). Read at state >= 1 too so the
         // AOD minute-gated repaint has a fresh `last_dt` to compare against.
         if screen_state >= 1 && now >= next_rtc {
-            if let Ok(dt) = rtc.get_time() {
+            if let Some(dt) = read_clock(&mut rtc, &soft_clock) {
                 // Feed the notification wall clock (#32): arrival stamps and
                 // age labels ride the PCF85063, not embassy-time (which AOD
                 // light-sleep freezes).
@@ -3554,15 +3625,20 @@ async fn main(_spawner: Spawner) -> ! {
         // One-shot NTP handoff from the burst: main owns the RTC + mesh, so
         // the time is APPLIED here (the socket query ran in net_task).
         if let Some(unix) = crate::net::net_task::take_ntp_unix() {
-            let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
-            println!("[NTP] {h:02}:{m:02}:{s:02} (US Pacific), unix={unix}");
+            let (dt, stored) = set_rtc_from_unix(&mut rtc, unix);
+            // Say whether the chip TOOK it, not what we meant to write.
+            println!(
+                "[NTP] {:02}:{:02}:{:02} (US Pacific), unix={} rtc_stored={}",
+                dt.hours, dt.minutes, dt.seconds, unix, stored
+            );
             sync_src = "ntp";
             last_sync = now;
             mesh.set_time_authoritative(unix, now.as_secs());
-            if let Ok(dt) = rtc.get_time() {
-                last_dt = Some(dt);
-            }
-            println!("[NTP] synced - RTC set, mesh authority claimed");
+            // The soft clock is armed whether or not the chip took it: it is the
+            // fallback, and on a board with no RTC it is the ONLY store.
+            soft_clock = Some(SoftClock::set(unix));
+            last_dt = read_clock(&mut rtc, &soft_clock);
+            println!("[NTP] synced - mesh authority claimed");
         }
         // One-shot weather handoff (fetched in the same burst window).
         if let Some((temp_f, code)) = crate::net::net_task::take_weather() {
@@ -3873,15 +3949,18 @@ async fn main(_spawner: Spawner) -> ! {
                     .await;
                     match event {
                         Some(MeshEvent::TimeAdopted { unix, from_id }) => {
-                            let (h, m, s) = set_rtc_from_unix(&mut rtc, unix);
+                            let (dt, stored) = set_rtc_from_unix(&mut rtc, unix);
                             sync_src = "mesh";
                             last_sync = now;
+                            soft_clock = Some(SoftClock::set(unix));
+                            last_dt = read_clock(&mut rtc, &soft_clock);
+                            // `rtc_stored=false` is EXPECTED on this board and is
+                            // the line whose absence hid the blank clock: six
+                            // adoptions all logged as successes.
                             println!(
-                                "[MESH] RTC set from mesh (id{from_id}): {h:02}:{m:02}:{s:02}"
+                                "[MESH] time adopted from id{from_id}: {:02}:{:02}:{:02} rtc_stored={}",
+                                dt.hours, dt.minutes, dt.seconds, stored
                             );
-                            if let Ok(dt) = rtc.get_time() {
-                                last_dt = Some(dt);
-                            }
                         }
                         // CFG `S`: apply live + persist. EDGE-TRIGGERED save —
                         // the gateway re-broadcasts cached configs every ~10s,
