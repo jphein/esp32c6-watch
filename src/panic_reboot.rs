@@ -55,6 +55,21 @@ extern "Rust" fn custom_halt() -> ! {
     // future panic raised from inside an alloc/dealloc critical section lands in
     // the wedge, and nothing warns you.
     //
+    // ⚠️ AND THE LOCK IS NOT THE ORIGINAL BUG. The wedge that opened #11 — img9dbg,
+    // panic #2, `rst:0x3 boot:0x3c` then silence for 3+ minutes, recovered only by
+    // reflashing — happened BEFORE any heap read existed in this handler. So that
+    // stall had a different cause and **it was never identified.** The lock
+    // deadlock above is a SECOND way in, introduced later by the very
+    // instrumentation meant to make panics legible.
+    //
+    // Which is the argument for a watchdog rather than a targeted fix: arming the
+    // one mechanism that fires when the core is stuck does not require knowing
+    // what it is stuck on. It covers the deadlock, it covers the original unknown,
+    // and it covers the next one. Do not let this note read as "the wedge was the
+    // heap lock, solved" — the original mechanism is still unexplained, and if a
+    // silent stall is ever seen again WITH this watchdog armed, that is a new and
+    // much more interesting fact.
+    //
     // WHY A WATCHDOG rather than a try-lock: esp-alloc exposes no try-lock, so
     // the choice is between reading the heap and being deadlock-proof. The RWDT
     // buys both — it is the only mechanism that still fires when the core is
