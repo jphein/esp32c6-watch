@@ -176,6 +176,27 @@ pub fn handle_announce(payload: &[u8]) {
         );
         return;
     }
+    // HOLE 4: a build that FLASHED FINE and then panicked is never "refused" — it
+    // passes every pre-write check — and `LAST_REFUSED_BUILD` is RAM that the
+    // rollback's own reboot clears. So without this check the retained announce for
+    // a bad build is still monotonic over the rolled-back-to epoch, gets
+    // re-accepted, and the board re-fetches 3.4 MB, flashes, boots, panics and rolls
+    // back again roughly every two minutes. That is worse than the local panic loop
+    // it replaces: it burns bandwidth AND 3.4 MB of flash writes per cycle.
+    //
+    // The gate records the id in retained (rtc_fast) memory, which a POWER CYCLE
+    // clears — so a genuinely-fixed rebuild is never permanently locked out, and the
+    // bad build still gets one full try per power cycle, by which point a human is
+    // present to see it.
+    if let Some(r) = crate::net::ota_rollback::read_retained() {
+        if r.rolled_back_build != 0 && build == r.rolled_back_build {
+            println!(
+                "[OTA] announce rejected (build {build} was ROLLED BACK after failing its \
+                 boot try; power-cycle to retry it, or publish a fixed build)"
+            );
+            return;
+        }
+    }
     println!("[OTA] announce accepted (build {build} > running {})", BUILD_EPOCH);
     CURRENT_BUILD.lock(|cell| *cell.borrow_mut() = build);
     PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().replace(Announce { build, url }));

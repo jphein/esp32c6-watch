@@ -1045,6 +1045,24 @@ const CFG_SETTLE_MS: u64 = 2_500;
 /// setting can never be silently lost to an audio path that stays busy.
 const CFG_MAX_DEFER_S: u64 = 30;
 
+/// A DELIBERATE reset: mark it as such for the rollback gate, then reset.
+///
+/// The distinction is load-bearing. `armed_reset` alone cannot make it, and
+/// `panic_reboot.rs` cannot make it either — that file is `include!`d into
+/// `slint-demo`, which declares no `net` module, so a call to the gate from there
+/// would fail to compile in the other binary. Hence the wrapper lives here, and
+/// every intentional reset in this file goes through it.
+///
+/// Why it matters: without the marker, any reboot inside the 10 s health window
+/// (CFG remote reboot, power-page reboot, OTA reboot-queued) leaves otadata at
+/// `PendingVerify`, and the next boot cannot tell that from a crash — so the gate
+/// would roll back a perfectly good image. `custom_halt` deliberately does NOT mark
+/// intentional: a panic IS the failure the gate exists to catch.
+fn deliberate_reset(reason: &str) -> ! {
+    net::ota_rollback::mark_intentional_reset();
+    armed_reset(reason)
+}
+
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
@@ -1994,6 +2012,31 @@ async fn main(_spawner: Spawner) -> ! {
 
     // === OTA foundation: report partition layout + boot slot ===
     let mut flash = esp_storage::FlashStorage::new(peripherals.FLASH);
+
+    // === ROLLBACK GATE — this board's bootloader has none (acceptance 5.9) =====
+    // The on-flash second stage is built without BOOTLOADER_APP_ROLLBACK_ENABLE, so
+    // it boots whatever otadata REQUESTS and ignores the state field. A bad image
+    // therefore loops forever unless the app rolls itself back. See
+    // net/ota_rollback.rs for the state machine and why the retained block is
+    // checksummed.
+    //
+    // ⚠️ THIS RUNS LATER THAN IT SHOULD. Everything above — PSRAM, the heap, the
+    // display, touch, the console — executes BEFORE the gate, so a panic in that
+    // prologue never consumes the one try and the board loops exactly as 5.9
+    // observed. Closing that window means moving `FlashStorage::new` and this call
+    // up together, which is a separate commit precisely so it can be TESTED: an
+    // image rigged to panic before this line must fail the acceptance before the
+    // move and pass after. Moving it speculatively would be an unverifiable
+    // reorder of boot init in a 7,000-line function.
+    match net::ota_rollback::gate(&mut flash) {
+        net::ota_rollback::Outcome::RolledBack => {
+            // NOT `deliberate_reset`: a rollback is not the user choosing to
+            // reboot, and marking it intentional would excuse the next failure.
+            // The gate has already recorded what it needs to survive this reset.
+            armed_reset("rollback gate flipped boot slot")
+        }
+        other => println!("[ROLLBACK] gate: {other:?}"),
+    }
     let mut config_offset: Option<u32> = None;
     // #55: the app slot the CPU is actually executing from (MMU probe) and
     // both app slots' geometry, feeding the GuardedFlash deny-list below.
@@ -4033,7 +4076,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // ARMED: a bare software_reset can hang in ROM on this chip —
                     // measured on this very path (OTA staged-reboot, >4 min silent,
                     // manual EN pulse to recover). See `armed_reset`.
-                    armed_reset("OTA staged - applying update");
+                    deliberate_reset("OTA staged - applying update");
                 }
                 OtaPhase::Failed { msg } => {
                     ota_status_text = msg;
@@ -4054,7 +4097,7 @@ async fn main(_spawner: Spawner) -> ! {
                     // honor the reboot now (edge-triggered, so a stale Failed
                     // from an earlier update can never false-fire).
                     if reboot_deadline.is_some() {
-                        armed_reset("OTA reboot-queued update failed - rebooting anyway");
+                        deliberate_reset("OTA reboot-queued update failed - rebooting anyway");
                     }
                 }
             }
@@ -4062,7 +4105,7 @@ async fn main(_spawner: Spawner) -> ! {
         }
         // REBOOT-with-OTA deadline backstop (edge above handles the fast path).
         if reboot_deadline.is_some_and(|t| now >= t) {
-            armed_reset("OTA reboot-queued update still pending at deadline");
+            deliberate_reset("OTA reboot-queued update still pending at deadline");
         }
 
         // === Push-OTA announce accept ===
@@ -4347,7 +4390,7 @@ async fn main(_spawner: Spawner) -> ! {
                         // consumed but ignored — never a reboot-loop).
                         Some(MeshEvent::CfgReboot) => {
                             if now_ms >= REBOOT_DEBOUNCE_MS {
-                                armed_reset("CFG remote reboot");
+                                deliberate_reset("CFG remote reboot");
                             } else {
                                 println!("[CFG] reboot ignored (boot debounce)");
                             }
@@ -6857,7 +6900,7 @@ async fn main(_spawner: Spawner) -> ! {
                         toast_until = now + Duration::from_secs(30);
                         toast_active = true;
                     } else {
-                        armed_reset("power-page reboot");
+                        deliberate_reset("power-page reboot");
                     }
                 }
                 if shell.req.power_shutdown.take() {
