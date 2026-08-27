@@ -47,6 +47,15 @@ RE_DBGCON = re.compile(r"\[DBGCON\] ready \(([^)]+)\)")
 RE_PERF = re.compile(
     r"\[DBGCON\] perf .*?frames_us=\[([0-9,\s]*)\].*?max_us=(\d+).*?avg_us=(\d+)"
 )
+# ⚠️ THREE NESTED SCOPES, and conflating them understates non-paint work.
+#   arm_max_us  — the LOOP BODY (ArmTimer RAII, main.rs:3137; the comment at
+#                 :2759 says "time every loop body")
+#   max_us      — one `shell.render()` CALL (record_frame's own doc), which is
+#                 NOT the loop body: it excludes touch poll, mesh RX, beat work
+#   render=     — `draw_if_needed` alone: scene walk + per-line render + flush
+# An earlier version of this tool labelled `max_us` "worst loop body" and so
+# reported +6.1 ms unaccounted when the true loop-vs-paint figure was +22.4 ms.
+RE_ARM = re.compile(r"arm_max_us=(\d+).*?arm_over10ms=(\d+)")
 RE_DBGCON_FAIL = re.compile(r"\[DBGCON\].*UART0 RX unavailable")
 RE_PANIC = re.compile(r"\[PANIC")
 RE_BOOT = re.compile(r"=== smol watch")
@@ -84,7 +93,8 @@ def analyse(paths):
     psram = []
     launch_ok, launch_no = [], []
     transports, dbgcon_fail = [], 0
-    perf = []  # (max_us, avg_us, [frames_us])
+    perf = []  # (max_us, avg_us, [frames_us])  — per shell.render() CALL
+    arms = []  # (arm_max_us, arm_over10ms)     — per LOOP BODY
     panics = boots = 0
     total_lines = 0
 
@@ -108,6 +118,8 @@ def analyse(paths):
             elif m := RE_PERF.search(raw):
                 frames = [int(x) for x in m[1].split(",") if x.strip()]
                 perf.append((int(m[2]), int(m[3]), frames))
+                if a := RE_ARM.search(raw):
+                    arms.append((int(a[1]), int(a[2])))
             elif m := RE_DBGCON.search(raw):
                 transports.append(m[1])
             if RE_DBGCON_FAIL.search(raw):
@@ -228,11 +240,11 @@ def analyse(paths):
     # THE instrument for "is there non-render work in the loop". `perf` times the
     # loop BODY, so unlike `dt` it cannot confuse waiting with working.
     if perf:
-        print("\nLOOP BODY (from `perf` — the only instrument that can settle this)")
+        print("\nLOOP BODY / RENDER CALL (from `perf` + `arm_max_us`)")
         all_frames = [f for _, _, frames in perf for f in frames]
         max_us = max(m for m, _, _ in perf)
         print(f"  perf reports={len(perf)}  frames={len(all_frames)}  "
-              f"worst loop body={max_us/1000:.1f}ms")
+              f"worst render CALL={max_us/1000:.1f}ms")
         if all_frames:
             # The distribution is expected to be BIMODAL: idle iterations cost
             # microseconds, painting iterations cost render-sized milliseconds.
@@ -246,17 +258,29 @@ def analyse(paths):
         if renders:
             rmax = max((r[3] for r in renders if r[3] is not None), default=None)
             if rmax is not None:
-                gap = max_us / 1000.0 - rmax
-                print(f"\n  worst loop body  {max_us/1000:.1f}ms")
-                print(f"  worst render=    {rmax}ms")
-                print(f"  UNACCOUNTED      {gap:+.1f}ms")
-                if abs(gap) <= max(10.0, 0.15 * rmax):
-                    print("  ✅ The worst loop iteration IS the worst render. There is")
-                    print("     NO hidden non-render work of consequence — whatever the")
-                    print("     dt remainder suggests, it was idleness.")
+                arm_max = max((a for a, _ in arms), default=None)
+                print("\n  NESTED SCOPES — smallest to largest, so each delta is named:")
+                print(f"    draw_if_needed (render=)   {rmax}ms")
+                print(f"    shell.render() call        {max_us/1000:.1f}ms"
+                      f"   (+{max_us/1000.0-rmax:.1f}ms over paint)")
+                if arm_max is not None:
+                    over = max(o for _, o in arms)
+                    print(f"    LOOP BODY (arm_max_us)     {arm_max/1000:.1f}ms"
+                          f"   (+{(arm_max-max_us)/1000.0:.1f}ms over render call)")
+                    print(f"    arm_over10ms               {over}")
+                    gap = arm_max / 1000.0 - rmax
+                    print(f"\n  NON-PAINT WORK in the worst loop body: {gap:+.1f}ms "
+                          f"({100.0*gap/(arm_max/1000.0):.0f}% of it)")
+                    if gap <= max(30.0, 0.25 * rmax):
+                        print("  ✅ The worst loop body is dominated by the paint. No")
+                        print("     hidden work of consequence — the dt remainder was idle.")
+                    else:
+                        print("  🔴 A real gap: the worst loop body carries substantial")
+                        print("     work beyond painting. THIS is the number to hunt.")
                 else:
-                    print("  🔴 A real gap: the worst loop iteration carries work beyond")
-                    print("     rendering. THIS is the number worth hunting (dt is not).")
+                    print("\n  ⚠️  no arm_max_us in capture — `max_us` is the render CALL,")
+                    print("      NOT the loop body, so loop-level work is UNMEASURED here.")
+                    print("      Do not read max_us as loop-body duration.")
         else:
             print("  no render= to correlate against — cannot attribute the loop cost")
 
