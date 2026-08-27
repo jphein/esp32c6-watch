@@ -1312,7 +1312,42 @@ async fn main(_spawner: Spawner) -> ! {
 
         let dc = Output::new(peripherals.GPIO46, Level::High, OutputConfig::default());
         let lcd_cs = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
-        let backlight = Output::new(peripherals.GPIO45, Level::High, OutputConfig::default());
+        // #482: backlight is LEDC PWM now, not a >0-threshold GPIO. 24 kHz
+        // (above audible, far below the 8-bit ceiling), Timer0/Channel0 —
+        // nothing else on this firmware uses LEDC. The Ledc driver and its
+        // timer must outlive the channel, hence the StaticCells.
+        let backlight = {
+            use crate::drivers::ili9341::LedcBacklight;
+            use esp_hal::gpio::DriveMode;
+            use esp_hal::ledc::channel::{self, ChannelIFace as _};
+            use esp_hal::ledc::timer::{self, TimerIFace as _};
+            use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed};
+
+            static LEDC: StaticCell<Ledc<'static>> = StaticCell::new();
+            static LEDC_TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
+
+            let ledc = LEDC.init({
+                let mut l = Ledc::new(peripherals.LEDC);
+                l.set_global_slow_clock(LSGlobalClkSource::APBClk);
+                l
+            });
+            let lstimer = LEDC_TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
+            lstimer
+                .configure(timer::config::Config {
+                    duty: timer::config::Duty::Duty8Bit,
+                    clock_source: timer::LSClockSource::APBClk,
+                    frequency: Rate::from_khz(24),
+                })
+                .expect("LEDC timer");
+            let mut ch = ledc.channel(channel::Number::Channel0, peripherals.GPIO45);
+            ch.configure(channel::config::Config {
+                timer: lstimer,
+                duty_pct: 100,
+                drive_mode: DriveMode::PushPull,
+            })
+            .expect("LEDC channel");
+            LedcBacklight::new(ch)
+        };
 
         let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
             esp_hal::dma_buffers!(64, STAGE_BYTES);
