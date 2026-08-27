@@ -390,7 +390,22 @@ pub async fn mic_capture_task(
                     lvl_buf[k] = i16::from_le_bytes([mono_buf[2 * k], mono_buf[2 * k + 1]]);
                 }
                 if samp_n > 0 {
-                    MIC_LEVEL.store(mic_dsp::rms_dbfs(&lvl_buf[..samp_n]) as i32, Ordering::Relaxed);
+                    let rms = mic_dsp::rms_dbfs(&lvl_buf[..samp_n]);
+                    MIC_LEVEL.store(rms as i32, Ordering::Relaxed);
+                    // Machine-verifiable audio-IN (debug-console builds only):
+                    // print the live window RMS ~1/s so a harness can tell "mic
+                    // task alive" from "mic actually capturing" — silence floors
+                    // near -60 dBFS, real signal reads higher, so the VALUE is the
+                    // discriminator (not merely that a line printed). 16 kHz /
+                    // 256-sample windows = 62.5 windows/s, so every 64th ~= 1.02 s.
+                    #[cfg(feature = "debug-console")]
+                    {
+                        static MIC_LOG_GATE: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        if MIC_LOG_GATE.fetch_add(1, Ordering::Relaxed) % 64 == 0 {
+                            esp_println::println!("[MIC] rms={} dbfs", rms as i32);
+                        }
+                    }
                 }
                 if let Ok(chunk) = MicChunk::from_slice(&mono_buf[..m]) {
                     let _ = sender.try_send(chunk); // drop on full = shed oldest audio (bounded latency)
