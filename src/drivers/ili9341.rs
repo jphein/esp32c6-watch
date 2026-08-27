@@ -46,12 +46,50 @@ const CMD_COLMOD: u8 = 0x3A;
 const RST_DELAY_MS: u32 = 150;
 const SLPOUT_DELAY_MS: u32 = 120;
 
+/// PWM backlight over LEDC (#482): the brightness slider becomes a real dim
+/// instead of a >0 threshold, and AOD's low value is genuinely low.
+///
+/// Gamma-squared mapping: LEDs are perceptually loud at low duty, so the
+/// UI's linear 0-255 maps through `(b/255)^2` — AOD's 0x18 lands near 1%
+/// duty instead of a linear 9%. 0 is EXACTLY 0 duty: the c992cb6 defect
+/// class (a floor turning "off" into 16 = ON on a threshold backlight)
+/// cannot re-enter through this path.
+pub struct LedcBacklight {
+    channel: esp_hal::ledc::channel::Channel<'static, esp_hal::ledc::LowSpeed>,
+    /// Last non-zero percent, so `display_on` restores the user's level
+    /// rather than blasting to 100%.
+    last_on_pct: u8,
+}
+
+impl LedcBacklight {
+    pub fn new(channel: esp_hal::ledc::channel::Channel<'static, esp_hal::ledc::LowSpeed>) -> Self {
+        Self {
+            channel,
+            last_on_pct: 100,
+        }
+    }
+
+    fn set_pct(&mut self, pct: u8) {
+        use esp_hal::ledc::channel::ChannelIFace as _;
+        // A failed duty write leaves the previous level — same degrade-not-
+        // panic stance as every other status output on this firmware.
+        let _ = self.channel.set_duty(pct.min(100));
+        if pct > 0 {
+            self.last_on_pct = pct.min(100);
+        }
+    }
+
+    /// UI byte (0-255) -> gamma-squared duty percent (0-100).
+    fn pct_for(brightness: u8) -> u8 {
+        let b = brightness as u32;
+        ((b * b * 100 + (255 * 255) / 2) / (255 * 255)) as u8
+    }
+}
+
 pub struct Ili9341Display<'d> {
     bus: SharedSpiBus<'d>,
-    /// Plain GPIO until the LEDC driver lands: set_brightness > 0 = ON.
-    /// The §1d slider renders on this board (backlight-dimmable = true is
-    /// the HARDWARE fact); smooth dimming is documented bring-up debt.
-    backlight: Output<'d>,
+    /// LEDC PWM on GPIO45 (#482). Was a plain >0-threshold GPIO.
+    backlight: LedcBacklight,
     delay: Delay,
     width: u16,
     height: u16,
@@ -60,7 +98,7 @@ pub struct Ili9341Display<'d> {
 }
 
 impl<'d> Ili9341Display<'d> {
-    pub fn new(bus: SharedSpiBus<'d>, backlight: Output<'d>) -> Self {
+    pub fn new(bus: SharedSpiBus<'d>, backlight: LedcBacklight) -> Self {
         Self {
             bus,
             backlight,
@@ -98,7 +136,7 @@ impl<'d> Ili9341Display<'d> {
         self.bus.write_command(CMD_NORON);
         self.bus.write_command(CMD_DISPON);
         self.delay.delay_millis(20);
-        self.backlight.set_high();
+        self.backlight.set_pct(100);
     }
 
     pub fn set_addr_window(&mut self, x: u16, y: u16, w: u16, h: u16) {
@@ -136,24 +174,27 @@ impl<'d> Ili9341Display<'d> {
         &mut self.bus
     }
 
-    /// Backlight is a plain GPIO until the LEDC driver lands: any non-zero
-    /// level = ON. The threshold matches the shell's own `v > 0.5` bool so
-    /// the slider's midpoint behaves predictably.
+    /// Real PWM dim (#482). 0 = duty 0 (hard off — no floor can turn "off"
+    /// into ON); otherwise the UI byte maps through a gamma-squared curve so
+    /// AOD's 0x18 is a genuine glow, not full brightness.
     pub fn set_brightness(&mut self, brightness: u8) {
-        if brightness > 0 {
-            self.backlight.set_high();
+        let pct = if brightness == 0 {
+            0
         } else {
-            self.backlight.set_low();
-        }
+            LedcBacklight::pct_for(brightness).max(1)
+        };
+        self.backlight.set_pct(pct);
     }
 
     pub fn display_on(&mut self) {
         self.bus.write_command(CMD_DISPON);
-        self.backlight.set_high();
+        // Restore the user's level, not an unconditional 100%.
+        let pct = self.backlight.last_on_pct;
+        self.backlight.set_pct(pct);
     }
 
     pub fn display_off(&mut self) {
-        self.backlight.set_low();
+        self.backlight.set_pct(0);
         self.bus.write_command(CMD_DISPOFF);
     }
 }
