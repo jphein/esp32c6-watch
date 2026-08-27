@@ -164,42 +164,77 @@ pub fn handle_announce(payload: &[u8]) {
         }
     };
     println!("[OTA] announce received: build {build} (running {})", BUILD_EPOCH);
-    if build <= BUILD_EPOCH {
-        println!("[OTA] announce rejected (build {build} <= running {})", BUILD_EPOCH);
+    // Every refusal reason lives in ONE place — see `announce_refusal`.
+    if announce_refusal(build).is_some() {
         return;
     }
-    let refused = LAST_REFUSED_BUILD.lock(|cell| *cell.borrow());
-    if build == refused {
+    queue_announce(build, url);
+}
+
+/// Queue a validated announce. **The ONLY way an announce can be queued.**
+///
+/// # Why this is a separate function, and why it is the only door
+///
+/// `PENDING_ANNOUNCE` is a PRIVATE static, so nothing outside this module can queue
+/// an announce without calling a public function here — and this is the only one
+/// that queues. That is deliberate structure, not tidiness.
+///
+/// The refusal checks above ([`handle_announce`]) were written for the **MQTT/HTTP**
+/// announce path. When a second ingress arrives — main's `ota_mesh` mesh-announce
+/// path, at task #8 — it will have its own frame parsing and CANNOT reuse
+/// `handle_announce`, which expects an MQTT payload. The obvious failure then is a
+/// mesh ingress that parses its frame and queues directly, silently skipping the
+/// monotonic gate, the pre-write-refusal memory and the rolled-back-build memory —
+/// so a refused mesh build re-queues forever on the mesh path, which is exactly the
+/// loop those memories exist to stop, just on the transport they do not cover yet.
+///
+/// Keeping the checks in the caller would make that a thing to REMEMBER. Putting
+/// them where the queue is makes it a thing that CANNOT BE FORGOTTEN: a new ingress
+/// must call this, because the alternative is private. Credit to
+/// debug-watch-network-gaps, who identified the mesh-path gap during task-#8 prep;
+/// this converts their merge-watch item into an invariant.
+///
+/// ⚠️ If you add an ingress, parse in your own function and finish HERE. Do not
+/// touch `PENDING_ANNOUNCE` directly, and do not re-implement the checks — a second
+/// copy is a second thing to drift.
+fn queue_announce(build: u64, url: Option<String<ANNOUNCE_URL_CAP>>) {
+    println!("[OTA] announce accepted (build {build} > running {})", BUILD_EPOCH);
+    CURRENT_BUILD.lock(|cell| *cell.borrow_mut() = build);
+    PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().replace(Announce { build, url }));
+}
+
+/// Every reason an announce may be refused, in one place, for ingresses that parse
+/// their own frames (the mesh path at task #8) and cannot reuse
+/// [`handle_announce`]'s MQTT payload handling.
+///
+/// Returns `Some(reason)` to refuse — the caller must NOT queue. Logging is done
+/// here so both transports report refusals identically and a capture cannot tell
+/// which ingress refused only by wording.
+///
+/// A new ingress should be exactly: parse -> `announce_refusal(build)` -> if `None`,
+/// `queue_announce(build, url)`.
+pub fn announce_refusal(build: u64) -> Option<&'static str> {
+    if build <= BUILD_EPOCH {
+        println!("[OTA] announce rejected (build {build} <= running {})", BUILD_EPOCH);
+        return Some("not newer than the running build");
+    }
+    if build == LAST_REFUSED_BUILD.lock(|cell| *cell.borrow()) {
         println!(
             "[OTA] announce rejected (build {build} was refused by a pre-write check; \
              clear or replace the retained announce)"
         );
-        return;
+        return Some("refused by a pre-write check");
     }
-    // HOLE 4: a build that FLASHED FINE and then panicked is never "refused" — it
-    // passes every pre-write check — and `LAST_REFUSED_BUILD` is RAM that the
-    // rollback's own reboot clears. So without this check the retained announce for
-    // a bad build is still monotonic over the rolled-back-to epoch, gets
-    // re-accepted, and the board re-fetches 3.4 MB, flashes, boots, panics and rolls
-    // back again roughly every two minutes. That is worse than the local panic loop
-    // it replaces: it burns bandwidth AND 3.4 MB of flash writes per cycle.
-    //
-    // The gate records the id in retained (rtc_fast) memory, which a POWER CYCLE
-    // clears — so a genuinely-fixed rebuild is never permanently locked out, and the
-    // bad build still gets one full try per power cycle, by which point a human is
-    // present to see it.
     if let Some(r) = crate::net::ota_rollback::read_retained() {
         if r.rolled_back_build != 0 && build == r.rolled_back_build {
             println!(
                 "[OTA] announce rejected (build {build} was ROLLED BACK after failing its \
                  boot try; power-cycle to retry it, or publish a fixed build)"
             );
-            return;
+            return Some("rolled back after failing its boot try");
         }
     }
-    println!("[OTA] announce accepted (build {build} > running {})", BUILD_EPOCH);
-    CURRENT_BUILD.lock(|cell| *cell.borrow_mut() = build);
-    PENDING_ANNOUNCE.lock(|cell| cell.borrow_mut().replace(Announce { build, url }));
+    None
 }
 
 /// Take the pending accepted announce, if any (clears it). Polled by main.rs.
