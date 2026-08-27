@@ -68,6 +68,8 @@ board-cyd-c5 = [
 # driver seam is proven against this chip — a capability is a tested claim,
 # not an inventory line.
 board-esp32s3-cyd = [
+    # Registers 8 MB octal PSRAM as External at region 0 — see `has-psram`.
+    "has-psram",
     "esp-hal/esp32s3", "esp-rtos/esp32s3", "esp-radio/esp32s3",
     "esp-storage/esp32s3", "esp-bootloader-esp-idf/esp32s3",
     "esp-println/esp32s3", "esp-backtrace/esp32s3",
@@ -127,6 +129,18 @@ has-die-temp = []
 # replaces the AOD light-sleep poll with a plain timer wait — same cadence,
 # more current, no chip-specific code.
 has-light-sleep = []
+# A PSRAM region is REGISTERED IN THE HEAP by this build.
+#
+# ⚠️ THIS IS A REGISTRATION FACT, NOT A HARDWARE FACT, and the distinction is
+# load-bearing. `board-cyd-c5` has an 8 MB PSRAM chip and does NOT register it on
+# this branch — only the S3 arm calls `HEAP.add_region`. Setting this flag on a
+# board that has the silicon but does not register the region would shift
+# `RGN_MAIN`/`RGN_RECL` off by one in the wrong direction and mislabel that
+# board's heap telemetry, which is the exact bug this feature exists to fix.
+#
+# Set it on precisely the boards whose `main()` arm registers a region, and gate
+# the registration on it too, so the two cannot drift apart.
+has-psram = []
 
 debug-console = ["dep:embedded-io-async"]
 # `tts` (read notifications aloud) is now ON BY DEFAULT — see `default` above.

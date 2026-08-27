@@ -453,9 +453,41 @@ struct ClimatePending {
     sent_at: Option<Instant>,
 }
 
+/// Index of the registered EXTERNAL PSRAM region in `HEAP.stats().region_stats`.
+///
+/// `region_stats` is ordered by REGISTRATION, not by name, so these constants are
+/// a restatement of the `add_region` order in `main()` and have no other source of
+/// truth. They are named — rather than written as `0`/`1` at the seven sites that
+/// read them — because of what registering PSRAM first did: it shifted both
+/// internal pools one slot along, so every `main=`/`recl=` label in this firmware
+/// began reporting the wrong region. Measured on the s3-cyd: `main_free=8342420`,
+/// which is 7.96 MB, i.e. the External region wearing MAIN's label.
+///
+/// That break has no compile error and no runtime symptom. It only makes the heap
+/// telemetry lie — in the instrument used to diagnose heap problems.
+///
+/// Gated on the same `has-psram` capability that performs the registration, so the
+/// two are impossible to move independently. See that feature's note for why it
+/// describes REGISTRATION rather than the presence of a PSRAM chip.
+#[cfg(feature = "has-psram")]
+const RGN_PSRAM: usize = 0;
+/// Index of the MAIN internal pool. See [`RGN_PSRAM`] for why this is named.
+#[cfg(feature = "has-psram")]
+const RGN_MAIN: usize = 1;
+/// Index of the ROM-reclaimed internal pool (dram2_seg). See [`RGN_PSRAM`].
+#[cfg(feature = "has-psram")]
+const RGN_RECL: usize = 2;
+/// Index of the MAIN internal pool where no external region is registered — the
+/// pools are then the only two regions, in `heap_allocator!` order.
+#[cfg(not(feature = "has-psram"))]
+const RGN_MAIN: usize = 0;
+/// Index of the ROM-reclaimed internal pool (dram2_seg). See [`RGN_MAIN`].
+#[cfg(not(feature = "has-psram"))]
+const RGN_RECL: usize = 1;
+
 /// Log per-region free heap at boot / app-enter. The framebuffer must come from
 /// ONE region, so total-free (HEAP.free()) can read fine while the main region
-/// alone is short. `region_stats[0]` = the MAIN pool, `[1]` = the ROM-reclaimed
+/// alone is short. Addressed via [`RGN_MAIN`] / [`RGN_RECL`] rather than by raw
 /// pool (dram2_seg), in declaration order of the two `heap_allocator!` calls in
 /// `main()` — read the sizes THERE, not from a number copied into this comment.
 ///
@@ -485,11 +517,18 @@ fn log_heap(tag: &str) {
             .map(|r| r.free)
             .unwrap_or(0)
     };
+    // Present as a field on EVERY board, reading 0 where no external region is
+    // registered, so a log consumer never has to branch on board to parse this.
+    #[cfg(feature = "has-psram")]
+    let psram_free = region_free(RGN_PSRAM);
+    #[cfg(not(feature = "has-psram"))]
+    let psram_free = 0usize;
     println!(
-        "[HEAP] {}: main_free={} recl_free={} total_free={} need={}",
+        "[HEAP] {}: main_free={} recl_free={} psram_free={} total_free={} need={}",
         tag,
-        region_free(0),
-        region_free(1),
+        region_free(RGN_MAIN),
+        region_free(RGN_RECL),
+        psram_free,
         esp_alloc::HEAP.free(),
         (410usize / 2) * (502usize / 2),
     );
@@ -605,7 +644,7 @@ fn largest_free_block() -> (usize, usize) {
         // layout before continuing.
         unsafe {
             let layout = core::alloc::Layout::from_size_align_unchecked(sz, 4);
-            let before = region_used(0);
+            let before = region_used(RGN_MAIN);
             let p = alloc::alloc::alloc(layout);
             if !p.is_null() {
                 // WHICH POOL SERVED IT, without hardcoding an address. `alloc_caps`
@@ -613,7 +652,7 @@ fn largest_free_block() -> (usize, usize) {
                 // a rise in region 0's `used` means MAIN served this size. An
                 // address-range test would work too but would rot on any layout
                 // change; a `used` delta cannot.
-                let from_main = region_used(0) > before;
+                let from_main = region_used(RGN_MAIN) > before;
                 alloc::alloc::dealloc(p, layout);
                 // SELF-VALIDATION (#75). A successful probe at `sz` must come out of
                 // ONE region's span, so `sz` can never exceed total free. If it does,
@@ -1012,7 +1051,11 @@ async fn main(_spawner: Spawner) -> ! {
     // (Auto is board landmine L2); size auto-detects. Runs before any
     // heap_allocator! so PSRAM is the head of the walk; the macros only
     // register regions (no allocation) so ordering here is deterministic.
-    #[cfg(feature = "board-esp32s3-cyd")]
+    // Gated on `has-psram` rather than the board name so that registering a
+    // region and shifting the RGN_* indices are the SAME switch. Board-name
+    // gating let them drift: the region moved to index 0 while every reader
+    // still called index 0 "main".
+    #[cfg(feature = "has-psram")]
     {
         use esp_hal::psram::{Psram, PsramConfig, PsramMode, PsramSize};
         let psram = Psram::new(
@@ -2857,7 +2900,7 @@ async fn main(_spawner: Spawner) -> ! {
         {
             let mf = esp_alloc::HEAP
                 .stats()
-                .region_stats[0]
+                .region_stats[RGN_MAIN]
                 .as_ref()
                 .map(|r| r.free)
                 .unwrap_or(0);
@@ -2882,14 +2925,21 @@ async fn main(_spawner: Spawner) -> ! {
             let region_free = |i: usize| {
                 hs.region_stats[i].as_ref().map(|r| r.free).unwrap_or(0)
             };
+            // One line shape on every board; `psram=` reads 0 where no external
+            // region is registered.
+            #[cfg(feature = "has-psram")]
+            let psram_free = region_free(RGN_PSRAM);
+            #[cfg(not(feature = "has-psram"))]
+            let psram_free = 0usize;
             println!(
-                "[LOOP] beat={} up={}s heap={} low={} main={} recl={} maxblk={}",
+                "[LOOP] beat={} up={}s heap={} low={} main={} recl={} psram={} maxblk={}",
                 loop_beats,
                 now.as_secs(),
                 heap_now,
                 heap_low,
-                region_free(0),
-                region_free(1),
+                region_free(RGN_MAIN),
+                region_free(RGN_RECL),
+                psram_free,
                 mb_global,
             );
             // Pooled scene-vector capacities (#75). The vector that GROWS is the one
@@ -2993,7 +3043,13 @@ async fn main(_spawner: Spawner) -> ! {
             // largest routine contiguous ask — the texture vector's 256->512 doubling
             // at 14,336 B, which is exactly the allocation that rebooted the watch
             // 10/10 before the CHAR page was bounded.
-            let recl_now = region_free(1);
+            // NAMED, not positional. With a region registered at index 0 this
+            // alarm was watching `region_stats[1]` — the MAIN pool — against the
+            // RECLAIMED threshold, while the message reported index 0 (the 8 MB
+            // external region) as what "main holds". Trigger and text were both
+            // wrong, in different directions, and neither could be seen from the
+            // output.
+            let recl_now = region_free(RGN_RECL);
             if recl_now < RECLAIMED_DANGER_B && !main_pool_warned {
                 main_pool_warned = true;
                 println!(
@@ -3002,7 +3058,7 @@ async fn main(_spawner: Spawner) -> ! {
                      margin; a {} B contiguous ask is now at risk",
                     recl_now,
                     RECLAIMED_DANGER_B,
-                    region_free(0),
+                    region_free(RGN_MAIN),
                     RECLAIMED_DANGER_B,
                 );
             }
