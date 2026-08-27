@@ -94,7 +94,11 @@ board-esp32s3-cyd = [
 # rides ed25519-dalek (ota-proto's per-arch dep) because ed25519-compact
 # crashes the Xtensa backend at every opt level — see ota-proto/Cargo.toml
 # for the whole story.
-mesh-ota = ["dep:ota-proto", "dep:sha2"]
+# ota-proto + sha2 are UNCONDITIONAL deps as of #489: the HTTP OTA path now
+# verifies the same ed25519 manifest the mesh path does, so the crypto/hash
+# stack must exist even in a build without mesh-ota. The feature still gates
+# the mesh session code itself.
+mesh-ota = []
 # cast (#36): mirror the live scene onto a WLED LED matrix over UDP. Opt-in —
 # the flusher tap and UDP path cfg out entirely when off, so default builds
 # are byte-identical. Pixel-correctness needs a matrix on the bench; the math
@@ -335,11 +339,11 @@ hunt = { path = "crates/hunt" }
 # MUST stay byte-identical with smol's copy or the fleet partitions silently.
 mesh-elect = { path = "crates/mesh-elect" }
 mesh-flood = { path = "crates/mesh-flood" }
-ota-proto = { path = "crates/ota-proto", optional = true }
+ota-proto = { path = "crates/ota-proto" }
 cast-core = { path = "crates/cast-core", optional = true }
 bard-core = { path = "crates/bard-core", optional = true }
 # mesh-OTA readback verify (ota_mesh.rs); same pin as ota-proto's.
-sha2 = { version = "0.10", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false }
 # #58: pure-logic HA climate parse/encode (oracle-t9 CONFIRMED-CLEAN @5c0d04c) —
 # replaces src/net/climate_model_stub.rs.
 climate-model = { path = "crates/climate-model" }

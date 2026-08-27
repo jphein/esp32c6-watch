@@ -8,6 +8,12 @@
 //! slot holds garbage that is never selected for boot.
 //!
 //! The image URL is baked in at build time: `OTA_URL=http://... cargo build`.
+//!
+//! **Signed (#489):** before the first flash write this path fetches
+//! `<image-url>.manifest` and ed25519-verifies the fleet-shape manifest
+//! M = `"build|size|sha256hex"`; the streamed image digest must match the
+//! signed sha256 before the otadata flip. An unsigned deploy host is refused
+//! — same posture as the mesh path and the fleet flavor's both paths.
 //! Plain HTTP only (no TLS, no DNS — the host must be a dotted-quad IPv4).
 //!
 //! Live deploy server: `http://10.0.11.11:8000/watch.bin` (ubox0, VLAN-11, same
@@ -37,6 +43,7 @@ use esp_bootloader_esp_idf::partitions::{
 };
 use esp_println::println;
 use heapless::String;
+use sha2::{Digest, Sha256};
 
 /// Firmware image URL, fixed at build time via the `OTA_URL` env var.
 pub const URL: &str = match option_env!("OTA_URL") {
@@ -302,6 +309,29 @@ async fn run(
     }
     let slot_size = target_entry.len() as u64;
 
+    // --- #489: signed manifest, verified BEFORE the first flash write ---------
+    // The mesh path verifies ed25519 before trusting a byte; the HTTP path now
+    // does the same. `<image-url>.manifest` = M ("build|size|sha256hex") + sig.
+    // BUILD_EPOCH monotonicity re-checked against the SIGNED build id, so a
+    // forged announce cannot ride a stale-but-genuine manifest downgrade.
+    let manifest = {
+        let mut murl = alloc::string::String::from(url);
+        murl.push_str(".manifest");
+        println!("[OTA] GET {murl} (signed manifest)");
+        let body = http_get_small(stack, &murl, 512).await?;
+        parse_manifest(&body)?
+    };
+    if manifest.build <= BUILD_EPOCH {
+        return Err("refused: signed manifest build <= running build");
+    }
+    println!(
+        "[OTA] manifest verified (ed25519 ok): build {} size {}",
+        manifest.build, manifest.size
+    );
+    if manifest.size == 0 || manifest.size > slot_size {
+        return Err("refused: signed size empty or larger than ota slot");
+    }
+
     // --- HTTP GET ------------------------------------------------------------
     let (addr, port, host, path) = parse_url(url)?;
     println!("[OTA] GET {url}");
@@ -322,6 +352,10 @@ async fn run(
     // `break 'net` replaces `return`/`?` inside the phase; nothing else may
     // leave it. abort() (RST) rather than close(): a refused 3.4 MB body must
     // never be politely drained.
+    // #489: streamed digest of exactly the bytes written to flash; compared
+    // against the SIGNED sha256 before the otadata flip. Lives outside the
+    // network block so the verdict survives the socket teardown.
+    let mut hasher = Sha256::new();
     let flashed = 'net: {
         match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
             Ok(Ok(())) => {}
@@ -380,6 +414,10 @@ async fn run(
         if content_len > slot_size {
             break 'net Err("refused: image larger than ota slot");
         }
+        // #489: the body must be byte-for-byte the signed object.
+        if content_len != manifest.size {
+            break 'net Err("refused: image size != signed manifest size");
+        }
         println!("[OTA] image size {content_len} bytes");
         progress(0, content_len as u32);
 
@@ -397,6 +435,7 @@ async fn run(
                 if flashed == 0 && chunk[0] != ESP_IMAGE_MAGIC {
                     break 'net Err("refused: not an esp app image (bad magic)");
                 }
+                hasher.update(&chunk[..chunk_len]);
                 {
                     // One 4 KB sector per lock: a concurrent config save waits at
                     // most one program cycle, never the whole download.
@@ -438,6 +477,16 @@ async fn run(
     socket.abort();
     let flashed = flashed?;
     println!("[OTA] download complete ({flashed} bytes flashed)");
+
+    // --- #489: the written bytes must BE the signed object --------------------
+    // Refused (not retried): the same URL serves the same bytes, and a digest
+    // mismatch against a VALID signature means the image on the host is not
+    // the image that was signed.
+    let digest = hasher.finalize();
+    if digest[..] != manifest.sha256[..] {
+        return Err("refused: image sha256 != signed manifest");
+    }
+    println!("[OTA] image digest matches signed manifest");
 
     // --- Image fully written: flip otadata to the new slot --------------------
     {
@@ -500,6 +549,122 @@ pub fn mark_valid_if_pending(
 }
 
 /// `http://a.b.c.d[:port][/path]` -> (addr, port, host, path). IPv4 only.
+/// One small HTTP/1.0 GET (#489 manifest fetch). Same socket discipline as
+/// the image download: explicit stall timeouts, abort() on every exit.
+async fn http_get_small(
+    stack: Stack<'static>,
+    url: &str,
+    cap: usize,
+) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let (addr, port, host, path) = parse_url(url)?;
+    let mut rx_buf = vec![0u8; 2048];
+    let mut tx_buf = vec![0u8; 512];
+    let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
+    let result = 'net: {
+        match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => break 'net Err("manifest connect refused/reset"),
+            Err(_) => break 'net Err("manifest connect timeout"),
+        }
+        let request = format!(
+            "GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        );
+        let mut sent = 0;
+        while sent < request.len() {
+            let n = match with_timeout(STALL_TIMEOUT, socket.write(&request.as_bytes()[sent..]))
+                .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break 'net Err("manifest request send failed"),
+                Err(_) => break 'net Err("manifest stalled sending request"),
+            };
+            sent += n;
+        }
+        let mut buf = alloc::vec::Vec::new();
+        loop {
+            if buf.len() > cap + 1024 {
+                break 'net Err("refused: manifest response too large");
+            }
+            let mut tmp = [0u8; 512];
+            let n = match with_timeout(STALL_TIMEOUT, socket.read(&mut tmp)).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) => break 'net Err("manifest connection reset"),
+                Err(_) => break 'net Err("manifest stalled"),
+            };
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        let body_start = match find(&buf, b"\r\n\r\n") {
+            Some(pos) => pos + 4,
+            None => break 'net Err("manifest response malformed"),
+        };
+        if parse_headers(&buf[..body_start]).is_err() {
+            // A 404 here is DETERMINISTIC: the deploy host serves no manifest
+            // for this image, and retrying fetches the same absence.
+            break 'net Err("refused: no signed manifest beside the image");
+        }
+        buf.drain(..body_start);
+        Ok(buf)
+    };
+    socket.abort();
+    result
+}
+
+/// Signed OTA manifest (#489): the fleet's trust shape on the HTTP path.
+///
+/// Served by the deploy host at `<image-url>.manifest` as two lines:
+/// line 1 = M exactly as signed (`build|size|sha256hex`), line 2 = the
+/// 128-hex-char ed25519 signature over M. The signature — not the transport,
+/// not the broker ACL — is the trust: `verify_signature_with` against the
+/// fleet public key, RFC 8032 strict, fail-closed.
+pub struct SignedManifest {
+    pub build: u64,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
+/// Parse + verify a `.manifest` body. Any malformation or a bad signature is
+/// a refusal, never a panic.
+fn parse_manifest(body: &[u8]) -> Result<SignedManifest, &'static str> {
+    let text = core::str::from_utf8(body).map_err(|_| "refused: manifest not utf-8")?;
+    let mut lines = text.lines();
+    let m = lines.next().ok_or("refused: manifest empty")?.trim();
+    let sig_hex = lines.next().ok_or("refused: manifest missing signature")?.trim();
+    let mut sig = [0u8; 64];
+    if sig_hex.len() != 128 {
+        return Err("refused: manifest signature not 128 hex chars");
+    }
+    for (i, byte) in sig.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&sig_hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "refused: manifest signature not hex")?;
+    }
+    if !ota_proto::verify_signature_with(&ota_proto::OTA_SIGNING_PUBKEY, m.as_bytes(), &sig) {
+        return Err("refused: manifest signature invalid");
+    }
+    // Only after the signature holds do the fields mean anything.
+    let mut it = m.split('|');
+    let build = it
+        .next()
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or("refused: manifest build unparsable")?;
+    let size = it
+        .next()
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or("refused: manifest size unparsable")?;
+    let sha_hex = it.next().ok_or("refused: manifest sha missing")?;
+    if sha_hex.len() != 64 {
+        return Err("refused: manifest sha not 64 hex chars");
+    }
+    let mut sha256 = [0u8; 32];
+    for (i, byte) in sha256.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&sha_hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "refused: manifest sha not hex")?;
+    }
+    Ok(SignedManifest { build, size, sha256 })
+}
+
 fn parse_url(url: &str) -> Result<(Ipv4Address, u16, &str, &str), &'static str> {
     let rest = url.strip_prefix("http://").ok_or("OTA_URL must be http://")?;
     let (host_port, path) = match rest.find('/') {
