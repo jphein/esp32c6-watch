@@ -439,6 +439,16 @@ export component WatchShell inherits Window {
         || root.shade-open || root.switcher-open
         || root.story-open;
 
+    // Phantom-repaint gate (mirror of ui/slint/shell.slint): the clock's
+    // per-second writes (seconds-text, minute-progress) fire only when the
+    // clock face is actually on-glass. Off page 0 or under an overlay they would
+    // dirty a hidden page-0 item every second, forcing a zero-pixel full scene
+    // walk (~1 Hz idle repaint). Shared slint_shell.rs::set_time reads this for
+    // BOTH layouts, so it MUST exist here too or the CYD arms fail to compile
+    // (no method get_clock_seconds_live). SAFE per the RULE above: both
+    // properties feed only the clock face, which sits UNDER every overlay.
+    out property <bool> clock-seconds-live: root.current-page == 0 && !root.covered;
+
     // ---- RULE, learned the hard way (0685985) ----------------------------------
     // NEVER gate an element on `covered` if that element can only become visible
     // BECAUSE a covered surface is up. Three toasts fire only while an overlay is
