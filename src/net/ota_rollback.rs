@@ -79,41 +79,95 @@ use esp_println::println;
 
 // ---------------------------------------------------------------------------
 // Retained across a software reset / watchdog / deep sleep; zeroed by a power
-// cycle. Three primitives rather than one struct so no `bytemuck` derive (and
-// therefore no direct dependency) is needed — `u32`/`u64` already satisfy the
-// macro's `AnyBitPattern` requirement.
+// cycle.
+//
+// 🔴 ONE SYMBOL, FIXED OFFSETS — and the previous design's failure is why.
+//
+// This was three separate `static mut` primitives (RB_INTENTIONAL, RB_BUILD,
+// RB_SUM). LLVM's global-merge packs small statics into a single MergedGlobals
+// block, and **which variable lands at which offset depends on what survives dead-
+// code elimination.** Measured on the bench (acceptance run 6, 2026-08-27) via
+// readelf on three ELFs from the same source:
+//
+//   gate-base / gate-moved: RB_INTENTIONAL@0x50000000, RB_SUM@+4, RB_BUILD@+8
+//   moved-disc:             RB_SUM@0x50000000, RB_BUILD@+8, RB_INTENTIONAL ABSENT
+//
+// The discriminator's unconditional panic made every `deliberate_reset` caller
+// unreachable, so DCE deleted RB_INTENTIONAL and the merge block RE-PACKED. The
+// disc wrote its sum at offset 0; the good build read `intentional` from offset 0
+// and the sum from +4. Checksum mismatch, conservative fall-through, "no retained
+// state" — and hole 4 silently stopped suppressing the bad build's announce.
+//
+// **The checksum did its job exactly right: it rejected garbage.** The LAYOUT was
+// the defect. And the real-world case is precisely cross-build — a bad NEW build
+// records, the GOOD OLD build reads — so any codegen difference (a cfg'd feature, an
+// LLVM bump, a caller added or removed) could permute it. The resulting re-fetch
+// loop is self-sustaining, because each rollback's boot burst opens the announce
+// window that feeds the next one. Two full cycles were observed before a manual
+// clear.
+//
+// So: ONE static, a byte array with hand-placed fields. Nothing can be deleted to
+// shift it, and the internal offsets are fixed by construction rather than by the
+// optimiser's mood.
+//
+// `[u8; N]` is also the honest choice for the macro's contract: it genuinely
+// implements `bytemuck::AnyBitPattern`, which persistent statics are documented to
+// require. (The macro does not currently ENFORCE that bound — relying on the
+// omission would be the "works by accident" class this whole block is a monument
+// to.)
+//
+// LAYOUT — do not reorder; add only at the end, and bump LAYOUT_MAGIC when you do.
+//   [ 0.. 4)  LAYOUT_MAGIC   u32  version tag, checked BEFORE the sum
+//   [ 4.. 8)  intentional    u32  INTENTIONAL marker or 0
+//   [ 8..16)  rolled_back    u64  build id rolled away from, 0 = none
+//   [16..20)  sum            u32  FNV-1a over bytes 0..16, written LAST
 // ---------------------------------------------------------------------------
 
+const RB_LEN: usize = 20;
+const OFF_MAGIC: usize = 0;
+const OFF_INTENTIONAL: usize = 4;
+const OFF_BUILD: usize = 8;
+const OFF_SUM: usize = 16;
+
+/// Layout tag. **Bump this whenever the field layout changes** — an older build
+/// reading a newer block then fails closed on the magic instead of aliasing fields
+/// and trusting a sum that happens to match.
+const LAYOUT_MAGIC: u32 = 0xC5B0_0001;
+
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
-static mut RB_INTENTIONAL: u32 = 0;
-#[esp_hal::ram(unstable(rtc_fast, persistent))]
-static mut RB_BUILD: u64 = 0;
-#[esp_hal::ram(unstable(rtc_fast, persistent))]
-static mut RB_SUM: u32 = 0;
+static mut RB: [u8; RB_LEN] = [0; RB_LEN];
 
 /// Marker value for "the reset now in flight was deliberate".
 const INTENTIONAL: u32 = 0x5AFE_B007;
 
-/// FNV-1a over the retained payload.
+fn rd32(buf: &[u8; RB_LEN], off: usize) -> u32 {
+    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
+fn rd64(buf: &[u8; RB_LEN], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&buf[off..off + 8]);
+    u64::from_le_bytes(b)
+}
+
+/// FNV-1a over bytes `0..OFF_SUM` — magic and payload, so a layout bump changes the
+/// sum too.
 ///
-/// Not cryptographic and does not need to be — its only job is to make **random
-/// bytes fail**, which is exactly what the macro's docs ask for. Never returns 0, so
-/// an all-zero block (first boot, or after a power cycle) cannot accidentally
-/// validate: a zero stored sum can then never match a computed one.
-fn checksum(intentional: u32, build: u64) -> u32 {
+/// Not cryptographic and does not need to be: its only job is to make **random
+/// bytes fail**, which is what the macro's docs ask for (a reset before the RAM is
+/// zeroed can start the app with random contents, and an update can be torn —
+/// "not even a critical section" prevents it). Never returns 0, so an all-zero block
+/// (first boot, or after a power cycle) cannot validate.
+fn checksum(buf: &[u8; RB_LEN]) -> u32 {
     let mut h: u32 = 0x811C_9DC5;
-    for b in intentional
-        .to_le_bytes()
-        .iter()
-        .chain(build.to_le_bytes().iter())
-    {
+    for b in &buf[..OFF_SUM] {
         h ^= *b as u32;
         h = h.wrapping_mul(0x0100_0193);
     }
     if h == 0 { 1 } else { h }
 }
 
-/// Validated retained state, or `None` when the block is absent/garbage/torn.
+/// Validated retained state, or `None` when the block is absent/garbage/torn/from a
+/// different layout.
 pub struct Retained {
     /// The reset that brought us here was deliberate (set by `armed_reset`).
     pub intentional: bool,
@@ -121,38 +175,46 @@ pub struct Retained {
     pub rolled_back_build: u64,
 }
 
-/// Read and VALIDATE the retained block. `None` means "no trustworthy state" —
-/// treat it as a fresh boot, never as zeros.
+/// Read and VALIDATE. `None` means "no trustworthy state" — treat it as a fresh
+/// boot, never as zeros.
 pub fn read_retained() -> Option<Retained> {
-    // SAFETY: single-core, and these are read once at boot before any task can
-    // touch them. Primitive reads, no references taken (edition-2024 friendly).
-    let (i, b, s) = unsafe { (RB_INTENTIONAL, RB_BUILD, RB_SUM) };
-    if s == 0 || s != checksum(i, b) {
+    // SAFETY: single-core; read once at boot before any task runs. Copy out by
+    // value — no reference taken into the static (edition-2024 friendly).
+    let buf: [u8; RB_LEN] = unsafe { RB };
+    if rd32(&buf, OFF_MAGIC) != LAYOUT_MAGIC {
+        return None;
+    }
+    let stored = rd32(&buf, OFF_SUM);
+    if stored == 0 || stored != checksum(&buf) {
         return None;
     }
     Some(Retained {
-        intentional: i == INTENTIONAL,
-        rolled_back_build: b,
+        intentional: rd32(&buf, OFF_INTENTIONAL) == INTENTIONAL,
+        rolled_back_build: rd64(&buf, OFF_BUILD),
     })
 }
 
-/// Write the retained block, checksum last.
+/// Write the block, **checksum last**.
 ///
 /// Checksum-last is deliberate: a reset that tears the write leaves the sum stale,
-/// so [`read_retained`] rejects the block instead of trusting half of it. There is
-/// no way to make the update atomic (see the module docs), so the ordering is the
-/// only lever available.
+/// so [`read_retained`] rejects the block rather than trusting half of it. The
+/// update cannot be made atomic (see the layout note above), so ordering is the only
+/// lever available.
 pub fn write_retained(intentional: bool, rolled_back_build: u64) {
+    let mut buf = [0u8; RB_LEN];
+    buf[OFF_MAGIC..OFF_MAGIC + 4].copy_from_slice(&LAYOUT_MAGIC.to_le_bytes());
     let i = if intentional { INTENTIONAL } else { 0 };
-    // SAFETY: as above — single-core, boot-time or reset-path only.
-    unsafe {
-        RB_INTENTIONAL = i;
-        RB_BUILD = rolled_back_build;
-        RB_SUM = checksum(i, rolled_back_build);
-    }
+    buf[OFF_INTENTIONAL..OFF_INTENTIONAL + 4].copy_from_slice(&i.to_le_bytes());
+    buf[OFF_BUILD..OFF_BUILD + 8].copy_from_slice(&rolled_back_build.to_le_bytes());
+    let sum = checksum(&buf);
+    buf[OFF_SUM..OFF_SUM + 4].copy_from_slice(&sum.to_le_bytes());
+    // SAFETY: as above. Single whole-array store; the sum is already inside `buf`,
+    // so the "sum last" property is preserved against a torn WRITE of the array by
+    // the reader's magic+sum validation.
+    unsafe { RB = buf };
 }
 
-/// Note that the reset about to happen is DELIBERATE, preserving the
+/// Note that the reset about to happen is DELIBERATE/// Note that the reset about to happen is DELIBERATE, preserving the
 /// rolled-back-build id. Called from `armed_reset`; never from `custom_halt`.
 pub fn mark_intentional_reset() {
     let prev = read_retained().map(|r| r.rolled_back_build).unwrap_or(0);
