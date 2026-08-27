@@ -16,6 +16,19 @@
 #                                      # (OTA_BUILD=0 accepts ANY announce and
 #                                      # zero-touch replaces your build — #55).
 #                                      # (combines with --target)
+#   tools/ota_push.sh --url <url>      # OVERRIDE the announced OTA_URL for this
+#                                      # push. The config's OTA_URL host is a
+#                                      # PER-SEAT reachability bet: the S3-CYD
+#                                      # sits on VLAN8 (iot), from which ubox0's
+#                                      # 10.0.11.11:8000 is FIREWALL-DEAD (the
+#                                      # same per-seat trap as the MQTT broker
+#                                      # leg). Announce a URL reachable from the
+#                                      # TARGET watch's VLAN instead — e.g.
+#                                      # http://disks:8087/ota/... (iot->family
+#                                      # is allowed). --url changes only what the
+#                                      # watch is TOLD to fetch; upload the image
+#                                      # to that host yourself (the default
+#                                      # ubox0 upload path assumes the C6 seat).
 #
 # Flow (see docs/ota-deploy.md "Push OTA"):
 #   1. Stamp OTA_BUILD=<unix-seconds> into .cargo/config.toml [env] (gitignored)
@@ -53,6 +66,7 @@ OTA_DEST="ubox0:/home/jp/watch-ota/watch.bin"
 ANNOUNCE_ONLY=0
 CLEAR=0
 TARGET=""
+OTA_URL_OVERRIDE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --announce-only) ANNOUNCE_ONLY=1 ;;
@@ -65,10 +79,23 @@ while [ $# -gt 0 ]; do
             TARGET="${2:-}"
             [ -n "$TARGET" ] || { echo "ota_push: --target needs a sigil (e.g. eldritch-lantern)" >&2; exit 2; }
             shift ;;
+        --url)
+            OTA_URL_OVERRIDE="${2:-}"
+            [ -n "$OTA_URL_OVERRIDE" ] || { echo "ota_push: --url needs a URL (e.g. http://disks:8087/ota/watch.bin)" >&2; exit 2; }
+            shift ;;
         *) echo "ota_push: unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
 done
+
+# Per-seat OTA_URL override (#s3-cyd VLAN8 firewall trap): the config's OTA_URL
+# is only reachable from the seat it was written for. Announce a URL the TARGET
+# watch's VLAN can actually reach when they differ. Only the ANNOUNCE changes —
+# the image upload (OTA_DEST) is unchanged, so upload to the override host first.
+if [ -n "$OTA_URL_OVERRIDE" ]; then
+    echo "ota_push: OTA_URL override: $OTA_URL -> $OTA_URL_OVERRIDE (per-seat reachability)"
+    OTA_URL="$OTA_URL_OVERRIDE"
+fi
 
 # Fleet topic by default; per-watch topic (watch/<sigil>/ota, both watches'
 # firmware subscribes its own alongside the fleet topic) when targeted. The
