@@ -172,17 +172,36 @@ pub fn name_for_mac(mac: [u8; 6]) -> (&'static str, &'static str) {
 
 /// Fold the efuse MAC to a mesh node id: XOR of the four [`seed_from_mac`]
 /// bytes (documented convention — smol has no node-id-from-MAC precedent, so
-/// this is the simplest fold that separates the fleet). 0 and 255 are remapped
-/// to 1 / 254 (reserved/broadcast-adjacent). The config sentinel 42 is NOT
-/// special-cased here: a derived 42 would be a legitimately-chosen id, and the
-/// fleet check below proves neither watch lands on it.
+/// this is the simplest fold that separates the fleet). The reserved and
+/// sentinel ids are remapped by [`remap_node_id`]: 0 → 1, 255 → 254, and
+/// **42 → 43** (#469).
 ///
-/// Fleet (host-tested below): `…A7:2F:E4` → 122, `…A5:A7:F8` → 236.
+/// 42 was originally left un-remapped on the reasoning that a derived 42 is a
+/// "legitimately chosen id" and that the two-watch fleet check proves neither
+/// lands on it — but that check only covers the two *current* MACs. Over the
+/// full MAC space the fold mints 42 at ~1-in-256 under the fleet OUI, and 42 is
+/// the config "unset" sentinel the #314 provisioning guardrails refuse BY NAME:
+/// such a board is permanently un-OTA-able and invisible to `discover_fleet`.
+/// So 42 must be remapped like the other reserveds — proven exhaustively by
+/// `node_id_never_mints_reserved_or_sentinel` below.
+///
+/// Fleet (host-tested below): `…A7:2F:E4` → 122, `…A5:A7:F8` → 236 (neither is
+/// 42, so the remap leaves both unchanged).
 #[inline]
 pub fn node_id_from_mac(mac: [u8; 6]) -> u8 {
     let s = seed_from_mac(mac);
-    match (s ^ (s >> 8) ^ (s >> 16) ^ (s >> 24)) as u8 {
+    remap_node_id((s ^ (s >> 8) ^ (s >> 16) ^ (s >> 24)) as u8)
+}
+
+/// Nudge the fold output off the ids the fleet must never mint: 0 (reserved)
+/// and 255 (broadcast-adjacent) to 1 / 254, and 42 (the #314 config-unset
+/// sentinel) to 43. Pure `u8 → u8` so it is exhaustively testable over all 256
+/// inputs (see `node_id_never_mints_reserved_or_sentinel`).
+#[inline]
+const fn remap_node_id(b: u8) -> u8 {
+    match b {
         0 => 1,
+        42 => 43,
         255 => 254,
         id => id,
     }
@@ -360,6 +379,30 @@ mod tests {
         for mac in [WATCH_A, WATCH_B] {
             assert!(![0, 42, 255].contains(&node_id_from_mac(mac)));
         }
+    }
+
+    /// #469: the remap must NEVER emit a reserved (0/255) or the config-unset
+    /// sentinel (42) — a board that minted 42 is refused by the #314 guardrails
+    /// and is permanently un-OTA-able + invisible to discover_fleet. Exhaustive
+    /// over the full fold-byte range (the two-MAC fleet check above proved this
+    /// only for the current fleet, which is exactly how the 1-in-256 42 slipped
+    /// through). remap_node_id is pure u8→u8, so 256 cases is a complete proof.
+    #[test]
+    fn node_id_never_mints_reserved_or_sentinel() {
+        for b in 0u8..=255 {
+            let r = remap_node_id(b);
+            assert!(
+                ![0u8, 42, 255].contains(&r),
+                "fold byte {b} remapped to reserved/sentinel {r}"
+            );
+        }
+        // The remap only moves the three reserved inputs; everything else is
+        // identity (so the fleet's 122/236 are untouched).
+        assert_eq!(remap_node_id(0), 1);
+        assert_eq!(remap_node_id(42), 43);
+        assert_eq!(remap_node_id(255), 254);
+        assert_eq!(remap_node_id(122), 122);
+        assert_eq!(remap_node_id(236), 236);
     }
 
     /// Every (adjective, noun) combination fits SIGIL_MAX and is MQTT-topic-
