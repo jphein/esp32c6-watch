@@ -218,6 +218,33 @@ else
     # 4. Publish the image to the OTA HTTP server.
     scp -q "$TMP/watch.bin" "$OTA_DEST"
     echo "ota_push: image uploaded -> $OTA_DEST ($(stat -c%s "$TMP/watch.bin") bytes)"
+
+    # 4b. #489: SIGNED MANIFEST beside the image. The firmware fetches
+    # `<image-url>.manifest` and ed25519-verifies M = "build|size|sha256hex"
+    # (the fleet's exact manifest shape and key) BEFORE its first flash write;
+    # a push without this file is REFUSED by the watch. Signing mirrors smol's
+    # tools/ota_publish.sh: key from Vaultwarden, /dev/shm temp, shredded.
+    SIGNING_KEY_ITEM="${WATCH_OTA_SIGNING_KEY_ITEM:-smol-ota-signing-ed25519}"
+    SIZE=$(stat -c%s "$TMP/watch.bin")
+    SHA=$(sha256sum "$TMP/watch.bin" | cut -d' ' -f1)
+    M="${EPOCH}|${SIZE}|${SHA}"
+    _msgf="$(mktemp)"; _keyf="$(mktemp -p /dev/shm 2>/dev/null || mktemp)"
+    trap 'shred -u "$_msgf" "$_keyf" 2>/dev/null' EXIT INT TERM
+    bw get notes "$SIGNING_KEY_ITEM" > "$_keyf" 2>/dev/null || {
+        shred -u "$_msgf" "$_keyf" 2>/dev/null
+        echo "ota_push: ABORT - couldn't read signing key '$SIGNING_KEY_ITEM' from bw" >&2
+        echo "ota_push:         (locked vault and 'Not found.' are DIFFERENT failures;" >&2
+        echo "ota_push:         check \`bw status\` + \`bw config server\`)" >&2
+        exit 4
+    }
+    printf '%s' "$M" > "$_msgf"   # printf, NOT echo: M is exact wire bytes
+    SIG="$(openssl pkeyutl -sign -rawin -inkey "$_keyf" -in "$_msgf" | xxd -p -c 64)"
+    shred -u "$_msgf" "$_keyf" 2>/dev/null
+    case "$SIG" in *[!0-9a-f]*|"") echo "ota_push: ABORT - ed25519 signing failed" >&2; exit 4;; esac
+    [ "${#SIG}" -eq 128 ] || { echo "ota_push: ABORT - sig wrong length ${#SIG}" >&2; exit 4; }
+    printf '%s\n%s\n' "$M" "$SIG" > "$TMP/watch.bin.manifest"
+    scp -q "$TMP/watch.bin.manifest" "${OTA_DEST}.manifest"
+    echo "ota_push: signed manifest uploaded -> ${OTA_DEST}.manifest (M=$M)"
 fi
 
 # 5. RETAINED announce: the watch triggers only if <epoch> > its running
