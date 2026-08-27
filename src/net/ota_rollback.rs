@@ -256,6 +256,31 @@ pub fn gate(flash: &mut impl embedded_storage::Storage) -> Outcome {
                     if ota2.set_current_app_partition(target).is_err() {
                         return Outcome::Failed("could not flip boot slot");
                     }
+                    // ⚠️ READ BACK — the flip can SILENTLY NO-OP.
+                    //
+                    // `set_current_app_partition` (esp-bootloader-esp-idf 0.5.0,
+                    // ota.rs:254-257) early-outs when `current_app_partition() ==
+                    // app` — and "current" there is what OTADATA REQUESTS, while
+                    // `target` here was derived from the MMU (what is actually
+                    // executing). Those disagree exactly in the #55 stale-otadata
+                    // case. If they disagree the flip does nothing, and reporting
+                    // `RolledBack` would reboot us straight back into the failing
+                    // image — a loop, dressed as a rescue.
+                    //
+                    // So verify rather than assume, and on mismatch keep booting the
+                    // current image: a loop that prints beats a reboot into the same
+                    // loop with a success message attached.
+                    match ota2.current_app_partition() {
+                        Ok(now) if now == target => {}
+                        Ok(now) => {
+                            println!(
+                                "[ROLLBACK] ⚠️ flip did NOT take (otadata still requests {now:?}, \
+                                 wanted {target:?}) - refusing to reboot into the same image"
+                            );
+                            return Outcome::Failed("boot-slot flip did not take");
+                        }
+                        Err(_) => return Outcome::Failed("could not read back boot slot"),
+                    }
                     // Valid, not New: the slot we are returning to has already
                     // proven itself, and staging it as New would hand it a
                     // one-try gate it does not need — and could roll it back too.
