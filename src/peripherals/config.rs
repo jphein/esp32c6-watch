@@ -68,6 +68,26 @@ const REC_LEN_V6: usize = 6 + 1 + 1 + 1 + 32 + 1 + 64 + 1 + 1 + 1 + 1 + 1 + 1 + 
 const MAGIC_V7: [u8; 6] = *b"SWCFG7";
 const REC_LEN_V7: usize = REC_LEN_V6 + 1;
 
+/// v8 record (smol #490, CFG `B`/`O`): v7 + the persisted network overrides,
+/// before the checksum — the fleet's NVS `NetCfg` semantics on the watch:
+///   117: override flags — bit 0 broker SET · bit 1 broker FALLBACK (the
+///        override was auto-disabled after repeated failed MQTT sessions;
+///        the value is KEPT so CFG-`B` still edge-triggers correctly) ·
+///        bit 2 OTA-host SET; bits 3..7 reserved-zero
+///   118-121: broker override IPv4 octets · 122-123: broker port (LE)
+///   124-127: OTA image-host override IPv4 octets
+/// Older records still load (no overrides — the baked broker + the plain
+/// RFC1918 fetch gate, the pre-v8 behavior); the first save rewrites v8 in
+/// place. Values were RFC1918-gated at the CFG parse, but load re-checks
+/// nothing — a record is trusted the way every other field here is.
+const MAGIC_V8: [u8; 6] = *b"SWCFG8";
+const REC_LEN_V8: usize = REC_LEN_V7 + 11;
+
+/// v8 override-flags byte (offset 117).
+const OVR_BROKER_SET: u8 = 0x01;
+const OVR_BROKER_FALLBACK: u8 = 0x02;
+const OVR_OTA_SET: u8 = 0x04;
+
 /// Volume byte (offset 111, v6): step level is the low nibble; bit 4 is mute.
 const VOL_LEVEL_MASK: u8 = 0x0F;
 const VOL_MUTED_BIT: u8 = 0x10;
@@ -201,6 +221,17 @@ pub struct WatchConfig {
     pub pwron_long: ButtonAction,
     /// Read notifications aloud (#read-aloud, v7). Defaults to on-demand.
     pub speak: SpeakMode,
+    /// CFG `B` (smol #490, v8): MQTT broker-leg override (IPv4 + port).
+    /// `None` = use the baked `MQTT_BROKER`. RFC1918-gated at the CFG parse.
+    pub broker_override: Option<([u8; 4], u16)>,
+    /// CFG `B` (v8): the override was auto-disabled after repeated failed
+    /// MQTT sessions — runtime uses the baked broker; `broker_override` is
+    /// KEPT so a re-sent identical CFG-`B` is still a no-op and a changed one
+    /// still edge-triggers (the fleet's `broker_fallback` contract).
+    pub broker_fallback: bool,
+    /// CFG `O` (smol #490, v8): one extra OTA image-host admitted by the
+    /// fetch gate (RFC1918-gated at parse). `None` = none.
+    pub ota_host: Option<[u8; 4]>,
 }
 
 impl Default for WatchConfig {
@@ -231,6 +262,9 @@ impl Default for WatchConfig {
             pwron_long: ButtonAction::PowerMenu,
             // On-demand, not Auto — see SpeakMode's docs for why.
             speak: SpeakMode::OnDemand,
+            broker_override: None,
+            broker_fallback: false,
+            ota_host: None,
         }
     }
 }
@@ -291,25 +325,28 @@ pub fn load(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
 }
 
 fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
-    let mut buf = [0u8; REC_LEN_V7];
+    let mut buf = [0u8; REC_LEN_V8];
     flash.read(offset, &mut buf).ok()?;
     // v2plus = has default_page + units (v2+); v3plus = also the theme byte;
     // v4plus = also the radios flags byte; v5plus = also the mic-gain byte;
-    // v6plus = also the volume + button-map bytes; v7 = also the speak byte.
-    let (rec_len, v2plus, v3plus, v4plus, v5plus, v6plus, v7) = if buf[..6] == MAGIC_V7 {
-        (REC_LEN_V7, true, true, true, true, true, true)
+    // v6plus = also the volume + button-map bytes; v7 = also the speak byte;
+    // v8 = also the network-override bytes.
+    let (rec_len, v2plus, v3plus, v4plus, v5plus, v6plus, v7, v8) = if buf[..6] == MAGIC_V8 {
+        (REC_LEN_V8, true, true, true, true, true, true, true)
+    } else if buf[..6] == MAGIC_V7 {
+        (REC_LEN_V7, true, true, true, true, true, true, false)
     } else if buf[..6] == MAGIC_V6 {
-        (REC_LEN_V6, true, true, true, true, true, false)
+        (REC_LEN_V6, true, true, true, true, true, false, false)
     } else if buf[..6] == MAGIC_V5 {
-        (REC_LEN_V5, true, true, true, true, false, false)
+        (REC_LEN_V5, true, true, true, true, false, false, false)
     } else if buf[..6] == MAGIC_V4 {
-        (REC_LEN_V4, true, true, true, false, false, false)
+        (REC_LEN_V4, true, true, true, false, false, false, false)
     } else if buf[..6] == MAGIC_V3 {
-        (REC_LEN_V3, true, true, false, false, false, false)
+        (REC_LEN_V3, true, true, false, false, false, false, false)
     } else if buf[..6] == MAGIC_V2 {
-        (REC_LEN_V2, true, false, false, false, false, false)
+        (REC_LEN_V2, true, false, false, false, false, false, false)
     } else if buf[..6] == MAGIC_V1 {
-        (REC_LEN_V1, false, false, false, false, false, false)
+        (REC_LEN_V1, false, false, false, false, false, false, false)
     } else {
         return None;
     };
@@ -386,6 +423,28 @@ fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
     // v7: read-aloud mode. Pre-v7 records take the default (on-demand) so an
     // OTA can never turn a quiet watch into a talking one.
     let speak = if v7 { SpeakMode::from_u8(buf[116]) } else { defaults.speak };
+    // v8: network overrides. Pre-v8 records take the defaults (no overrides
+    // — baked broker, plain RFC1918 fetch gate), so an OTA can never move a
+    // watch's broker on its own.
+    let (broker_override, broker_fallback, ota_host) = if v8 {
+        let flags = buf[117];
+        (
+            (flags & OVR_BROKER_SET != 0).then(|| {
+                (
+                    [buf[118], buf[119], buf[120], buf[121]],
+                    u16::from_le_bytes([buf[122], buf[123]]),
+                )
+            }),
+            flags & OVR_BROKER_FALLBACK != 0,
+            (flags & OVR_OTA_SET != 0).then(|| [buf[124], buf[125], buf[126], buf[127]]),
+        )
+    } else {
+        (
+            defaults.broker_override,
+            defaults.broker_fallback,
+            defaults.ota_host,
+        )
+    };
     Some(WatchConfig {
         node_id,
         brightness,
@@ -407,6 +466,9 @@ fn load_slot(flash: &mut impl ReadStorage, offset: u32) -> Option<WatchConfig> {
         pwron_short,
         pwron_long,
         speak,
+        broker_override,
+        broker_fallback,
+        ota_host,
     })
 }
 
@@ -425,8 +487,8 @@ pub fn save(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result<
 }
 
 fn save_slot(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result<(), ()> {
-    let mut buf = [0u8; REC_LEN_V7];
-    buf[..6].copy_from_slice(&MAGIC_V7);
+    let mut buf = [0u8; REC_LEN_V8];
+    buf[..6].copy_from_slice(&MAGIC_V8);
     buf[6] = cfg.node_id;
     buf[7] = cfg.brightness;
     let sb = cfg.ssid.as_bytes();
@@ -457,7 +519,18 @@ fn save_slot(flash: &mut impl Storage, offset: u32, cfg: &WatchConfig) -> Result
     buf[115] = cfg.pwron_long.as_u8();
     // Read-aloud mode (offset 116, v7).
     buf[116] = cfg.speak.as_u8();
-    let sum = checksum(&buf[..REC_LEN_V7 - 2]);
-    buf[REC_LEN_V7 - 2..].copy_from_slice(&sum.to_le_bytes());
+    // Network overrides (offsets 117-127, v8) — see MAGIC_V8's layout doc.
+    buf[117] = (if cfg.broker_override.is_some() { OVR_BROKER_SET } else { 0 })
+        | (if cfg.broker_fallback { OVR_BROKER_FALLBACK } else { 0 })
+        | (if cfg.ota_host.is_some() { OVR_OTA_SET } else { 0 });
+    if let Some((ip, port)) = cfg.broker_override {
+        buf[118..122].copy_from_slice(&ip);
+        buf[122..124].copy_from_slice(&port.to_le_bytes());
+    }
+    if let Some(ip) = cfg.ota_host {
+        buf[124..128].copy_from_slice(&ip);
+    }
+    let sum = checksum(&buf[..REC_LEN_V8 - 2]);
+    buf[REC_LEN_V8 - 2..].copy_from_slice(&sum.to_le_bytes());
     flash.write(offset, &buf).map_err(|_| ())
 }

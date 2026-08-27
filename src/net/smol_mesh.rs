@@ -329,6 +329,32 @@ pub enum MeshEvent {
     /// down to `net_task` as the association preference, and persist it as the
     /// new last-known-good.
     Elected { decision: mesh_elect::Decision },
+    /// CFG key `L` (#48, smol #490): status-LED mode. Already validated — a
+    /// malformed value never yields an event (the caller keeps its mode).
+    /// Never persisted: the gateway's retained CFG re-relays it (~10 s
+    /// re-arm), same as the fleet leaf.
+    CfgLed { mode: LedCfgMode },
+    /// CFG key `P` (#55, smol #490): plugin-visibility mask, the fleet's
+    /// stable HA bit contract (0=Clock · 1=Snake · 2=Bench · 3=Batt · 4=Grid
+    /// · 5=WledRemote · 6=About · 7=Familiar; 0 = show all). The caller maps
+    /// the bits onto the launcher registry rows that HAVE a fleet
+    /// counterpart and leaves the rest visible (a bit for an absent plugin
+    /// is simply never tested — the fleet's own forward-compat rule).
+    CfgPlugins { mask: u16 },
+    /// CFG key `B` (#100 S2, smol #490): broker-leg override. `None` = an
+    /// explicit clear (empty value = the retained topic was cleared). A
+    /// malformed value never yields an event. Apply is edge-triggered on a
+    /// CHANGE and persisted (the retained frame re-delivers every ~10 s).
+    CfgBroker { addr: Option<([u8; 4], u16)> },
+    /// CFG key `O` (#100 S3, smol #490): OTA image-host override (RFC1918).
+    /// `None` = explicit clear. Same edge-trigger + persist contract as `B`;
+    /// applied live (the allowlist is read at fetch time), no reboot.
+    CfgOtaHost { host: Option<[u8; 4]> },
+    /// CFG key `W` (#71, smol #490): transient on-demand WiFi-scan trigger —
+    /// never cached or persisted. The caller gates it (OTA-in-flight, heap
+    /// pressure) before actually scanning; a deferred scan is simply dropped,
+    /// the operator re-arms.
+    CfgScan,
 }
 
 /// A leaf's single outstanding RELAY message (mode.rs RelayTx): retained so
@@ -615,6 +641,99 @@ fn parse_units(value: &[u8]) -> Option<(bool, bool)> {
         _ => return None,
     };
     Some((temp_f, clk_24h))
+}
+
+/// CFG `L` (#48) LED mode — the fleet's wire tokens exactly (fleet `led.rs`
+/// `LedMode::from_wire`), so HA's one input_select drives both flavors.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LedCfgMode {
+    /// Show mesh peer state (off → blink = detected → solid = connected) —
+    /// the boot default and the pre-#490 behavior.
+    Status,
+    /// Force lit, regardless of peer state.
+    On,
+    /// Force dark.
+    Off,
+}
+
+/// CFG `L` value `status`/`on`/`off` → [`LedCfgMode`]. Malformed → `None`
+/// (caller keeps its current mode — never a half-applied config).
+fn parse_led_mode(value: &[u8]) -> Option<LedCfgMode> {
+    match core::str::from_utf8(value).ok()?.trim() {
+        "status" => Some(LedCfgMode::Status),
+        "on" => Some(LedCfgMode::On),
+        "off" => Some(LedCfgMode::Off),
+        _ => None,
+    }
+}
+
+/// CFG `P` (#55) plugin-visibility mask: 1–4 hex chars → `u16` (fleet
+/// `menu.rs::parse_plugin_mask`, ported verbatim — same accepted grammar so
+/// the one HA bit-map lands identically on both flavors). Empty / longer /
+/// non-hex → `None`.
+fn parse_plugin_mask(value: &[u8]) -> Option<u16> {
+    let s = core::str::from_utf8(value).ok()?.trim();
+    if s.is_empty() || s.len() > 4 {
+        return None;
+    }
+    let mut v: u16 = 0;
+    for b in s.bytes() {
+        let d = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return None,
+        };
+        v = (v << 4) | d as u16;
+    }
+    Some(v)
+}
+
+/// Dotted-quad IPv4 → four octets (fleet `ota.rs::parse_ipv4`, ported
+/// verbatim). Panic-free; `None` on anything but exactly four 0..=255 parts.
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut it = s.split('.');
+    for o in octets.iter_mut() {
+        *o = it.next()?.parse::<u8>().ok()?;
+    }
+    if it.next().is_some() {
+        return None; // more than four parts
+    }
+    Some(octets)
+}
+
+/// RFC1918 private-range test (`10/8`, `172.16/12`, `192.168/16`). The `B`/`O`
+/// overrides MUST pass this so a dashboard typo can never point the watch
+/// off-LAN — the on-LAN guard JP named in smol #100 (fleet `ota.rs`, verbatim).
+pub fn is_rfc1918(ip: [u8; 4]) -> bool {
+    matches!(ip, [10, ..] | [172, 16..=31, ..] | [192, 168, ..])
+}
+
+/// CFG `B` (#100 S2) broker override `"a.b.c.d"` / `"a.b.c.d:port"` (port
+/// defaults to 1883). `None` unless RFC1918 with a non-zero port (fleet
+/// `ota.rs::parse_broker_override`, ported verbatim).
+fn parse_broker_override(s: &str) -> Option<([u8; 4], u16)> {
+    let s = s.trim();
+    let (ip_str, port) = match s.rsplit_once(':') {
+        Some((ip, p)) => (ip, p.parse::<u16>().ok()?),
+        None => (s, 1883u16),
+    };
+    let ip = parse_ipv4(ip_str)?;
+    if !is_rfc1918(ip) || port == 0 {
+        return None;
+    }
+    Some((ip, port))
+}
+
+/// CFG `O` (#100 S3) OTA image-host override `"a.b.c.d"`. `None` unless
+/// RFC1918 (fleet `ota.rs::parse_ota_host_override`, ported verbatim).
+fn parse_ota_host_override(s: &str) -> Option<[u8; 4]> {
+    let ip = parse_ipv4(s.trim())?;
+    if !is_rfc1918(ip) {
+        return None;
+    }
+    Some(ip)
 }
 
 impl SmolMesh {
@@ -1267,8 +1386,60 @@ impl SmolMesh {
                     println!("[MESH] CFG R: remote reboot commanded");
                     Some(MeshEvent::CfgReboot)
                 }
+                // smol #490: the mechanical five. Same drop-on-garbage
+                // contract as S/U — a value that doesn't parse yields no
+                // event and the watch keeps what it had (#56: the failure
+                // mode of a config channel must never be a brick).
+                b'L' => parse_led_mode(value).map(|mode| {
+                    println!("[MESH] CFG L: LED mode -> {mode:?}");
+                    MeshEvent::CfgLed { mode }
+                }),
+                b'P' => parse_plugin_mask(value).map(|mask| {
+                    println!("[MESH] CFG P: plugin mask -> {mask:#06x}");
+                    MeshEvent::CfgPlugins { mask }
+                }),
+                b'B' => {
+                    let raw = core::str::from_utf8(value).unwrap_or("").trim();
+                    if raw.is_empty() {
+                        println!("[MESH] CFG B: broker override cleared");
+                        Some(MeshEvent::CfgBroker { addr: None })
+                    } else if let Some(addr) = parse_broker_override(raw) {
+                        println!(
+                            "[MESH] CFG B: broker override -> {}.{}.{}.{}:{}",
+                            addr.0[0], addr.0[1], addr.0[2], addr.0[3], addr.1
+                        );
+                        Some(MeshEvent::CfgBroker { addr: Some(addr) })
+                    } else {
+                        // Non-empty garbage: dropped (keep current), but say so
+                        // — the interesting failure mode here is silent.
+                        println!("[MESH] CFG B: unparseable value dropped");
+                        None
+                    }
+                }
+                b'O' => {
+                    let raw = core::str::from_utf8(value).unwrap_or("").trim();
+                    if raw.is_empty() {
+                        println!("[MESH] CFG O: OTA-host override cleared");
+                        Some(MeshEvent::CfgOtaHost { host: None })
+                    } else if let Some(host) = parse_ota_host_override(raw) {
+                        println!(
+                            "[MESH] CFG O: OTA-host override -> {}.{}.{}.{}",
+                            host[0], host[1], host[2], host[3]
+                        );
+                        Some(MeshEvent::CfgOtaHost { host: Some(host) })
+                    } else {
+                        println!("[MESH] CFG O: unparseable/off-LAN value dropped");
+                        None
+                    }
+                }
+                b'W' => {
+                    println!("[MESH] CFG W: on-demand WiFi scan commanded");
+                    Some(MeshEvent::CfgScan)
+                }
                 // Forward-compat (#46 clamp): a key this firmware doesn't
-                // apply (L/P/Y/B/O/W/G/g/...) is dropped silently.
+                // apply (Y/G/g/T/...) is dropped silently. Y is #473's own
+                // subject (custom screens); T/G/g await the #490 scoping
+                // ruling (they presuppose the Bard and free GPIOs).
                 _ => None,
             };
         }

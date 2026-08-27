@@ -159,6 +159,45 @@ impl AppDescriptor {
             _ => true,
         }
     }
+
+    /// smol #490 (CFG `P`, fleet #55): the app's bit in the fleet's STABLE
+    /// plugin-visibility mask (luna's HA contract: 0=Clock · 1=Snake ·
+    /// 2=Bench · 3=Batt · 4=Grid · 5=WledRemote · 6=About · 7=Familiar).
+    /// Only the tiles with a fleet counterpart get a bit — the fleet's own
+    /// rule for unmapped kinds (`plugin_bit -> None` ⇒ always shown) covers
+    /// every GUI-only tile, so the one HA bit-map lands identically on both
+    /// flavors without inventing new bits (that needs a paired HA change).
+    pub fn fleet_bit(&self) -> Option<u8> {
+        match self.state {
+            // Both snake tiles share the fleet's "Snake" bit, exactly like
+            // the fleet's own MeshSnake alias.
+            AppState::Snake | AppState::WorldSnake => Some(1),
+            // The GUI's Energy dashboard is the fleet's Grid plugin (the same
+            // HA grid-power feed, richer chrome).
+            AppState::Energy => Some(4),
+            AppState::Wled => Some(5),
+            _ => None,
+        }
+    }
+}
+
+/// CFG-`P` plugin-visibility mask (fleet `menu.rs::kind_enabled` semantics:
+/// 0 = show all — the #55 safety, and the boot default). Main writes on a
+/// CFG apply; the launcher build reads. Never persisted — the gateway's
+/// retained CFG re-relays it, same as the fleet leaf.
+static PLUGIN_MASK: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Store the mask (CFG-`P` apply). Returns the previous value so the caller
+/// can edge-trigger the launcher rebuild.
+pub fn set_plugin_mask(mask: u16) -> u16 {
+    PLUGIN_MASK.swap(mask, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Is this registry row visible under the current mask? Fleet
+/// `kind_enabled`, ported: zero mask or no fleet bit = shown.
+pub fn mask_allows(d: &AppDescriptor) -> bool {
+    let mask = PLUGIN_MASK.load(core::sync::atomic::Ordering::Relaxed);
+    mask == 0 || d.fleet_bit().is_none_or(|b| mask & (1 << b) != 0)
 }
 
 /// Look up a launchable app's descriptor by state (linear scan, ≤15 entries).

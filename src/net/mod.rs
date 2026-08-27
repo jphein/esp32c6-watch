@@ -16,6 +16,9 @@ pub mod mqtt_ha;
 #[allow(dead_code)]
 pub mod mqtt_climate;
 pub mod names;
+// smol #490: the CFG `B`/`O` runtime overrides (broker leg + OTA image-host)
+// — main writes, the MQTT/OTA paths read.
+pub mod overrides;
 // #53 net_task: the network owner (WiFi connect machine, scan, boot burst,
 // OTA). Spawned from main.rs; commands in via `net_task::send`, state out via
 // `net_task::snapshot` + NET_WAKE.

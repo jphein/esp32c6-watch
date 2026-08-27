@@ -78,10 +78,24 @@ pub async fn publish_burst(stack: Stack<'static>, batt_pct: u8) {
     // budget in that case ONLY; the common co-channel path is unchanged.
     let off_channel = off_mesh_channel();
     let budget = if off_channel { BURST_BUDGET_OFFCH } else { BURST_BUDGET };
+    // smol #490: the CFG-`B` override leg wins over the baked BROKER
+    // (`overrides::broker()` answers None when unset OR after its fallback
+    // ratchet tripped). The burst's FINAL verdict feeds the ratchet, so a
+    // typo'd override falls back to the baked broker after 3 failed bursts
+    // instead of silencing telemetry forever.
+    let (used_override, leg) = match crate::net::overrides::broker() {
+        Some((o, p)) => (true, Some((Ipv4Address::new(o[0], o[1], o[2], o[3]), p))),
+        None => (false, parse_broker(BROKER)),
+    };
+    let Some(leg) = leg else {
+        println!("[MQTT] failed: bad MQTT_BROKER (want ip:port)");
+        return;
+    };
     for attempt in 0..2 {
-        match with_timeout(budget, burst(stack, batt_pct, off_channel)).await {
+        match with_timeout(budget, burst(stack, batt_pct, off_channel, leg)).await {
             Ok(Ok(())) => {
                 println!("[MQTT] published");
+                crate::net::overrides::note_mqtt_session(used_override, true);
                 return;
             }
             Ok(Err(reason)) => {
@@ -92,10 +106,12 @@ pub async fn publish_burst(stack: Stack<'static>, batt_pct: u8) {
                     continue;
                 }
                 println!("[MQTT] failed: {reason}");
+                crate::net::overrides::note_mqtt_session(used_override, false);
                 return;
             }
             Err(_) => {
                 println!("[MQTT] failed: timeout (12s, outer backstop)");
+                crate::net::overrides::note_mqtt_session(used_override, false);
                 return;
             }
         }
@@ -141,10 +157,12 @@ async fn burst(
     stack: Stack<'static>,
     batt_pct: u8,
     off_channel: bool,
+    // smol #490: the leg to dial — resolved by the caller (override vs baked)
+    // so the caller can feed the session verdict to the fallback ratchet.
+    (ip, port): (Ipv4Address, u16),
 ) -> Result<(), &'static str> {
     let connect_to = if off_channel { CONNECT_TIMEOUT_OFFCH } else { CONNECT_TIMEOUT };
     let handshake_to = if off_channel { HANDSHAKE_TIMEOUT_OFFCH } else { HANDSHAKE_TIMEOUT };
-    let (ip, port) = parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?;
 
     let mut rx_buf = [0u8; 256];
     let mut tx_buf = [0u8; 1024];

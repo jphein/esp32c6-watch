@@ -216,6 +216,18 @@ pub fn mark_current_build_refused() {
     }
 }
 
+/// smol #490: a CFG-`O` apply clears the refused-build latch. The latch's
+/// premise ("the verdict is about the image bytes") does not hold for the
+/// host-gate refusal — the operator may have just admitted the host the
+/// announce names, and the same build must become fetchable again. A
+/// genuinely bad image simply re-latches on its next attempt.
+pub fn clear_refused_latch() {
+    let b = LAST_REFUSED_BUILD.lock(|cell| core::mem::take(&mut *cell.borrow_mut()));
+    if b != 0 {
+        println!("[OTA] refused-build latch cleared (was build {b}) - CFG O changed");
+    }
+}
+
 /// Download the firmware image into the inactive OTA slot and stage it for
 /// the next boot. `url_override` (from a push announce) replaces the baked
 /// [`URL`] for this one download.
@@ -252,6 +264,17 @@ async fn run(
     url: &str,
     progress: fn(u32, u32),
 ) -> Result<(), &'static str> {
+    // smol #490 (CFG `O`, fleet #100 S3): the image-host gate, BEFORE any
+    // network use. RFC1918 or the one CFG-`O` override host — a poisoned
+    // announce can already only serve a correctly-signed image (#489); this
+    // keeps the fetch itself on-LAN too. `refused:` so the build ratchet
+    // latches it like every other deterministic refusal.
+    {
+        let (addr, ..) = parse_url(url)?;
+        if !crate::net::overrides::ota_host_allowed(addr.octets()) {
+            return Err("refused: image host off-LAN (no CFG-O override for it)");
+        }
+    }
     // --- Slot selection: read the partition table + otadata -----------------
     // The returned table borrows `pt_mem`, NOT the flash handle (same pattern
     // as the boot-time scan in main.rs), so the lock guards can stay scoped.

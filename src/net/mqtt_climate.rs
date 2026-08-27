@@ -416,7 +416,22 @@ pub async fn run_climate_session(
     cmd_rx: ClimateCmdReceiver,
     close: &'static CloseSignal,
 ) -> Result<(), Error> {
-    let (ip, port) = parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?;
+    // smol #490: the CFG-`B` override leg wins over the baked BROKER — same
+    // resolution as `mqtt_ha::publish_burst`. Verdicts feed the fallback
+    // ratchet at the connect/CONNACK sites below (the handshake failures an
+    // unreachable-or-refusing broker actually produces); the ha burst is the
+    // ratchet's main driver, this session just must not dial a leg the
+    // ratchet already abandoned.
+    let (used_override, (ip, port)) = match crate::net::overrides::broker() {
+        Some((o, p)) => (
+            true,
+            (embassy_net::Ipv4Address::new(o[0], o[1], o[2], o[3]), p),
+        ),
+        None => (
+            false,
+            parse_broker(BROKER).ok_or("bad MQTT_BROKER (want ip:port)")?,
+        ),
+    };
     let t_start = Instant::now();
     SESSION_PHASE.store(PHASE_CONNECTING, core::sync::atomic::Ordering::Relaxed);
     // Drop commands queued during a PREVIOUS failed attempt / backoff window:
@@ -435,7 +450,10 @@ pub async fn run_climate_session(
     // broker aborts in ~2s instead of blocking the executor for the full handshake.
     match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, port))).await {
         Ok(Ok(())) => {}
-        _ => return Err("tcp connect"),
+        _ => {
+            crate::net::overrides::note_mqtt_session(used_override, false);
+            return Err("tcp connect");
+        }
     }
 
     // CONNECT (clean session, keepalive 30s) -> CONNACK. Reuses mqtt_ha's
@@ -453,11 +471,17 @@ pub async fn run_climate_session(
     let mut ack = [0u8; 4];
     read_exact(&mut socket, &mut ack).await?;
     if ack[0] != 0x20 || ack[1] != 0x02 {
+        crate::net::overrides::note_mqtt_session(used_override, false);
         return Err("bad CONNACK");
     }
     if ack[3] != 0x00 {
+        crate::net::overrides::note_mqtt_session(used_override, false);
         return Err("broker refused connection (check MQTT_USER/MQTT_PASS)");
     }
+    // The leg answered CONNACK-accept: this session is a ratchet SUCCESS
+    // regardless of how it later ends (a mid-session death hours in says
+    // nothing about the broker leg being wrong — smol #490 / fleet #100 S2).
+    crate::net::overrides::note_mqtt_session(used_override, true);
 
     // SUBSCRIBE watch/climate/+/state + watch/climate/roster (QoS 0) -> SUBACK.
     subscribe(&mut socket).await?;

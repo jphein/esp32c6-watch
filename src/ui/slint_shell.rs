@@ -1233,6 +1233,20 @@ impl ShellUi {
         ui.set_launcher_open(open);
     }
 
+    /// smol #490 (CFG `P`): rebuild the launcher pages after a
+    /// plugin-visibility mask change. The boot build is static (see the scene
+    /// setup); a mask edge is the one runtime event that invalidates it.
+    /// Clamps the current page back into the (possibly shorter) range.
+    pub fn rebuild_launcher(&self) {
+        let Some(ui) = self.ui.as_ref() else { return; };
+        let (tiles, titles) = build_launcher_pages();
+        let pages = titles.len().max(1) as i32;
+        ui.set_launcher_page_count(pages);
+        ui.set_launcher_page(ui.get_launcher_page().min(pages - 1).max(0));
+        ui.set_launcher_titles(ModelRc::from(Rc::new(VecModel::from(titles))));
+        ui.set_launcher_tiles(ModelRc::from(Rc::new(VecModel::from(tiles))));
+    }
+
     pub fn set_wled_open(&self, open: bool) {
         let Some(ui) = self.ui.as_ref() else { return; };
         ui.set_wled_open(open);
@@ -2711,7 +2725,13 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
             .enumerate()
             // hardware_present: capability gate (has-imu / has-audio). Rows
             // stay in REGISTRY so launch indexes never shift — see its doc.
-            .filter(|(_, d)| d.section == sec && d.hardware_present())
+            // mask_allows (smol #490, CFG `P`): the fleet plugin-visibility
+            // mask, same never-shift rule — hidden tiles keep their index.
+            .filter(|(_, d)| {
+                d.section == sec
+                    && d.hardware_present()
+                    && crate::apps::registry::mask_allows(d)
+            })
             .collect();
         for chunk in apps.chunks(LAUNCHER_PAGE_SLOTS) {
             titles.push(SharedString::from(sec.label()));

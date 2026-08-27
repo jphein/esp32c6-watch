@@ -509,6 +509,22 @@ const RGN_RECL: usize = 1;
 /// glass at ca4794d: a game launch moved main by exactly 820 B (the fb's
 /// full-width `row`) while reclaimed fell 51,456 B (the fb's `buf`) — first-fit
 /// by region order, doing precisely what it says.
+/// smol #490 CFG `W` heap gate — the fleet's floor verbatim
+/// (`rust/clock/budget.rs::SCAN_HEAP_FLOOR_BYTES` = scan peak + 50%):
+/// `scan_async` heap-allocates one `AccessPointInfo` per visible AP per
+/// channel of the sweep, so a scan started under pressure is an OOM lever.
+const SCAN_HEAP_FLOOR_BYTES: usize = 13_536;
+
+/// Free bytes in the MAIN heap region right now (the region games/scan
+/// allocations actually draw from — total `HEAP.free()` can read fine while
+/// this one is exhausted, see `log_heap`'s doc).
+fn main_region_free() -> usize {
+    esp_alloc::HEAP.stats().region_stats[RGN_MAIN]
+        .as_ref()
+        .map(|r| r.free)
+        .unwrap_or(0)
+}
+
 fn log_heap(tag: &str) {
     let stats = esp_alloc::HEAP.stats();
     let region_free = |i: usize| {
@@ -2006,6 +2022,28 @@ async fn main(_spawner: Spawner) -> ! {
         watch_cfg.node_id,
         watch_cfg.ssid.as_str()
     );
+    // smol #490: seed the CFG-`B`/`O` runtime overrides from the persisted
+    // record. A tripped broker fallback stays tripped across reboots — the
+    // operator clears it by sending a fresh CFG-`B`.
+    crate::net::overrides::seed(
+        watch_cfg.broker_override,
+        watch_cfg.broker_fallback,
+        watch_cfg.ota_host,
+    );
+    if let Some((bip, bport)) = watch_cfg.broker_override {
+        println!(
+            "[CFG] broker override {}.{}.{}.{}:{}{}",
+            bip[0],
+            bip[1],
+            bip[2],
+            bip[3],
+            bport,
+            if watch_cfg.broker_fallback { " (FALLEN BACK to baked)" } else { "" },
+        );
+    }
+    if let Some(oip) = watch_cfg.ota_host {
+        println!("[CFG] OTA-host override {}.{}.{}.{}", oip[0], oip[1], oip[2], oip[3]);
+    }
     // Boot reads above used the raw handle; everything from here shares it —
     // wrapped in the #55 write guard: the bootloader + partition-table region
     // and the slot the CPU executes from are write-protected. If the booted
@@ -2622,6 +2660,11 @@ async fn main(_spawner: Spawner) -> ! {
     // Deferred config persistence (#75). `Some(t)` = `watch_cfg` differs from
     // flash and last changed at `t`; the flush block below picks a quiet moment.
     let mut cfg_dirty_at: Option<Instant> = None;
+    // smol #490 CFG `L`: the status-LED mode (fleet #48). Status = the #491
+    // peer-state ladder; On/Off force the pixel. Never persisted — the
+    // gateway's retained CFG re-relays it, same as the fleet leaf.
+    #[cfg(feature = "has-ws2812")]
+    let mut led_cfg_mode = crate::net::smol_mesh::LedCfgMode::Status;
     // Heap LOW-WATER between beats. A 15s sample misses the trough: the beat
     // series showed 51K -> 17K -> 32K while the watch was being used, so the
     // real minimum during an app open is somewhere below what any beat printed.
@@ -3993,12 +4036,23 @@ async fn main(_spawner: Spawner) -> ! {
                 // #491: peer-state pixel — mesh is unconditional in this loop,
                 // so the ladder is blink (searching) / solid (>=1 peer); frames
                 // only go on the wire when the lit flag changes.
+                // smol #490 CFG `L`: On/Off override the ladder (fleet #48
+                // `led.apply_mode` semantics); Status is the ladder itself.
                 #[cfg(feature = "has-ws2812")]
                 ws2812_led.service(
-                    if peers > 0 {
-                        crate::peripherals::ws2812::LedState::Solid
-                    } else {
-                        crate::peripherals::ws2812::LedState::Blink
+                    match led_cfg_mode {
+                        crate::net::smol_mesh::LedCfgMode::Off => {
+                            crate::peripherals::ws2812::LedState::Off
+                        }
+                        crate::net::smol_mesh::LedCfgMode::On => {
+                            crate::peripherals::ws2812::LedState::Solid
+                        }
+                        crate::net::smol_mesh::LedCfgMode::Status if peers > 0 => {
+                            crate::peripherals::ws2812::LedState::Solid
+                        }
+                        crate::net::smol_mesh::LedCfgMode::Status => {
+                            crate::peripherals::ws2812::LedState::Blink
+                        }
                     },
                     now_ms,
                 );
@@ -4176,6 +4230,93 @@ async fn main(_spawner: Spawner) -> ! {
                                 esp_hal::system::software_reset();
                             } else {
                                 println!("[CFG] reboot ignored (boot debounce)");
+                            }
+                        }
+                        // smol #490 CFG `L` (fleet #48): LED mode. The S3's
+                        // WS2812 peer-state pixel obeys it at its service
+                        // site; a board with no status LED fitted (the C6)
+                        // consumes it — a fleet-global `L` broadcast must not
+                        // read as an unknown key — and says why it's inert.
+                        Some(MeshEvent::CfgLed { mode }) => {
+                            #[cfg(feature = "has-ws2812")]
+                            {
+                                led_cfg_mode = mode;
+                            }
+                            #[cfg(not(feature = "has-ws2812"))]
+                            {
+                                let _ = mode;
+                                println!("[CFG] L: no status LED on this board - inert");
+                            }
+                        }
+                        // smol #490 CFG `P` (fleet #55): plugin-visibility
+                        // mask. Edge-triggered launcher rebuild (hidden tiles
+                        // keep their launch index — the registry's never-shift
+                        // rule); never persisted, the retained CFG re-relays.
+                        Some(MeshEvent::CfgPlugins { mask }) => {
+                            if crate::apps::registry::set_plugin_mask(mask) != mask {
+                                shell.rebuild_launcher();
+                                println!("[CFG] P: launcher rebuilt (mask {mask:#06x})");
+                            }
+                        }
+                        // smol #490 CFG `B` (fleet #100 S2): broker override.
+                        // Edge-triggered on a CHANGE of the stored value —
+                        // the retained frame re-delivers every ~10 s, so an
+                        // unconditional apply would reset the fallback
+                        // ratchet forever. Applied to the NEXT session (the
+                        // GUI's sessions re-resolve the leg each time, so the
+                        // fleet's reboot lever isn't needed); persisted (v8).
+                        Some(MeshEvent::CfgBroker { addr }) => {
+                            let (cur, _) = crate::net::overrides::broker_stored();
+                            if addr != cur {
+                                crate::net::overrides::set_broker(addr);
+                                watch_cfg.broker_override = addr;
+                                watch_cfg.broker_fallback = false;
+                                cfg_dirty_at = Some(now);
+                                println!(
+                                    "[CFG] B: broker override changed (set={}) - next session dials it",
+                                    addr.is_some()
+                                );
+                            }
+                        }
+                        // smol #490 CFG `O` (fleet #100 S3): OTA image-host.
+                        // Live — the fetch gate reads at fetch time, no
+                        // reboot. A change clears the refused-build latch so
+                        // a build refused by the HOST gate (not by its bytes)
+                        // becomes fetchable once its host is admitted.
+                        Some(MeshEvent::CfgOtaHost { host }) => {
+                            if host != watch_cfg.ota_host {
+                                crate::net::overrides::set_ota_host(host);
+                                crate::net::ota_http::clear_refused_latch();
+                                watch_cfg.ota_host = host;
+                                cfg_dirty_at = Some(now);
+                                println!(
+                                    "[CFG] O: OTA-host override changed (set={})",
+                                    host.is_some()
+                                );
+                            }
+                        }
+                        // smol #490 CFG `W` (fleet #71): one-shot scan sweep,
+                        // behind the fleet's gates — never mid-OTA (the sweep
+                        // hops the PHY off the mesh channel: coexist), never
+                        // under heap pressure (scan_async heap-allocates one
+                        // AccessPointInfo per visible AP). A deferred scan is
+                        // DROPPED, not queued — `W` is transient, the
+                        // operator re-arms.
+                        Some(MeshEvent::CfgScan) => {
+                            let snap = crate::net::net_task::snapshot();
+                            if snap.ota.active() || mesh_ota.session.is_active() {
+                                println!("[CFG] W: scan skipped - OTA in flight (coexist)");
+                            } else if snap.scanning {
+                                println!("[CFG] W: scan already running");
+                            } else if main_region_free() < SCAN_HEAP_FLOOR_BYTES {
+                                println!(
+                                    "[CFG] W: scan skipped - main heap {} < floor {}",
+                                    main_region_free(),
+                                    SCAN_HEAP_FLOOR_BYTES
+                                );
+                            } else if crate::net::net_task::send(crate::net::net_task::NetCmd::Scan)
+                            {
+                                println!("[CFG] W: scan sweep queued");
                             }
                         }
                         Some(MeshEvent::Fam { frame, rssi }) => {
@@ -4630,6 +4771,15 @@ async fn main(_spawner: Spawner) -> ! {
         // taken once the HUD has closed AND no audio is streaming AND the mic
         // meter is off. `flash-guard` protects WHERE a write lands; this is the
         // missing WHEN.
+        // smol #490: the broker-fallback ratchet tripped in an MQTT task —
+        // persist the flag (config v8) so a reboot doesn't retry a leg three
+        // sessions already proved dead. One-shot; the tasks can't touch
+        // flash, main owns it.
+        if crate::net::overrides::take_fallback_tripped() {
+            watch_cfg.broker_fallback = true;
+            cfg_dirty_at = Some(now);
+            println!("[CFG] B: override FELL BACK to baked broker (3 failed sessions) - persisting");
+        }
         if let Some(dirty_at) = cfg_dirty_at {
             let settled = now >= dirty_at + Duration::from_millis(CFG_SETTLE_MS);
             let quiet = !audio_out::busy() && !meter_on;
