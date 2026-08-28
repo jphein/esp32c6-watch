@@ -1,10 +1,19 @@
 //! #13 — the PURE SMOLv1 relay-family wire codec + its ASCII field helpers.
 //!
+//! ⚠ VENDORED COPY — DIVERGED as of smol#528. This is a byte-for-byte vendored copy of the SMOLv1
+//! wire codec whose CANONICAL source is `rust/clock/src/net/wire.rs`. As of smol#528 (the `mf=`/
+//! `mfk=` MacVerdict benign-vs-actionable split) the two have DIVERGED: THIS copy still carries the
+//! pre-#471 single-`Fail` verdict. DO NOT implement the MAC trailer or any verifier from this file —
+//! one built here cannot tell a benign MAC mismatch from an actionable one, reintroducing #471 on
+//! exactly the boards whose frames made it matter. Canonical source: `rust/clock/src/net/wire.rs`.
+//! Tracking + the byte-identity gate that will make this drift loud: smol#529.
+//!
 //! Extracted verbatim from `net/mode.rs` (byte-identical — a pure move, no logic change) so the
 //! frame formats are HOST-unit-testable off-target, mirroring the `net/flood.rs` pure split. The
-//! bidirectional byte-compat guard in `experiments/relay_compat` `#[path]`-includes this module and
-//! asserts (a) a NEW-code frame parses under a vendored pre-#13 parser and (b) an old-format
-//! RELAYACK parses under this matcher — the permanent mixed-fleet / #124-migration insurance.
+//! bidirectional byte-compat guard in `experiments/relay_compat` `#[path]`-includes the CANONICAL
+//! `rust/clock` copy (NOT this vendored file — see the divergence warning above) and asserts (a) a
+//! NEW-code frame parses under a vendored pre-#13 parser and (b) an old-format RELAYACK parses under
+//! that matcher — the permanent mixed-fleet / #124-migration insurance.
 //!
 //! `mode.rs` re-exports everything here via `use crate::net::wire::*;`, so its call sites are
 //! unchanged. No `esp-hal`/`esp-wifi` deps — everything is `&[u8]` in / out.
@@ -351,7 +360,8 @@ pub fn parse_dl<'a>(prefix: &[u8], data: &'a [u8]) -> Option<(u32, &'a [u8])> {
 // stays plaintext (design §4.3). The ESP-NOW hardware CANNOT encrypt broadcast (#36), so this
 // software MAC is the reshaped #190 transport rung. It reuses the same `sha2` already in the OTA
 // path — no `esp-hal`/`esp-wifi` deps, so this stays the pure/host-testable codec module
-// (`experiments/mac_verify` `#[path]`-includes it, mirroring `flood`/`etx`).
+// (`experiments/mac_verify` `#[path]`-includes the CANONICAL `rust/clock` copy, NOT this vendored
+// file — see the divergence warning at the top of this module).
 //
 // Wire layout (trailer, appended after the frame): `… frame … | key-epoch(1 B) | tag(MAC_TAG_LEN)`
 //   tag = truncate(HMAC-SHA256(GROUP_KEY[epoch], frame_bytes ‖ epoch), MAC_TAG_LEN)
