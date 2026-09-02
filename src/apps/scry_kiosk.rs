@@ -31,7 +31,12 @@ use crate::drivers::ActivePanel;
 use crate::net::scry_client::{self, TapOutcome, FRAME_H, FRAME_W, HOST_CAP};
 use crate::peripherals::rc522::{Tap, UID_STR_CAP};
 
-/// Status-face refresh cadence. A frame costs ~3 s of the 5 s, per the spike.
+/// Status-face refresh TIMER. ⚠️ NOT the observed cadence: this timer starts
+/// after the previous paint completes, and a frame fetch+blit costs ~3 s plus
+/// main-loop latency, so the real cadence labels measured from the server is
+/// **~12 s** (deltas 7–15 s), not 5 s. The live status page doesn't change
+/// faster than that meaningfully, so this is documented, not chased — the
+/// honest number is ~12 s and the chronicle can lag reality by up to that.
 const FRAME_MS: u64 = 5_000;
 /// How long a tap holds the status face before the idle face returns.
 const STATUS_MS: u64 = 60_000;
@@ -110,7 +115,20 @@ impl Kiosk {
         let mode = core::mem::replace(&mut self.mode, Mode::WaitLink);
         match mode {
             Mode::WaitLink => {
-                if !connected || now_ms < self.next_paint_ms {
+                if !connected {
+                    self.mode = Mode::WaitLink;
+                    return None;
+                }
+                // A tap must never be silently dropped — even before the first
+                // idle paint. Someone eager taps a card the instant the station
+                // powers up; the link is what a tap needs (not a painted idle
+                // face), so once connected, handle it and take the panel. This
+                // was the one gap in WaitLink: the arm ignored `tap` entirely.
+                if let Some(tap) = tap {
+                    self.enter_status(stack, tap, display, now_ms).await;
+                    return Some(KioskAction::ParkScene);
+                }
+                if now_ms < self.next_paint_ms {
                     self.mode = Mode::WaitLink;
                     return None;
                 }
@@ -246,6 +264,12 @@ impl Kiosk {
     /// the whole frame (the bus latches RAMWR_CONT between strips — the
     /// measured-fast path); a mid-frame error leaves a torn frame the next
     /// paint repairs, which is the honest failure for a kiosk.
+    ///
+    /// A fetch abandoned deliberately (a re-tap mid-hold aborts the socket)
+    /// makes the SERVER log a `ConnectionResetError` on the /screen write —
+    /// EXPECTED, not a defect: it kills only that request's thread and the
+    /// next fetch succeeds. The abort is the correct response to "the user
+    /// tapped a new card, stop painting the old one.
     async fn paint(
         &mut self,
         stack: Stack<'static>,
