@@ -2467,6 +2467,19 @@ async fn main(_spawner: Spawner) -> ! {
         }
         crate::peripherals::ws2812::Ws2812::new(ch)
     };
+    // smol #540: the scry station's MFRC522 on SPI3 / the P3 jack. Station
+    // feature (never rides the board feature — id162's bench board has no
+    // reader); the wrong-board case is a compile_error in peripherals/mod.rs.
+    // Dark-degrades to inert if the version register answers garbage.
+    #[cfg(feature = "scry")]
+    let mut scry = crate::peripherals::rc522::Scry::new(
+        peripherals.SPI3,
+        peripherals.GPIO14,
+        peripherals.GPIO21,
+        peripherals.GPIO2,
+        peripherals.GPIO3,
+    );
+
     // Mesh Familiar (fleet #57): always-on holder/arbitration state machine,
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(node_id);
@@ -4002,6 +4015,18 @@ async fn main(_spawner: Spawner) -> ! {
                     },
                     now_ms,
                 );
+                // smol #540: poll the scry reader (self-paced to ~7 Hz inside).
+                // v1 surfaces the tap on the glass + serial; the /tap POST +
+                // /screen blit app consumes this event in the next commit.
+                #[cfg(feature = "scry")]
+                if let Some(tap) = scry.service(now_ms) {
+                    let mut msg: heapless::String<48> = heapless::String::new();
+                    {
+                        use core::fmt::Write as _;
+                        let _ = write!(msg, "scry: {}", tap.uid.as_str());
+                    }
+                    shell.set_toast(msg.as_str());
+                }
                 // DIAG record every 60s: full field set in spec order (the HA
                 // dashboard parses positionally), zeros where the watch has
                 // no equivalent counter yet.

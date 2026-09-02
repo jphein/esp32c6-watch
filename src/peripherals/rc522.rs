@@ -31,7 +31,7 @@ use esp_hal::spi::Mode;
 use esp_hal::time::Rate;
 use esp_hal::Blocking;
 use esp_println::println;
-use mfrc522::comm::blocking::spi::SpiInterface;
+use mfrc522::comm::blocking::spi::{DummyDelay, SpiInterface};
 use mfrc522::{Initialized, Mfrc522};
 
 /// Poll cadence. 6–7 Hz sits inside #540's 5–10 Hz ask; a WUPA round trip is
@@ -55,7 +55,7 @@ const UID_MAX: usize = 10;
 pub const UID_STR_CAP: usize = 32;
 
 type Reader = Mfrc522<
-    SpiInterface<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, Delay>>,
+    SpiInterface<ExclusiveDevice<Spi<'static, Blocking>, Output<'static>, Delay>, DummyDelay>,
     Initialized,
 >;
 
