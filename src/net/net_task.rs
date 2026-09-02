@@ -151,6 +151,13 @@ pub enum Hold {
     /// Appended last so no existing discriminant — and therefore no existing
     /// bit — moves.
     Story,
+    /// smol #540: the scry station kiosk. Mains-powered infra that polls the
+    /// station API on a 5 s cadence — raised once at kiosk start and held for
+    /// the uptime (a station without its link is a brick with a nice idle
+    /// face). Its own bit, its own name in the mask logs, per the
+    /// new-failure-source rule; appended last so no existing bit moves.
+    #[cfg(feature = "scry")]
+    Scry,
 }
 
 impl Hold {
@@ -164,6 +171,8 @@ impl Hold {
             Hold::Session => "session",
             Hold::Voice => "voice",
             Hold::Ota => "ota",
+            #[cfg(feature = "scry")]
+            Hold::Scry => "scry",
             Hold::Phy => "phy",
             Hold::Story => "story",
         }

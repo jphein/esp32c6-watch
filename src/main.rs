@@ -2480,6 +2480,19 @@ async fn main(_spawner: Spawner) -> ! {
         peripherals.GPIO3,
     );
 
+    // smol #540: the scry kiosk state machine + its held WiFi association.
+    // Raised ONCE — a station polling the API every 5 s wants the link up for
+    // its uptime (Hold::Scry, its own mask bit). Only a reader-present station
+    // build arms it; a scry build on reader-less hardware stays a normal watch.
+    #[cfg(feature = "scry")]
+    let mut kiosk = crate::apps::scry_kiosk::Kiosk::new();
+    #[cfg(feature = "scry")]
+    if scry.present() {
+        crate::net::net_task::send(crate::net::net_task::NetCmd::Raise(
+            crate::net::net_task::Hold::Scry,
+        ));
+    }
+
     // Mesh Familiar (fleet #57): always-on holder/arbitration state machine,
     // ticked alongside mesh.tick. The creature renders on the watchface.
     let mut familiar = crate::net::familiar::FamState::new(node_id);
@@ -4015,17 +4028,43 @@ async fn main(_spawner: Spawner) -> ! {
                     },
                     now_ms,
                 );
-                // smol #540: poll the scry reader (self-paced to ~7 Hz inside).
-                // v1 surfaces the tap on the glass + serial; the /tap POST +
-                // /screen blit app consumes this event in the next commit.
+                // smol #540: the scry kiosk. Poll the reader (self-paced ~7 Hz),
+                // then step the state machine — it POSTs /tap, streams the
+                // status/idle faces straight to the panel, and asks main to
+                // park/unpark the Slint scene. A BOOT short-press (pending_button)
+                // is CONSUMED here while the kiosk owns the glass, so it lends the
+                // panel back to the watch UI instead of firing its mapped action.
                 #[cfg(feature = "scry")]
-                if let Some(tap) = scry.service(now_ms) {
-                    let mut msg: heapless::String<48> = heapless::String::new();
-                    {
-                        use core::fmt::Write as _;
-                        let _ = write!(msg, "scry: {}", tap.uid.as_str());
+                if scry.present() {
+                    let tap = scry.service(now_ms);
+                    let boot_for_kiosk =
+                        kiosk.owns_panel() && matches!(pending_button, Some(_));
+                    if boot_for_kiosk {
+                        pending_button = None; // the kiosk eats this press
                     }
-                    shell.set_toast(msg.as_str());
+                    let net = crate::net::net_task::snapshot();
+                    if let Some(action) = kiosk
+                        .tick(
+                            stack,
+                            net.phase.ready(),
+                            tap.as_ref(),
+                            boot_for_kiosk,
+                            &mut display,
+                            now_ms,
+                        )
+                        .await
+                    {
+                        match action {
+                            crate::apps::scry_kiosk::KioskAction::ParkScene => {
+                                shell.suspend_scene();
+                            }
+                            crate::apps::scry_kiosk::KioskAction::UnparkScene => {
+                                shell.resume_scene();
+                                prev_page = -1;
+                                prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
+                            }
+                        }
+                    }
                 }
                 // DIAG record every 60s: full field set in spec order (the HA
                 // dashboard parses positionally), zeros where the watch has

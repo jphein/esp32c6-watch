@@ -145,6 +145,16 @@ pub async fn post_tap(stack: Stack<'static>, uid: &str) -> TapOutcome {
     TapOutcome::Bound(host)
 }
 
+/// Stream the station's resting face (`/screen-idle`, contract v4: gradient
+/// void + orb + "TAP A DEVICE CARD HERE" + clock footer — 812 ms measured).
+/// Same wire shape as [`fetch_screen`]; separate route, same streaming.
+pub async fn fetch_idle(
+    stack: Stack<'static>,
+    blit: &mut dyn FnMut(u16, u16, &[u8]),
+) -> Result<(), &'static str> {
+    fetch_frame(stack, FramePath::Idle, blit).await
+}
+
 /// Stream one status frame, handing each 8-row strip (big-endian RGB565
 /// bytes, display-ready) to `blit(y0, rows, bytes)`. `host` = `Some(name)`
 /// for `/screen/<name>`, `None` for `/screen-unbound/<uid>`.
@@ -158,16 +168,38 @@ pub async fn fetch_screen(
     uid: &str,
     blit: &mut dyn FnMut(u16, u16, &[u8]),
 ) -> Result<(), &'static str> {
+    let path = match host {
+        Some(h) => FramePath::Host(h),
+        None => FramePath::Unbound(uid),
+    };
+    fetch_frame(stack, path, blit).await
+}
+
+enum FramePath<'a> {
+    Idle,
+    Host(&'a str),
+    Unbound(&'a str),
+}
+
+async fn fetch_frame(
+    stack: Stack<'static>,
+    path: FramePath<'_>,
+    blit: &mut dyn FnMut(u16, u16, &[u8]),
+) -> Result<(), &'static str> {
     let (ip, port) = endpoint().ok_or("bad SCRY_HOST (want ip:port)")?;
     let mut req: heapless::String<192> = heapless::String::new();
     {
         use core::fmt::Write as _;
-        let r = match host {
-            Some(h) => write!(
+        let r = match path {
+            FramePath::Idle => write!(
+                req,
+                "GET /screen-idle?k={TOKEN} HTTP/1.0\r\nHost: {HOST}\r\nConnection: close\r\n\r\n"
+            ),
+            FramePath::Host(h) => write!(
                 req,
                 "GET /screen/{h}?k={TOKEN} HTTP/1.0\r\nHost: {HOST}\r\nConnection: close\r\n\r\n"
             ),
-            None => write!(
+            FramePath::Unbound(uid) => write!(
                 req,
                 "GET /screen-unbound/{uid}?k={TOKEN} HTTP/1.0\r\nHost: {HOST}\r\nConnection: close\r\n\r\n"
             ),
