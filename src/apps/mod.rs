@@ -10,6 +10,9 @@ pub mod tetris;
 pub mod flappy;
 pub mod maze;
 pub mod registry;
+// smol #540: the scry station kiosk state machine (station builds only).
+#[cfg(feature = "scry")]
+pub mod scry_kiosk;
 pub mod session;
 #[cfg(feature = "bard")]
 pub mod bard;
