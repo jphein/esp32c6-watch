@@ -3963,6 +3963,52 @@ async fn main(_spawner: Spawner) -> ! {
                     Err(e) => println!("[MESH] add_peer failed: {e:?}"),
                 }
             }
+            // smol #540: the scry kiosk ticks EVERY loop, independent of the
+            // mesh — a station has no ESP-NOW peers (witnessed mesh=0), so this
+            // must NOT live inside the mesh-gated block below (where an earlier
+            // draft stranded it: wifi=1, ip up, yet the kiosk never painted).
+            #[cfg(feature = "scry")]
+            if scry.present() {
+                let now_ms = now.as_millis();
+                // Keep the glass bright while the kiosk owns it: card taps are
+                // not touch events, so without this the server-rendered face
+                // would AOD-dim on the inactivity timer (witnessed screen=1).
+                // When the kiosk is Suspended (BOOT lent the glass back), it
+                // does NOT own the panel, so the watch UI dims normally.
+                if kiosk.owns_panel() {
+                    last_interaction = now;
+                }
+                let tap = scry.service(now_ms);
+                let boot_for_kiosk =
+                    kiosk.owns_panel() && matches!(pending_button, Some(_));
+                if boot_for_kiosk {
+                    pending_button = None; // the kiosk eats this press
+                }
+                let net = crate::net::net_task::snapshot();
+                if let Some(action) = kiosk
+                    .tick(
+                        stack,
+                        net.phase.ready(),
+                        tap.as_ref(),
+                        boot_for_kiosk,
+                        &mut display,
+                        now_ms,
+                    )
+                    .await
+                {
+                    match action {
+                        crate::apps::scry_kiosk::KioskAction::ParkScene => {
+                            shell.suspend_scene();
+                        }
+                        crate::apps::scry_kiosk::KioskAction::UnparkScene => {
+                            shell.resume_scene();
+                            prev_page = -1;
+                            prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
+                        }
+                    }
+                }
+            }
+
             if esp_now_peer_added && mesh_enabled {
                 let now_ms = now.as_millis();
                 let uptime_secs = now.as_secs();
@@ -4034,38 +4080,6 @@ async fn main(_spawner: Spawner) -> ! {
                 // park/unpark the Slint scene. A BOOT short-press (pending_button)
                 // is CONSUMED here while the kiosk owns the glass, so it lends the
                 // panel back to the watch UI instead of firing its mapped action.
-                #[cfg(feature = "scry")]
-                if scry.present() {
-                    let tap = scry.service(now_ms);
-                    let boot_for_kiosk =
-                        kiosk.owns_panel() && matches!(pending_button, Some(_));
-                    if boot_for_kiosk {
-                        pending_button = None; // the kiosk eats this press
-                    }
-                    let net = crate::net::net_task::snapshot();
-                    if let Some(action) = kiosk
-                        .tick(
-                            stack,
-                            net.phase.ready(),
-                            tap.as_ref(),
-                            boot_for_kiosk,
-                            &mut display,
-                            now_ms,
-                        )
-                        .await
-                    {
-                        match action {
-                            crate::apps::scry_kiosk::KioskAction::ParkScene => {
-                                shell.suspend_scene();
-                            }
-                            crate::apps::scry_kiosk::KioskAction::UnparkScene => {
-                                shell.resume_scene();
-                                prev_page = -1;
-                                prev_radios = (!wifi_connected, ble_on, last_mesh_peers);
-                            }
-                        }
-                    }
-                }
                 // DIAG record every 60s: full field set in spec order (the HA
                 // dashboard parses positionally), zeros where the watch has
                 // no equivalent counter yet.

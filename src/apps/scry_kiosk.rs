@@ -37,8 +37,12 @@ const FRAME_MS: u64 = 5_000;
 const STATUS_MS: u64 = 60_000;
 /// How long a BOOT press lends the glass back to the normal watch UI.
 const SUSPEND_MS: u64 = 60_000;
-/// Idle-face repaint cadence (its footer carries a clock).
-const IDLE_REPAINT_MS: u64 = 60_000;
+/// Idle-face repaint cadence. 10 s (not per-minute) so the server's transient
+/// idle prompts reach the glass promptly — the `/imbue` rite (labels) arms a
+/// 180 s pending bind and `/screen-idle` then shows "PRESENT A BLANK CARD" /
+/// "CARD IMBUED"; a slow repaint would strand that prompt. The station is
+/// mains-powered, so a 10 s HTTP poll costs nothing worth saving.
+const IDLE_REPAINT_MS: u64 = 10_000;
 /// Retry cadence for a failed paint (server down, link flap).
 const RETRY_MS: u64 = 10_000;
 

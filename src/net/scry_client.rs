@@ -19,6 +19,8 @@
 //! blit — a full-frame buffer never exists (the spike measured 2,961 ms per
 //! fetch+blit this way; the wire is the cost, the SPI half is noise).
 
+use alloc::vec;
+
 use embassy_net::{tcp::TcpSocket, Stack};
 use embassy_time::{with_timeout, Duration};
 use esp_println::println;
@@ -71,8 +73,8 @@ async fn exchange<'b>(
     buf: &'b mut [u8],
 ) -> Result<&'b [u8], &'static str> {
     let (ip, port) = endpoint().ok_or("bad SCRY_HOST (want ip:port)")?;
-    let mut rx = [0u8; 1024];
-    let mut tx = [0u8; 512];
+    let mut rx = vec![0u8; 1024];
+    let mut tx = vec![0u8; 512];
     let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
     socket.set_timeout(Some(STALL_TIMEOUT));
     match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, port))).await {
@@ -208,9 +210,13 @@ async fn fetch_frame(
             return Err("screen: request too long");
         }
     }
-    // 8 KiB RX: the spike measured per-strip stalls with a small window.
-    let mut rx = [0u8; 8192];
-    let mut tx = [0u8; 512];
+    // Heap, not stack: this future is awaited INLINE in main's loop, so a
+    // stack buffer here counts against main's #59 stack floor — and 8 KiB RX
+    // + a strip blew it (68,604 < 71,680, boot-loop). The watch has a heap;
+    // these are transient per-fetch. 8 KiB RX: the spike measured per-strip
+    // stalls with a small window.
+    let mut rx = vec![0u8; 8192];
+    let mut tx = vec![0u8; 512];
     let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
     socket.set_timeout(Some(STALL_TIMEOUT));
     match with_timeout(CONNECT_TIMEOUT, socket.connect((ip, port))).await {
@@ -250,7 +256,7 @@ async fn fetch_frame(
     }
 
     // --- Stream exactly FRAME_BYTES, strip by strip ------------------------
-    let mut strip = [0u8; STRIP_BYTES];
+    let mut strip = vec![0u8; STRIP_BYTES]; // heap — see the rx note above
     let mut strip_n = 0usize;
     let mut total = 0usize;
     let mut y: u16 = 0;

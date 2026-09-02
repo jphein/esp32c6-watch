@@ -181,12 +181,24 @@ impl Hold {
 
 /// Holds that want an *association* (PHY + connect); `Phy` wants the radio
 /// started only.
+// smol #540: the scry kiosk holds the association up for its uptime — it polls
+// the station API every 5 s, so its hold MUST drive association intent (and
+// reconnection after a drop), not merely appear in the mask. Witnessed
+// 2026-09-01: without this the station associated once, NTP-synced, dropped,
+// and never came back (wifi=0) — the kiosk never reached ready() to paint.
+// cfg'd because `Hold::Scry` only exists in a scry build; 0 otherwise.
+#[cfg(feature = "scry")]
+const SCRY_ASSOC_BIT: u8 = Hold::Scry.bit();
+#[cfg(not(feature = "scry"))]
+const SCRY_ASSOC_BIT: u8 = 0;
+
 const ASSOC_HOLDS: u8 = Hold::User.bit()
     | Hold::Burst.bit()
     | Hold::Session.bit()
     | Hold::Voice.bit()
     | Hold::Story.bit()
-    | Hold::Ota.bit();
+    | Hold::Ota.bit()
+    | SCRY_ASSOC_BIT;
 
 /// A command for the network owner. See the module docs for semantics.
 pub enum NetCmd {
