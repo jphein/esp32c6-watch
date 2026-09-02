@@ -45,8 +45,8 @@ pub const STRIP_ROWS: usize = 8;
 const STRIP_BYTES: usize = FRAME_W * STRIP_ROWS * 2;
 const FRAME_BYTES: usize = FRAME_W * FRAME_H * 2;
 
-/// Longest host name we accept back from `/tap` (server names are short).
-pub const HOST_CAP: usize = 24;
+/// Longest host name accepted from `/tap` — the tested parser's bound.
+pub use scry_proto::HOST_CAP;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 /// Per-read inactivity budget. The spike's whole frame is ~3 s; a socket
@@ -128,23 +128,16 @@ pub async fn post_tap(stack: Stack<'static>, uid: &str) -> TapOutcome {
         println!("[SCRY] tap refused: {}", text.lines().next().unwrap_or("?"));
         return TapOutcome::Failed("tap: non-200 (token? binding route?)");
     }
-    // Minimal JSON peel: `"host":null` or `"host":"name"`. The body is the
-    // server's own compact shape; a full parser earns nothing here.
-    let Some(at) = text.find("\"host\"") else {
-        return TapOutcome::Failed("tap: no host field");
-    };
-    let rest = text[at + 6..].trim_start_matches([':', ' ']);
-    if rest.starts_with("null") {
-        return TapOutcome::Unbound;
+    // Peel the host field with the host-TESTED parser (scry-proto): bound /
+    // unbound / rejected, adversarial against a truncated or malformed body.
+    match scry_proto::parse_tap_host(text) {
+        scry_proto::TapHost::Bound(h) => TapOutcome::Bound(h),
+        scry_proto::TapHost::Unbound => TapOutcome::Unbound,
+        scry_proto::TapHost::Rejected(why) => {
+            println!("[SCRY] tap response rejected: {why}");
+            TapOutcome::Failed("tap: unreadable host field")
+        }
     }
-    let Some(name) = rest.strip_prefix('"').and_then(|r| r.split('"').next()) else {
-        return TapOutcome::Failed("tap: malformed host");
-    };
-    let mut host: heapless::String<HOST_CAP> = heapless::String::new();
-    if host.push_str(name).is_err() {
-        return TapOutcome::Failed("tap: host name too long");
-    }
-    TapOutcome::Bound(host)
 }
 
 /// Stream the station's resting face (`/screen-idle`, contract v4: gradient

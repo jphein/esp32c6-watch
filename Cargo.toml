@@ -104,7 +104,7 @@ mesh-ota = []
 # glass). A STATION build, not a board fact: id162's bench board has no reader wired, so this
 # never rides board-esp32s3-cyd — station images add `--features scry`. The driver dark-degrades
 # on a version-register sanity failure, so a scry build on reader-less hardware still boots.
-scry = ["dep:mfrc522"]
+scry = ["dep:mfrc522", "dep:scry-proto"]
 # cast (#36): mirror the live scene onto a WLED LED matrix over UDP. Opt-in —
 # the flusher tap and UDP path cfg out entirely when off, so default builds
 # are byte-identical. Pixel-correctness needs a matrix on the bench; the math
@@ -350,6 +350,7 @@ hunt = { path = "crates/hunt" }
 mesh-elect = { path = "crates/mesh-elect" }
 mesh-flood = { path = "crates/mesh-flood" }
 ota-proto = { path = "crates/ota-proto" }
+scry-proto = { path = "crates/scry-proto", optional = true }
 cast-core = { path = "crates/cast-core", optional = true }
 bard-core = { path = "crates/bard-core", optional = true }
 # mesh-OTA readback verify (ota_mesh.rs); same pin as ota-proto's.

@@ -285,16 +285,12 @@ impl Kiosk {
             let mut blit = |_y0: u16, rows: u16, bytes: &[u8]| {
                 // BE wire bytes -> u16 pixels, one panel row at a time
                 // (320 px = 640 B on the stack — deliberately not a
-                // strip-sized buffer; #438: stack is not headroom).
+                // strip-sized buffer; #438: stack is not headroom). The
+                // per-row conversion is scry-proto's host-tested hot loop.
                 let mut row = [0u16; FRAME_W];
                 for r in 0..rows as usize {
                     let base = r * FRAME_W * 2;
-                    for (i, px) in row.iter_mut().enumerate() {
-                        *px = u16::from_be_bytes([
-                            bytes[base + 2 * i],
-                            bytes[base + 2 * i + 1],
-                        ]);
-                    }
+                    scry_proto::be_row_to_pixels(&bytes[base..], &mut row);
                     bus.stream_pixels(&row);
                 }
             };

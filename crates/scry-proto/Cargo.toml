@@ -1,0 +1,9 @@
+[package]
+name = "scry-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std scry-station protocol core: the /tap JSON response peel (bound/unbound/malformed) and the rgb565-BE wire → panel-pixel row conversion. Adversarial (parses an untrusted HTTP server response). Host-testable. The pure half of src/net/scry_client.rs (smol #540)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+heapless = "0.9"
