@@ -3990,6 +3990,7 @@ async fn main(_spawner: Spawner) -> ! {
                         stack,
                         net.phase.ready(),
                         tap.as_ref(),
+                        &mut scry,
                         boot_for_kiosk,
                         &mut display,
                         now_ms,

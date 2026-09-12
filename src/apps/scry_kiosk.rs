@@ -29,7 +29,7 @@ use esp_println::println;
 
 use crate::drivers::ActivePanel;
 use crate::net::scry_client::{self, TapOutcome, FRAME_H, FRAME_W, HOST_CAP};
-use crate::peripherals::rc522::{Tap, UID_STR_CAP};
+use crate::peripherals::rc522::{Scry, Tap, UID_STR_CAP};
 
 /// Status-face refresh TIMER. ⚠️ NOT the observed cadence: this timer starts
 /// after the previous paint completes, and a frame fetch+blit costs ~3 s plus
@@ -108,6 +108,7 @@ impl Kiosk {
         stack: Stack<'static>,
         connected: bool,
         tap: Option<&Tap>,
+        scry: &mut Scry,
         boot_pressed: bool,
         display: &mut ActivePanel<'static>,
         now_ms: u64,
@@ -125,7 +126,7 @@ impl Kiosk {
                 // face), so once connected, handle it and take the panel. This
                 // was the one gap in WaitLink: the arm ignored `tap` entirely.
                 if let Some(tap) = tap {
-                    self.enter_status(stack, tap, display, now_ms).await;
+                    self.enter_status(stack, scry, tap, display, now_ms).await;
                     return Some(KioskAction::ParkScene);
                 }
                 if now_ms < self.next_paint_ms {
@@ -150,7 +151,7 @@ impl Kiosk {
                 }
                 if let Some(tap) = tap {
                     // Already owned the panel: no scene action needed.
-                    self.enter_status(stack, tap, display, now_ms).await;
+                    self.enter_status(stack, scry, tap, display, now_ms).await;
                     return None;
                 }
                 if now_ms >= self.next_paint_ms {
@@ -172,7 +173,7 @@ impl Kiosk {
                 }
                 if let Some(tap) = tap {
                     // A new card (or the same card re-armed) restarts the flow.
-                    self.enter_status(stack, tap, display, now_ms).await;
+                    self.enter_status(stack, scry, tap, display, now_ms).await;
                     return None;
                 }
                 if now_ms >= until_ms {
@@ -196,7 +197,7 @@ impl Kiosk {
             Mode::Suspended { until_ms } => {
                 if let Some(tap) = tap {
                     // A tap re-enters the kiosk immediately — the card wins.
-                    self.enter_status(stack, tap, display, now_ms).await;
+                    self.enter_status(stack, scry, tap, display, now_ms).await;
                     return Some(KioskAction::ParkScene);
                 }
                 if now_ms >= until_ms {
@@ -221,6 +222,7 @@ impl Kiosk {
     async fn enter_status(
         &mut self,
         stack: Stack<'static>,
+        scry: &mut Scry,
         tap: &Tap,
         display: &mut ActivePanel<'static>,
         now_ms: u64,
@@ -230,8 +232,11 @@ impl Kiosk {
         // Local copy so `Face` never borrows `self` across `paint(&mut self)`.
         let uid: heapless::String<UID_STR_CAP> = self.uid.clone();
         let host = match scry_client::post_tap(stack, uid.as_str()).await {
-            TapOutcome::Bound(h) => {
+            TapOutcome::Bound { host: h, inscribe } => {
                 println!("[SCRY] {} -> {} (summoned)", uid, h.as_str());
+                if let Some(url) = inscribe {
+                    Self::inscribe(stack, scry, uid.as_str(), url.as_str()).await;
+                }
                 Some(h)
             }
             TapOutcome::Unbound => {
@@ -258,6 +263,33 @@ impl Kiosk {
             until_ms: now_ms + STATUS_MS,
         };
         self.next_paint_ms = now_ms + FRAME_MS;
+    }
+
+    /// The inscribe half of an imbue: the server named the card's URL and the
+    /// card is still on the pad — write it as an NDEF URI, read it back, and
+    /// report the verdict so the IMBUED face can show it.
+    async fn inscribe(stack: Stack<'static>, scry: &mut Scry, uid: &str, url: &str) {
+        let mut ndef = [0u8; scry_proto::NDEF_CAP];
+        let verdict: Result<u8, &str> = match scry_proto::ndef_uri_tlv(url, &mut ndef) {
+            None => Err("URL does not fit a Type 2 tag"),
+            Some(n) => match scry.inscribe(&ndef[..n]) {
+                Ok(done) => {
+                    println!(
+                        "[SCRY] inscribed {uid} <- {url} ({} pages{})",
+                        done.pages,
+                        if done.already { ", already carried it" } else { "" }
+                    );
+                    Ok(done.pages)
+                }
+                Err(e) => {
+                    println!("[SCRY] inscribe FAILED {uid}: {}", e.label());
+                    Err(e.label())
+                }
+            },
+        };
+        if let Err(e) = scry_client::post_inscribed(stack, uid, verdict).await {
+            println!("[SCRY] inscribe report failed: {e}");
+        }
     }
 
     /// Stream one face onto the panel. One address window + one RAMWR run for

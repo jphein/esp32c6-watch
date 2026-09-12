@@ -49,6 +49,11 @@ const REARM_MS: u64 = 30_000;
 /// what JP's unit actually reads; labels spike verdict).
 const KNOWN_VERSIONS: [u8; 5] = [0x82, 0x88, 0x90, 0x91, 0x92];
 
+/// First user page of a Type 2 tag. Pages 0–1 are the UID, page 2 the ONE-WAY
+/// lock bytes, page 3 the OTP capability container — the inscribe rite never
+/// writes below this, and there is no override.
+const FIRST_USER_PAGE: u8 = 4;
+
 /// Longest ISO14443A UID is 10 bytes ("triple size").
 const UID_MAX: usize = 10;
 /// "AA:BB:…" for 10 bytes = 29 chars; 32 rounds up.
@@ -63,6 +68,44 @@ type Reader = Mfrc522<
 /// (uppercase colon-hex).
 pub struct Tap {
     pub uid: heapless::String<UID_STR_CAP>,
+}
+
+/// A finished inscribe: how many 4-byte pages the message spans, and whether
+/// the tag already carried exactly it (then nothing was written).
+pub struct Inscribed {
+    pub pages: u8,
+    pub already: bool,
+}
+
+/// Why an inscribe did not happen. `label()` is the wire/serial wording.
+pub enum InscribeError {
+    NoReader,
+    NoTag,
+    Select,
+    NotType2,
+    NoCc([u8; 4]),
+    TooSmall { need: usize, have: usize },
+    Read(u8),
+    Write(u8),
+    Nak(u8),
+    Verify,
+}
+
+impl InscribeError {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NoReader => "no reader",
+            Self::NoTag => "card left the pad",
+            Self::Select => "anticollision failed",
+            Self::NotType2 => "not a Type 2 tag (MIFARE Classic?)",
+            Self::NoCc(_) => "no NDEF capability container - refusing to format page 3",
+            Self::TooSmall { .. } => "tag too small for the URL",
+            Self::Read(_) => "readback failed",
+            Self::Write(_) => "write not answered",
+            Self::Nak(_) => "write NAKed (locked page?)",
+            Self::Verify => "readback mismatch",
+        }
+    }
 }
 
 pub struct Scry {
@@ -134,6 +177,87 @@ impl Scry {
     /// True when the sanity check found a live reader at boot.
     pub fn present(&self) -> bool {
         self.reader.is_some()
+    }
+
+    /// The inscribe rite (scry.realm.watch, 2026-09-11): write `tlv` — an NDEF
+    /// message from `scry_proto::ndef_uri_tlv` — onto the Type 2 tag on the
+    /// pad, from page 4, then read every page back. Called right after a `/tap`
+    /// the server answered with `"inscribe"`; the card is still under the
+    /// hand that tapped it (we HLTA'd it, WUPA wakes it).
+    ///
+    /// Refuses, never formats: a tag whose page 3 is not an NDEF capability
+    /// container is reported, not written — page 3 is one-time-programmable
+    /// and the lock bytes on page 2 are one-way. ⛔ Never lock a tag.
+    pub fn inscribe(&mut self, tlv: &[u8]) -> Result<Inscribed, InscribeError> {
+        let reader = self.reader.as_mut().ok_or(InscribeError::NoReader)?;
+        let atqa = reader.wupa().map_err(|_| InscribeError::NoTag)?;
+        reader.select(&atqa).map_err(|_| InscribeError::Select)?;
+        // Pages 0–3 in one READ: UID, UID+BCC, lock bytes, CC. A MIFARE
+        // Classic refuses an unauthenticated READ here — that is our tell.
+        let head = reader.mf_read(0).map_err(|_| InscribeError::NotType2)?;
+        let cc: [u8; 4] = [head[12], head[13], head[14], head[15]];
+        let Some(cap) = scry_proto::t2t_capacity(&cc) else {
+            let _ = reader.hlta();
+            return Err(InscribeError::NoCc(cc));
+        };
+        if tlv.len() > cap {
+            let _ = reader.hlta();
+            return Err(InscribeError::TooSmall { need: tlv.len(), have: cap });
+        }
+        let pages = (tlv.len() / 4) as u8;
+        // Already carrying exactly this message? Say so and touch nothing.
+        match Self::carries(reader, tlv) {
+            Ok(true) => {
+                let _ = reader.hlta();
+                return Ok(Inscribed { pages, already: true });
+            }
+            Ok(false) => {}
+            Err(e) => {
+                let _ = reader.hlta();
+                return Err(e);
+            }
+        }
+        for (i, chunk) in tlv.chunks(4).enumerate() {
+            let page = FIRST_USER_PAGE + i as u8;
+            // T2T WRITE: A2 <page> <4 bytes> CRC_A → 4-bit ACK (0xA) or NAK.
+            let mut frame = [0u8; 8];
+            frame[0] = 0xA2;
+            frame[1] = page;
+            frame[2..6].copy_from_slice(chunk);
+            let crc = scry_proto::crc_a(&frame[..6]);
+            frame[6..].copy_from_slice(&crc);
+            let ack = match reader.transceive::<1>(&frame, 0, 0) {
+                Ok(a) => a,
+                Err(_) => {
+                    let _ = reader.hlta();
+                    return Err(InscribeError::Write(page));
+                }
+            };
+            if ack.valid_bytes != 1 || ack.valid_bits != 4 || ack.buffer[0] & 0x0F != 0x0A {
+                let _ = reader.hlta();
+                return Err(InscribeError::Nak(page));
+            }
+        }
+        let verified = Self::carries(reader, tlv);
+        let _ = reader.hlta();
+        match verified {
+            Ok(true) => Ok(Inscribed { pages, already: false }),
+            Ok(false) => Err(InscribeError::Verify),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Does the tag's user memory start with exactly `tlv`? Reads 16 B (four
+    /// pages) per READ from page 4.
+    fn carries(reader: &mut Reader, tlv: &[u8]) -> Result<bool, InscribeError> {
+        for (i, chunk) in tlv.chunks(16).enumerate() {
+            let page = FIRST_USER_PAGE + (i * 4) as u8;
+            let block = reader.mf_read(page).map_err(|_| InscribeError::Read(page))?;
+            if block[..chunk.len()] != *chunk {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// One poll step; call every main-loop tick, it self-paces to [`POLL_MS`].

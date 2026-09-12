@@ -46,7 +46,7 @@ const STRIP_BYTES: usize = FRAME_W * STRIP_ROWS * 2;
 const FRAME_BYTES: usize = FRAME_W * FRAME_H * 2;
 
 /// Longest host name accepted from `/tap` — the tested parser's bound.
-pub use scry_proto::HOST_CAP;
+pub use scry_proto::{HOST_CAP, URL_CAP};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 /// Per-read inactivity budget. The spike's whole frame is ~3 s; a socket
@@ -54,8 +54,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const STALL_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub enum TapOutcome {
-    /// The sigil is bound: paint `/screen/<host>`.
-    Bound(heapless::String<HOST_CAP>),
+    /// The sigil is bound: paint `/screen/<host>`. `inscribe` is set on the
+    /// tap that consumed an imbue: the card's URL, for the station to write
+    /// onto the tag while it is still on the pad (the inscribe rite).
+    Bound {
+        host: heapless::String<HOST_CAP>,
+        inscribe: Option<heapless::String<URL_CAP>>,
+    },
     /// Unbound sigil: paint `/screen-unbound/<uid>` once.
     Unbound,
     Failed(&'static str),
@@ -131,12 +136,57 @@ pub async fn post_tap(stack: Stack<'static>, uid: &str) -> TapOutcome {
     // Peel the host field with the host-TESTED parser (scry-proto): bound /
     // unbound / rejected, adversarial against a truncated or malformed body.
     match scry_proto::parse_tap_host(text) {
-        scry_proto::TapHost::Bound(h) => TapOutcome::Bound(h),
+        scry_proto::TapHost::Bound(h) => TapOutcome::Bound {
+            host: h,
+            inscribe: scry_proto::parse_tap_inscribe(text),
+        },
         scry_proto::TapHost::Unbound => TapOutcome::Unbound,
         scry_proto::TapHost::Rejected(why) => {
             println!("[SCRY] tap response rejected: {why}");
             TapOutcome::Failed("tap: unreadable host field")
         }
+    }
+}
+
+/// Report the inscribe verdict (`POST /inscribed/<uid>`) so the glass shows
+/// it on the IMBUED face and the host's chronicle keeps it. Best-effort: a
+/// lost report changes nothing on the card.
+pub async fn post_inscribed(
+    stack: Stack<'static>,
+    uid: &str,
+    verdict: Result<u8, &str>,
+) -> Result<(), &'static str> {
+    let mut body: heapless::String<160> = heapless::String::new();
+    {
+        use core::fmt::Write as _;
+        let r = match verdict {
+            Ok(pages) => write!(body, "{{\"ok\":true,\"pages\":{pages}}}"),
+            Err(why) => write!(body, "{{\"ok\":false,\"why\":\"{why}\"}}"),
+        };
+        if r.is_err() {
+            return Err("inscribed: body too long");
+        }
+    }
+    let mut req: heapless::String<384> = heapless::String::new();
+    {
+        use core::fmt::Write as _;
+        if write!(
+            req,
+            "POST /inscribed/{uid}?k={TOKEN} HTTP/1.0\r\nHost: {HOST}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .is_err()
+        {
+            return Err("inscribed: request too long");
+        }
+    }
+    let mut buf = [0u8; 256];
+    let resp = exchange(stack, req.as_str(), &mut buf).await?;
+    let text = core::str::from_utf8(resp).unwrap_or("");
+    if text.starts_with("HTTP/1.0 200") || text.starts_with("HTTP/1.1 200") {
+        Ok(())
+    } else {
+        Err("inscribed: non-200")
     }
 }
 
