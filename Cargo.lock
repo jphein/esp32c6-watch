@@ -2205,6 +2205,7 @@ dependencies = [
 name = "esp32c6-watch"
 version = "0.12.1"
 dependencies = [
+ "bard-core",
  "cast-core",
  "climate-model",
  "critical-section",
@@ -2234,9 +2235,11 @@ dependencies = [
  "log",
  "mesh-elect",
  "mesh-flood",
+ "mfrc522",
  "mic-dsp",
  "ota-proto",
  "rssi",
+ "scry-proto",
  "sha2 0.10.9",
  "sigil-id",
  "slint",
@@ -3957,6 +3960,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfrc522"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "543f2c392f438e427aa9009338710434884b0dc95d0c39110f456846be0aa352"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "mic-dsp"
 version = "0.1.0"
 dependencies = [
@@ -5468,6 +5481,13 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "scry-proto"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
+]
 
 [[package]]
 name = "semihosting"
