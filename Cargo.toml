@@ -99,6 +99,12 @@ board-esp32s3-cyd = [
 # stack must exist even in a build without mesh-ota. The feature still gates
 # the mesh session code itself.
 mesh-ota = []
+# smol #540: the realm scry STATION — an MFRC522 NFC reader on the S3-CYD's P3 jack turns the
+# board into a tap-a-card kiosk (tap → POST /tap → the scry chain; live status frame on the
+# glass). A STATION build, not a board fact: id162's bench board has no reader wired, so this
+# never rides board-esp32s3-cyd — station images add `--features scry`. The driver dark-degrades
+# on a version-register sanity failure, so a scry build on reader-less hardware still boots.
+scry = ["dep:mfrc522", "dep:scry-proto"]
 # cast (#36): mirror the live scene onto a WLED LED matrix over UDP. Opt-in —
 # the flusher tap and UDP path cfg out entirely when off, so default builds
 # are byte-identical. Pixel-correctness needs a matrix on the bench; the math
@@ -321,6 +327,10 @@ embedded-graphics = "0.8.2"
 embedded-graphics-core = "0.4"
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3.0"
+# smol #540 scry station: MFRC522/FM175xx driver (no_std, embedded-hal 1.0). Version adjudicated
+# in metal by the spike build on familiar (mfrc522 0.8.0 · e-h 1.0.0 · e-h-bus 0.3.0 against
+# esp-hal 1.1.2 — labels spike-scry, 2026-09-01).
+mfrc522 = { version = "0.8", optional = true, default-features = false }
 heapless = "0.9"
 u8g2-fonts = "0.8.0"
 
@@ -340,6 +350,7 @@ hunt = { path = "crates/hunt" }
 mesh-elect = { path = "crates/mesh-elect" }
 mesh-flood = { path = "crates/mesh-flood" }
 ota-proto = { path = "crates/ota-proto" }
+scry-proto = { path = "crates/scry-proto", optional = true }
 cast-core = { path = "crates/cast-core", optional = true }
 bard-core = { path = "crates/bard-core", optional = true }
 # mesh-OTA readback verify (ota_mesh.rs); same pin as ota-proto's.

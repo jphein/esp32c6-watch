@@ -129,6 +129,21 @@ pub const HAS_BATT_ADC: bool = true;
 pub const BATT_ADC_GPIO: u8 = 9;
 pub const BATT_ADC_DIVIDER: f32 = 2.0;
 
+// --- P3 "Expanded IO" jack (smol #540 scry station) -------------------------
+// The 4-pin 1.25mm JST at P3, silkscreen order 2·3·14·21 — silk-verified on
+// JP's unit 2026-09-01 (labels/scry/rc522-s3cyd-wiring.md; the vendor schematic
+// draws 6-pin symbols but populates 4-pin jacks, and the jack carries NO power:
+// the harness takes GND/3V3 from P4's I²C jack, SDA/SCL left unconnected).
+// These four are the board's free-pool GPIOs {2,3,14,21}, connector-verified.
+// The scry build wires an MFRC522 to them as SPI3 via the GPIO matrix; the
+// PINS are a board fact, the READER is a station fact (`scry` feature).
+// GPIO3 is an S3 strapping pin (JTAG select) — safe as a runtime output that
+// idles high, which is exactly what a chip-select does.
+pub const RC522_SCK_GPIO: u8 = 14;
+pub const RC522_MOSI_GPIO: u8 = 21;
+pub const RC522_MISO_GPIO: u8 = 2;
+pub const RC522_CS_GPIO: u8 = 3;
+
 // --- Audio (ES8311 + SC8002B 3 W amp — BOARD.md §Audio + emberburrito) -----
 /// The codec already ACKs init over shared I²C (same chip as the C6). These
 /// pins are the ES3C28P's I²S wiring; the silkscreen names data pins from the

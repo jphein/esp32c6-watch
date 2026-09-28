@@ -27,6 +27,10 @@ pub mod ota_mesh;
 // per-watch OTA topic. `mac` is a logs/debug field until a consumer lands.
 #[allow(dead_code)]
 pub mod sigil;
+// smol #540: the scry station's HTTP client (/tap + streamed /screen[-idle]
+// frames) against scry.realm.watch's station API.
+#[cfg(feature = "scry")]
+pub mod scry_client;
 pub mod smol_mesh;
 // Voice-to-text upload (STT bridge). Unwired until MC5 spawns it from main.rs;
 // silence dead-code until then rather than churn per-item attributes.

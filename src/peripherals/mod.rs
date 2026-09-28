@@ -24,5 +24,13 @@ pub mod rtc;
 pub mod touch;
 #[cfg(feature = "has-ws2812")]
 pub mod ws2812;
+// smol #540: the scry station's MFRC522 reader. Station feature, and S3-CYD
+// ONLY by construction — the P3 free-pool pins it drives (2/3/14/21) are the
+// AMOLED QSPI + mic DIN on the C6 board, so a scry build of any other board
+// is a wiring accident refused at compile time.
+#[cfg(feature = "scry")]
+pub mod rc522;
+#[cfg(all(feature = "scry", not(feature = "board-esp32s3-cyd")))]
+compile_error!("`scry` is an S3-CYD station feature: its P3 pins (2/3/14/21) collide with the C6/C5 boards' display and mic wiring");
 // (wifi.rs retired in v0.9.0: its WifiConfig/WifiState only served the fb
 // Settings app; the hub's NETWORK flow lives in main.rs + slint_shell.)

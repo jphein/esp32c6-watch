@@ -44,9 +44,16 @@ fi
 
 # The ui/cyd scene builds since the CydBacklightToggle workaround (the
 # Rust-pushed on-state) landed — the LINK-ONLY C6-scene fallback is retired.
+# Station builds (`--features scry`) bake SCRY_HOST / SCRY_TOKEN via option_env!;
+# forward them ONLY when set (an exported empty SCRY_HOST would bake "" and the
+# station would dial nowhere). The token never lands in the tree.
+SCRY_ENV=""
+if [ -n "${SCRY_TOKEN:-}" ]; then SCRY_ENV="$SCRY_ENV SCRY_TOKEN='$SCRY_TOKEN'"; fi
+if [ -n "${SCRY_HOST:-}" ]; then SCRY_ENV="$SCRY_ENV SCRY_HOST='$SCRY_HOST'"; fi
+
 ssh familiar "cd ~/fambuild/esp32c6-watch \
   && export PATH=\$HOME/.cargo/bin:\$PATH && source ~/export-esp.sh \
-  && export RUSTFLAGS='' CARGO_PROFILE_RELEASE_OPT_LEVEL=2 WATCH_BUILD_HASH='$HASH' \
+  && export RUSTFLAGS='' CARGO_PROFILE_RELEASE_OPT_LEVEL=2 WATCH_BUILD_HASH='$HASH'$SCRY_ENV \
   && cargo +esp build --release --no-default-features --features board-esp32s3-cyd \
        --target $TRIPLE --bin esp32c6-watch $*"
 
