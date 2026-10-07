@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploy watch_bridge.py to the LAN bridge host.
 #
-# TARGET: ubox0 — 10.0.11.11:8090 (VLAN 11 "roam", the network the watch is on).
+# TARGET: the watch-bridge VM on ubox0 (jp@10.0.6.164, OpenRC) since 2026-10-07. The watch still dials
+# 10.0.11.11:8090 (ubox0's VLAN-11 leg); ubox0 proxies it to the VM (~/Projects/ubox0/vms/watch-bridge/).
 # That address is hardcoded in the firmware as `voice_stt::default_bridge_ip()`
 # and reused by `voice_tts`, so it is not a preference — change one and you must
 # change the other.
@@ -22,7 +23,7 @@
 #   ./deploy.sh --dry-run    # diff what WOULD change; touch nothing
 set -euo pipefail
 
-HOST=ubox0
+HOST=jp@10.0.6.164
 DEST_DIR='$HOME/Projects/speech-to-cli'      # expanded remotely, not here
 SERVICE=watch-bridge
 PORT=8090
@@ -70,9 +71,9 @@ scp -q "$SRC" "$HOST:/tmp/watch_bridge.py.new"
 ssh "$HOST" "mv -f /tmp/watch_bridge.py.new $DEST_DIR/watch_bridge.py"
 
 echo "== restarting $SERVICE =="
-ssh "$HOST" "sudo systemctl restart $SERVICE" || {
+ssh "$HOST" "sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || {
   echo "restart failed — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo systemctl restart $SERVICE" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || true
   exit 1
 }
 
@@ -80,7 +81,7 @@ echo "== health =="
 sleep 2
 if ! ssh "$HOST" "curl -fsS --max-time 10 http://127.0.0.1:$PORT/health"; then
   echo; echo "health check FAILED — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo systemctl restart $SERVICE" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || true
   exit 5
 fi
 echo
