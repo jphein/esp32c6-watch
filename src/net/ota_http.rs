@@ -252,6 +252,12 @@ async fn run(
     url: &str,
     progress: fn(u32, u32),
 ) -> Result<(), &'static str> {
+    // #518: this read is the load-bearing runtime reference that keeps the
+    // embedded descriptor through --gc-sections; a false here is a build
+    // problem (peers/self-checks would read tgt-absent off our images).
+    if !crate::net::target_desc::self_desc_present() {
+        println!("[OTA] WARNING: own target descriptor missing - this build is broken (tgt-absent to peers)");
+    }
     // --- Slot selection: read the partition table + otadata -----------------
     // The returned table borrows `pt_mem`, NOT the flash handle (same pattern
     // as the boot-time scan in main.rs), so the lock guards can stay scoped.
@@ -356,6 +362,12 @@ async fn run(
     // against the SIGNED sha256 before the otadata flip. Lives outside the
     // network block so the verdict survives the socket teardown.
     let mut hasher = Sha256::new();
+    // #518: descriptor scan over the same stream. Valid HERE (unlike the
+    // fleet, which must scan the slot read-back) because this path has no
+    // resume — every image byte passes through this loop exactly once, in
+    // order. The mesh path scans its finalize read-back for the same reason
+    // in reverse (its chunks arrive out of order).
+    let mut desc_scan = crate::net::target_desc::DescScan::new();
     let flashed = 'net: {
         match with_timeout(STALL_TIMEOUT, socket.connect((addr, port))).await {
             Ok(Ok(())) => {}
@@ -436,6 +448,7 @@ async fn run(
                     break 'net Err("refused: not an esp app image (bad magic)");
                 }
                 hasher.update(&chunk[..chunk_len]);
+                desc_scan.feed(&chunk[..chunk_len]);
                 {
                     // One 4 KB sector per lock: a concurrent config save waits at
                     // most one program cycle, never the whole download.
@@ -487,6 +500,23 @@ async fn run(
         return Err("refused: image sha256 != signed manifest");
     }
     println!("[OTA] image digest matches signed manifest");
+
+    // --- #518: the written image must SAY it is for this board ----------------
+    // After the sha gate on purpose: this refusal judges authentic bytes, so
+    // its labels (tgt-chip / tgt-flavor / tgt-absent) name a real staging
+    // mistake, never corruption. `refused:` latches the build like the other
+    // deterministic verdicts — re-fetching the same image cannot change what
+    // it is for.
+    use crate::net::target_desc::TargetReject;
+    if let Err(why) = crate::net::target_desc::gate_written_image(&desc_scan) {
+        return Err(match why {
+            TargetReject::Absent => "refused: no target descriptor in image (tgt-absent)",
+            TargetReject::Ambiguous => "refused: two target descriptors in image (tgt-ambiguous)",
+            TargetReject::DescVersion => "refused: descriptor format too new (tgt-descver)",
+            TargetReject::Chip => "refused: image built for different silicon (tgt-chip)",
+            TargetReject::FleetFlavor => "refused: fleet-flavor image on a GUI board (tgt-flavor)",
+        });
+    }
 
     // --- Image fully written: flip otadata to the new slot --------------------
     {

@@ -21,6 +21,9 @@ pub mod names;
 // `net_task::snapshot` + NET_WAKE.
 pub mod net_task;
 pub mod ota_http;
+// #349/#518: the SMOL target descriptor — emission + the finalize-time
+// suitability gate both OTA paths call before an otadata flip.
+pub mod target_desc;
 #[cfg(feature = "mesh-ota")]
 pub mod ota_mesh;
 // Per-device SIGIL IDENTITY from the efuse MAC (#34): name, node id,
