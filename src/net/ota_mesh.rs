@@ -165,8 +165,13 @@ impl ImageSink for MeshImageSink {
         if self.written < size {
             return false;
         }
-        // Readback SHA-256 over exactly `size` bytes, 4 KB per lock.
+        // Readback SHA-256 over exactly `size` bytes, 4 KB per lock. The #518
+        // descriptor scan rides the SAME read-back (zero extra flash reads) —
+        // and the read-back is the only place it CAN run on this path: the
+        // NAK'd windows land out of order, so the incoming stream never sees
+        // the image bytes in sequence.
         let mut hasher = Sha256::new();
+        let mut desc_scan = crate::net::target_desc::DescScan::new();
         let mut buf = [0u8; 4096];
         let mut done = 0u32;
         while done < size {
@@ -180,11 +185,22 @@ impl ImageSink for MeshImageSink {
             }
             drop(f);
             hasher.update(&buf[..n]);
+            desc_scan.feed(&buf[..n]);
             done += n as u32;
         }
         let digest = hasher.finalize();
         if digest[..] != sha256[..] {
             println!("[MESH-OTA] readback SHA mismatch - discarded (good slot intact)");
+            return false;
+        }
+        // #518: authentic bytes, but are they FOR this board? Before this
+        // gate the leaf checked no descriptor at all — the only thing between
+        // it and booting a wrong-arch or fleet-flavor image was the accident
+        // that watch builds are epoch-scale while fleet builds are small
+        // integers. otadata is still untouched here; a refusal costs the
+        // transfer and nothing else (good slot intact, same as the sha line).
+        if crate::net::target_desc::gate_written_image(&desc_scan).is_err() {
+            println!("[MESH-OTA] image unsuitable for this board - discarded (good slot intact)");
             return false;
         }
         // Stage: otadata flip to the target slot, state New (the bootloader's
