@@ -25,7 +25,7 @@ import { VolumeOverlay } from "volume.slint";
 // Re-export so the generated Rust module keeps exposing `PeerRow`
 // (slint_shell.rs constructs it) now that the struct lives in theme.slint.
 // LauncherTile likewise: slint_shell.rs builds them from the app registry
-// and pushes them into `launcher-tiles` (page-major, 9 slots per page).
+// and pushes them into `launcher-tiles` (page-major, `launcher-slots` per page).
 // `Theme` is re-exported too so Rust can drive the scheme selector via
 // `ui.global::<Theme>().set_scheme(n)` (theme picker + boot restore).
 // NotifCard rides along for the same reason (slint_shell.rs builds the
@@ -105,11 +105,15 @@ export component WatchShell inherits Window {
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
     // Paged launcher model, built from the app registry in slint_shell.rs
-    // (build_launcher_pages): page-major tiles (9 slots per page, padded with
+    // (build_launcher_pages): page-major tiles (`launcher-slots` per page, padded with
     // present:false), one section title per page, and the page count. The
     // current page is in-out: flipped by handle_touch (swipe up/down) and by
     // the launcher's own indicator dots.
     in property <[LauncherTile]> launcher-tiles: [];
+    // Launcher slots per page, owned by THIS layout (3x3 here). Rust reads it
+    // with get_launcher_slots() to chunk `launcher-tiles`, so the grid stride
+    // and the chunking are one number, not two that must agree (#94).
+    out property <int> launcher-slots: 9;
     in property <[string]> launcher-titles: [];
     in property <int> launcher-page-count: 1;
     in-out property <int> launcher-page: 0;
@@ -832,6 +836,7 @@ export component WatchShell inherits Window {
         tiles: root.launcher-tiles;
         titles: root.launcher-titles;
         page-count: root.launcher-page-count;
+        slots: root.launcher-slots;
         page <=> root.launcher-page;
         launch-app(idx) => { root.launch-app(idx); }
     }
