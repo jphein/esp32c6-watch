@@ -873,6 +873,10 @@ pub async fn net_task(
             // WiFi window instead of waiting for a reboot.
             if !st.was_ready {
                 st.was_ready = true;
+                if let Some(c) = stack.config_v4() {
+                    let o = c.address.address().octets();
+                    println!("[WIFI] ready: ipv4 {}.{}.{}.{}", o[0], o[1], o[2], o[3]);
+                }
                 st.next_announce = Instant::now() + ANNOUNCE_EDGE_DELAY;
             }
             // OTA owns the window (old executor ran it ahead of the mesh
@@ -1207,12 +1211,17 @@ async fn attempt_connect(
             let info = controller.ap_info().ok();
             let landed_ch = info.as_ref().map(|i| i.channel);
             match (&info, landed_ch) {
+                // "associated", not "connected" (#89): this is the 802.11 link
+                // only. Usable means holding an IPv4 lease, which is logged as
+                // `[WIFI] ready: ipv4 …` on the ready edge below. An
+                // "associated" line with no "ready" after it is the no-lease
+                // state #89 saw on glass, readable from the log alone.
                 (Some(i), Some(ch)) => println!(
-                    "[WIFI] connected (BSSID {} ch{ch}, hint {:?})",
+                    "[WIFI] associated (BSSID {} ch{ch}, hint {:?})",
                     fmt_bssid(&i.bssid),
                     prefer_ch
                 ),
-                _ => println!("[WIFI] connected (AP info unavailable)"),
+                _ => println!("[WIFI] associated (AP info unavailable)"),
             }
             if let Some(ch) = landed_ch {
                 LANDED_CH.store(ch, Ordering::Relaxed);

@@ -42,6 +42,7 @@
 
 pub mod json;
 pub mod model;
+pub mod retry;
 
 use heapless::String;
 
