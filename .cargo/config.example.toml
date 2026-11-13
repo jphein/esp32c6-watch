@@ -13,8 +13,6 @@ rustflags = [
 
 target = "riscv32imac-unknown-none-elf"
 
-[unstable]
-build-std = ["alloc", "core"]
 # Copy to .cargo/config.toml and add under [env]:
 #   WIFI_SSID="YourNetwork"
 #   WIFI_PASS="YourPassword"

@@ -31,8 +31,8 @@ jobs:
         uses: actions/checkout@v7
 
       # Mirror rust-toolchain.toml: stable + rust-src + the riscv32imac bare-metal
-      # target (its precompiled core/alloc are what the build uses; build-std in
-      # the cargo config is tolerated/ignored on stable).
+      # target (its precompiled core/alloc are what the build uses; the repo has
+      # no build-std since #85).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,11 +43,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Recreate the gitignored build config (no runner, no creds — CI only
-      # builds). Note: the repo's config carries `[unstable] build-std`, but on
-      # the stable toolchain that's a no-op — the build uses the precompiled
-      # riscv32imac target libs (verified: `cargo build --release` is green with
-      # just target + rustflags). Omitting build-std here avoids any
-      # unstable-feature error from a fresh CI cargo and produces the same binary.
+      # builds). No `[unstable] build-std`, same as config.example.toml since #85:
+      # the build uses the precompiled riscv32imac target libs, and build-std on a
+      # nightly cargo leaks esp-hal's riscv-only portable-atomic cfg into the host
+      # build (smol 690d31d).
       - name: Write .cargo/config.toml
         run: |
           mkdir -p .cargo
