@@ -165,7 +165,7 @@ pub struct SharedSpiBus<'d> {
     lcd_cs: Output<'d>,
     touch_cs: Option<Output<'d>>,
     /// Held, never driven low. Its whole job is to keep the SD card off the bus
-    /// — see [`crate::board::PIN_SD_CS`]. Owning it also makes it impossible
+    /// — see `board::SD_CS_GPIO_PARK_HIGH` (cyd_c5.rs). Owning it also makes it impossible
     /// for another part of the firmware to claim GPIO10 by accident.
     _sd_cs: Option<Output<'d>>,
     tuned: Tuned,
