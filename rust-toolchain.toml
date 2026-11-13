@@ -1,8 +1,4 @@
 [toolchain]
-# PINNED to 1.98.1 (2026-11-13, #101): stable 1.100.0 grows the release image ~1.9 MB (+39%) with
-# no code change, past the 6,291,424 B ROM region, so main's preflight went red on 2026-11-12.
-# Revisit trigger: remove this pin (back to "stable") when the tree links under the 6,291,424 B
-# ROM on 1.100+; #101 holds the numbers and the root-cause plan.
-channel    = "1.98.1"
+channel    = "stable"
 components = ["rust-src"]
 targets = ["riscv32imac-unknown-none-elf"]

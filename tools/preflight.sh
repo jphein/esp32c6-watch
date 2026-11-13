@@ -132,6 +132,7 @@ rom_region() {
     if [[ "$BUILDER" == "fambuild" ]]; then
       line=$(ssh familiar "grep -h -oE 'ROM : ORIGIN =[^,]+, LENGTH = [^,]+' \
             \$HOME/fambuild/$(basename "$REPO")/target/$TRIPLE/release/build/esp-hal-*/out/memory.x \
+            \$HOME/fambuild/$(basename "$REPO")/target/$TRIPLE/release/build/esp-hal/*/out/memory.x \
             2>/dev/null | head -1" 2>/dev/null)
     else
       local mx
@@ -300,6 +301,14 @@ for feat in "${COMBOS[@]}"; do
   # the heap to fix a broken scp.
   if [[ "${gap:-0}" -le 0 ]]; then
     fail "$label: could not read _bss_end/_stack_start from the ELF (measured gap ${gap:-?})"
+    continue
+  fi
+  # #67/#101: the C6 image fits only because build.rs widens esp-hal's ROM region to the 6 MiB
+  # partition. Assert the region this link actually used, so an unwidened 4 MiB cap (cargo
+  # 1.100's build-dir layout did exactly that) is named for what it is, never read as code growth.
+  read -r _rom_base rom_len <<<"$(rom_region || echo '0 0')"
+  if [[ "${rom_len:-0}" -ne $(( 0x600000 )) ]]; then
+    fail "$label: ROM region LENGTH is $(printf '0x%x' "${rom_len:-0}"), not the widened 0x600000 (#67/#101)"
     continue
   fi
   # The build STAMP must MATCH THE TREE, not merely be present.
