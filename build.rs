@@ -313,18 +313,45 @@ fn widen_rom_region() {
     const STOCK: &str = "LENGTH = 0x400000 - 0x20";
     const WIDE: &str = "LENGTH = 0x600000 - 0x20";
 
-    // OUT_DIR = target/<triple>/<profile>/build/<our-pkg>-<hash>/out
+    // #101: cargo has TWO build-dir layouts, and this must work under both:
+    //   cargo < 1.100:  target/<triple>/<profile>/build/<pkg>-<hash>/out   (OUT_DIR)
+    //   cargo >= 1.100: target/<triple>/<profile>/build/<pkg>/<hash>/out   (per-crate dirs)
+    // The old code took a fixed `OUT_DIR/../..` and looked for `esp-hal-*` siblings; under the new
+    // layout that is build/<our-pkg>/, which has none, so NOTHING was widened and the link was
+    // silently capped at 4 MiB. That read as "stable 1.100 grew the image 1.9 MB" for a night (#101).
+    // Walk up to the `build` dir instead, and collect esp-hal's memory.x from BOTH layouts.
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let Some(build_dir) = out.parent().and_then(|p| p.parent()) else { return };
+    let Some(build_dir) = out
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "build"))
+    else {
+        panic!(
+            "#67/#101: no `build` directory above OUT_DIR {} - cannot find esp-hal's memory.x \
+             to widen the ROM region (cargo changed its build-dir layout again?)",
+            out.display()
+        );
+    };
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(build_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name == "esp-hal" {
+                // new layout: build/esp-hal/<hash>/out/memory.x
+                if let Ok(hashes) = std::fs::read_dir(e.path()) {
+                    for h in hashes.flatten() {
+                        candidates.push(h.path().join("out").join("memory.x"));
+                    }
+                }
+            } else if name.starts_with("esp-hal-") {
+                // old layout: build/esp-hal-<hash>/out/memory.x
+                candidates.push(e.path().join("out").join("memory.x"));
+            }
+        }
+    }
 
     let mut patched = 0usize;
-    let Ok(entries) = std::fs::read_dir(build_dir) else { return };
-    for e in entries.flatten() {
-        let name = e.file_name();
-        if !name.to_string_lossy().starts_with("esp-hal-") {
-            continue;
-        }
-        let mx = e.path().join("out").join("memory.x");
+    for mx in candidates {
         let Ok(text) = std::fs::read_to_string(&mx) else { continue };
         if text.contains(WIDE) {
             patched += 1; // already wide; keep it that way
@@ -343,9 +370,13 @@ fn widen_rom_region() {
         }
     }
     if patched == 0 {
-        println!(
-            "cargo:warning=#67: could not widen esp-hal's ROM region under {} - \
-             build still capped at 4 MiB.",
+        // #101: a HARD failure, not a warning. The warning existed and nobody saw it; the link then
+        // failed 555,772 B over a 4 MiB region and the night was spent chasing code growth that
+        // was not there. Failing here names the real cause at the step that has it.
+        panic!(
+            "#67/#101: could not widen esp-hal's ROM region: no esp-hal memory.x with the stock \
+             or widened LENGTH under {} (looked in build/esp-hal-*/out and build/esp-hal/*/out). \
+             The C6 image needs the 6 MiB partition; refusing to build against a 4 MiB cap.",
             build_dir.display()
         );
     }
