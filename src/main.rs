@@ -2345,6 +2345,11 @@ async fn main(_spawner: Spawner) -> ! {
     // was taken and dropped with zero feedback). This stamps the first retry
     // so the wait is bounded rather than a stuck spinner.
     let mut story_play_wait: Option<Instant> = None;
+    // #89: a failed chapter-list fetch gets ONE automatic retry (the fetch
+    // racing DHCP right after Hold::Story is raised on open). Policy and tests
+    // live in story_proto::retry; this loop only feeds it the clock.
+    #[cfg(feature = "story")]
+    let mut story_list_retry = story_proto::retry::ListRetry::new();
     // `?since=` paging cursor for the chapter list.
     #[cfg(feature = "story")]
     let mut story_since: u16 = 0;
@@ -5749,6 +5754,11 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.req.launch.set(Some(AppState::Voice));
                     }
 
+                    // #89: the one bounded retry comes due.
+                    if story_list_retry.due(now.as_secs()) {
+                        story_need_list = true;
+                    }
+
                     // ---- fetches (park the loop briefly) ------------------
                     if net.phase.ready() {
                         #[cfg(feature = "debug-console")]
@@ -5769,6 +5779,7 @@ async fn main(_spawner: Spawner) -> ! {
                             .await
                             {
                                 Ok(()) => {
+                                    story_list_retry.reset();
                                     story_list = fresh;
                                     shell.set_story_chapters(
                                         &story_list.rows,
@@ -5779,7 +5790,19 @@ async fn main(_spawner: Spawner) -> ! {
                                 }
                                 Err(e) => {
                                     println!("[STORY] chapters failed: {e}");
-                                    shell.set_story_loading(false, e);
+                                    match story_list_retry.on_fail(now.as_secs()) {
+                                        story_proto::retry::OnFail::RetryScheduled => {
+                                            // Keep the spinner: one retry is coming.
+                                            println!(
+                                                "[STORY] chapters: retrying once in {} s",
+                                                story_proto::retry::ListRetry::DELAY_SECS
+                                            );
+                                            shell.set_story_loading(true, "");
+                                        }
+                                        story_proto::retry::OnFail::ShowError => {
+                                            shell.set_story_loading(false, e);
+                                        }
+                                    }
                                 }
                             }
                             shell.request_redraw();
@@ -6809,6 +6832,8 @@ async fn main(_spawner: Spawner) -> ! {
                         shell.set_story_character(&story_proto::model::Character::new());
                         shell.set_story_open(true);
                         story_need_list = true;
+                        // A fresh open gets a fresh retry budget (#89).
+                        story_list_retry.reset();
                         // Stats/character are one 501-byte request that feeds both
                         // pages, so fetch it up front rather than on first tab.
                         story_need_char = true;
