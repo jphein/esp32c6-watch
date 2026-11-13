@@ -41,6 +41,11 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 2
+# Where a LOCAL build lands. Cargo honours CARGO_TARGET_DIR, so this script must
+# too: hardcoding `target` made every off-tree build (the fleet keeps target dirs
+# under ~/.cache, out of the synced tree) report "no ELF to measure" after a
+# GREEN link, and would have hidden memory.x from the ROM arm as well.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 # .cargo/config.toml is GITIGNORED (it holds WiFi/MQTT credentials), so every
 # `git worktree add` checkout silently lacks it — and without it cargo builds
@@ -136,7 +141,7 @@ rom_region() {
             2>/dev/null | head -1" 2>/dev/null)
     else
       local mx
-      mx=$(find target -path '*esp-hal*' -name memory.x 2>/dev/null | head -1)
+      mx=$(find "$TARGET_DIR" -path '*esp-hal*' -name memory.x 2>/dev/null | head -1)
       [[ -n "$mx" ]] && line=$(grep -oE 'ROM : ORIGIN =[^,]+, LENGTH = [^,]+' "$mx" | head -1)
     fi
     [[ -z "$line" ]] && return 1
@@ -285,7 +290,7 @@ for feat in "${COMBOS[@]}"; do
   else
     out=$("$CARGO" "${args[@]}" 2>&1)
     rc=$?
-    elf="target/$TRIPLE/release/$BIN"
+    elf="$TARGET_DIR/$TRIPLE/release/$BIN"
   fi
 
   if [[ $rc -ne 0 ]] || grep -qE '^error' <<<"$out"; then
