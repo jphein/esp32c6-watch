@@ -65,10 +65,12 @@ export { LauncherTile }
 // no longer exists. See PROPOSED-board-ui-consts.md — the fix is a one-line
 // reorder in Rust, not a layout change.
 //
-// ⚠️ TWO-SIDED CONSTANT. `Geom.launcher-slots` here and `LAUNCHER_PAGE_SLOTS`
-// in `slint_shell.rs` (plus its chunking) are halves of one number. The grid
-// indexes `tiles[page * slots + slot]`, so if they disagree the launcher does
-// not error — it launches the WRONG APP. See PROPOSED-board-ui-consts.md.
+// ONE-SIDED SINCE #94. `Geom.launcher-slots` is the only copy of the slot
+// count: WatchShell exports it as `launcher-slots`, this grid strides by it,
+// and Rust's build_launcher_pages chunks by `get_launcher_slots()`. Before
+// #94 Rust chunked by its own literal 9 while this grid strode by a literal 8,
+// so every page after the first was shifted one tile per page and the last
+// tiles were never drawn. Change the count in geom.slint and both halves move.
 //
 // THE LABELS WRAP, AND THAT IS THE WHOLE REASON THE GRID FITS
 // -----------------------------------------------------------------------------
@@ -125,7 +127,7 @@ component AppTile {
 export component LauncherOverlay {
     callback launch-app(int);
     // Flat page-major tile list from Rust (build_launcher_pages): page-count
-    // pages × 8 slots, padded with present:false.
+    // pages × `slots`, padded with present:false.
     in property <[LauncherTile]> tiles: [];
     // One section title per page ("AUDIO" / "GAMES" / "SYSTEM").
     in property <[string]> titles: [];
@@ -133,6 +135,8 @@ export component LauncherOverlay {
     // Current page. Flipped by the Rust shell on swipe up/down (handle_touch)
     // and by the indicator dots below; two-way bound through WatchShell.
     in-out property <int> page: 0;
+    // Slots per page, from WatchShell.launcher-slots (= Geom.launcher-slots).
+    in property <int> slots: Geom.launcher-slots;
 
     // 4x2 grid. 4 cols of 70 + 3 gutters of 8 = 304 = the content band exactly.
     // 2 rows of 78 + 1 gutter of 8 = 164, from y34 to y198, leaving the bottom
@@ -164,9 +168,9 @@ export component LauncherOverlay {
     }
     CydPageTitle { title: root.titles[root.page]; }
 
-    // Current page's tiles: fixed 8-slot grid, pure index math — a page flip
-    // re-binds 8 tiles and renders ONCE (hard cut, no intermediate frames).
-    for slot in 8: Rectangle {
+    // Current page's tiles: fixed `slots`-slot grid, pure index math — a page
+    // flip re-binds the tiles and renders ONCE (hard cut, no intermediate frames).
+    for slot in root.slots: Rectangle {
         x: Geom.content-x + mod(slot, 4) * (root.tile-w + root.gutter);
         y: Geom.content-y + floor(slot / 4) * (root.tile-h + root.gutter);
         width: root.tile-w;
@@ -176,12 +180,12 @@ export component LauncherOverlay {
         // overlay itself stays `if`-gated in shell.slint, so nothing here is
         // resident while the launcher is shut.
         AppTile {
-            visible: root.tiles[root.page * 8 + slot].present;
+            visible: root.tiles[root.page * root.slots + slot].present;
             width: 100%; height: 100%;
-            name: root.tiles[root.page * 8 + slot].name;
-            accent: root.tiles[root.page * 8 + slot].accent;
-            icon-id: root.tiles[root.page * 8 + slot].icon-id;
-            idx: root.tiles[root.page * 8 + slot].idx;
+            name: root.tiles[root.page * root.slots + slot].name;
+            accent: root.tiles[root.page * root.slots + slot].accent;
+            icon-id: root.tiles[root.page * root.slots + slot].icon-id;
+            idx: root.tiles[root.page * root.slots + slot].idx;
             launch(i) => { root.launch-app(i); }
         }
     }

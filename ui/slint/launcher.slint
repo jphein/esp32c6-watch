@@ -238,8 +238,12 @@ export component LauncherOverlay {
     // Current page. Flipped by the Rust shell on swipe up/down (handle_touch)
     // and by the indicator-dots tap below; two-way bound through WatchShell.
     in-out property <int> page: 0;
+    // Slots per page, from WatchShell.launcher-slots: the ONE place this
+    // layout's tile count lives. Rust reads the same property to chunk pages
+    // (build_launcher_pages), so the stride below cannot disagree with it (#94).
+    in property <int> slots: 9;
 
-    // 3x3 grid geometry — keep in sync with LAUNCHER_PAGE_SLOTS (slint_shell.rs).
+    // 3x3 grid geometry — sized for `slots` = 9.
     // Grid area x22..388, y96..444: 3 cols of 114 + 2x12 gutters, 3 rows of
     // 108 + 2x12; ends 4px above the indicator dots at y448.
     property <length> tile-w: 114px;
@@ -276,9 +280,9 @@ export component LauncherOverlay {
     }
     PageTitle { title: root.titles[root.page]; }
 
-    // Current page's tiles: fixed 9-slot grid, pure index math — a page flip
-    // re-binds 9 tiles and renders ONCE (hard cut, no intermediate frames).
-    for slot in 9: Rectangle {
+    // Current page's tiles: fixed `slots`-slot grid, pure index math — a page
+    // flip re-binds the tiles and renders ONCE (hard cut, no intermediate frames).
+    for slot in root.slots: Rectangle {
         x: 22px + mod(slot, 3) * (root.tile-w + root.gutter);
         y: 96px + floor(slot / 3) * (root.tile-h + root.gutter);
         width: root.tile-w;
@@ -288,12 +292,12 @@ export component LauncherOverlay {
         // idiom — see shade.slint). The overlay itself stays `if`-gated in
         // shell.slint, so nothing here is resident while the launcher is shut.
         AppTile {
-            visible: root.tiles[root.page * 9 + slot].present;
+            visible: root.tiles[root.page * root.slots + slot].present;
             width: 100%; height: 100%;
-            name: root.tiles[root.page * 9 + slot].name;
-            accent: root.tiles[root.page * 9 + slot].accent;
-            icon-id: root.tiles[root.page * 9 + slot].icon-id;
-            idx: root.tiles[root.page * 9 + slot].idx;
+            name: root.tiles[root.page * root.slots + slot].name;
+            accent: root.tiles[root.page * root.slots + slot].accent;
+            icon-id: root.tiles[root.page * root.slots + slot].icon-id;
+            idx: root.tiles[root.page * root.slots + slot].idx;
             launch(i) => { root.launch-app(i); }
         }
     }

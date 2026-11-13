@@ -309,9 +309,9 @@ export global Geom {
     out property <int> max-peers: 4;
     out property <int> max-chapters: 3;
     out property <int> max-nets: 3;
-    // Launcher slots per page. TWO-SIDED CONSTANT: `LAUNCHER_PAGE_SLOTS` in
-    // slint_shell.rs must equal this or `page * slots + slot` launches the
-    // wrong app — silently, with no error to observe.
+    // Launcher slots per page — the ONLY copy for the CYD layout (#94).
+    // WatchShell exports it as `launcher-slots`; Rust chunks the tile model by
+    // get_launcher_slots(), and the launcher grid strides by it.
     out property <int> launcher-slots: 8;
     // Visible card slots for the switcher and the shade. ALSO two-sided:
     // `switcher_slot()` / `shade_slot()` invert a start_y back to an index by

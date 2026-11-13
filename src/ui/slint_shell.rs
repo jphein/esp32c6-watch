@@ -2635,8 +2635,10 @@ fn build_scene(
     // Launcher pages are built once from the app registry (single source of
     // truth) — static per boot, so plain VecModels the scene owns are enough.
     // (The old Flickable + content-height plumbing is gone with the paged
-    // launcher: page geometry is fixed 3x3, nothing to measure.)
-    let (launcher_tiles, launcher_titles) = build_launcher_pages();
+    // launcher: page geometry is fixed per layout, nothing to measure.)
+    // The layout owns the slot count (#94): chunk by what the grid strides by.
+    let slots = usize::try_from(ui.get_launcher_slots()).unwrap_or(1).max(1);
+    let (launcher_tiles, launcher_titles) = build_launcher_pages(slots);
     ui.set_launcher_page_count(launcher_titles.len().max(1) as i32);
     ui.set_launcher_titles(ModelRc::from(Rc::new(VecModel::from(launcher_titles))));
     ui.set_launcher_tiles(ModelRc::from(Rc::new(VecModel::from(launcher_tiles))));
@@ -2674,19 +2676,17 @@ fn build_scene(
     ui
 }
 
-/// Slots per launcher page — a fixed 3x3 grid. MUST match the `for slot in 9`
-/// grid + geometry in `ui/slint/launcher.slint`.
-const LAUNCHER_PAGE_SLOTS: usize = 9;
-
 /// Build the PAGED launcher model from the app registry — the single source of
-/// truth for tile metadata. One page per section (display order: Audio, Games,
-/// System; a section that ever outgrows 9 apps chunks into repeated pages with
-/// the same title). Returns the page-major tile list — each page padded to
-/// exactly [`LAUNCHER_PAGE_SLOTS`] entries with `present:false` defaults so the
-/// Slint grid can index `tiles[page*9 + slot]` — plus one title per page. The
+/// truth for tile metadata. One page per section (a section that ever outgrows
+/// `slots` apps chunks into repeated pages with the same title). Returns the
+/// page-major tile list — each page padded to exactly `slots` entries with
+/// `present:false` defaults so the Slint grid can index
+/// `tiles[page*slots + slot]` — plus one title per page. `slots` is the
+/// layout's `launcher-slots` (9 on the C6, 8 on the CYD layouts), read from the
+/// scene so the chunking and the grid stride are one number (#94). The
 /// tile `idx` is the app's registry position, so `launch_app(idx)` maps back
 /// through `registry::launch_state(idx)`.
-fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
+fn build_launcher_pages(slots: usize) -> (Vec<LauncherTile>, Vec<SharedString>) {
     use crate::apps::registry::{AppDescriptor, Section, REGISTRY};
     let tile = |idx: usize, d: &AppDescriptor| LauncherTile {
         name: SharedString::from(d.name),
@@ -2713,12 +2713,12 @@ fn build_launcher_pages() -> (Vec<LauncherTile>, Vec<SharedString>) {
             // stay in REGISTRY so launch indexes never shift — see its doc.
             .filter(|(_, d)| d.section == sec && d.hardware_present())
             .collect();
-        for chunk in apps.chunks(LAUNCHER_PAGE_SLOTS) {
+        for chunk in apps.chunks(slots) {
             titles.push(SharedString::from(sec.label()));
             for (i, d) in chunk {
                 tiles.push(tile(*i, d));
             }
-            for _ in chunk.len()..LAUNCHER_PAGE_SLOTS {
+            for _ in chunk.len()..slots {
                 tiles.push(LauncherTile::default()); // present:false pad
             }
         }

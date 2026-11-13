@@ -225,6 +225,9 @@ export component WatchShell inherits Window {
     in-out property <int> current-page: 0; // 0 clock 1 sensors 2 system 3 power 4 mesh
     in-out property <bool> launcher-open: false;
     in property <[LauncherTile]> launcher-tiles: [];
+    // Launcher slots per page, owned by this layout (Geom.launcher-slots, 4x2).
+    // Rust reads it with get_launcher_slots() to chunk `launcher-tiles` (#94).
+    out property <int> launcher-slots: Geom.launcher-slots;
     in property <[string]> launcher-titles: [];
     in property <int> launcher-page-count: 1;
     in-out property <int> launcher-page: 0;
@@ -792,6 +795,7 @@ export component WatchShell inherits Window {
         tiles: root.launcher-tiles;
         titles: root.launcher-titles;
         page-count: root.launcher-page-count;
+        slots: root.launcher-slots;
         page <=> root.launcher-page;
         launch-app(idx) => { root.launch-app(idx); }
     }
