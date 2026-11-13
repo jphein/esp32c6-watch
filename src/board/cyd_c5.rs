@@ -25,6 +25,9 @@ pub const LCD_DC_GPIO: u8 = 24;
 // The SD slot shares the SPI bus. Its CS (GPIO10) floats unless driven, and a
 // floating SD CS corrupts display transactions. The BOARD seam owns parking it
 // high at init, before the first display byte, whether or not SD is ever used.
+// The parking itself is SharedSpiBus::new's `sd_cs` (drivers/spi_bus.rs); the C5
+// display arm that passes GPIO10 into it is not on main yet (#92), so this pin
+// has no use site today. Pin constants are documentation; see board/mod.rs.
 pub const SD_CS_GPIO_PARK_HIGH: u8 = 10;
 
 // === Backlight (plain GPIO, no PWM requirement) ===

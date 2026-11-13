@@ -4,7 +4,8 @@
 
 use embedded_hal::i2c::I2c;
 
-const PCF85063A_ADDR: u8 = 0x51;
+// The board file is the address's one home (#92).
+const PCF85063A_ADDR: u8 = crate::board::RTC_I2C_ADDR;
 
 // Registers
 const REG_CTRL1: u8 = 0x00;

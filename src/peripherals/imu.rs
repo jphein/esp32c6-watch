@@ -5,7 +5,8 @@
 use embedded_hal::i2c::I2c;
 use esp_hal::delay::Delay;
 
-const QMI8658_ADDR: u8 = 0x6B;
+// The board file is the address's one home (#92).
+const QMI8658_ADDR: u8 = crate::board::IMU_I2C_ADDR;
 
 // Registers
 const REG_WHO_AM_I: u8 = 0x00;

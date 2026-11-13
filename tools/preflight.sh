@@ -207,6 +207,16 @@ if [[ $SKIP_TESTS -eq 0 ]]; then
     fi
   done
   info "total: $TOTAL host tests"
+
+  # #92: every non-pin board constant has a real reader (pins are documentation
+  # of record by design; see src/board/mod.rs). Text scan, no build: cheap.
+  note "board constants (#92)"
+  if audit=$(tools/board-consts-audit.sh 2>&1); then
+    pass "${audit##*$'\n'}"
+  else
+    fail "board constants with no reader: $(grep -c '^UNREAD' <<<"$audit") (tools/board-consts-audit.sh)"
+    grep -E '^(UNREAD|UNKNOWN)' <<<"$audit" | head -8 | sed 's/^/        /'
+  fi
 fi
 
 # --- link every feature combination ---------------------------------------
