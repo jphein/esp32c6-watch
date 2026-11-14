@@ -65,6 +65,14 @@
 //! connect attempt, one scan channel, an OTA read) queue up and apply right
 //! after — the old code blocked the whole UI in those same waits.
 //!
+//! ## Lease deadline + reachability probe (#108, the follow-up to #89)
+//!
+//! #89's AP gave the watch a lease and then L2-isolated it: `ready()` said Up, every connect failed,
+//! and nothing here noticed. Now an association with no lease for `roam_guard::LEASE_TIMEOUT_MS` is a
+//! failed attempt, and every fresh lease gets one TCP probe to [`PROBE_TARGET`]. A failure quarantines
+//! the BSSID and roams on, unless two different APs fail in a row (then the target is blamed and
+//! probing rests). The policy is the host-tested `roam-guard` crate; this file only wires it in.
+//!
 //! ## Firmware roaming (#57 — esp-radio has no 802.11r FT)
 //!
 //! The C6 radio can't do seamless Fast Transition, and the whole house is one
@@ -593,6 +601,17 @@ const ROAM_COOLDOWN: Duration = Duration::from_secs(45);
 /// present AP — but SSID-filtered so it's fast (only matching APs returned).
 const ROAM_SCAN_PASSES: u8 = 2;
 
+// --- #108 roamer guard: lease deadline + reachability probe -----------------
+/// What the post-lease probe connects to: `NET_PROBE` ("ip:port") at build time, else the HA broker.
+/// A LAN service, not the gateway: #89's isolating AP still passed traffic to the gateway while every
+/// same-LAN connect failed. A RST counts as reachable (it proves the path); only silence does not.
+const PROBE_TARGET: &str = match option_env!("NET_PROBE") {
+    Some(s) => s,
+    None => crate::net::mqtt_ha::BROKER,
+};
+/// One probe's connect budget.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn backoff_for(fails: u8) -> Duration {
     let idx = (fails.saturating_sub(1) as usize).min(BACKOFF_SECS.len() - 1);
     Duration::from_secs(BACKOFF_SECS[idx])
@@ -650,6 +669,16 @@ struct St {
     next_rssi: Instant,
     /// Roam cooldown: no reassociation before this (anti-flap).
     roam_after: Instant,
+    /// #108: quarantined BSSIDs, the probe's consensus rule, the landing refusals.
+    guard: roam_guard::RoamGuard,
+    /// #108: the BSSID/channel this association landed on (for the guard's verdicts).
+    assoc_bssid: Option<[u8; 6]>,
+    assoc_ch: u8,
+    /// #108: associated with no lease since this instant (the lease deadline's clock); `None` while a
+    /// lease is held. Set on association AND when a lease is lost mid-session.
+    no_lease_since: Option<Instant>,
+    /// #108: probe the LAN once on the next ready edge.
+    probe_pending: bool,
 }
 
 impl St {
@@ -762,6 +791,11 @@ pub async fn net_task(
         rssi_low: 0,
         next_rssi: now,
         roam_after: now,
+        guard: roam_guard::RoamGuard::new(),
+        assoc_bssid: None,
+        assoc_ch: 0,
+        no_lease_since: None,
+        probe_pending: false,
     };
     println!(
         "[NET] task up (holds {:#04x}, creds={})",
@@ -866,6 +900,30 @@ pub async fn net_task(
         if !ready_now {
             st.was_ready = false;
         }
+        // #108 lease deadline: associated with no lease for LEASE_TIMEOUT is a failed attempt on that
+        // BSSID, not an indefinite wait (#89's `associated` with no `ready` after it).
+        if st.connected && !ready_now {
+            let since = *st.no_lease_since.get_or_insert_with(Instant::now);
+            let now = Instant::now();
+            if roam_guard::RoamGuard::lease_overdue(since.as_millis(), now.as_millis()) {
+                println!(
+                    "[WIFI] no lease {} s after associating - failed attempt; BSSID quarantined",
+                    now.duration_since(since).as_secs()
+                );
+                if let Some(b) = st.assoc_bssid {
+                    st.guard.on_lease_timeout(&b, st.assoc_ch, now.as_millis());
+                }
+                let _ = controller.disconnect_async().await;
+                st.connected = false;
+                st.no_lease_since = None;
+                st.prefer_ch = None;
+                st.consec_fails = st.consec_fails.saturating_add(1);
+                st.backoff_until = Some(now + backoff_for(st.consec_fails));
+                continue;
+            }
+        } else {
+            st.no_lease_since = None;
+        }
         if ready_now {
             // #90 ready-edge: schedule the announce re-check shortly after
             // every association-with-lease, so a retained announce published
@@ -878,6 +936,14 @@ pub async fn net_task(
                     println!("[WIFI] ready: ipv4 {}.{}.{}.{}", o[0], o[1], o[2], o[3]);
                 }
                 st.next_announce = Instant::now() + ANNOUNCE_EDGE_DELAY;
+                st.probe_pending = true;
+            }
+            // #108: one reachability probe per ready edge, ahead of OTA/burst (they would only fail).
+            if st.probe_pending {
+                st.probe_pending = false;
+                if probe_and_judge(&mut controller, &mut st, stack).await {
+                    continue;
+                }
             }
             // OTA owns the window (old executor ran it ahead of the mesh
             // re-pin for the same reason).
@@ -1103,20 +1169,6 @@ async fn scan_channels(
     best
 }
 
-/// Strongest channel in an observation vector, for logging and for the
-/// association hint before any election has run.
-fn strongest_channel(obs: &[Option<i8>; mesh_elect::N_CHANNELS]) -> Option<(u8, i8)> {
-    let mut best: Option<(u8, i8)> = None;
-    for (i, r) in obs.iter().enumerate() {
-        if let Some(dbm) = r {
-            if best.map(|(_, b)| *dbm > b).unwrap_or(true) {
-                best = Some((i as u8 + 1, *dbm));
-            }
-        }
-    }
-    best
-}
-
 /// One bounded association attempt + backoff bookkeeping.
 ///
 /// Two rungs, no BSSID pin on either:
@@ -1171,7 +1223,9 @@ async fn attempt_connect(
         // No elected channel yet — scan and prefer the strongest one we hear.
         let obs = scan_channels(controller, st.ssid.as_str()).await;
         publish_scan_obs(&obs);
-        match strongest_channel(&obs) {
+        // #108: steer around channels holding a quarantined BSSID (a preference, never a cage).
+        let avoid = st.guard.avoid_mask(Instant::now().as_millis());
+        match roam_guard::pick_channel(&obs, avoid) {
             Some((ch, rssi)) => {
                 println!("[NET] strongest ch{ch} rssi{rssi} (hint, no BSSID pin)");
                 st.prefer_ch = Some(ch);
@@ -1226,6 +1280,28 @@ async fn attempt_connect(
             if let Some(ch) = landed_ch {
                 LANDED_CH.store(ch, Ordering::Relaxed);
             }
+            // #108: a landing on a quarantined BSSID is refused (twice, then accepted: the watch must
+            // always be able to get online). The driver picks the AP, so this is the only way to say no.
+            st.assoc_bssid = info.as_ref().map(|i| i.bssid);
+            st.assoc_ch = landed_ch.unwrap_or(0);
+            if let Some(b) = st.assoc_bssid {
+                match st.guard.on_associated(&b, Instant::now().as_millis()) {
+                    roam_guard::Landing::Accept => {}
+                    roam_guard::Landing::AcceptExhausted => println!(
+                        "[ROAM] quarantined BSSID {} is all there is - accepting it; probe rests",
+                        fmt_bssid(&b)
+                    ),
+                    roam_guard::Landing::Reject => {
+                        println!("[ROAM] landed on quarantined BSSID {} - refusing it", fmt_bssid(&b));
+                        let _ = controller.disconnect_async().await;
+                        st.prefer_ch = None; // re-scan; the hint then steers around its channel
+                        st.consec_fails = st.consec_fails.saturating_add(1);
+                        st.backoff_until = Some(Instant::now() + backoff_for(st.consec_fails));
+                        return;
+                    }
+                }
+            }
+            st.no_lease_since = Some(Instant::now());
             st.connected = true;
             st.consec_fails = 0;
             st.hint_fails = 0;
@@ -1325,7 +1401,7 @@ async fn maybe_roam(
     st.rssi_low = 0; // consume the trigger regardless of outcome
     let obs = scan_channels(controller, st.ssid.as_str()).await;
     publish_scan_obs(&obs);
-    let Some((ch, cand_rssi)) = strongest_channel(&obs) else {
+    let Some((ch, cand_rssi)) = roam_guard::pick_channel(&obs, st.guard.avoid_mask(now.as_millis())) else {
         st.roam_after = now + ROAM_COOLDOWN;
         return false;
     };
@@ -1353,6 +1429,73 @@ async fn maybe_roam(
     st.backoff_until = None;
     st.roam_after = now + ROAM_COOLDOWN;
     true
+}
+
+/// #108: one TCP connect to [`PROBE_TARGET`]. Completed or RST = reachable; silence = unreachable;
+/// anything else (no route, socket state, an unparsable target) is no evidence.
+async fn probe(stack: Stack<'static>) -> roam_guard::Probe {
+    use embassy_net::tcp::{ConnectError, TcpSocket};
+    use roam_guard::Probe;
+    let Some((ip, port)) = crate::net::mqtt_ha::parse_broker(PROBE_TARGET) else {
+        return Probe::Inconclusive;
+    };
+    let mut rx = [0u8; 64];
+    let mut tx = [0u8; 64];
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    socket.set_timeout(Some(PROBE_TIMEOUT));
+    let got = match with_timeout(PROBE_TIMEOUT, socket.connect((ip, port))).await {
+        Ok(Ok(())) | Ok(Err(ConnectError::ConnectionReset)) => Probe::Reachable,
+        Ok(Err(ConnectError::TimedOut)) | Err(_) => Probe::Unreachable,
+        Ok(Err(_)) => Probe::Inconclusive,
+    };
+    // Close with RST and let it go out before the socket is dropped (embassy-net's abort() contract).
+    socket.abort();
+    let _ = with_timeout(Duration::from_millis(500), socket.flush()).await;
+    got
+}
+
+/// #108: probe on a fresh lease and act on the guard's verdict. Returns true when it disconnected
+/// to roam on (the top-of-loop connect machine takes it from there).
+async fn probe_and_judge(
+    controller: &mut WifiController<'static>,
+    st: &mut St,
+    stack: Stack<'static>,
+) -> bool {
+    let Some(b) = st.assoc_bssid else { return false };
+    if !st.guard.should_probe(Instant::now().as_millis()) {
+        println!("[NET] reachability probe resting");
+        return false;
+    }
+    let p = probe(stack).await;
+    let now = Instant::now();
+    match st.guard.on_probe(&b, st.assoc_ch, p, now.as_millis()) {
+        roam_guard::Verdict::Keep => {
+            println!("[NET] reachability probe {PROBE_TARGET}: {p:?}");
+            false
+        }
+        roam_guard::Verdict::TargetDown => {
+            println!(
+                "[NET] {PROBE_TARGET} unreachable from two APs in a row - the target, not the AP; \
+                 staying, probe rests"
+            );
+            false
+        }
+        roam_guard::Verdict::Roam => {
+            println!(
+                "[ROAM] {PROBE_TARGET} unreachable via BSSID {} ch{} - quarantined, roaming on",
+                fmt_bssid(&b),
+                st.assoc_ch
+            );
+            let _ = controller.disconnect_async().await;
+            st.connected = false;
+            st.no_lease_since = None;
+            st.prefer_ch = None; // re-scan; the hint steers around the quarantined channel
+            st.consec_fails = 0; // a roam, not a failure: no backoff (as maybe_roam)
+            st.backoff_until = None;
+            st.roam_after = now + ROAM_COOLDOWN;
+            true
+        }
+    }
 }
 
 /// Streaming scan sweep: one `scan_async` per 2.4 GHz channel, rows published

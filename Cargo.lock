@@ -2238,6 +2238,7 @@ dependencies = [
  "mfrc522",
  "mic-dsp",
  "ota-proto",
+ "roam-guard",
  "rssi",
  "scry-proto",
  "sha2 0.10.9",
@@ -5332,6 +5333,10 @@ dependencies = [
  "rustversion",
  "svgbobdoc",
 ]
+
+[[package]]
+name = "roam-guard"
+version = "0.1.0"
 
 [[package]]
 name = "rowan"
