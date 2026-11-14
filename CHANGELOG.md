@@ -6,7 +6,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 
 ## [Unreleased]
 
-*Tooling and docs only — no firmware change; fold into the next release heading.*
+*Tooling and docs, plus one firmware change (#108, the roamer guard below); fold into the next
+release heading.*
+
+- **The roamer leaves an AP that gives no lease or reaches nothing (#108, follow-up to #89).**
+  Associated with no DHCP lease for 20 s is now a failed attempt (backoff, and that BSSID is
+  quarantined for 10 min), not an indefinite wait. After every fresh lease the watch makes one TCP
+  connect to a LAN service (`NET_PROBE`, else the HA broker; a RST counts as reachable). Silence
+  quarantines the BSSID and roams on. If two different APs in a row fail the probe, the target is
+  blamed instead: no AP is quarantined and probing rests 30 min, so a broker outage can't make the
+  watch flap. With no BSSID pin (#57), "avoid" is a channel preference plus refusing a landing on a
+  quarantined BSSID. Both give way (two refusals, then accept), so the watch can always get online.
+  The policy is the pure `roam-guard` crate (12 host tests); the on-glass behaviour needs a bench run.
 
 - **`watchctl soak <sigil> [-n trials] [-s seconds]`** — the boot-stability probe is now a
   first-class subcommand (defaults 6 boots × 12 s), resolving the watch by sigil instead of

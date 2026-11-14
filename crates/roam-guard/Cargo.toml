@@ -1,0 +1,9 @@
+[package]
+name = "roam-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Pure no_std roamer guard (#108): a DHCP lease deadline after association, a reachability-probe verdict after the lease, and a time-limited BSSID quarantine the channel hint steers around. Host-unit-testable; no esp-hal deps."
+license = "MIT OR Apache-2.0"
+
+# Pure logic — no dependencies (core only).
+[dependencies]

@@ -340,6 +340,8 @@ u8g2-fonts = "0.8.0"
 flash-guard = { path = "crates/flash-guard" }
 wled-wizmote = { path = "crates/wled-wizmote" }
 rssi = { path = "crates/rssi" }
+# #108: the roamer's lease deadline, post-lease reachability verdict and BSSID quarantine (pure, host-tested).
+roam-guard = { path = "crates/roam-guard" }
 hunt = { path = "crates/hunt" }
 # Fleet-wide deterministic ESP-NOW channel + gateway election (2026-07-29). One
 # radio means choosing the AP IS choosing the mesh channel, so mesh partitions
