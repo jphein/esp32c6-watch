@@ -63,17 +63,47 @@ fi
 echo "== deploying to $HOST =="
 # Back up first — this host serves the live voice path.
 ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py $DEST_DIR/watch_bridge.py.bak 2>/dev/null || true"
+# the stamp names the code beside it: invalidate it first, so a failed stamp step or a rollback reports "dev",
+# never the previous (or the newer) commit for the code that is actually running
+ssh "$HOST" "rm -f $DEST_DIR/watch_bridge.hash"
 # scp does NOT expand $HOME in the destination (the ssh calls above DO, because
 # they run through a remote shell — which is why the cat/cp worked and this did
 # not, creating a literal "$HOME" directory). Stage in /tmp, then move it into
 # place with a shell that can expand the path.
-scp -q "$SRC" "$HOST:/tmp/watch_bridge.py.new"
+# one snapshot is checked, shipped and stamped: the bytes deployed are the bytes judged
+SNAP=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/watch_bridge.py.XXXXXX") && cp "$SRC" "$SNAP" || { echo "cannot snapshot $SRC" >&2; exit 1; }
+trap 'rm -f "$SNAP"' EXIT
+scp -q "$SNAP" "$HOST:/tmp/watch_bridge.py.new"
 ssh "$HOST" "mv -f /tmp/watch_bridge.py.new $DEST_DIR/watch_bridge.py"
+# realm-sigil /api/version: the copy has no .git, so ship the commit and the realm_sigil package beside it
+# (best effort: without them the route answers 503 and /health is unaffected)
+SIGIL_PKG="${REALM_SIGIL_PY:-$HOME/Projects/realm-sigil/python}/realm_sigil"
+stamp=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/watch_bridge.hash.XXXXXX") || stamp=""
+# stamp only when the shipped snapshot IS HEAD's blob for this path (an untracked or modified copy keeps no stamp and
+# reports "dev"/dirty; the old stamp was removed above)
+REPO_TOP=$(git -C "$(dirname "$SRC")" rev-parse --show-toplevel 2>/dev/null || true)
+REL=${SRC#"$REPO_TOP"/}
+COMMIT=$( [[ -n "$REPO_TOP" ]] && git -C "$REPO_TOP" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
+head_blob=$( [[ -n "$COMMIT" ]] && git -C "$REPO_TOP" rev-parse --verify --quiet "$COMMIT:$REL" 2>/dev/null || true)
+snap_blob=$( [[ -n "$REPO_TOP" ]] && git -C "$REPO_TOP" hash-object "$SNAP" 2>/dev/null || true)
+if [[ -n "$stamp" && -n "$head_blob" && "$head_blob" == "$snap_blob" ]] \
+   && git -C "$REPO_TOP" rev-parse --short=7 "$COMMIT" > "$stamp" 2>/dev/null \
+   && scp -q "$stamp" "$HOST:/tmp/watch_bridge.hash.new" \
+   && ssh "$HOST" "mv -f /tmp/watch_bridge.hash.new $DEST_DIR/watch_bridge.hash"; then :
+else echo "note: no build stamp shipped; /api/version will say dev" >&2; fi
+[[ -n "$stamp" ]] && rm -f "$stamp" || true
+if [[ -f "$SIGIL_PKG/__init__.py" ]]; then
+  ssh "$HOST" "rm -rf /tmp/realm_sigil.new" && scp -qr "$SIGIL_PKG" "$HOST:/tmp/realm_sigil.new" \
+    && ssh "$HOST" "rm -rf $DEST_DIR/realm_sigil && mv /tmp/realm_sigil.new $DEST_DIR/realm_sigil" \
+    || echo "note: realm_sigil not shipped; /api/version will answer 503" >&2
+else
+  echo "note: $SIGIL_PKG missing; /api/version will answer 503" >&2
+fi
 
 echo "== restarting $SERVICE =="
 ssh "$HOST" "sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || {
   echo "restart failed — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && rm -f $DEST_DIR/watch_bridge.hash && sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || true
   exit 1
 }
 
@@ -81,7 +111,7 @@ echo "== health =="
 sleep 2
 if ! ssh "$HOST" "curl -fsS --max-time 10 http://127.0.0.1:$PORT/health"; then
   echo; echo "health check FAILED — rolling back" >&2
-  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || true
+  ssh "$HOST" "cp -f $DEST_DIR/watch_bridge.py.bak $DEST_DIR/watch_bridge.py && rm -f $DEST_DIR/watch_bridge.hash && sudo rc-service $SERVICE restart 2>/dev/null || sudo systemctl restart $SERVICE" || true
   exit 5
 fi
 echo

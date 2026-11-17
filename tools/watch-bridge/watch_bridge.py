@@ -30,6 +30,8 @@ Env:  BRIDGE_PORT (default 8090). Azure creds via speech-to-cli's own config
 
 import json
 import os
+import time
+import re
 import struct
 import sys
 import tempfile
@@ -79,6 +81,41 @@ def _wav_from_pcm(pcm: bytes) -> bytes:
     ) + pcm
 
 
+
+# realm-sigil /api/version (JP 2026-11-17 05:07: every web project in status carries the sigil; status.realm.watch's
+# CHECK sigil-coverage reads it). deploy.sh copies this file with no .git, so it also ships watch_bridge.hash (the
+# commit) and the realm_sigil package next to it. Without the package the route answers 503, never a made-up name.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_STARTED = time.time()
+_HEX = re.compile(r"[0-9a-f]{7,40}")
+
+
+def _stamped_hash() -> str:
+    try:
+        with open(os.path.join(_HERE, "watch_bridge.hash"), encoding="ascii") as f:
+            raw = f.read(65)
+    except (OSError, UnicodeDecodeError):
+        return "dev"
+    h = raw.strip().lower()
+    return h[:12] if len(raw) <= 64 and _HEX.fullmatch(h) else "dev"   # the whole file is the stamp, or nothing
+
+
+_HASH = _stamped_hash()   # read once at start: the running code's stamp, not whatever a later deploy writes
+
+
+def version_doc():
+    if _HERE not in sys.path:
+        sys.path.append(_HERE)
+    try:
+        from realm_sigil import version_dict
+    except ImportError:
+        return None
+    h = _HASH
+    return version_dict("watch-bridge", "Azure STT/TTS bridge for the esp32c6 watch", "signal",
+                        "https://github.com/jphein/esp32c6-watch", hash=h, dirty=(h == "dev"),
+                        started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_STARTED)),
+                        uptime=int(time.time() - _STARTED))
+
 class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
@@ -92,6 +129,9 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("[watch_bridge] %s - %s\n" % (self.address_string(), fmt % args))
 
     def do_GET(self):
+        if self.path.split("?")[0] == "/api/version":
+            doc = version_doc()
+            return self._json(200 if doc else 503, doc or {"error": "realm_sigil not available"})
         if self.path.split("?")[0] != "/health":
             return self._json(404, {"error": "not found"})
         cfg = load_config()
